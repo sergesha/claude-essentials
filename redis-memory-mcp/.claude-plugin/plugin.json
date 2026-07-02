@@ -8,5 +8,28 @@
   },
   "homepage": "https://github.com/sergesha/claude-essentials",
   "license": "MIT",
-  "hooks": "./hooks/project-init.json"
+  "hooks": "./hooks/project-init.json",
+  "userConfig": {
+    "mode": {
+      "type": "string",
+      "title": "Mode",
+      "description": "\"dedicated\" (this client starts its own Redis+TEI backend) or \"shared\" (connect to a backend already running elsewhere)",
+      "default": "dedicated"
+    },
+    "redis_url": {
+      "type": "string",
+      "title": "Redis URL",
+      "description": "Redis connection URL. Required when mode is \"shared\" (e.g. redis://127.0.0.1:6379/0)"
+    },
+    "embed_url": {
+      "type": "string",
+      "title": "Embeddings URL",
+      "description": "TEI embeddings endpoint. Required when mode is \"shared\" (e.g. http://127.0.0.1:8081)"
+    },
+    "namespace": {
+      "type": "string",
+      "title": "Namespace",
+      "description": "Isolates this client's kv_*/mem_* data on a shared instance. Leave empty for the fleet-wide/shared default"
+    }
+  }
 }

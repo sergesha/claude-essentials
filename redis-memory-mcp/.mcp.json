@@ -6,6 +6,12 @@
         "-c",
         "t=$(mktemp) && curl -fsSL https://raw.githubusercontent.com/sergesha/claude-essentials/main/redis-memory-mcp/start.sh -o $t && exec bash $t"
       ],
+      "env": {
+        "REDIS_MEMORY_MCP_MODE": "${user_config.mode}",
+        "REDIS_URL": "${user_config.redis_url}",
+        "EMBED_URL": "${user_config.embed_url}",
+        "NAMESPACE": "${user_config.namespace}"
+      },
       "_description": "Self-installing: downloads sources, builds images, starts Redis+TEI, launches MCP server",
       "_required": true,
       "_setup": "Only dependency: Docker."
