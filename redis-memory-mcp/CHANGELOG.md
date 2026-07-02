@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1](https://github.com/sergesha/claude-essentials/compare/redis-memory-mcp-v0.5.0...redis-memory-mcp-v0.5.1) (2026-07-02)
+
+
+### Bug Fixes
+
+* plugin-installed redis-memory does not inherit shell env vars ([#10](https://github.com/sergesha/claude-essentials/issues/10)) ([f006e9a](https://github.com/sergesha/claude-essentials/commit/f006e9a41fe7b585b566aebede1cb654cc13b98c))
+
 ## 0.5.0 (2026-07-02)
 
 
