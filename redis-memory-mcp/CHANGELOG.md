@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2](https://github.com/sergesha/claude-essentials/compare/redis-memory-mcp-v0.5.1...redis-memory-mcp-v0.5.2) (2026-07-02)
+
+
+### Bug Fixes
+
+* extra-files paths in release-please-config were repo-root-relative, not package-relative ([#12](https://github.com/sergesha/claude-essentials/issues/12)) ([10f7c60](https://github.com/sergesha/claude-essentials/commit/10f7c60e956563887867bce293cea99f2343a256))
+
 ## [0.5.1](https://github.com/sergesha/claude-essentials/compare/redis-memory-mcp-v0.5.0...redis-memory-mcp-v0.5.1) (2026-07-02)
 
 
