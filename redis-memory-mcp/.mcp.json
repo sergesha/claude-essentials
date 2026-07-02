@@ -10,7 +10,8 @@
         "REDIS_MEMORY_MCP_MODE": "${user_config.mode}",
         "REDIS_URL": "${user_config.redis_url}",
         "EMBED_URL": "${user_config.embed_url}",
-        "NAMESPACE": "${user_config.namespace}"
+        "NAMESPACE": "${user_config.namespace}",
+        "REDIS_MEMORY_MCP_NETWORK": "${user_config.network}"
       },
       "_description": "Self-installing: downloads sources, builds images, starts Redis+TEI, launches MCP server",
       "_required": true,
