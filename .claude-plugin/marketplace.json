@@ -1,0 +1,21 @@
+{
+  "name": "claude-essentials",
+  "owner": {
+    "name": "sergesha",
+    "url": "https://github.com/sergesha/claude-essentials"
+  },
+  "description": "Shared, reusable Claude Code plugins — infra utilities usable across unrelated projects (memory backends, agent self-improvement, ...).",
+  "version": "0.1.0",
+  "allowCrossMarketplaceDependenciesOn": ["redis-memory-marketplace"],
+  "plugins": [
+    {
+      "name": "continuous-learning",
+      "description": "Capture runtime surprises as they happen, periodically promote them into a project's own versioned skills/docs/commands, then forget them — git is the only permanent record.",
+      "source": "./continuous-learning",
+      "category": "developer-tools",
+      "dependencies": [
+        { "name": "redis-memory", "marketplace": "redis-memory-marketplace" }
+      ]
+    }
+  ]
+}

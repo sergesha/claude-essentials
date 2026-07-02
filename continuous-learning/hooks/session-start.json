@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '🧭 continuous-learning: end each completed task with a learn: line — \"learn: none\", or if a tool/API/workflow behaved unexpectedly and it changes future approach: \"learn: [slug] surprise → what to change\" (then mem_save it: text=that line, label=the bare slug, tagged continuous-learning; dedup via mem_search first; skip silently if memory is unavailable). No status fields, no instance specifics (hosts/IPs/paths/tokens) — abstract to technique. Run /learn to promote accumulated findings into this project'\\''s own docs — see the continuous-learning skill.'"
+          }
+        ]
+      }
+    ]
+  }
+}

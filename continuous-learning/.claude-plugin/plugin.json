@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin.json",
+  "name": "continuous-learning",
+  "displayName": "Continuous Learning",
+  "description": "Capture runtime surprises (a tool/API/workflow that behaved unexpectedly) as they happen, then periodically promote the accumulated findings into a project's own versioned skills/docs/commands. Memory holds only open findings; git is the permanent record.",
+  "version": "0.1.0",
+  "author": {
+    "name": "sergesha"
+  },
+  "homepage": "https://github.com/sergesha/claude-essentials",
+  "license": "MIT",
+  "keywords": ["self-improvement", "memory", "findings", "runtime-errors", "learning"],
+  "hooks": "./hooks/session-start.json"
+}
