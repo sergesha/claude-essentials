@@ -30,6 +30,11 @@
       "type": "string",
       "title": "Namespace",
       "description": "Isolates this client's kv_*/mem_* data on a shared instance. Leave empty for the fleet-wide/shared default"
+    },
+    "network": {
+      "type": "string",
+      "title": "Podman/Docker network",
+      "description": "Join this container network instead of relying on host.docker.internal. Needed when the shared backend publishes no host port (e.g. loopback-only or no port at all) -- lets this container reach it by name on the shared network. Leave empty to use host.docker.internal as before"
     }
   }
 }
