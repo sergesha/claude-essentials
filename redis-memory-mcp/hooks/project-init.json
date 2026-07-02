@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '🧠 redis-memory loaded. If MCP unavailable: set REDIS_MEMORY_MCP_DIR=<repo path> in mcp.json. Tools: kv_set/kv_get/kv_list/kv_delete + mem_save/mem_search/mem_list/mem_delete'"
+          }
+        ]
+      }
+    ]
+  }
+}
