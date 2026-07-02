@@ -1,0 +1,4 @@
+{
+  "marketplace": "./.claude-plugin/marketplace.json",
+  "autoload": true
+}
