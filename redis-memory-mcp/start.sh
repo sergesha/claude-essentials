@@ -114,8 +114,23 @@ log "Ready ($REF)."
 # --add-host maps host.docker.internal to the host gateway. On Docker Desktop
 # (macOS/Windows) it already resolves; on Linux Docker Engine it does not unless
 # mapped explicitly, so the server couldn't reach Redis/TEI on the host there.
+# That gateway address only reaches host-published ports, though -- a backend
+# bound to 127.0.0.1 (loopback-only, e.g. for host-level isolation) is not
+# reachable through it from a different container's network namespace, no
+# matter what URL/env points at it. REDIS_MEMORY_MCP_NETWORK sidesteps that:
+# when set, this container joins that (pre-existing) network directly instead
+# of relying on the host gateway, so it can reach a same-network peer by
+# container name/IP even when that peer publishes no host port at all. Unset
+# by default -- existing dedicated/shared setups using host.docker.internal
+# are unaffected.
+NETWORK_ARGS=()
+if [ -n "${REDIS_MEMORY_MCP_NETWORK:-}" ]; then
+  NETWORK_ARGS=(--network "$REDIS_MEMORY_MCP_NETWORK")
+fi
+
 exec docker run --rm -i \
   --add-host=host.docker.internal:host-gateway \
+  "${NETWORK_ARGS[@]}" \
   -e "REDIS_URL=${REDIS_URL:-redis://host.docker.internal:6379/0}" \
   -e "EMBED_URL=${EMBED_URL:-http://host.docker.internal:8081}" \
   -e "INDEX_NAME=${INDEX_NAME:-idx:memories}" \
