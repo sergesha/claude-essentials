@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0](https://github.com/sergesha/claude-essentials/compare/redis-memory-mcp-v0.5.0...redis-memory-mcp-v0.6.0) (2026-07-02)
+
+
+### Features
+
+* add redis-memory-mcp plugin ([700719e](https://github.com/sergesha/claude-essentials/commit/700719e7d7f75b7eb0f93cdf3813f8a58d15bab9))
+
 ## [0.4.0](https://github.com/sergesha/redis-memory-mcp/compare/v0.3.0...v0.4.0) (2026-07-01)
 
 
