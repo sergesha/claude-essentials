@@ -1,0 +1,22 @@
+name: release-please
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      # Maintains one release PR per package (bumps version + CHANGELOG from
+      # Conventional Commits), and on merge tags the release (<package>-vX.Y.Z)
+      # and creates a GitHub Release. Config: release-please-config.json,
+      # state: .release-please-manifest.json.
+      - uses: googleapis/release-please-action@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
