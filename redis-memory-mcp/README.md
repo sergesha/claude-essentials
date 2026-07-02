@@ -58,6 +58,20 @@ docker compose up -d
 /plugin install redis-memory@claude-essentials
 ```
 
+Installing this way prompts for `mode`/`redis_url`/`embed_url`/`namespace` interactively — these
+are the plugin's `userConfig` fields, the only way its bundled `.mcp.json` receives them (plugin
+MCP servers do **not** inherit the installing shell's environment, e.g. `.bashrc` exports; only
+values explicitly declared via `userConfig` and referenced as `${user_config.KEY}` reach the
+spawned process). For a non-interactive install (e.g. scripted, over SSH), pass them directly:
+
+```bash
+claude plugin install redis-memory@claude-essentials \
+  --config mode=shared \
+  --config redis_url=redis://127.0.0.1:6379/0 \
+  --config embed_url=http://127.0.0.1:8081 \
+  --config namespace=my-project   # omit for the fleet-wide/shared default
+```
+
 ## Tools (8 total)
 
 ### Key-Value Storage — instant lookup
