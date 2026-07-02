@@ -1,0 +1,67 @@
+services:
+  redis:
+    image: redis/redis-stack:latest
+    container_name: redis-stack
+    platform: linux/amd64
+    ports:
+      - "6379:6379"
+      - "8001:8001"
+    environment:
+      - REDIS_ARGS=--save 900 1 --save 300 10 --appendonly yes --appendfsync everysec --maxmemory 2gb --maxmemory-policy volatile-lru
+    volumes:
+      - type: bind
+        source: ./redis_data
+        target: /data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis-init:
+    image: redis/redis-stack:latest
+    platform: linux/amd64
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: >
+      bash -c "redis-cli -h redis FT.CREATE idx:memories ON HASH PREFIX 1 mem: SCHEMA label TEXT text TEXT code TEXT tags TAG SEPARATOR , vector VECTOR HNSW 6 TYPE FLOAT32 DIM 768 DISTANCE_METRIC COSINE timestamp NUMERIC || echo 'Index already exists'"
+    restart: "no"
+
+  embeddings:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-latest
+    container_name: embeddings-inference
+    platform: linux/amd64
+    ports:
+      - "8081:80"
+    environment:
+      - HF_MODEL_ID=sentence-transformers/paraphrase-multilingual-mpnet-base-v2
+    volumes:
+      - ./embeddings_cache:/data
+    command: --model-id sentence-transformers/paraphrase-multilingual-mpnet-base-v2
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:80/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    restart: unless-stopped
+
+  redis-memory-mcp:
+    build: ./server
+    image: redis-memory-mcp
+    container_name: redis-memory-mcp
+    depends_on:
+      redis:
+        condition: service_healthy
+      embeddings:
+        condition: service_healthy
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - EMBED_URL=http://embeddings:80
+      - INDEX_NAME=idx:memories
+      - "KEY_PREFIX=mem:"
+    stdin_open: true
+    tty: false
+    restart: unless-stopped

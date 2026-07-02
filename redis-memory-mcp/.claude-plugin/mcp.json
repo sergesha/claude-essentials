@@ -1,0 +1,29 @@
+{
+  "servers": {
+    "redis-memory-mcp": {
+      "description": "Persistent cross-session memory with semantic search + KV store. 8 tools: kv_set, kv_get, kv_delete, kv_list, mem_save, mem_search, mem_list, mem_delete.",
+      "capabilities": [
+        "kv_set — store key/value fact (instant, no embeddings)",
+        "kv_get — retrieve value by exact key (O(1) lookup, refreshes TTL)",
+        "kv_delete — delete key/value entry",
+        "kv_list — list key/value entries with tag/pattern filtering",
+        "mem_save — save fact with vector embedding for semantic search",
+        "mem_search — find facts by meaning (cosine similarity)",
+        "mem_list — browse memories sorted by recency",
+        "mem_delete — permanently delete a semantic memory"
+      ],
+      "required": true,
+      "env": {
+        "REDIS_URL": "Redis connection URL (default: redis://host.docker.internal:6379/0)",
+        "EMBED_URL": "TEI embeddings endpoint (default: http://host.docker.internal:8081)",
+        "INDEX_NAME": "Redis search index name (default: idx:memories)",
+        "DEFAULT_TTL": "Default TTL in seconds (default: 7776000 = 90 days)"
+      },
+      "infrastructure": {
+        "redis": "Redis Stack with RediSearch module (for vector HNSW index)",
+        "embeddings": "HuggingFace TEI with paraphrase-multilingual-mpnet-base-v2 (768 dim)"
+      },
+      "setup": "docker compose up -d (starts Redis Stack + TEI + initializes HNSW index)"
+    }
+  }
+}

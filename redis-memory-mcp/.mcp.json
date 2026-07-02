@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "redis-memory-mcp": {
+      "command": "bash",
+      "args": [
+        "-c",
+        "t=$(mktemp) && curl -fsSL https://raw.githubusercontent.com/sergesha/claude-essentials/main/redis-memory-mcp/start.sh -o $t && exec bash $t"
+      ],
+      "_description": "Self-installing: downloads sources, builds images, starts Redis+TEI, launches MCP server",
+      "_required": true,
+      "_setup": "Only dependency: Docker."
+    }
+  }
+}
