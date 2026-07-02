@@ -1,6 +1,6 @@
 ---
 name: continuous-learning
-description: Use when capturing a finding mid-work (a tool, API, or workflow just behaved unexpectedly, or you found a materially better approach), when wrapping up any task (the learn: checkpoint), or when running /learn to turn accumulated findings into this project's own skills/docs/commands. Triggers — "capture this", "note this for later", "/learn", "what have we learned", "promote findings".
+description: Use when capturing a finding mid-work (a tool, API, or workflow just behaved unexpectedly, or you found a materially better approach), when wrapping up any task (the learn checkpoint line), or when running /learn to turn accumulated findings into this project's own skills/docs/commands. Triggers - "capture this", "note this for later", "/learn", "what have we learned", "promote findings".
 ---
 
 # Continuous Learning
