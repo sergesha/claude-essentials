@@ -1,4 +1,4 @@
 {
   "continuous-learning": "0.1.0",
-  "redis-memory-mcp": "0.5.2"
+  "redis-memory-mcp": "0.6.0"
 }
