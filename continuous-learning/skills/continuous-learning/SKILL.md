@@ -10,6 +10,17 @@ versioned docs. **Memory holds only OPEN findings; git is the only record of wha
 and fixed.** A finding's presence in memory *is* its "open" status — there is no other status,
 and nothing stays in memory once it's handled.
 
+## Prerequisite: a namespaced redis-memory connection
+
+This skill's `mem_save`/`mem_list` calls use whatever scope the installing client's own
+`redis-memory-mcp` connection defaults to (default `shared: false`). **Only install this on a
+client that has its own `NAMESPACE` set.** Without one, `shared: false` and `shared: true`
+resolve to the *same* base pool — findings land in the general shared memory alongside
+unrelated facts, get surfaced by other agents' generic `mem_search`/`mem_list` calls as noise,
+and `/learn` run from a different project could see (and wrongly promote) another project's
+findings. A per-project `NAMESPACE` isolates findings the same way it isolates everything else
+that client saves — no separate configuration needed here.
+
 ## Capture
 
 **When**: mid-task (a tool/API/MCP just surprised you, or you found a materially better
