@@ -9,7 +9,7 @@
       "changelog-path": "CHANGELOG.md",
       "initial-version": "0.1.0",
       "extra-files": [
-        { "type": "json", "path": "continuous-learning/.claude-plugin/plugin.json", "jsonpath": "$.version" }
+        { "type": "json", "path": ".claude-plugin/plugin.json", "jsonpath": "$.version" }
       ]
     },
     "redis-memory-mcp": {
@@ -17,8 +17,8 @@
       "changelog-path": "CHANGELOG.md",
       "initial-version": "0.5.0",
       "extra-files": [
-        { "type": "json", "path": "redis-memory-mcp/.claude-plugin/plugin.json", "jsonpath": "$.version" },
-        { "type": "toml", "path": "redis-memory-mcp/server/pyproject.toml", "jsonpath": "$.project.version" }
+        { "type": "json", "path": ".claude-plugin/plugin.json", "jsonpath": "$.version" },
+        { "type": "toml", "path": "server/pyproject.toml", "jsonpath": "$.project.version" }
       ]
     }
   }
