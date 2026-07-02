@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0](https://github.com/sergesha/claude-essentials/compare/redis-memory-mcp-v0.5.2...redis-memory-mcp-v0.6.0) (2026-07-02)
+
+
+### Features
+
+* **redis-memory-mcp:** support joining a shared container network ([#14](https://github.com/sergesha/claude-essentials/issues/14)) ([119aea8](https://github.com/sergesha/claude-essentials/commit/119aea8bdb81b18286b7210f3f1745e1ea81c3b5))
+
 ## [0.5.2](https://github.com/sergesha/claude-essentials/compare/redis-memory-mcp-v0.5.1...redis-memory-mcp-v0.5.2) (2026-07-02)
 
 
