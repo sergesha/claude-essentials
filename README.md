@@ -10,7 +10,8 @@ lists is versioned and released independently (see [Versioning](#versioning)).
 
 | Plugin | What it does |
 |---|---|
-| [`continuous-learning`](continuous-learning/) | Capture runtime surprises as they happen, periodically promote them into a project's own versioned skills/docs/commands. |
+| [`continuous-learning`](continuous-learning/) | Capture runtime surprises as they happen, periodically promote them into a project's own versioned skills/docs/commands. Requires a namespaced `redis-memory` connection — see its own README. |
+| [`redis-memory`](redis-memory-mcp/) | Persistent cross-session memory for AI agents — semantic search + KV store with auto-expiry. Moved here from the standalone `sergesha/redis-memory-mcp` repo at v0.5.0. |
 
 ## Install
 
@@ -30,9 +31,9 @@ Or auto-enable per project in `.claude/settings.json`:
 }
 ```
 
-`continuous-learning` depends on the [`redis-memory`](https://github.com/sergesha/redis-memory-mcp)
-plugin (`mem_save`/`mem_list`/`mem_search`/`mem_delete` tools) — declared in this marketplace's
-`dependencies`, so installing it also pulls in `redis-memory-mcp`.
+`continuous-learning` depends on `redis-memory` (`mem_save`/`mem_list`/`mem_search`/`mem_delete`
+tools) — both live in this marketplace, declared in `continuous-learning`'s `dependencies`, so
+installing it also pulls in `redis-memory`.
 
 ## Versioning
 
