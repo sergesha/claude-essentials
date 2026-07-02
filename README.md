@@ -33,7 +33,10 @@ Or auto-enable per project in `.claude/settings.json`:
 
 `continuous-learning` depends on `redis-memory` (`mem_save`/`mem_list`/`mem_search`/`mem_delete`
 tools) — both live in this marketplace, declared in `continuous-learning`'s `dependencies`, so
-installing it also pulls in `redis-memory`.
+installing it also pulls in `redis-memory`. The auto-pulled dependency installs with
+`redis-memory`'s defaults (`mode: dedicated`, no namespace) — since continuous-learning requires
+a namespaced connection (see its README), also run `redis-memory`'s own install with `--config`
+to configure it, either before or after installing `continuous-learning`.
 
 ## Versioning
 
