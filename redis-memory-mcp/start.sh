@@ -128,11 +128,30 @@ if [ -n "${REDIS_MEMORY_MCP_NETWORK:-}" ]; then
   NETWORK_ARGS=(--network "$REDIS_MEMORY_MCP_NETWORK")
 fi
 
+# REDIS_MEMORY_MCP_SOCKET_DIR sidesteps the same host.docker.internal
+# limitation for Unix sockets: when set, that host directory (expected to
+# contain a Redis Unix socket, and optionally an EMBED_SOCKET file/socket
+# proxying the embeddings endpoint -- e.g. via a socat sidecar) is bind-mounted
+# into this container at the identical path, and the container joins the
+# socket owner's group (--group-add keep-groups) so it can actually open a
+# group-gated (mode 770) socket that belongs to a different host user than
+# whichever user launched this container. REDIS_URL can then be a unix://
+# path under that directory (redis-py's `from_url` supports this natively,
+# no server code change needed); EMBED_SOCKET (below) is what lets the
+# embeddings HTTP client use the same mechanism, since a bare http:// URL
+# has no unix-socket equivalent.
+SOCKET_MOUNT_ARGS=()
+if [ -n "${REDIS_MEMORY_MCP_SOCKET_DIR:-}" ]; then
+  SOCKET_MOUNT_ARGS=(-v "${REDIS_MEMORY_MCP_SOCKET_DIR}:${REDIS_MEMORY_MCP_SOCKET_DIR}" --group-add keep-groups)
+fi
+
 exec docker run --rm -i \
   --add-host=host.docker.internal:host-gateway \
   "${NETWORK_ARGS[@]}" \
+  "${SOCKET_MOUNT_ARGS[@]}" \
   -e "REDIS_URL=${REDIS_URL:-redis://host.docker.internal:6379/0}" \
   -e "EMBED_URL=${EMBED_URL:-http://host.docker.internal:8081}" \
+  -e "EMBED_SOCKET=${EMBED_SOCKET:-}" \
   -e "INDEX_NAME=${INDEX_NAME:-idx:memories}" \
   -e "NAMESPACE=${NAMESPACE:-}" \
   "$IMAGE"

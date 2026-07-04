@@ -35,6 +35,16 @@
       "type": "string",
       "title": "Podman/Docker network",
       "description": "Join this container network instead of relying on host.docker.internal. Needed when the shared backend publishes no host port (e.g. loopback-only or no port at all) -- lets this container reach it by name on the shared network. Leave empty to use host.docker.internal as before"
+    },
+    "embed_socket": {
+      "type": "string",
+      "title": "Embeddings Unix socket path",
+      "description": "Path to a Unix socket proxying the embeddings endpoint (e.g. via a socat sidecar). When set, embedding requests go over this socket instead of EMBED_URL's host/port."
+    },
+    "socket_dir": {
+      "type": "string",
+      "title": "Shared socket directory to bind-mount",
+      "description": "Host directory containing redis_url's/embed_socket's Unix socket files. When set, this directory is bind-mounted into the bridge container at the same path, and the container joins the socket owner's group (--group-add keep-groups) so it can actually reach group-gated sockets owned by a different host user."
     }
   }
 }
