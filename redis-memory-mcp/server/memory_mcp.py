@@ -172,13 +172,21 @@ def _parse_search_results(raw):
 @mcp.tool()
 async def kv_set(key: str, value: str, label: str = "", tags: str = "", ttl_days: int = 90, shared: bool = False) -> str:
     """Store a key/value fact — instant lookup, no embeddings.
-    Use for discrete facts with a known name: credentials, config, settings, names.
+    Use for discrete facts with a known name: config, settings, versions, names,
+    non-secret connection info.
+
+    NOT a secrets store. This backend has no per-client authentication and, by
+    default, no Redis password, so anything stored here is readable by every
+    other agent/client that can reach the same Redis. Do NOT put API keys,
+    passwords, tokens, or other secrets in it — keep those in a real secret
+    manager or environment variables; at most store a non-secret *reference*
+    to where the secret lives.
 
     Parameters:
-    - key (required): Unique identifier. Use slugs like 'prod-db-url', 'user-timezone'.
+    - key (required): Unique identifier. Use slugs like 'prod-db-host', 'user-timezone'.
       Saving with an existing key overwrites the previous value.
-    - value (required): The value to store — any string (URL, password, number, JSON, etc).
-    - label: Short human-readable description (shown in lists). Example: 'Production DB connection string'.
+    - value (required): The value to store — any non-secret string (URL host, number, JSON, etc).
+    - label: Short human-readable description (shown in lists). Example: 'Production DB host'.
     - tags: Comma-separated labels for grouping. Example: 'db,production'.
     - ttl_days: OMIT this parameter in most cases — default is 90 days and TTL resets on
       every read so popular facts never expire. Only set explicitly when needed:
@@ -186,9 +194,11 @@ async def kv_set(key: str, value: str, label: str = "", tags: str = "", ttl_days
       Do NOT pass ttl_days=0 unless the fact must be permanent (no expiry ever).
     - shared: OMIT unless this server is running with NAMESPACE set AND the fact
       should be visible to every other agent/namespace on this instance, not just
-      this one. Default (false) stores in this server's own area.
+      this one. Default (false) stores in this server's own area. NAMESPACE and
+      shared are a cooperative key-prefix convention, not a security boundary —
+      any client can choose any NAMESPACE or pass shared=True.
 
-    Examples: kv_set('openai-api-key', 'sk-...', label='OpenAI API key', tags='secrets,ai')
+    Examples: kv_set('prod-db-host', 'db.internal:5432', label='Production DB host', tags='db')
               kv_set('user-language', 'Russian', label='User preferred language', ttl_days=365)
     """
     _, kv_prefix, _ = _scope(shared)
@@ -276,7 +286,7 @@ async def kv_list(tag: str = "", pattern: str = "", shared: bool = False) -> str
     """List stored key/value entries with their TTL.
 
     Parameters:
-    - tag: Filter by tag (e.g. tag='secrets').
+    - tag: Filter by tag (e.g. tag='db').
     - pattern: Glob pattern for key names (e.g. pattern='prod-*').
     - shared: List this server's own area (default) or the always-available
       shared area (shared=True). Lists one area at a time, never both.
