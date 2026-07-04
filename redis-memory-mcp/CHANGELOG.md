@@ -5,6 +5,18 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0](https://github.com/sergesha/claude-essentials/compare/redis-memory-mcp-v0.7.0...redis-memory-mcp-v0.8.0) (2026-07-04)
+
+
+### Features
+
+* **redis-memory-mcp:** enforced per-NAMESPACE isolation via Redis ACLs ([#17](https://github.com/sergesha/claude-essentials/issues/17)) ([#20](https://github.com/sergesha/claude-essentials/issues/20)) ([97789bd](https://github.com/sergesha/claude-essentials/commit/97789bd614913e82c9f2e46d0fc7e79515938e92))
+
+
+### Bug Fixes
+
+* **redis-memory-mcp:** stop shipping/advertising an open secrets store ([#19](https://github.com/sergesha/claude-essentials/issues/19)) ([27cb495](https://github.com/sergesha/claude-essentials/commit/27cb4951be94a864629db3983756c00778dbed33))
+
 ## [0.7.0](https://github.com/sergesha/claude-essentials/compare/redis-memory-mcp-v0.6.0...redis-memory-mcp-v0.7.0) (2026-07-04)
 
 
