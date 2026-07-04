@@ -1,11 +1,18 @@
+# SECURITY: the published ports below bind to ALL host interfaces (Docker's
+# default when no host IP is given), and this stack ships with NO Redis auth.
+# On a host with a public IP — and note Docker's iptables rules typically
+# bypass ufw — that is an open, unauthenticated database. Only run this on a
+# trusted network / behind a firewall, or add authentication. This is NOT a
+# secrets store: see the "Security" section of README.md before storing
+# anything sensitive. Redis auth + per-NAMESPACE ACL isolation is tracked
+# separately.
 services:
   redis:
-    image: redis/redis-stack:latest
+    image: redis/redis-stack-server:latest   # server-only: same RediSearch/HNSW modules, without the RedisInsight web GUI
     container_name: redis-stack
     platform: linux/amd64
     ports:
       - "6379:6379"
-      - "8001:8001"
     environment:
       - REDIS_ARGS=--save 900 1 --save 300 10 --appendonly yes --appendfsync everysec --maxmemory 2gb --maxmemory-policy volatile-lru
     volumes:
@@ -20,7 +27,7 @@ services:
     restart: unless-stopped
 
   redis-init:
-    image: redis/redis-stack:latest
+    image: redis/redis-stack-server:latest
     platform: linux/amd64
     depends_on:
       redis:

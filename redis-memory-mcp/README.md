@@ -99,7 +99,7 @@ claude plugin install redis-memory@claude-essentials \
 | TTL | Use case |
 |-----|----------|
 | `ttl_days=90` (default) | Normal facts — expire if unused for 90 days |
-| `ttl_days=0` | Permanent — API keys, critical config |
+| `ttl_days=0` | Permanent — stable non-secret config (never secrets, see [Security](#security)) |
 | `ttl_days=7` | Short-lived context |
 
 - TTL **resets on every read** — frequently accessed facts never expire
@@ -149,13 +149,13 @@ REDIS_URL=redis://<backend-host>:6379/0
 EMBED_URL=http://<backend-host>:8081
 ```
 
-Sharing a backend does **not** mean sharing data — see `NAMESPACE` below for isolating agents that happen to point at the same Redis/TEI.
+Sharing a backend need not mean sharing data — see `NAMESPACE` below for keeping agents that point at the same Redis/TEI in separate key areas. Note this is a cooperative convention, not an enforced boundary (see [Security](#security)).
 
 ### NAMESPACE (data isolation on a shared instance)
 
 `tags` (accepted by `kv_set`/`mem_save`, used as an optional filter by `mem_search`/`kv_list`/`mem_list`) are a same-namespace filter, not an isolation boundary: `kv_get`/`kv_set` operate on an exact key with no tag involved at all, so two agents on a shared instance calling `kv_set('database-url', ...)` would collide regardless of tags, and an untagged `mem_search` sees every agent's memories.
 
-`NAMESPACE` fixes that at the key level. Set once per MCP client (e.g. `-e NAMESPACE=my-project`), it prefixes every key and picks a dedicated search index, so two namespaces cannot see or overwrite each other's data no matter what tags (or no tags) are passed:
+`NAMESPACE` fixes that at the key level. Set once per MCP client (e.g. `-e NAMESPACE=my-project`), it prefixes every key and picks a dedicated search index, so two well-behaved namespaced clients won't see or overwrite each other's data through these tools, no matter what tags (or no tags) are passed. This is collision-avoidance between cooperating clients, **not** an enforced security boundary — a client can pick any namespace or pass `shared=True`, and a direct Redis connection reads everything (see [Security](#security)):
 
 ```
 NAMESPACE unset      → mem:{id}              kv:{key}              idx:memories            (previous behavior, unchanged)
@@ -179,9 +179,31 @@ mem_search('deploy steps', shared=True)    # searches shared area only — never
 
 There's no automatic fallback between the two: a call touches exactly one area, and the caller decides which by setting `shared`. Reading something saved with `shared=True` requires `shared=True` on the read too, or it reports "not found" even though the entry exists in the other area.
 
-## Redis UI
+## Security
 
-RedisInsight is included at **http://localhost:8001** — browse keys, run queries, analyze memory usage.
+**This is not a secrets store, and its default deployment is not hardened.** Read this before
+storing anything sensitive or exposing the backend beyond a single trusted machine.
+
+- **No per-client auth, no password by default.** The shipped `docker-compose.yaml` runs Redis
+  with no `requirepass`. Anything stored is readable by every client that can reach the Redis
+  port. **Never store API keys, passwords, tokens, or other secrets** — keep those in a real
+  secret manager or environment variables and store at most a non-secret *reference* here.
+- **`NAMESPACE` and `shared` are cooperative, not a security boundary.** They are a key-prefix
+  convention with no server-side enforcement: any client can choose any `NAMESPACE` or pass
+  `shared=True`, and anyone with direct Redis access reads every namespace's keys regardless.
+  Two namespaces are isolated *only* for well-behaved clients going through these tools — not
+  against a direct connection or a client that simply picks another namespace's prefix.
+- **Ports publish on all interfaces.** `6379` (Redis) and `8081` (TEI embeddings) are published
+  without a host-IP restriction, so Docker binds them on every interface — and Docker's iptables
+  rules typically **bypass `ufw`**. On a host with a public IP that is an open, unauthenticated
+  database. Restrict it: bind the ports to a trusted interface, put the host behind a firewall
+  Docker cannot bypass, or run the whole stack on an isolated network.
+- **No RedisInsight GUI.** This package uses `redis/redis-stack-server` (server only); it does
+  not expose the RedisInsight web UI (port 8001).
+
+Enforced per-client authentication and per-`NAMESPACE` isolation (Redis ACLs) is tracked
+separately — until then, treat the backend as a shared, unauthenticated cache among mutually
+trusting clients.
 
 ## Plugin Structure
 
