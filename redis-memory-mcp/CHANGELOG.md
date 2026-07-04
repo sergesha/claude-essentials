@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0](https://github.com/sergesha/claude-essentials/compare/redis-memory-mcp-v0.6.0...redis-memory-mcp-v0.7.0) (2026-07-04)
+
+
+### Features
+
+* **redis-memory-mcp:** Unix-socket transport for cross-OS-user access ([#16](https://github.com/sergesha/claude-essentials/issues/16)) ([9e604ef](https://github.com/sergesha/claude-essentials/commit/9e604eff6cd0a22235e1efc51d5c182f014d57cd))
+
 ## [0.6.0](https://github.com/sergesha/claude-essentials/compare/redis-memory-mcp-v0.5.2...redis-memory-mcp-v0.6.0) (2026-07-02)
 
 
