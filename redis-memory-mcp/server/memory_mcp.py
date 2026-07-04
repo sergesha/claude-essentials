@@ -19,6 +19,12 @@ from mcp.server.fastmcp import FastMCP
 
 REDIS_URL    = os.getenv("REDIS_URL",    "redis://localhost:6379/0")
 EMBED_URL    = os.getenv("EMBED_URL",    "http://localhost:8081")
+# When set, embedding requests go over this Unix socket (e.g. a socat sidecar
+# proxying TEI's HTTP port) instead of resolving EMBED_URL's host/port --
+# httpx has no unix:// URL scheme, so this needs a real transport, not just an
+# env value. EMBED_URL is still used as the request's nominal URL (path only
+# matters; the transport intercepts the actual connection).
+EMBED_SOCKET = os.getenv("EMBED_SOCKET", "")
 TOP_K        = int(os.getenv("TOP_K",   "5"))
 DEFAULT_TTL  = int(os.getenv("DEFAULT_TTL", str(90 * 24 * 3600)))  # 90 days
 
@@ -77,8 +83,13 @@ mcp = FastMCP("Redis Memory")
 def _encode(v: list[float]) -> bytes:
     return struct.pack(f"{len(v)}f", *v)
 
+def _embed_client() -> httpx.AsyncClient:
+    if EMBED_SOCKET:
+        return httpx.AsyncClient(transport=httpx.AsyncHTTPTransport(uds=EMBED_SOCKET), timeout=30.0)
+    return httpx.AsyncClient(timeout=30.0)
+
 async def _embed(text: str) -> list[float]:
-    async with httpx.AsyncClient(timeout=30.0) as c:
+    async with _embed_client() as c:
         r = await c.post(f"{EMBED_URL}/embed", json={"inputs": text})
         r.raise_for_status()
         return r.json()[0]
