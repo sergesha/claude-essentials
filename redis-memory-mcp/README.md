@@ -201,8 +201,62 @@ storing anything sensitive or exposing the backend beyond a single trusted machi
 - **No RedisInsight GUI.** This package uses `redis/redis-stack-server` (server only); it does
   not expose the RedisInsight web UI (port 8001).
 
-Enforced per-client authentication and per-`NAMESPACE` isolation (Redis ACLs) is tracked
-separately — until then, treat the backend as a shared, unauthenticated cache among mutually
+### Enforced multi-tenant isolation (Redis ACLs)
+
+For a shared host with mutually-distrusting tenants, turn `NAMESPACE` from a cooperative
+convention into an **enforced** boundary: each namespace authenticates as its own Redis user,
+scoped by key pattern, so one tenant cannot read or write another's keys even over a direct
+Redis connection. This is **opt-in** — the base `docker-compose.yaml` is unchanged, so the
+single-user quick-start keeps working with no auth.
+
+1. Copy the template (`redis-acl.example.acl` — see that file for the exact lines) to the real,
+   gitignored file. Every user except `default` ships **disabled** (`off`) with a `CHANGE_ME_`
+   placeholder password, so an unedited copy is **fail-safe** — the backend loads but rejects
+   every login. To enable a user, flip `off` → `on` and replace its `CHANGE_ME_` with a strong,
+   unique password. Add one `user ns_<name>` line per `NAMESPACE` you run.
+
+   ```bash
+   cp redis-acl.example.acl redis-acl.acl   # gitignored; this file IS a secret
+   # edit redis-acl.acl: enable (on) + set a real password for each user you use
+   ```
+
+   The users in the template:
+
+   - `default` — locked: data access denied, only the unauthenticated `ping` healthcheck allowed.
+   - `admin` — manual ops / provisioning only (never used by agents). Strong password.
+   - `shared` — clients that run with **no** `NAMESPACE`: the shared/base commons only.
+   - `ns_<name>` — one per namespace: its private area (`ns:<name>:*` + index `idx:memories:<name>`)
+     **plus** the shared commons (`~mem:* ~kv:* ~idx:memories` — what `shared=True` reaches).
+     Drop those three grants from a line to wall that tenant off from the commons.
+     `-@dangerous -@admin` block `FLUSHALL`/`KEYS`/`CONFIG`/`ACL`; the server needs only hashes,
+     `SCAN`, `EXPIRE`, `DEL`, and `FT.*`, all still permitted.
+
+   > **Redis ACL files allow no comments or blank lines** — every line must start with `user`.
+   > Keep `redis-acl.acl` to `user …` lines only. Passwords written as `>plaintext` are hashed
+   > by Redis on load.
+
+2. Start with the ACL overlay on top of the base compose file:
+
+   ```bash
+   docker compose -f docker-compose.yaml -f docker-compose.acl.yaml up -d
+   ```
+
+   The overlay mounts `redis-acl.acl` as a Compose **config**, so if you forget step 1 the command
+   fails immediately (missing source path) instead of silently creating a directory there.
+
+3. Point each client's `REDIS_URL` at its own namespace user (the credentials ride in the URL —
+   no server-side change needed):
+
+   ```bash
+   REDIS_URL=redis://ns_alice:<password>@host.docker.internal:6379/0
+   NAMESPACE=alice
+   ```
+
+Enforcement is real: a direct `redis-cli` as one namespace user gets `NOPERM` on another
+namespace's keys, and `FLUSHALL`/`CONFIG` are denied to every namespace user.
+
+This is the follow-up tracked as [#17](https://github.com/sergesha/claude-essentials/issues/17).
+Without the overlay, treat the backend as a shared, unauthenticated cache among mutually
 trusting clients.
 
 ## Plugin Structure

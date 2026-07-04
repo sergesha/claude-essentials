@@ -1,0 +1,39 @@
+# Redis ACL overlay — enforced per-NAMESPACE isolation + backend auth.
+# Opt-in: the base docker-compose.yaml is unchanged (no auth) so the single-user
+# quick-start keeps working; layer this file on top for a shared/multi-tenant host.
+#
+#   1. cp redis-acl.example.acl redis-acl.acl   then, for each user you want to
+#      enable, flip `off` -> `on` and replace its CHANGE_ME_ password. Add one
+#      `user ns_<name>` line per NAMESPACE. (Shipped users are `off`, so an
+#      unedited file is fail-safe: the backend just rejects every login.)
+#   2. docker compose -f docker-compose.yaml -f docker-compose.acl.yaml up -d
+#      (this errors immediately if redis-acl.acl is missing — see `configs` below.)
+#   3. point each client's REDIS_URL at its own user:
+#        redis://ns_<name>:<password>@host.docker.internal:6379/0
+#
+# Full recipe (per-line meaning, caveats): README "Security" ->
+# "Enforced multi-tenant isolation (Redis ACLs)".
+services:
+  redis:
+    volumes:
+      # redis-stack-server auto-loads /redis-stack.conf; this committed fragment
+      # only adds `aclfile /etc/redis/users.acl`. The base file's REDIS_ARGS
+      # persistence tuning still applies on top, so it is NOT duplicated here.
+      - ./redis-acl-enable.conf:/redis-stack.conf:ro
+    configs:
+      # The ACL users file is a `config`, not a service bind mount, on purpose:
+      # if redis-acl.acl does not exist yet, `up` fails loudly (missing source
+      # path) instead of silently creating a directory at that path.
+      - source: redis_acl
+        target: /etc/redis/users.acl
+
+  # The base-index bootstrap runs unauthenticated `redis-cli FT.CREATE`, which
+  # the locked `default` user can no longer do — and it is redundant anyway: the
+  # MCP server's own _ensure_index() creates each index (base and per-namespace)
+  # on demand, as the authenticated user. Neutralize the init container.
+  redis-init:
+    command: ["true"]
+
+configs:
+  redis_acl:
+    file: ./redis-acl.acl
