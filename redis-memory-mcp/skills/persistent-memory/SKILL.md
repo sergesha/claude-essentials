@@ -31,8 +31,11 @@ Requires MCP server `redis-memory-mcp` to be running.
 **Rule: kv is for values you retrieve by exact name.** If the value is longer than ~200 chars
 or describes/explains something — use `mem_save` instead.
 
-✅ Good kv: URL, API key, version number, flag, short JSON config, timezone, username.
+✅ Good kv: non-secret URL/host, version number, flag, short JSON config, timezone, username.
 ❌ Bad kv: architecture description, tech stack list, workflow explanation, pattern description.
+❌ Never kv: API keys, passwords, tokens, or any secret — this backend has no auth and is
+   readable by every client on it (see [Security](#security)). Store a *reference* to where
+   the secret lives, not the secret.
 
 | Tool | Parameters | Purpose |
 |------|-----------|---------|
@@ -77,7 +80,7 @@ architecture notes, explanations — anything that answers "how", "why", "what h
 | Exact short value by name | `kv_set` / `kv_get` | `kv_set('prod-db-url', 'postgresql://host:5432/db', label='Production DB URL', tags='db,prod')` |
 | Search everything at once | `search` | `search(query='database connection', tags='project')` |
 | Find knowledge by meaning | `mem_save` / `mem_search` | `mem_save(text='JWT with 24h expiry, refresh in Redis', label='JWT auth strategy', tags='auth,jwt')` |
-| Config value / credential | `kv_set` | `kv_set('openai-key', 'sk-...', label='OpenAI API key', tags='secrets')` |
+| Non-secret config value | `kv_set` | `kv_set('prod-db-host', 'db.internal:5432', label='Production DB host', tags='db')` |
 | Architecture / patterns | `mem_save` | `mem_save(text='DDD with layered structure...', label='Project architecture', tags='project,architecture')` |
 | Lessons learned | `mem_save` | `mem_save(text='Problem: X. Solution: Y.', label='Lesson: X solved', tags='project,lessons')` |
 | Bug fix with code | `mem_save` | `mem_save(text='Race condition in auth', label='Auth race condition fix', code='async def ...', tags='bugs')` |
@@ -152,10 +155,12 @@ mem_save(
 )
 ```
 
-**9. Config/Credentials**
+**9. Non-secret config**
 ```
-kv_set(key="[project]-db-url", value="postgresql://...", label="[Project] DB URL", tags="[project],db,prod")
+kv_set(key="[project]-db-host", value="db.internal:5432", label="[Project] DB host", tags="[project],db,prod")
 ```
+(Never store the password/DSN itself — see [Security](#security). Keep secrets in a secret
+manager; store only a non-secret reference here.)
 
 **10. Pattern Recognized**
 ```
@@ -184,6 +189,20 @@ This ensures facts don't mix between projects. Use consistent project identifier
 4. **ALWAYS tag with project** — multi-project isolation
 5. **ALWAYS use kv_* for named facts** — faster, more reliable than search
 6. **`ttl_days=0` only in extreme cases** — permanent storage, no expiry ever. Almost never needed — TTL auto-resets on every read.
+
+## Security
+
+- **Not a secrets store.** The backend has no per-client authentication and, by default, no
+  Redis password. Anything stored is readable by every agent/client that can reach the same
+  Redis. **Never** store API keys, passwords, tokens, or other secrets — keep those in a real
+  secret manager or environment variables, and store at most a non-secret *reference* here.
+- **`NAMESPACE` and `shared` are cooperative, not a boundary.** They are a key-prefix
+  convention; nothing server-side enforces them. Any client can pick any `NAMESPACE` or pass
+  `shared=True`, and anyone with direct Redis access reads every key regardless. Do not rely
+  on them to keep one project's data secret from another.
+- **Network exposure.** The shipped `docker-compose.yaml` publishes Redis on all host
+  interfaces with no auth (and Docker's iptables rules typically bypass ufw). Run it only on
+  a trusted network / behind a firewall. See README's Security section.
 
 ## Error Handling
 
