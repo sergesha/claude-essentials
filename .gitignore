@@ -5,3 +5,8 @@ __pycache__/
 .venv/
 uv.lock
 .DS_Store
+
+# real Redis ACL file with plaintext passwords — never commit (template is
+# redis-acl.example.acl)
+redis-acl.acl
+**/redis-acl.acl
