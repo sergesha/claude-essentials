@@ -1,6 +1,6 @@
 [project]
 name = "redis-memory-mcp"
-version = "0.6.0"
+version = "0.7.0"
 description = "Persistent cross-session memory for AI agents — semantic search + KV store with auto-expiry"
 readme = "README.md"
 requires-python = ">=3.11"
