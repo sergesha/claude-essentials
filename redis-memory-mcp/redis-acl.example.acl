@@ -1,0 +1,5 @@
+user default on nopass resetchannels -@all +ping
+user admin off >CHANGE_ME_ADMIN ~* &* +@all
+user shared off >CHANGE_ME_SHARED ~mem:* ~kv:* ~idx:memories +@all -@dangerous -@admin
+user ns_alice off >CHANGE_ME_ALICE ~ns:alice:* ~idx:memories:alice ~mem:* ~kv:* ~idx:memories +@all -@dangerous -@admin
+user ns_bob off >CHANGE_ME_BOB ~ns:bob:* ~idx:memories:bob ~mem:* ~kv:* ~idx:memories +@all -@dangerous -@admin
