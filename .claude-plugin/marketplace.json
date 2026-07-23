@@ -4,21 +4,32 @@
     "name": "sergesha",
     "url": "https://github.com/sergesha/claude-essentials"
   },
-  "description": "Shared, reusable Claude Code plugins — infra utilities usable across unrelated projects (memory backends, agent self-improvement, ...).",
+  "description": "Shared, reusable Claude Code plugins \u2014 infra utilities usable across unrelated projects (memory backends, agent self-improvement, ...).",
   "version": "0.2.0",
   "plugins": [
     {
       "name": "continuous-learning",
-      "description": "Capture runtime surprises as they happen, periodically promote them into a project's own versioned skills/docs/commands, then forget them — git is the only permanent record.",
+      "description": "Capture runtime surprises as they happen, periodically promote them into a project's own versioned skills/docs/commands, then forget them \u2014 git is the only permanent record.",
       "source": "./continuous-learning",
       "category": "developer-tools",
-      "dependencies": ["redis-memory"]
+      "dependencies": [
+        "redis-memory"
+      ]
     },
     {
       "name": "redis-memory",
       "description": "Persistent cross-session memory for AI agents. Two storage modes: semantic vector search (mem_*) for knowledge found by meaning, and key-value store (kv_*) for instant lookup. Auto-expiry via TTL + volatile-lru eviction.",
       "source": "./redis-memory-mcp",
       "category": "memory"
+    },
+    {
+      "name": "tech-radar",
+      "description": "AI-powered technology scout: monitors news via SearXNG, stores summaries with semantic search in Redis, generates HTML dashboards.",
+      "source": "./tech-radar",
+      "category": "research",
+      "dependencies": [
+        "redis-memory"
+      ]
     }
   ]
 }

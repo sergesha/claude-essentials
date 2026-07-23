@@ -12,6 +12,7 @@ lists is versioned and released independently (see [Versioning](#versioning)).
 |---|---|
 | [`continuous-learning`](continuous-learning/) | Capture runtime surprises as they happen, periodically promote them into a project's own versioned skills/docs/commands. Requires a namespaced `redis-memory` connection — see its own README. |
 | [`redis-memory`](redis-memory-mcp/) | Persistent cross-session memory for AI agents — semantic search + KV store with auto-expiry. Moved here from the standalone `sergesha/redis-memory-mcp` repo at v0.5.0. |
+| [`tech-radar`](tech-radar/) | AI-powered technology scout — SearXNG news collection, semantic storage, HTML dashboards. Depends on `redis-memory` (this marketplace) for its memory tools. Moved here from the standalone `sergesha/claude-tech-radar` repo at v0.4.0. |
 
 ## Install
 

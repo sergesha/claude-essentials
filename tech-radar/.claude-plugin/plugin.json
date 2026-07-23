@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin.json",
+  "name": "tech-radar",
+  "displayName": "Tech Radar",
+  "description": "AI-powered technology scout: monitors news via SearXNG, stores summaries with semantic search in Redis, generates HTML dashboards.",
+  "version": "0.4.0",
+  "author": {
+    "name": "sergesha"
+  },
+  "homepage": "https://github.com/sergesha/claude-tech-radar",
+  "license": "MIT",
+  "keywords": [
+    "news",
+    "tech-radar",
+    "searxng",
+    "monitoring",
+    "dashboard"
+  ],
+  "hooks": "./hooks/session-start.json"
+}

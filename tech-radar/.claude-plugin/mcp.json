@@ -1,0 +1,35 @@
+{
+  "servers": {
+    "searxng-mcp": {
+      "description": "SearXNG metasearch engine bridge. Searches news, tech articles, arxiv, github via local SearXNG instance.",
+      "capabilities": [
+        "search — search SearXNG with query, category, language, time_range",
+        "search_and_fetch — search + fetch full page content",
+        "search_and_summarize — search + AI-generated summary"
+      ],
+      "required": true,
+      "env": {
+        "SEARXNG_URL": "SearXNG instance URL (default: http://localhost:8888)",
+        "CACHE_URL": "Redis/Dragonfly cache URL (default: redis://localhost:6381)"
+      },
+      "infrastructure": {
+        "searxng": "SearXNG metasearch engine (Docker, port 8888)",
+        "cache": "Dragonfly/Redis cache for search results (Docker, port 6381)"
+      },
+      "setup": "docker compose up -d (starts SearXNG + Dragonfly)"
+    },
+    "redis-memory-mcp": {
+      "description": "Persistent cross-session memory with semantic search + KV store for storing news summaries.",
+      "capabilities": [
+        "mem_save — save article summary with vector embedding",
+        "mem_search — find articles by meaning (cosine similarity)",
+        "mem_list — browse saved articles",
+        "mem_delete — remove article",
+        "kv_set — store operational metadata",
+        "kv_get — retrieve metadata by key"
+      ],
+      "required": true,
+      "setup": "Install redis-memory plugin separately or run start.sh from repo"
+    }
+  }
+}

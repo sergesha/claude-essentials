@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "nohup sh \"${CLAUDE_PLUGIN_ROOT}/hooks/ensure-stack.sh\" >/dev/null 2>&1 &",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
