@@ -145,13 +145,30 @@ if [ -n "${REDIS_MEMORY_MCP_SOCKET_DIR:-}" ]; then
   SOCKET_MOUNT_ARGS=(-v "${REDIS_MEMORY_MCP_SOCKET_DIR}:${REDIS_MEMORY_MCP_SOCKET_DIR}" --group-add keep-groups)
 fi
 
+# Defaults are applied HERE, by export, so the run below can pass every
+# variable by NAME. That is not a style choice: with ACLs (0.8.0) REDIS_URL
+# carries the namespace password, and `-e NAME=value` writes that value into
+# this process's argv. /proc/<pid>/cmdline is world-readable on a stock Linux
+# host, so every other local user -- and anything that prints a process tree,
+# `systemctl status` and `ps` included -- reads the password in clear text.
+# `-e NAME` makes docker/podman copy the value out of this process's
+# environment instead, and /proc/<pid>/environ is 0400, owner only.
+# Behaviour is identical: an exported-but-empty variable is still passed as an
+# empty string (verified against podman), which is what the old explicit
+# `-e "EMBED_SOCKET="` did.
+export REDIS_URL="${REDIS_URL:-redis://host.docker.internal:6379/0}"
+export EMBED_URL="${EMBED_URL:-http://host.docker.internal:8081}"
+export EMBED_SOCKET="${EMBED_SOCKET:-}"
+export INDEX_NAME="${INDEX_NAME:-idx:memories}"
+export NAMESPACE="${NAMESPACE:-}"
+
 exec docker run --rm -i \
   --add-host=host.docker.internal:host-gateway \
   "${NETWORK_ARGS[@]}" \
   "${SOCKET_MOUNT_ARGS[@]}" \
-  -e "REDIS_URL=${REDIS_URL:-redis://host.docker.internal:6379/0}" \
-  -e "EMBED_URL=${EMBED_URL:-http://host.docker.internal:8081}" \
-  -e "EMBED_SOCKET=${EMBED_SOCKET:-}" \
-  -e "INDEX_NAME=${INDEX_NAME:-idx:memories}" \
-  -e "NAMESPACE=${NAMESPACE:-}" \
+  -e REDIS_URL \
+  -e EMBED_URL \
+  -e EMBED_SOCKET \
+  -e INDEX_NAME \
+  -e NAMESPACE \
   "$IMAGE"
