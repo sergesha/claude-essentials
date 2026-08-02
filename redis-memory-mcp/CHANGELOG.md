@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1](https://github.com/sergesha/claude-essentials/compare/redis-memory-mcp-v0.8.0...redis-memory-mcp-v0.8.1) (2026-08-02)
+
+
+### Bug Fixes
+
+* **redis-memory-mcp:** keep the namespace password out of the container argv ([#23](https://github.com/sergesha/claude-essentials/issues/23)) ([e8c30e0](https://github.com/sergesha/claude-essentials/commit/e8c30e05b1698554b94e1f851171043abd78d372))
+
 ## [0.8.0](https://github.com/sergesha/claude-essentials/compare/redis-memory-mcp-v0.7.0...redis-memory-mcp-v0.8.0) (2026-07-04)
 
 
