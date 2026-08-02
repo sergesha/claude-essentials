@@ -252,6 +252,13 @@ single-user quick-start keeps working with no auth.
    NAMESPACE=alice
    ```
 
+   Set it as an **environment variable**, never as a literal in the MCP entry's `args` (the
+   Cursor example above shows the unauthenticated default, and an authed URL does not belong
+   there). A value in `args` becomes part of the process command line, and `/proc/<pid>/cmdline`
+   is world-readable: every other local user, and anything that prints a process tree, reads the
+   password in clear text. `start.sh` passes all five variables to the container by name for the
+   same reason.
+
 Enforcement is real: a direct `redis-cli` as one namespace user gets `NOPERM` on another
 namespace's keys, and `FLUSHALL`/`CONFIG` are denied to every namespace user.
 
