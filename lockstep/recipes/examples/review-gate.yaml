@@ -1,0 +1,75 @@
+version: "1.0"
+name: review-gate
+description: >
+  Task-9 example — the CHILD recipe feature-dev-reviewed.yaml's fractal
+  subcall spawns (scenario: review-gate). One review step whose artifact
+  path (.lockstep/review.md) is covered by baseline_globs, so the parent's
+  `hash_from: _subcall_envelope.artifact_hashes.review` resolves against
+  this child run's own validated baseline snapshot — never against
+  collect-time project bytes the worker could have edited. This run is a
+  full lockstep run in its own right: it goes through every v1 profile
+  rule and gate on its own, independently of the parent. Copied from
+  tests/fixtures/recipes/good/child-review.yaml (the ground-truth shape),
+  with fuller task text. Repo-level example only — copy alongside
+  feature-dev-reviewed.yaml into <project>/.lockstep/recipes/.
+
+baseline_globs: [".lockstep/**"]
+
+state:
+  brief: dict
+  evidence: dict
+  verdict_status: str
+  verdict_reasons: list
+
+tools:
+  run_checks:
+    type: python
+    module: lockstep_mcp.validators
+    function: run_checks
+
+nodes:
+  step_review:
+    type: interrupt
+    idempotent: false
+    state_key: brief
+    resume_key: evidence
+    message:
+      step: review
+      task: "Write the review to .lockstep/review.md; end with Verdict: PASS or FAIL"
+      exit_criterion: "review.md exists and states a verdict"
+      evidence_schema:
+        required: [review_path]
+        properties:
+          review_path:
+            type: string
+            format: project-path
+      checks:
+        - type: file_matches
+          path_from: review_path
+          regex: "Verdict:\\s*(PASS|FAIL)"
+
+  validate_review:
+    type: python
+    tool: run_checks
+
+  escalate_gate:
+    type: passthrough
+    output: {}
+
+  escalate:
+    type: interrupt
+    idempotent: false
+    state_key: brief
+    resume_key: evidence
+    message:
+      step: escalate
+
+edges:
+  - {from: START, to: step_review}
+  - {from: step_review, to: validate_review}
+  - {from: validate_review, to: END, condition: "verdict_status == 'pass'"}
+  - {from: validate_review, to: step_review, condition: "verdict_status == 'fail'"}
+  - {from: escalate_gate, to: escalate}
+
+loop_limits: {validate_review: 2}
+loop_exits:  {validate_review: escalate_gate}

@@ -205,6 +205,7 @@ recipe, never sourced from evidence.
 | `unchanged` | `glob` (fnmatch-style pattern, e.g. `"tests/**"`); `since: start\|previous` (default `start`) | No file matching `glob` differs from the selected baseline snapshot. | Deferred to the END of the check pass regardless of list position, and re-hashes AFTER every `cmd_ok`/`junit_gate` in the same pass (TOCTOU guard — a command earlier in the list that mutates a "frozen" file is still caught). **Coverage rule differs from the others**: `glob` must appear **verbatim** as an entry in `baseline_globs` (or match existing manifest entries) or the check raises — not just prefix-covered. `since: start` treats "absent at start and absent now" as pass (a project with no `pytest.ini` stays clean; *creating* one mid-run counts as a change → fail). |
 | `changed_in` | `paths: [str, ...]`; `since: start\|previous` (default `start`) | At least one file under any of `paths` differs from the selected baseline snapshot. | Each declared path must be covered by `baseline_globs` (prefix-match) or the check raises. |
 | `diff_only` | `paths: [str, ...]` | No file OUTSIDE `paths` differs from the **previous**-step baseline snapshot. | **Always compares against the previous step's snapshot — there is no `since:` option for `diff_only`, it is hardwired to `previous`.** Each declared path must be covered by `baseline_globs` or the check raises. Use this on the LAST step too, not just implementation steps — a recipe that only fences intermediate steps lets post-gate weakening of tests/config slip through clean at the very end (see `feature-dev.yaml`'s review step). |
+| `file_matches_hash` | `path_from` (evidence-relative); `hash_from` (recipe-pinned string, must match `_subcall_envelope.artifact_hashes.<name>`) | File's SHA-256 must equal the hash pinned at `hash_from` in graph state. | **Fractal subcalls only** — `hash_from` resolves against the child run's own validated baseline snapshot, never against collect-time project bytes (the point: the worker owns the project dir and could have edited the file after the child wrote it; the hash comes from the DENIED side). A one-shot subcall (no `scenario:` on the marker) never populates `artifact_hashes` — it validates the **envelope** instead (`output`/`exit_code`/`session_id`), not a project file. `hash_from` naming an artifact no marker declares in `artifacts:` is a profile error. |
 
 **`baseline_globs`** (top-level recipe key, required whenever any baseline check above is used):
 a list of glob patterns (supports `**`, resolved via Python's recursive glob) defining which
@@ -227,6 +228,124 @@ a check that raises (missing baseline, uncovered path, `re.error`, etc.) yields 
 above raise instead of silently passing or failing: an `error` is loud and free, a wrong `pass`
 would be a real integrity hole.
 
+## Subcalls (v2) — spawning an independent CLI-agent session
+
+A **subcall** is a recipe-level triple built from existing node types only —
+a `python` spawn node, an `interrupt` marker node, a `python` poll node —
+that hands one closed sub-task to a separate `claude -p` process the main
+(worker) agent cannot read or steer. `subcall-one-shot.yaml` (one-shot,
+validated by its captured output) and `subcall-fractal.yaml` +
+`child-review.yaml` (fractal — the spawned session runs its own lockstep
+child run) in `tests/fixtures/recipes/good/` are the ground truth; copy
+their shape rather than improvising. `recipes/examples/feature-dev-reviewed.yaml`
++ `review-gate.yaml` are a full worked example of the fractal form.
+
+**The triple:**
+
+```yaml
+tools:
+  subcall_spawn: {type: python, module: lockstep_mcp.subcalls, function: spawn}
+  subcall_poll:  {type: python, module: lockstep_mcp.subcalls, function: poll}
+
+nodes:
+  review_spawn: {type: python, tool: subcall_spawn}
+  review_wait:
+    type: interrupt
+    idempotent: false
+    state_key: brief
+    resume_key: evidence
+    message:
+      step: _subcall            # the marker discriminator — exactly this
+      node: review              # unique node id within the recipe
+      runner: claude
+      timeout_minutes: 30
+      prompt: "..."             # verbatim, no {var} placeholders
+      scenario: review-gate     # OMIT for a one-shot subcall
+      artifacts: {review: ".lockstep/review.md"}   # fractal only
+  review_poll: {type: python, tool: subcall_poll}
+
+edges:
+  - {from: validate_plan, to: review_spawn, condition: "verdict_status == 'pass'"}
+  - {from: review_spawn, to: review_wait}
+  - {from: review_wait, to: review_poll}
+  - {from: review_poll, to: review_wait, condition: "_subcall_status == 'running'"}
+  - {from: review_poll, to: <next>, condition: "_subcall_status == 'done'"}
+  - {from: review_poll, to: escalate_gate, condition: "_subcall_status == 'error'"}
+```
+
+**Trap — `scenario:`/`artifacts:` live in the marker's `message`, never on
+the spawn node.** yamlgraph 0.5.18 rejects unknown keys in a node's config
+(`extra_forbidden`), so the fractal-child wiring rides the marker's
+free-form `message` dict alongside `step`/`node`/`runner`/`prompt`/
+`timeout_minutes` — the same place `evidence_schema`/`checks` already live
+on work interrupts. Putting `scenario:` on `review_spawn` instead compiles
+to nothing and the profile will not catch it there — it isn't a recognized
+key on either node type.
+
+**Declare the subcall state channels.** Any recipe using subcalls must add
+`_subcall_status: str` and `_subcall_envelope: dict` to `state:` — LangGraph
+drops undeclared channels, and the profile refuses a subcall recipe missing
+either.
+
+**Profile traps specific to the triple** (each is a `check_recipe` error,
+not a runtime surprise):
+
+- Every edge **entering** a spawn node must be conditioned exactly
+  `verdict_status == 'pass'` or `verdict_status == 'fail'` — nothing else,
+  and never from `START` (a start-time spawn would fire on an empty
+  evidence channel and bypass the engine's done()-time policy prediction
+  for runner/budget/depth). A spawn must be the direct conditional
+  successor of a validator.
+- Every edge **out of a poll node** must be conditioned exactly
+  `_subcall_status == 'running'`, `'done'`, or `'error'` — the `'running'`
+  back edge to the marker is required.
+  Poll-loop back edges are exempt from `loop_limits`/`loop_exits` — a long
+  subcall polled many times must not falsely escalate; termination is the
+  runner's own `timeout_minutes`, which must be a finite positive integer
+  (an unbounded/`0`/negative timeout is a profile error).
+- `runner:` (when given) must match `^[a-z][a-z0-9-]*$` — a name looked up
+  in the owner's `runners.yaml`, never a command. `node` (the marker id)
+  must match `^[a-z][a-z0-9_-]*$` and be unique within the recipe (subcall
+  workdirs and the single-start claim are keyed on it).
+- `prompt` is required, non-empty, and used **verbatim** — the placeholder
+  scan (`\{[A-Za-z_]\w*\}`) applies to it exactly as it does to
+  `checks`/`evidence_schema`; a subcall prompt is never a template.
+- **Sequential subcalls share `_subcall_envelope`** (last-write-wins) — if
+  a recipe spawns a second subcall after the first, validate/consume the
+  first's envelope (via a check with `hash_from`, or a validator step)
+  before the second spawn resumes, or its result is gone.
+- **Fractal children need covering `baseline_globs`.** Every artifact a
+  marker names in `artifacts:` must be a path the CHILD recipe's own
+  `baseline_globs` covers — that's where the parent's `hash_from:
+  _subcall_envelope.artifact_hashes.<name>` gets its hash from (the
+  child's last validated baseline snapshot). An uncovered artifact is a
+  profile error at `validate_recipe`/`check_recipe` time, not a runtime
+  surprise — `check_recipe` resolves the child recipe beside the file
+  being checked by default (pass `child_recipes_dir=` to override, e.g.
+  when checking a staged copy).
+
+**`runners.yaml`** (owner-authored, lives under `$LOCKSTEP_STATE_DIR` —
+never the project tree, never agent-writable) is what makes a `runner:`
+name resolvable at all:
+
+```yaml
+runners:
+  claude:
+    path: /usr/local/bin/claude   # ABSOLUTE — the engine never PATH-resolves
+    models: [haiku, sonnet]       # required, non-empty — fail-closed otherwise
+    timeout_minutes: 30           # optional override; falls back to budgets/defaults
+budgets:
+  max_subcalls_per_run: 8
+  max_fractal_depth: 2
+```
+
+`path` MUST be an absolute, executable file — the engine checks this again
+immediately before every spawn, never from a cached value. A `runner:`
+name with no matching entry, or an entry with an empty `models` list, is a
+loud start-time refusal, never a silent fallback. See README.md "Subcalls
+(v2)" for why the path must be absolute and the state dir must sit outside
+the project tree, and for what this setup does and does NOT guarantee.
+
 ## `tools:` / local `tools.py` policy — last resort
 
 A recipe's `tools:` block wires python functions as validator nodes. Every fixture and example
@@ -247,3 +366,9 @@ skeleton for any new recipe — it exercises the full hardened vocabulary (`base
 `unchanged`/`changed_in`/`diff_only`/`fresh`, `md_has_sections`, `file_matches`, `junit_gate`)
 end to end, in the exact spike-frozen dialect, with the escalate-gate wiring already correct.
 Adapt the steps and checks; keep the wiring shape.
+
+For a recipe that needs an independent review gate, copy
+`feature-dev-reviewed.yaml` + `review-gate.yaml` together (both, into the
+same `.lockstep/recipes/`) instead — the fractal subcall triple, its
+`file_matches_hash` verify step, and the child recipe it spawns, wired end
+to end.

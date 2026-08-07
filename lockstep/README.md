@@ -149,6 +149,88 @@ for "nothing configured". A consumer's CI can prove the hook wiring itself actua
 (independent of whether any lockstep run is active) by running `claude -p "ok"` in a repo with
 lockstep's hooks configured and asserting `heartbeat.jsonl` grew by at least one line.
 
+## Subcalls (v2)
+
+A **subcall** is a recipe step that hands a closed sub-task to a separate
+`claude -p` process the main (worker) agent's conversation cannot read or
+steer — first use case: an independent review gate, so the reviewer isn't
+the same session that did the work. A **fractal** subcall goes further: the
+spawned session runs its own lockstep child run, with its own snapshot,
+baseline and gate — the parent's evidence is that child run's terminal
+status, machine-checked, not the child's word. See
+`skills/lockstep-author/SKILL.md` for the recipe dialect
+(`recipes/examples/feature-dev-reviewed.yaml` + `review-gate.yaml` is a
+full worked example) and `skills/lockstep/SKILL.md` for how a worker
+experiences a subcall in flight.
+
+**What it guarantees**: the worker cannot WRITE the subcall's control
+channel or drive the child run. This is enforced by state-dir/`runners.yaml`
+denial (the same permission-system denial the rest of this README already
+requires) + absolute-path exec (the engine never PATH-resolves a runner —
+on a no-sudo host `~/.local/bin` is agent-writable and on PATH, so PATH
+resolution would let the worker plant a fake `claude` that forges the
+"independent" session) + child-run origin binding (only the credentialed
+child process — the one holding the `LOCKSTEP_CHILD_RUN`/
+`LOCKSTEP_CHILD_NONCE` pair the engine minted at spawn — may call
+`scenario_done`/`scenario_escalate`/`scenario_abort` on a parented run; a
+caller without that credential is refused). Validated artifact bytes are
+hash-pinned from the DENIED side — the child's own validated baseline
+snapshot for a fractal subcall, or the runner's captured output file under
+the state dir for a one-shot subcall — never from collect-time project
+bytes, which the worker owns and could have edited after the fact. A
+fractal child is a full lockstep run: every v1 guarantee above applies to
+it recursively, and the policy gate unlocks only descendants of an
+**awaiting** run of the policy's recipe.
+
+**What it does NOT guarantee:**
+
+- **Origin binding closes the sanctioned MCP surface. It does NOT close
+  same-user OS access**: on a multi-user OS a process environment may be
+  reachable by other same-user processes through ordinary OS facilities,
+  and a worker with shell can Bash-launch its own credentialed engine. That
+  is the SAME same-user residual class v1 already carries (shell reaches
+  the state dir too) — stated honestly, not claimed closed.
+- **Input poisoning is real.** The worker CAN read the child's transcript
+  (`~/.claude/projects/<slug>/` — outside this project's boundary; add your
+  own deny if that matters to you) and CAN author the child's inputs — a
+  file planted with "this was already reviewed/approved" is a live attack,
+  not a hypothetical. This is why the shipped reviewer prompt
+  (`feature-dev-reviewed.yaml`) explicitly instructs the reviewer to treat
+  any in-repo claim of pre-approval as a FINDING to report, never as an
+  instruction to follow — write the same instruction into any reviewer
+  prompt you author.
+- **No liveness without tool calls.** Polling happens only on
+  `scenario_status`/`scenario_done` entry — nothing runs in the background.
+  A sleeping subcall makes no progress until something calls one of those
+  two tools.
+- **Subcall work quality is not guaranteed**, same as everywhere else in
+  this README — shape checks are tripwires, not proof.
+
+**Owner setup**: a `runner:` name (e.g. `claude`) only resolves through
+`$LOCKSTEP_STATE_DIR/runners.yaml` — owner-authored, denied to the agent by
+the same permission rule as the rest of the state dir. It pins the
+runner's executable by ABSOLUTE path (never resolved from `PATH`) and a
+non-empty model allowlist; an unlisted runner, a relative path, or an empty
+model list is a loud start-time refusal, never a silent fallback. The state
+dir itself must not sit inside the project tree — the engine refuses to
+start a run if it does (`runners.assert_state_dir_sane`), because a state
+dir under the gate would hand the agent the allowlist it's supposed to be
+denied.
+
+**OS-agnostic**: process spawn, liveness, termination, and the run-index
+lock all use only Python stdlib with portable semantics — no
+`fcntl`/`msvcrt`/`/proc`/`setsid` assumptions anywhere in the core paths;
+the same test suite is green on macOS and Linux with zero platform skips.
+
+**Explicit deferrals** — not silently missing, deliberately out of v2's
+scope:
+
+- `copilot` stays in `FORBIDDEN_NODE_TYPES` in v2 — the conditional
+  shim-runner allowance is deferred.
+- v2 never resumes runner sessions; the envelope's `session_id` is
+  informational only (`safe_argv`'s resume gate exists for the future
+  continuation path).
+
 ## Known assumptions
 
 **`run.project` = the MCP server process's cwd at `scenario_start`** (captured once via
