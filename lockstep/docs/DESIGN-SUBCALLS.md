@@ -129,7 +129,11 @@ Liveness model (honest, review M2): polling happens ONLY on
 `scenario_status` / `scenario_done` entry — hooks are read-only on
 runs.json (v1 contract, unchanged) and `list_runs` reads the index raw;
 neither polls. A sleeping run makes no progress until someone calls
-status. The Stop hook gets subcall-aware text: on a run parked in a
+status — with one engine-internal exception: a child run's terminal
+transition, the last instant its session is provably alive, best-effort
+polls each ancestor once (`Engine._nudge_ancestors`), so a parent parked
+on that subcall advances even when its own worker session is dead. The
+Stop hook gets subcall-aware text: on a run parked in a
 subcall it says "subcall in progress — check scenario_status", never
 "report via scenario_done" (which is refused during a subcall).
 

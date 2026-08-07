@@ -917,6 +917,36 @@ class Engine:
         for rec in self._runs.descendants(run_id):
             if rec.status not in TERMINAL_STATUSES:
                 self._runs.update(rec.run_id, status="aborted")   # CAS skips completed children
+        self._nudge_ancestors(run_id)
+
+    def _nudge_ancestors(self, run_id: str) -> None:
+        """Liveness nudge: the server is not a daemon — a run parked on a
+        subcall advances only when some call touches THAT run, and a
+        terminal transition is the last instant this run's session is
+        provably alive. So, as the transition's closing act, poll each
+        ancestor once via self.status() — the engine equivalent of
+        scenario_status: read-only, not origin-bound — letting a parent
+        parked on this subcall observe the terminal child even when its own
+        worker session is dead. Sits at the end of _cascade_terminate
+        because that is the one call every terminal-setting index write
+        already makes, and no sidecar lock is held here (RunIndex acquires
+        and releases per call; locking.file_lock is non-reentrant).
+        Visited-set walk, same shape as RunIndex.descendants — a forged
+        on-disk parent_run cycle must not loop. Best-effort by contract:
+        this run's terminal outcome is already durable, so no failure here
+        may ever surface to the caller."""
+        try:
+            seen = {run_id}
+            parent_id = self._runs.get(run_id).parent_run
+            while parent_id is not None and parent_id not in seen:
+                seen.add(parent_id)
+                try:
+                    self.status(parent_id)
+                except Exception:  # noqa: BLE001 - one dead ancestor must not stop the walk
+                    pass
+                parent_id = self._runs.get(parent_id).parent_run
+        except Exception:  # noqa: BLE001 - the nudge never affects the child's own result
+            pass
 
     def _subcall_ctx(self, run_id: str, record: RunRecord, spawn_node: str) -> dict:
         doc = self._snapshot_doc(run_id)

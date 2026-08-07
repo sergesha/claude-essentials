@@ -80,7 +80,9 @@ While a subcall is in flight:
   or guess at its outcome. Liveness only advances on a tool call —
   `scenario_status`/`scenario_done` — nothing polls in the background, so a
   subcall makes no progress until you (or the parent's own retry) call one
-  of them.
+  of them. One exception you get for free: a fractal child's own terminal
+  report nudges its parent, so a parent parked on a finished child advances
+  without you.
 - **`scenario_done` is refused while a subcall is running** — read the
   refusal message; it names the subcall's node and how long it's been
   running. There is no step of your own to report evidence for yet — poll
