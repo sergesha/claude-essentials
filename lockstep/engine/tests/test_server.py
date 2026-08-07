@@ -90,6 +90,30 @@ def test_start_and_done_roundtrip(tmp_path, monkeypatch):
     assert final_status["status"] == "done"
 
 
+def test_run_naming_responses_carry_the_binding_marker(tmp_path, monkeypatch):
+    # The PostToolUse hook's name-agnostic recognition signal: every
+    # response that names a run_id is stamped with the binding marker, so
+    # binding survives ANY tool-name spelling the platform matcher lets
+    # through. Responses without a run_id stay unstamped.
+    from lockstep_mcp import sessions
+
+    _configure(monkeypatch, tmp_path)
+
+    res = server.scenario_start("minimal", {})
+    assert res[sessions.BINDING_MARKER_KEY] == sessions.BINDING_MARKER_VALUE
+
+    status = server.scenario_status(res["run_id"])
+    assert status["run_id"] == res["run_id"]
+    assert status[sessions.BINDING_MARKER_KEY] == sessions.BINDING_MARKER_VALUE
+
+    aborted = server.scenario_abort(res["run_id"])
+    assert aborted[sessions.BINDING_MARKER_KEY] == sessions.BINDING_MARKER_VALUE
+
+    terminal = server.scenario_status(res["run_id"])   # terminal shape has no run_id
+    assert "run_id" not in terminal
+    assert sessions.BINDING_MARKER_KEY not in terminal
+
+
 # ---------------------------------------------------------------------------
 # validate_recipe
 # ---------------------------------------------------------------------------

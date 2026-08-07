@@ -37,7 +37,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "mcp__lockstep__.*|mcp__plugin_lockstep_lockstep__.*",
+        "matcher": "mcp__lockstep__.*|mcp__plugin_.+_lockstep__.*",
         "hooks": [
           {
             "type": "command",

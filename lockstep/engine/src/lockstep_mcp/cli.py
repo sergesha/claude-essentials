@@ -12,9 +12,12 @@ Task 7 fills the hook/policy/doctor handlers:
   are thin stdin/stdout plumbing.
 - `policy require|clear` writes/removes an owner-authored `policy.d/<slug>.yaml`
   file (decision 15) — the PreToolUse no-run gate reads these.
-- `doctor` is a v1-trimmed diagnostic report (dirs exist, installed version
+- `doctor` is a diagnostic report (dirs exist, installed version
   self-report — distribution is the plugin's own cloned files run via
-  `uv run`, so there is no version pin to check against).
+  `uv run`, so there is no version pin to check against) plus the loud
+  detector for the silent-lockout failure: an ACTIVE run with no binding
+  sidecar means the PostToolUse hook never fired — matcher/tool-name
+  mismatch — and the report names the exact matcher to fix.
 
 Fail-open vs fail-closed (Global Constraints): PreToolUse is the only gate
 that can actually stop an action, so `hook_pretool` is internally
@@ -40,6 +43,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -334,7 +338,9 @@ def hook_pretool(stdin_json: dict, state_dir: Path) -> tuple[int, str]:
 
 # ---------------------------------------------------------------------------
 # PostToolUse hook — the binding writer. Fires on lockstep MCP tools only
-# (hooks.json matcher, re-checked here via _LOCKSTEP_TOOL_PREFIXES). This is where a
+# (hooks.json matcher; re-checked here — by name for the known shapes via
+# LOCKSTEP_TOOL_MATCHER, by the server-stamped response marker for any
+# other mcp__ name a user-extended matcher lets through). This is where a
 # run gets BOUND to the session driving it: at scenario_start (run_id read
 # from the tool response) and on every later touch naming the run —
 # scenario_status polls included, so a parent waiting out a long subcall
@@ -350,10 +356,21 @@ def hook_pretool(stdin_json: dict, state_dir: Path) -> tuple[int, str]:
 # (verified live 2026-08-07); a plugin-manifest install yields
 # `mcp__plugin_<plugin>_<server>__<tool>` — observed live on Claude Code
 # 2.1.220: `mcp__plugin_lockstep_lockstep__scenario_start` (fixture:
-# tests/fixtures/hooks/posttool_scenario_start_plugin_install.json). Both
-# here and in hooks/hooks.json's PostToolUse matcher — keep them in sync
-# (pinned by test_recorded_payload_matches_shipped_hook_matcher).
-_LOCKSTEP_TOOL_PREFIXES = ("mcp__lockstep__", "mcp__plugin_lockstep_lockstep__")
+# tests/fixtures/hooks/posttool_scenario_start_plugin_install.json). The
+# PLUGIN segment is the user's install name — free text — but the SERVER
+# segment is pinned to "lockstep" by the shipped plugin manifest's
+# mcpServers key, so `mcp__plugin_.+_lockstep__` covers every plugin
+# install regardless of what the user named the plugin. ONE home for the
+# pattern, mirrored byte-for-byte into hooks/hooks.json's PostToolUse
+# matcher (pinned by test_shipped_hook_matcher_covers_install_shapes).
+# A tool name OUTSIDE these shapes (e.g. a hand-written .mcp.json server
+# under another key) is still accepted by hook_posttool — but only via
+# the server-stamped response marker (`sessions.BINDING_MARKER_KEY`), so
+# extending the platform matcher is the ONLY step such an install needs;
+# `lockstep-mcp doctor` detects the missed-binding state and says exactly
+# that.
+LOCKSTEP_TOOL_MATCHER = r"mcp__lockstep__.*|mcp__plugin_.+_lockstep__.*"
+_LOCKSTEP_TOOL_RE = re.compile(LOCKSTEP_TOOL_MATCHER)
 
 
 def _find_run_id(obj, depth: int = 0) -> str | None:
@@ -384,6 +401,39 @@ def _find_run_id(obj, depth: int = 0) -> str | None:
     return None
 
 
+def _find_marked_run_id(obj, depth: int = 0) -> str | None:
+    """`run_id` accepted ONLY from a JSON object that also carries the
+    server-stamped binding marker as a SIBLING key. This is the
+    name-agnostic identity predicate for tools whose name is not a known
+    lockstep shape: a bare `run_id` anywhere in a foreign tool's response
+    (a file-read surfacing runs.json, an unrelated tool's own run ids)
+    proves nothing, and must bind nothing."""
+    if depth > 6:
+        return None
+    if isinstance(obj, dict):
+        v = obj.get("run_id")
+        if (isinstance(v, str) and v
+                and obj.get(sessions.BINDING_MARKER_KEY) == sessions.BINDING_MARKER_VALUE):
+            return v
+        for val in obj.values():
+            got = _find_marked_run_id(val, depth + 1)
+            if got:
+                return got
+    elif isinstance(obj, list):
+        for val in obj:
+            got = _find_marked_run_id(val, depth + 1)
+            if got:
+                return got
+    elif isinstance(obj, str):
+        s = obj.strip()
+        if s[:1] in "{[":
+            try:
+                return _find_marked_run_id(json.loads(s), depth + 1)
+            except ValueError:
+                return None
+    return None
+
+
 def _posttool_run_id(tool_input, tool_response) -> str | None:
     if isinstance(tool_input, dict):
         v = tool_input.get("run_id")
@@ -396,13 +446,22 @@ def hook_posttool(stdin_json: dict, state_dir: Path) -> None:
     try:
         state_dir = Path(state_dir)
         tool_name = str(stdin_json.get("tool_name") or "")
-        if not tool_name.startswith(_LOCKSTEP_TOOL_PREFIXES):
+        if not tool_name.startswith("mcp__"):
+            return
+        if _LOCKSTEP_TOOL_RE.fullmatch(tool_name):
+            # Known lockstep name shape: trusted by name, permissive
+            # extraction (input run_id, else any run_id in the response).
+            run_id = _posttool_run_id(stdin_json.get("tool_input"),
+                                      stdin_json.get("tool_response"))
+        else:
+            # Unknown MCP tool name (a custom-named install whose user
+            # extended the platform matcher — or any foreign tool that
+            # slipped into it): only a marker-stamped response counts.
+            run_id = _find_marked_run_id(stdin_json.get("tool_response"))
+        if not run_id:
             return
         session_id = stdin_json.get("session_id")
         if not isinstance(session_id, str) or not session_id:
-            return
-        run_id = _posttool_run_id(stdin_json.get("tool_input"), stdin_json.get("tool_response"))
-        if not run_id:
             return
         # Only a real, still-awaiting run is worth a binding — a failed call
         # (run_id in the input but no such run) or a terminal run binds
@@ -448,11 +507,15 @@ def policy_clear(state_dir: Path, project: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# doctor (v1 trimmed — dirs exist, installed version self-report. No
+# doctor — dirs exist, installed version self-report, and the LOUD check
+# for the one silent failure mode observed live: an active run with no
+# binding sidecar means the PostToolUse binding hook never fired for it
+# (the installed matcher does not match this installation's tool names),
+# and the gate will deny even the session that started the run. No
 # version-pin check: distribution is the plugin's own cloned files run via
 # `uv run --project ${CLAUDE_PLUGIN_ROOT}/engine`, so there is nothing
 # external to fall out of sync with. NOT implemented: effective-settings
-# inspection, handler self-exec — those are v2.)
+# inspection, handler self-exec — those are v2.
 # ---------------------------------------------------------------------------
 
 
@@ -470,6 +533,40 @@ def doctor(state_dir: Path, recipes_dir: Path) -> tuple[bool, str]:
 
     check("state dir exists", state_dir.exists(), str(state_dir))
     check("recipes dir exists", recipes_dir.exists(), str(recipes_dir))
+
+    # Binding liveness: every ACTIVE run must have a session-binding
+    # sidecar — it is written by the PostToolUse hook on the very
+    # scenario_start that created the run, so its absence proves the hook
+    # never fired (matcher/tool-name mismatch), the exact silent-lockout
+    # failure this check exists to make loud.
+    try:
+        active = RunIndex(state_dir).list(active_only=True) if _runs_json_path(state_dir).exists() else []
+    except Exception as exc:  # noqa: BLE001 - unreadable index is itself a finding
+        active = []
+        check("runs index readable", False, f"{_runs_json_path(state_dir)}: {exc}")
+    for r in active:
+        binding = sessions.read_binding(state_dir, r.run_id)
+        if binding is None:
+            check(
+                f"run {r.run_id} has a session binding", False,
+                f"active run (recipe {r.recipe}) with no bindings/{r.run_id}.json: the "
+                "PostToolUse binding hook never fired, so the policy gate denies every "
+                "session, including the one that started the run. The installed "
+                "PostToolUse matcher must match this installation's lockstep tool "
+                f"names (shipped matcher: {LOCKSTEP_TOOL_MATCHER}). Find the real "
+                "name in the session's tool list (it ends in __scenario_start) and "
+                "add its prefix followed by .* to the PostToolUse matcher in the "
+                "plugin's hooks/hooks.json or your settings hooks — responses are "
+                "marker-verified, no code change needed. Then a scenario_status "
+                f"call on {r.run_id} binds it",
+            )
+        else:
+            live = sessions.is_live(binding, _session_stale_minutes())
+            check(
+                f"run {r.run_id} has a session binding", True,
+                f"session {binding['session_id']}"
+                + ("" if live else " (silent past the stale window — adoptable)"),
+            )
 
     lines.append(f"installed version: {__version__}")
 

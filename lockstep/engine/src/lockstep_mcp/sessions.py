@@ -41,6 +41,22 @@ from pathlib import Path
 
 from lockstep_mcp.locking import file_lock
 
+# The response marker: the MCP server stamps this key into every tool
+# result that names a `run_id` (server._mark), and the PostToolUse hook
+# accepts a run_id from an UNRECOGNIZED mcp__ tool name only when this
+# key sits beside it in the same JSON object (cli._find_marked_run_id).
+# It makes binding independent of the tool-name spelling — an install
+# under any server/plugin name only needs its shape added to the
+# platform's PostToolUse matcher; the hook code recognizes the response
+# itself. A bare `run_id` in a foreign tool's response (e.g. a file-read
+# surfacing runs.json) carries no marker and binds nothing. Boundary,
+# stated honestly: the marker authenticates the response SHAPE, not the
+# server — a tool that deliberately replays a marked lockstep response
+# (and whose name the installed matcher lets through) reads as lockstep;
+# the damage ceiling is a binding touch, which never robs a live owner.
+BINDING_MARKER_KEY = "lockstep_protocol"
+BINDING_MARKER_VALUE = 1
+
 
 def binding_path(state_dir: Path, run_id: str) -> Path:
     return Path(state_dir) / "bindings" / f"{run_id}.json"
