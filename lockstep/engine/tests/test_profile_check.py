@@ -49,6 +49,9 @@ MARKERS = {
     # and fires with an empty evidence channel — a spawn must follow a
     # validator.
     "subcall-start-spawn.yaml": "must not be entered from START",
+    # I6: work-interrupt step names must be unique — spawn prediction and
+    # scenario_done key on them; a collision reads the wrong validator.
+    "duplicate-step.yaml": "duplicate step name",
 }
 
 
@@ -58,7 +61,7 @@ def test_good_recipes_pass():
 
 
 def test_each_bad_fixture_yields_its_violation():
-    assert len(MARKERS) == 22
+    assert len(MARKERS) == 23
     for fixture, marker in MARKERS.items():
         errors = check_recipe(BAD / fixture)
         assert errors, f"{fixture}: expected errors, got none"
