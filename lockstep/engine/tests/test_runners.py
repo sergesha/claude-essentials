@@ -232,6 +232,37 @@ def test_state_dir_symlink_into_project_is_rejected(tmp_path):
         assert_state_dir_sane(link, project)
 
 
+def test_alias_spelling_of_project_is_still_inside(tmp_path):
+    # Round-2 Finding A: Path.resolve() does not case-canonicalize and
+    # PosixPath comparison is case-sensitive, so a case-variant spelling of
+    # the project (APFS/NTFS) evades string ancestry — only stat identity
+    # (device+inode) catches it. Runtime-probe the filesystem: use the case
+    # variant where it aliases the same dir, else a symlink alias — both
+    # spellings resolve to the same inode, which is what samestat sees.
+    from lockstep_mcp.runners import assert_state_dir_sane
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    alias = tmp_path / "PROJ"
+    if not alias.exists():                        # case-SENSITIVE fs
+        alias = tmp_path / "alias"
+        alias.symlink_to(project)
+    with pytest.raises(RunnerError):
+        assert_state_dir_sane(alias / "state", project)
+
+
+def test_home_shaped_state_dir_still_sane(tmp_path):
+    from lockstep_mcp.runners import assert_state_dir_sane
+
+    home = tmp_path / "home"
+    (home / "work" / "proj").mkdir(parents=True)
+    # the default ~/.lockstep shape: state under $HOME, project deeper in a
+    # sibling branch — sane (the state dir need not even exist yet)
+    assert_state_dir_sane(home / ".lockstep", home / "work" / "proj")
+    with pytest.raises(RunnerError):
+        assert_state_dir_sane(home / ".lockstep", home)  # project IS $HOME: refuse
+
+
 def test_engine_start_refuses_state_dir_inside_project(tmp_path):
     from lockstep_mcp.engine import Engine
 

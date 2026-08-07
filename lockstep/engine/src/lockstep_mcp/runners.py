@@ -101,6 +101,18 @@ def assert_state_dir_sane(state_dir: Path, project: Path) -> None:
     index, and ``LOCKSTEP_STATE_DIR`` arrives from the environment
     unvalidated — while the project tree is exactly the zone the gated
     agent writes. A state dir inside it hands the agent the allowlist.
+
+    Ancestry is decided by STAT IDENTITY (``os.path.samestat``:
+    device+inode), walking the resolved state dir and each of its parents
+    against the resolved project — a string/component comparison is
+    evadable by spelling: ``Path.resolve()`` does not case-canonicalize,
+    so on a case-insensitive filesystem (APFS, NTFS) ``TMP/PROJ/state``
+    names the same directory as project ``tmp/proj`` while comparing
+    unequal. samestat is immune to case spelling, symlinks and hardlinks,
+    and is stdlib-portable. Ancestors that do not exist yet are skipped
+    (their existing parent decides); a project with no stat identity
+    (not on disk) falls back to the lexical comparison of resolved paths.
+
     RESIDUAL (documented, not closable here): in the target deployment
     the agent runs as the SAME OS user as the engine, so a state dir
     anywhere that user can write remains reachable outside the gate;
@@ -108,7 +120,23 @@ def assert_state_dir_sane(state_dir: Path, project: Path) -> None:
     """
     state = Path(state_dir).resolve()
     proj = Path(project).resolve()
-    if state == proj or proj in state.parents:
+    try:
+        proj_st = os.stat(proj)
+    except OSError:
+        proj_st = None
+    inside = False
+    if proj_st is not None:
+        for p in (state, *state.parents):
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue  # not-yet-created component — its parent decides
+            if os.path.samestat(st, proj_st):
+                inside = True
+                break
+    else:
+        inside = state == proj or proj in state.parents
+    if inside:
         raise RunnerError(
             f"state dir {state} lies inside the project tree {proj} — "
             "the runner allowlist and run index would be agent-writable"

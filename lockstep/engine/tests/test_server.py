@@ -116,7 +116,10 @@ def test_validate_recipe_reports_profile(tmp_path, monkeypatch):
 def test_scenario_dryrun_is_shape_only_and_leaves_nothing_durable(tmp_path, monkeypatch):
     project = _configure(monkeypatch, tmp_path)
 
-    sentinel = tmp_path / "DRYRUN-SENTINEL-SHOULD-NOT-EXIST"
+    # the recipe's command is relative (`touch DRYRUN-...`), so if dryrun
+    # ever DID execute it, the file would land in the server cwd — the
+    # project dir. The sentinel must watch exactly there.
+    sentinel = project / "DRYRUN-SENTINEL-SHOULD-NOT-EXIST"
     artifact_dir = project / ".lockstep"
     artifact_dir.mkdir()
     (artifact_dir / "a.md").write_text("hi")
