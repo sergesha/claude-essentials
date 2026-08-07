@@ -262,6 +262,37 @@ def test_unchanged_since_start_pass_then_fail(tmp_path):
     assert r["verdict_status"] == "fail"
 
 
+def test_unchanged_catches_a_cmd_ok_mutation_in_the_same_pass(tmp_path):
+    """item 12 — TOCTOU guard: `unchanged` is deferred to the END of the
+    check pass and re-hashes AFTER every `cmd_ok`/`junit_gate` in that
+    same pass, regardless of list position. A `cmd_ok` command that
+    mutates a file the recipe claims is "frozen" must still be caught —
+    checking the file BEFORE the mutating command ran would let it slip
+    through as an ordinary TOCTOU race."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "t.py").write_text("original\n")
+    start_manifest = tmp_path / "start.json"
+    start_manifest.write_text(json.dumps(build_manifest(proj, ["t.py"])))
+
+    mutate = "python3 -c \"open('t.py', 'a').write('mutated\\n')\""
+    state = _state(
+        [
+            {"type": "cmd_ok", "command": mutate},
+            {"type": "unchanged", "glob": "t.py", "since": "start"},
+        ],
+        {},
+        _project=str(proj),
+        _baseline_start=str(start_manifest),
+        _baseline_globs=["t.py"],
+    )
+
+    r = run_checks(state, execute=True)
+
+    assert r["verdict_status"] == "fail"
+    assert any("t.py" in reason for reason in r["verdict_reasons"])
+
+
 def test_unchanged_since_previous_survives_earlier_change(tmp_path):
     proj = tmp_path / "proj"
     proj.mkdir()
@@ -336,6 +367,55 @@ def test_diff_only_confines_change_to_declared_paths(tmp_path):
     assert r["verdict_status"] == "fail"
 
 
+def test_diff_only_prefix_match_does_not_bless_sibling_dir(tmp_path):
+    """item 10: a naive `rel.startswith(p)` lets a declared path `src`
+    wrongly cover `src-evil/...` (it's a string prefix, not a path-segment
+    prefix). `paths: ["src"]` must confine to `src/...` exactly, not
+    anything merely starting with the same characters."""
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "src").mkdir()
+    (proj / "src-evil").mkdir()
+    (proj / "src" / "a.py").write_text("1\n")
+    (proj / "src-evil" / "a.py").write_text("1\n")
+    prev_manifest = tmp_path / "prev.json"
+    prev_manifest.write_text(json.dumps(build_manifest(proj, ["src/**", "src-evil/**"])))
+
+    state = _state(
+        [{"type": "diff_only", "paths": ["src"]}],
+        {},
+        _project=str(proj),
+        _baseline_prev=str(prev_manifest),
+        _baseline_globs=["src/**", "src-evil/**"],
+    )
+
+    (proj / "src-evil" / "a.py").write_text("2\n")  # leaks outside the declared "src"
+    r = run_checks(state, execute=True)
+    assert r["verdict_status"] == "fail"
+
+
+def test_changed_in_prefix_match_does_not_bless_sibling_dir(tmp_path):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "src").mkdir()
+    (proj / "src-evil").mkdir()
+    (proj / "src-evil" / "a.py").write_text("1\n")
+    start_manifest = tmp_path / "start.json"
+    start_manifest.write_text(json.dumps(build_manifest(proj, ["src/**", "src-evil/**"])))
+
+    state = _state(
+        [{"type": "changed_in", "paths": ["src"], "since": "start"}],
+        {},
+        _project=str(proj),
+        _baseline_start=str(start_manifest),
+        _baseline_globs=["src/**", "src-evil/**"],
+    )
+
+    (proj / "src-evil" / "a.py").write_text("2\n")  # change is in src-evil/, not src/
+    r = run_checks(state, execute=True)
+    assert r["verdict_status"] == "fail"  # "no changes detected under ['src']"
+
+
 def test_changed_in_uncovered_path_is_error(tmp_path):
     proj = tmp_path / "proj"
     proj.mkdir()
@@ -352,6 +432,44 @@ def test_changed_in_uncovered_path_is_error(tmp_path):
         execute=True,
     )
     assert r["verdict_status"] == "error"
+
+
+# ---------------------------------------------------------------------------
+# M2 — hidden files must be visible to baseline manifests
+# ---------------------------------------------------------------------------
+
+
+def test_build_manifest_hashes_hidden_files(tmp_path):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / ".env.test").write_text("A=1\n")
+    (proj / "visible.txt").write_text("x\n")
+
+    manifest = build_manifest(proj, ["*"])
+
+    assert ".env.test" in manifest
+    assert "visible.txt" in manifest
+
+
+def test_unchanged_catches_a_hidden_file_edit(tmp_path):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / ".env.test").write_text("A=1\n")
+    start_manifest = tmp_path / "start.json"
+    start_manifest.write_text(json.dumps(build_manifest(proj, ["*"])))
+    state = _state(
+        [{"type": "unchanged", "glob": "*", "since": "start"}],
+        {},
+        _project=str(proj),
+        _baseline_start=str(start_manifest),
+        _baseline_globs=["*"],
+    )
+    r = run_checks(state, execute=True)
+    assert r["verdict_status"] == "pass"
+
+    (proj / ".env.test").write_text("A=2\n")  # edit to a dotfile, not a "visible" one
+    r = run_checks(state, execute=True)
+    assert r["verdict_status"] == "fail"
 
 
 # ---------------------------------------------------------------------------

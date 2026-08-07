@@ -83,9 +83,11 @@ Two environment variables, read by the MCP server process:
 | `LOCKSTEP_STATE_DIR` | `~/.lockstep` | Durable run state: SQLite checkpoints, `runs.json`, recipe snapshots, baseline manifests, `policy.d/`, `heartbeat.jsonl`. Deliberately outside the project — not in git, easy to deny writes to. |
 | `LOCKSTEP_RECIPES` | `<cwd>/.lockstep/recipes` | Where `list_recipes`/`scenario_start` resolve recipe names from. |
 
-`lockstep-mcp hook-session-start` additionally reads `LOCKSTEP_STALE_HOURS` (default `24`) — a
-cosmetic staleness hint on the SessionStart context line for a run that hasn't been touched in
-that long; it does not affect engine behavior.
+`LOCKSTEP_STALE_HOURS` (default `24`) is read in two places: `lockstep-mcp hook-session-start`
+uses it for a cosmetic staleness hint on the SessionStart context line for a run that hasn't been
+touched in that long (never affects engine behavior); `lockstep-mcp doctor` uses the same default
+to actually gate `heartbeat.jsonl` recency — a heartbeat older than the threshold is a `[FAIL]`
+line and flips `doctor`'s process exit code to `1`.
 
 The plugin's `mcpServers.lockstep.env` block passes both of the first two through as
 `${LOCKSTEP_STATE_DIR}` / `${LOCKSTEP_RECIPES}` — set them in your own shell/settings before
@@ -130,8 +132,11 @@ an action).
 
 **`lockstep-mcp doctor [--hooks-json <path>]`**: v1-trimmed diagnostic — state/recipes dirs
 exist, `hooks.json`'s version pin matches the installed `lockstep-mcp` version, `heartbeat.jsonl`
-recency, and a `uvx lockstep-mcp==<version> --version` pre-warm one-liner to print. Not
-implemented in v1 (planned v2): effective-settings inspection, handler self-exec.
+recency against `LOCKSTEP_STALE_HOURS` (default 24h — an older heartbeat is `[FAIL]`), and a
+`uvx lockstep-mcp==<version> --version` pre-warm one-liner to print. Exits `1` if any check
+failed, `0` if all green — a CI/operator script can gate on the process exit code, not just
+scrape the report text. Not implemented in v1 (planned v2): effective-settings inspection,
+handler self-exec.
 
 **CI liveness assert**: "the rule is in the file" is not "the rule works" — every hook handler
 appends one best-effort JSONL line to `heartbeat.jsonl` unconditionally, before any early-exit
@@ -155,9 +160,11 @@ its `.mcp.json` entry, and `Path.cwd()` at server-start time is exactly that pro
 
 ## Honesty notes
 
-- **The Stop hook is a nudge, not a wall.** It can block a stop repeatedly within one stop
-  chain (the platform allows up to ~8 consecutive blocks) but cannot prevent a sufficiently
-  determined stop indefinitely — it can only delay and annotate, never truly enforce. The
+- **The Stop hook is a nudge, not a wall.** It blocks once per stop chain — our handler checks
+  `stop_hook_active` and allows the very next stop attempt through unconditionally, it never
+  re-blocks within the same chain (the platform's own ~8-consecutive-block cap on Stop hooks in
+  general is not something this handler ever exercises). It cannot prevent a sufficiently
+  determined stop at all — it can only delay and annotate once, never truly enforce. The
   engine's evidence gate is what's actually load-bearing: a `scenario_done` report without
   valid, machine-checked evidence is simply rejected regardless of whether the Stop hook fired
   at all. Don't rely on the hook to make an agent honest; rely on it only to reduce the chance

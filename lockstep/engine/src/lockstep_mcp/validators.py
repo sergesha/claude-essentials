@@ -277,7 +277,12 @@ def build_manifest(project: Path, globs: list[str]) -> dict[str, str]:
     project = Path(project).resolve()
     manifest: dict[str, str] = {}
     for pattern in globs:
-        for match in glob_mod.glob(str(project / pattern), recursive=True):
+        # M2: py3.11+ glob() excludes dotfiles/dot-dirs by default; without
+        # include_hidden a hidden file inside a declared glob is invisible
+        # to the manifest, so editing it never trips `unchanged`/`fresh`/
+        # `changed_in`/`diff_only`. The explicit ignore set below still
+        # applies on top (__pycache__/, .git/, *.pyc).
+        for match in glob_mod.glob(str(project / pattern), recursive=True, include_hidden=True):
             p = Path(match)
             if p.is_symlink() or not p.is_file():
                 continue
@@ -364,6 +369,21 @@ def _check_unchanged(check: dict, evidence: dict, ctx: dict) -> list[str]:
     return reasons
 
 
+def _under_prefix(rel: str, declared: str) -> bool:
+    """item 10: a bare `rel.startswith(declared)` treats `declared` as a
+    raw string prefix, so `paths: ["src"]` wrongly covers `src-evil/...`
+    too (same characters, different directory). Normalize `declared` to
+    end with `/` before the prefix check — an exact match on `declared`
+    itself (a file path, not a directory) still counts. `rel` is always a
+    posix-relative manifest key (`build_manifest` writes `.as_posix()`),
+    so `/` — not `os.sep` — is the correct separator here regardless of
+    platform."""
+    if rel == declared:
+        return True
+    prefix = declared if declared.endswith("/") else declared + "/"
+    return rel.startswith(prefix)
+
+
 def _check_changed_in(check: dict, evidence: dict, ctx: dict) -> list[str]:
     paths = check.get("paths")
     if not paths:
@@ -384,7 +404,7 @@ def _check_changed_in(check: dict, evidence: dict, ctx: dict) -> list[str]:
     changed = [
         rel
         for rel in set(selected) | set(current)
-        if any(rel.startswith(p) for p in paths) and selected.get(rel) != current.get(rel)
+        if any(_under_prefix(rel, p) for p in paths) and selected.get(rel) != current.get(rel)
     ]
     if not changed:
         return [f"changed_in: no changes detected under {paths}"]
@@ -409,7 +429,7 @@ def _check_diff_only(check: dict, evidence: dict, ctx: dict) -> list[str]:
     current = build_manifest(project, baseline_globs)
     reasons = []
     for rel in sorted(set(selected) | set(current)):
-        if selected.get(rel) != current.get(rel) and not any(rel.startswith(p) for p in paths):
+        if selected.get(rel) != current.get(rel) and not any(_under_prefix(rel, p) for p in paths):
             reasons.append(f"diff_only: unexpected change outside {paths}: {rel}")
     return reasons
 

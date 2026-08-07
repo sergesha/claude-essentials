@@ -199,7 +199,16 @@ def scenario_dryrun(recipe: str, step: str, evidence: dict) -> dict:
         ctype = check.get("type")
         if ctype in SHAPE_CHECK_TYPES:
             fn = validators.CHECKS.get(ctype)
-            reasons = fn(check, raw_evidence, ctx) if fn else [f"unknown check type: {ctype!r}"]
+            try:
+                reasons = fn(check, raw_evidence, ctx) if fn else [f"unknown check type: {ctype!r}"]
+            except Exception as e:  # noqa: BLE001 - item 13: a recipe-pinned
+                # `path:` (never evidence-sourced, so `_containment_errors`
+                # above never sees it) can still raise inside the check
+                # itself (e.g. `_resolve_path`'s path-escape guard). dryrun
+                # is a probe tool — it must report that cleanly, not crash
+                # the whole tool call over one check's bad recipe-pinned path.
+                results.append({"type": ctype, "verdict": "error", "reasons": [str(e)]})
+                continue
             results.append(
                 {"type": ctype, "verdict": "pass" if not reasons else "fail", "reasons": reasons}
             )
