@@ -418,3 +418,37 @@ def test_hook_stop_writes_heartbeat_on_fast_path(tmp_path):
     assert heartbeat.exists()
     entry = json.loads(heartbeat.read_text().splitlines()[0])
     assert entry["event"] == "Stop"
+
+
+# ---------------------------------------------------------------------------
+# Task 8: subcall-aware hook surfaces
+# ---------------------------------------------------------------------------
+
+
+def test_stop_text_is_subcall_aware_per_run(tmp_path):
+    idx = RunIndex(tmp_path)
+    parked = idx.create("rec", "/proj")
+    idx.update(parked.run_id, step="_subcall",
+               brief={"step": "_subcall", "node": "review", "runner": "claude"})
+    working = idx.create("rec2", "/proj")
+    idx.update(working.run_id, step="one", brief={"step": "one"})
+    code, out = cli.hook_stop({"stop_hook_active": False, "cwd": "/proj"}, tmp_path, cwd="/proj")
+    payload = json.loads(out)["reason"]
+    # m8.5: the parked run's line must NOT say scenario_done; the working
+    # run's line still must — per-run rendering, not one joined sentence.
+    parked_line = next(l for l in payload.split("lockstep:") if parked.run_id in l)
+    working_line = next(l for l in payload.split("lockstep:") if working.run_id in l)
+    assert "subcall in progress" in parked_line and "scenario_done" not in parked_line
+    assert "scenario_done" in working_line
+
+
+def test_session_start_names_the_subcall_not_the_raw_marker(tmp_path):
+    idx = RunIndex(tmp_path)
+    r = idx.create("rec", "/proj")
+    idx.update(r.run_id, step="_subcall",
+               brief={"step": "_subcall", "node": "review", "runner": "claude"})
+    ctx = cli.hook_session_start(tmp_path, cwd="/proj")
+    # v1 renders the step repr-quoted: awaiting step '_subcall' — that
+    # exact token must be gone (I8.1: the old replace()-based assertion was
+    # tautological and passed against unmodified v1 text).
+    assert "subcall in progress" in ctx and "'_subcall'" not in ctx
