@@ -139,7 +139,7 @@ nodes:
           hash_from: _subcall_envelope.artifact_hashes.review
         - type: file_matches
           path_from: review_path
-          regex: "Verdict:\\s*PASS"
+          regex: "(?m)^\\s*Verdict:\\s*PASS\\s*$"
 
   validate_verify:
     type: python
