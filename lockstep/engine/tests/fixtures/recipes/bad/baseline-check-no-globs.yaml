@@ -1,7 +1,7 @@
 version: "1.0"
 name: lockstep-bad-baseline-check-no-globs
 description: >
-  Task-3 bad fixture — step_one adds a `fresh` baseline check but the
+  Bad fixture: step_one adds a `fresh` baseline check but the
   recipe declares no top-level baseline_globs, so the check would error
   forever at runtime (never a vacuous pass). Expect: "baseline_globs".
 

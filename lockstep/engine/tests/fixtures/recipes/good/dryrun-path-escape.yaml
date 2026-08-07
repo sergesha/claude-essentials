@@ -1,7 +1,7 @@
 version: "1.0"
 name: lockstep-server-dryrun-path-escape
 description: >
-  item 13 fixture — a SHAPE check (`file_exists`) with a recipe-PINNED
+  A SHAPE check (`file_exists`) with a recipe-PINNED
   `path` (not `path_from`) that escapes the project root. `server.py`'s
   `_containment_errors` only resolves+contains evidence-sourced paths
   annotated `format: project-path`; a literal `path:` pinned directly in

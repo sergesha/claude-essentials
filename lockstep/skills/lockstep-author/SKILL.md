@@ -42,11 +42,11 @@ dialect reference and vocabulary table, then validate it with the `validate_reci
 
 ## Recipe dialect crib
 
-The dialect below is **frozen by spike** against yamlgraph 0.5.18 — it is copied verbatim from
+The dialect below is **pinned** to yamlgraph 0.5.18 — copied verbatim from
 `lockstep/engine/tests/fixtures/recipes/good/two-steps.yaml` and
 `lockstep/recipes/examples/feature-dev.yaml`, the two real fixtures the engine's own tests
-compile and run. Do not improvise a different shape for any of the traps below — each one was
-a real failure mode during the engine's own spike.
+compile and run. Do not improvise a different shape for any of the traps below: each one is a
+live failure mode, not a style preference.
 
 **Every step is a triple**: an `interrupt` node (the agent-facing step) → an unconditional edge
 → a `python` validator node (`tool: run_checks`, wired once via `tools: { run_checks: {type:
@@ -377,7 +377,7 @@ a human review gate when you do.
 Copy `lockstep/recipes/examples/feature-dev.yaml` into `<project>/.lockstep/recipes/` as the
 skeleton for any new recipe — it exercises the full hardened vocabulary (`baseline_globs`,
 `unchanged`/`changed_in`/`diff_only`/`fresh`, `md_has_sections`, `file_matches`, `junit_gate`)
-end to end, in the exact spike-frozen dialect, with the escalate-gate wiring already correct.
+end to end, in the exact pinned dialect, with the escalate-gate wiring already correct.
 Adapt the steps and checks; keep the wiring shape.
 
 For a recipe that needs an independent review gate, copy

@@ -1,8 +1,8 @@
-"""Task 4: runs.py — RunRecord + RunIndex (runs.json persistence).
+"""runs.py — RunRecord + RunIndex (runs.json persistence).
 
-RunIndex persists the FULL brief of the parked step (review C4) so
+RunIndex persists the FULL brief of the parked step so
 `scenario_status` never needs to peek into the graph checkpoint —
-restart-safe by construction (decision 3). Writes are atomic (tmp +
+restart-safe by construction. Writes are atomic (tmp +
 os.replace); timestamps are ISO-8601 UTC; run_id = `<recipe>-<8 hex
 uuid4>`; active_only means status == "awaiting".
 """
@@ -145,7 +145,7 @@ def test_descendants_are_recursive(tmp_path):
 
 
 def test_status_none_cannot_bypass_terminal_cas(tmp_path):
-    # C1: `status=None` must not slip past the CAS (which keys on presence,
+    # `status=None` must not slip past the CAS (which keys on presence,
     # not truthiness) nor write `status: null` — the springboard for a later
     # resurrection.
     idx = RunIndex(tmp_path)
@@ -159,7 +159,7 @@ def test_status_none_cannot_bypass_terminal_cas(tmp_path):
 
 
 def test_bogus_status_string_is_rejected(tmp_path):
-    # C1: any status outside {"awaiting"} | TERMINAL_STATUSES is refused —
+    # any status outside {"awaiting"} | TERMINAL_STATUSES is refused —
     # terminal or not — so no unknown value can ever sit in the index.
     idx = RunIndex(tmp_path)
     r = idx.create("rec", "/proj")
@@ -173,7 +173,7 @@ def test_bogus_status_string_is_rejected(tmp_path):
 
 
 def test_update_rejects_unknown_fields_before_save(tmp_path):
-    # I1: an unknown field must raise BEFORE _save — a persisted bogus key
+    # an unknown field must raise BEFORE _save — a persisted bogus key
     # would make every later get()/list() raise TypeError (index poisoned,
     # Stop hook fails open).
     idx = RunIndex(tmp_path)
@@ -185,7 +185,7 @@ def test_update_rejects_unknown_fields_before_save(tmp_path):
 
 
 def test_update_refuses_identity_and_credential_fields(tmp_path):
-    # I1: run_id/started are identity, parent_run/nonce are the anti-forgery
+    # run_id/started are identity, parent_run/nonce are the anti-forgery
     # credential — all set only at create(), never via update().
     idx = RunIndex(tmp_path)
     r = idx.create("rec", "/proj")
@@ -256,7 +256,7 @@ def _mp_worker(state_dir: str, wid: int, n_updates: int, barrier) -> None:
 
 
 def test_writes_are_serialized_under_lock(tmp_path):
-    # I8: separate PROCESSES, barrier-released together, each create+update
+    # separate PROCESSES, barrier-released together, each create+update
     # racing the shared runs.json — a process-local or null lock loses
     # records/updates here.
     import multiprocessing as mp
@@ -280,7 +280,7 @@ def test_writes_are_serialized_under_lock(tmp_path):
 
 
 def test_every_save_happens_inside_a_lock_hold(tmp_path, monkeypatch):
-    # I8 (deterministic half): every _save — create's included — must occur
+    # every _save — create's included — must occur
     # between file_lock enter and exit.
     import lockstep_mcp.runs as runs_mod
     from contextlib import contextmanager

@@ -1,7 +1,7 @@
 version: "1.0"
 name: lockstep-bad-no-validator
 description: >
-  Task-3 bad fixture — step_one has no outgoing edge at all (the edge to
+  Bad fixture: step_one has no outgoing edge at all (the edge to
   its validator was dropped). Expect: "no validator".
 
 state:

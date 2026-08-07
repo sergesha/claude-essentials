@@ -1,4 +1,4 @@
-"""Evidence schema validation (Task 4).
+"""Evidence schema validation.
 
 `validate_evidence` is the deterministic gate on what an agent's reported
 evidence dict must look like: jsonschema Draft 2020-12, `[]` means the

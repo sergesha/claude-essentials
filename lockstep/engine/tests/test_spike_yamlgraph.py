@@ -1,6 +1,7 @@
-"""Task 1 spike: pin down yamlgraph's actual API/dialect before anything else
-in lockstep depends on it. See yamlgraph_api.py module docstring for every
-deviation from the plan's assumed dialect, found while writing this spike.
+"""Pins yamlgraph's actual API/dialect: every behaviour the rest of
+lockstep depends on, asserted against the installed package. See
+yamlgraph_api.py's module docstring for the dialect these tests hold in
+place.
 """
 
 from pathlib import Path

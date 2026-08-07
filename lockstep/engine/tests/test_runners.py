@@ -86,7 +86,7 @@ def test_budgets_default_when_absent(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# I6: budgets honoured per-runner, unknown runner keys rejected
+# budgets honoured per-runner, unknown runner keys rejected
 # ---------------------------------------------------------------------------
 
 
@@ -139,7 +139,7 @@ def test_non_numeric_budget_is_a_runner_error(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# C2 + I9: argv is byte-exact; the prompt sits LAST behind a `--` terminator
+# argv is byte-exact; the prompt sits LAST behind a `--` terminator
 # ---------------------------------------------------------------------------
 
 
@@ -161,7 +161,7 @@ def test_argv_exact_with_resume(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# I5: model gate never fails open
+# model gate never fails open
 # ---------------------------------------------------------------------------
 
 
@@ -189,7 +189,7 @@ def test_model_must_be_allowlisted(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# I3: re-verify the binary adjacent to spawn
+# re-verify the binary adjacent to spawn
 # ---------------------------------------------------------------------------
 
 
@@ -205,7 +205,7 @@ def test_verified_path_revalidates_immediately_before_use(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# I4: the trust anchor must not live inside the agent-writable project tree
+# the trust anchor must not live inside the agent-writable project tree
 # ---------------------------------------------------------------------------
 
 
@@ -233,7 +233,7 @@ def test_state_dir_symlink_into_project_is_rejected(tmp_path):
 
 
 def test_alias_spelling_of_project_is_still_inside(tmp_path):
-    # Round-2 Finding A: Path.resolve() does not case-canonicalize and
+    # Path.resolve() does not case-canonicalize and
     # PosixPath comparison is case-sensitive, so a case-variant spelling of
     # the project (APFS/NTFS) evades string ancestry — only stat identity
     # (device+inode) catches it. Runtime-probe the filesystem: use the case
@@ -274,7 +274,7 @@ def test_engine_start_refuses_state_dir_inside_project(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# I7 + I9: child env — exact allowlist, all-or-nothing credential
+# child env — exact allowlist, all-or-nothing credential
 # ---------------------------------------------------------------------------
 
 
@@ -312,7 +312,7 @@ def test_partial_child_credential_refuses(tmp_path):
 
 
 def test_depth2_child_inherits_the_adapter_runner_default(tmp_path):
-    # I7: LOCKSTEP_RUNNER is a NAME resolved against the owner allowlist,
+    # LOCKSTEP_RUNNER is a NAME resolved against the owner allowlist,
     # not a path — it must survive child_env so a depth-2 child whose
     # markers rely on the adapter default can still spawn. Fails against
     # the pre-fix allowlist (which dropped it): resolve() raises

@@ -1,5 +1,5 @@
-"""Task 2: deterministic check registry + run_checks explicit-execution
-contract (decision 16). All asserts use the FLAT verdict shape —
+"""deterministic check registry + run_checks explicit-execution
+contract. All asserts use the FLAT verdict shape —
 r["verdict_status"] / r["verdict_reasons"], never nested.
 """
 
@@ -263,7 +263,7 @@ def test_unchanged_since_start_pass_then_fail(tmp_path):
 
 
 def test_unchanged_catches_a_cmd_ok_mutation_in_the_same_pass(tmp_path):
-    """item 12 — TOCTOU guard: `unchanged` is deferred to the END of the
+    """TOCTOU guard: `unchanged` is deferred to the END of the
     check pass and re-hashes AFTER every `cmd_ok`/`junit_gate` in that
     same pass, regardless of list position. A `cmd_ok` command that
     mutates a file the recipe claims is "frozen" must still be caught —
@@ -368,7 +368,7 @@ def test_diff_only_confines_change_to_declared_paths(tmp_path):
 
 
 def test_diff_only_prefix_match_does_not_bless_sibling_dir(tmp_path):
-    """item 10: a naive `rel.startswith(p)` lets a declared path `src`
+    """A naive `rel.startswith(p)` lets a declared path `src`
     wrongly cover `src-evil/...` (it's a string prefix, not a path-segment
     prefix). `paths: ["src"]` must confine to `src/...` exactly, not
     anything merely starting with the same characters."""
@@ -435,7 +435,7 @@ def test_changed_in_uncovered_path_is_error(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# M2 — hidden files must be visible to baseline manifests
+# hidden files must be visible to baseline manifests
 # ---------------------------------------------------------------------------
 
 
@@ -490,7 +490,7 @@ def test_republish_absent_verdict_is_error():
 
 
 # ---------------------------------------------------------------------------
-# file_matches_hash (Task 6) — pin from the denied-side state, bytes from
+# file_matches_hash — pin from the denied-side state, bytes from
 # the contained project path
 # ---------------------------------------------------------------------------
 
@@ -524,9 +524,26 @@ def test_file_matches_hash_errors_when_pin_absent(tmp_path):
 
 
 def test_file_matches_hash_errors_when_pin_present_but_empty(tmp_path):
-    # m6.4: absent and present-but-falsy are DIFFERENT failures — both
+    # absent and present-but-falsy are DIFFERENT failures — both
     # error (fail-closed), but the message must say which.
     art = tmp_path / "review.md"; art.write_text("x")
     out = run_checks(_hash_state(art, ""), execute=True)
     assert out["verdict_status"] == "error"
     assert any("not a" in r or "empty" in r for r in out["verdict_reasons"])
+
+
+def test_manifest_skips_files_reached_through_a_symlinked_directory(tmp_path):
+    # is_symlink() tests only the leaf, so a file reached through a symlinked
+    # PARENT lives outside the project. It is skipped like any other symlink:
+    # raising there would hand the agent a wedge — one `ln -s` inside a
+    # baseline glob turning every check into a permanent `error`, which
+    # neither resumes nor burns retry budget.
+    project = tmp_path / "proj"; (project / "src").mkdir(parents=True)
+    (project / "src" / "a.py").write_text("keep")
+    outside = tmp_path / "outside"; outside.mkdir()
+    (outside / "b.py").write_text("elsewhere")
+    (project / "src" / "linked").symlink_to(outside, target_is_directory=True)
+
+    manifest = build_manifest(project, ["src/**"])
+    assert "src/a.py" in manifest
+    assert not any(k.startswith("src/linked") for k in manifest)

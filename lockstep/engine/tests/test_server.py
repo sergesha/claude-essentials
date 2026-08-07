@@ -1,4 +1,4 @@
-"""Task 6: server.py — the MCP tool surface. Delegates to `Engine` (Task 5)
+"""server.py — the MCP tool surface. Delegates to `Engine`
 through a lazy `_eng()` singleton built from `LOCKSTEP_STATE_DIR`/
 `LOCKSTEP_RECIPES` env vars; `_reset_engine()` lets each test rebuild it
 against a fresh tmp state/recipes dir.
@@ -7,7 +7,7 @@ Uses the mcp SDK's real `MCPServer` (imported here as `FastMCP` — see
 server.py docstring for why: the 2.0.0 `mcp` package this repo pins under
 `mcp>=2.0,<3` renamed the class, there is no `mcp.server.fastmcp` module).
 Tool registration is introspected via `app._tool_manager.list_tools()`
-(the actual SDK's registry — the plan's `_tool_manager` fallback landed).
+(the SDK's real registry).
 """
 
 from __future__ import annotations
@@ -133,7 +133,7 @@ def test_validate_recipe_reports_profile(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# scenario_dryrun — SHAPE-ONLY (decision 17)
+# scenario_dryrun — SHAPE-ONLY
 # ---------------------------------------------------------------------------
 
 
@@ -175,7 +175,7 @@ def test_scenario_dryrun_reports_shape_failure(tmp_path, monkeypatch):
 
 
 def test_scenario_dryrun_reports_clean_error_on_recipe_pinned_path_escape(tmp_path, monkeypatch):
-    """item 13: a shape check's `path:` is recipe-PINNED (not evidence-
+    """A shape check's `path:` is recipe-PINNED (not evidence-
     sourced), so `_containment_errors` — which only resolves/contains
     evidence keys annotated `format: project-path` — never sees it. The
     literal `../outside.md` in `dryrun-path-escape.yaml` reaches

@@ -1,8 +1,7 @@
 version: "1.0"
 name: lockstep-bad-loop-exit-direct-to-interrupt
 description: >
-  Task-3 EXTRA bad fixture (spike finding 3 gate-shape case — not one of
-  the plan's original 12): loop_exits points straight at the `escalate`
+  Bad fixture: loop_exits points straight at the `escalate`
   interrupt, skipping the required passthrough gate. yamlgraph's
   loop_exits routing bypasses `_process_edge`'s interrupt redirect, so
   this would park with a stale `brief` instead of the escalate marker.

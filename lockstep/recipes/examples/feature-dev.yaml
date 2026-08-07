@@ -1,8 +1,8 @@
 version: "1.0"
 name: lockstep-feature-dev
 description: >
-  Task-8 example recipe — plan -> implement -> test -> review, each step an
-  interrupt/python-validator triple in the spike-frozen dialect (mirrors
+  Plan -> implement -> test -> review, each step an
+  interrupt/python-validator triple (mirrors
   tests/fixtures/recipes/good/two-steps.yaml exactly: same passthrough-gated
   escalate, same idempotent: false, same loop_limits/loop_exits keyed on the
   validator). Repo-level example only (v1 has no builtin recipe resolution)
@@ -29,7 +29,7 @@ tools:
     module: lockstep_mcp.validators
     function: run_checks
 
-# Runner CONFIG surface is fenced too (decision 14) — the checks below read
+# Runner CONFIG surface is fenced too — the checks below read
 # it (test step's unchanged set, review step's diff_only), globs alone gate
 # nothing on their own.
 baseline_globs:
@@ -160,8 +160,8 @@ nodes:
 
   # NOTE: see two-steps.yaml / minimal.yaml — loop_exits routes through a
   # plain passthrough gate, never straight to the `escalate` interrupt
-  # (yamlgraph skips the interrupt's prepare_fn on a loop_exits redirect,
-  # spike finding 3). All four validators share this one gate.
+  # (yamlgraph skips the interrupt's prepare_fn on a loop_exits
+  # redirect). All four validators share this one gate.
   escalate_gate:
     type: passthrough
     output: {}
@@ -213,8 +213,8 @@ edges:
     to: escalate
 
 # loop_limits/loop_exits key on the REPEATING node (the python validator),
-# never the interrupt (spike finding 2). All four steps share the one
-# escalate gate (spike finding 3).
+# never the interrupt. All four steps share the one
+# escalate gate.
 loop_limits:
   validate_plan: 2
   validate_implement: 2

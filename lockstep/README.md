@@ -158,8 +158,8 @@ stays shut). The impatient alternative needs no window: `scenario_abort` the run
 `scenario_start` a fresh one — bound to you at birth. There is no timestamp expiry on runs:
 `RunRecord.updated` does not tick during real work (not on Write/Edit, not on status polls,
 not while a subcall runs), so its age measured nothing — the binding's `last_seen`, which does
-tick, replaced it. That also retires the old `_nudge_ancestors` caveat: a finished child's
-nudge refreshes the parent's `updated`, which the gate no longer reads, and never touches
+tick, is what the gate reads. `_nudge_ancestors` needs no caveat either: a finished child's
+nudge refreshes the parent's `updated`, which the gate does not read, and never touches
 bindings. A spawned child session's gate is unchanged by bindings — its `LOCKSTEP_CHILD_RUN`
 credential plus an all-awaiting ancestry chain rooted in a policy-recipe run is the whole
 predicate; the env credential binds the child to its run more tightly than a sidecar could.

@@ -1,9 +1,10 @@
-"""Task 5: Engine — durable runs, terminal escalation, var substitution,
+"""Engine — durable runs, terminal escalation, var substitution,
 project-relative evidence. Uses the good fixtures (minimal.yaml, two-steps.yaml)
-as the dialect authority, plus error-check.yaml (a raising cmd_ok check, for
-the decision-16 error-verdict mechanic) added under fixtures/recipes/good/.
+as the dialect authority, plus error-check.yaml (a raising cmd_ok check,
+for the error-verdict mechanic) under fixtures/recipes/good/.
 """
 
+import json
 import shutil
 
 import pytest
@@ -130,8 +131,8 @@ def test_fail_verdict_retries_then_escalates(tmp_path):
 
 
 def test_pass_at_loop_cap_reports_honest_escalation(tmp_path):
-    """C2, sequence empirically derived (probed against `minimal.yaml`'s
-    `loop_limits: {validate_one: 2}` before writing this test): yamlgraph's
+    """Sequence empirically derived against `minimal.yaml`'s
+    `loop_limits: {validate_one: 2}`: yamlgraph's
     loop guard runs BEFORE the validator node executes, keyed on a count
     that starts at 0 and blocks once count >= limit. fail (count 0->1),
     fail (count 1->2) both stay under the cap and resume normally; the
@@ -139,11 +140,10 @@ def test_pass_at_loop_cap_reports_honest_escalation(tmp_path):
     real) — but `yg.resume()`'s graph-side execution of `validate_one` for
     what would be its 3rd real run is the one the loop guard blocks
     (count 2 >= limit 2), diverting straight to the escalate marker
-    regardless of the passing verdict. Without the C2 fix this came back
-    as `{"passed": True, "step": "escalate", ...}` with no `escalated` flag
-    and the run index still `awaiting` until some later `_reconcile` call
-    happened to notice — a false "it passed" report on a run that is, in
-    fact, terminal.
+    regardless of the passing verdict. The run IS terminal, and `done()`
+    must say so — reporting `{"passed": True, "step": "escalate"}` with no
+    `escalated` flag, leaving the index `awaiting` until some later
+    `_reconcile` noticed, would be a false "it passed".
     """
     eng = _engine(tmp_path)
     project = _project(tmp_path)
@@ -248,7 +248,7 @@ def test_vars_cannot_reach_checks(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# C1 — hostile vars must never reach graph state
+# hostile vars must never reach graph state
 # ---------------------------------------------------------------------------
 
 
@@ -277,10 +277,10 @@ def test_benign_var_still_works_after_reserved_check(tmp_path):
 
 
 def test_hostile_loop_counts_var_cannot_defeat_the_loop_cap(tmp_path):
-    """The reviewer's probe: an agent-supplied `_loop_counts` var, if it ever
+    """An agent-supplied `_loop_counts` var, if it ever
     reached the initial graph state, could pre-seed/reset yamlgraph's
-    internal loop counter and defeat `loop_limits` entirely. With the C1
-    rejection in place, the attack never gets that far — `start()` itself
+    internal loop counter and defeat `loop_limits` entirely. The reserved-key
+    rejection means the attack never gets that far — `start()` itself
     raises, so no run (and no seeded counter) is ever created."""
     eng = _engine(tmp_path)
     project = _project(tmp_path)
@@ -292,7 +292,7 @@ def test_hostile_loop_counts_var_cannot_defeat_the_loop_cap(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# path handling (decision 12)
+# path handling
 # ---------------------------------------------------------------------------
 
 
@@ -352,7 +352,7 @@ def test_midrun_recipe_edit_is_inert(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# item 11: fail reasons survive a restart
+# fail reasons survive a restart
 # ---------------------------------------------------------------------------
 
 
@@ -374,7 +374,7 @@ def test_fail_reasons_persisted_across_restart(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# index repair (decision 13)
+# index repair
 # ---------------------------------------------------------------------------
 
 
@@ -394,7 +394,7 @@ def test_index_repair(tmp_path):
 
 
 def test_reconcile_never_rewrites_a_done_record(tmp_path):
-    # I2: `done` is terminal like escalated/aborted — reconcile must
+    # `done` is terminal like escalated/aborted — reconcile must
     # early-return on the WHOLE terminal set, not keep writing the
     # checkpoint's live step+brief back onto a closed record forever.
     state_dir = tmp_path / "state"
@@ -413,7 +413,7 @@ def test_reconcile_never_rewrites_a_done_record(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# anti-forgery (decision 16 + reserved `_` prefix)
+# anti-forgery
 # ---------------------------------------------------------------------------
 
 
@@ -451,3 +451,39 @@ def test_error_verdict_does_not_consume_retry_budget(tmp_path):
     status = eng.status(run_id)
     assert status["status"] == "awaiting"
     assert status["step"] == "one"
+
+
+# ---------------------------------------------------------------------------
+# a refused start leaves no state behind
+# ---------------------------------------------------------------------------
+
+
+def test_start_that_produces_no_step_registers_no_run(tmp_path):
+    # A run registered but never started is `awaiting` forever: it blocks the
+    # Stop hook and denies every write, and no caller holds a run_id to abort
+    # it with. Registration must therefore follow the first real park.
+    eng = _engine(tmp_path)
+    project = _project(tmp_path)
+    with pytest.raises(LockstepError):
+        eng.start("no-work-step", {}, str(project))
+    assert RunIndex(tmp_path / "state").list() == []
+
+
+def test_atomic_write_leaves_the_previous_file_intact(tmp_path, monkeypatch):
+    # Manifests and the baseline counter are parsed unguarded on the done()
+    # path, so a torn write is a wedge: the publish must be a tmp+replace,
+    # never an in-place rewrite.
+    import os as os_mod
+
+    eng = _engine(tmp_path)
+    target = tmp_path / "state" / "m.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    eng._write_json(target, {"a": 1})
+
+    def boom(src, dst):
+        raise OSError("crash between write and publish")
+
+    monkeypatch.setattr(os_mod, "replace", boom)
+    with pytest.raises(OSError):
+        eng._write_json(target, {"b": 2})
+    assert json.loads(target.read_text()) == {"a": 1}

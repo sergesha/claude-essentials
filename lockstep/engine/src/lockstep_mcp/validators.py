@@ -1,7 +1,7 @@
-"""Deterministic check registry + run_checks (Task 2).
+"""Deterministic check registry + run_checks.
 
-Replaces the Task-1 stub. Two distinct execution modes live behind one
-function, per decision 16 (explicit-execution contract):
+Two distinct execution modes live behind one function (the
+explicit-execution contract):
 
 - `run_checks(state, execute=True)` — the ENGINE's direct call. Reads checks
   from `state["brief"]["checks"]` + evidence from `state["evidence"]`, runs
@@ -9,21 +9,21 @@ function, per decision 16 (explicit-execution contract):
   baseline context (`_project` / `_baseline_start` / `_baseline_prev` /
   `_baseline_globs`) rides inside `state` — never injected as graph state.
 - `run_checks(state)` (execute defaults False) — the IN-GRAPH node's call
-  (`validate_one` in the spike fixture). It never executes checks itself: it
+  (`validate_one` in the fixtures). It never executes checks itself: it
   only republishes the verdict the engine already embedded in the resume
   payload's evidence (`evidence["_verdict_status"]`/`_verdict_reasons`). No
   embedded verdict -> `error` (anti-forgery: combined with the reserved `_`
   evidence-key prefix rejected upstream in the engine, a forged verdict can
   never reach this path with a status the graph will trust).
 
-Verdict shape is FLAT and unconditional (decision 10):
+Verdict shape is FLAT and unconditional:
 `{"verdict_status": "pass"|"fail"|"error", "verdict_reasons": [str]}`.
 
 `error` means a check RAISED, OR a baseline check's target is not covered
-by `baseline_globs` (decision 14's coverage predicate — never a vacuous
+by `baseline_globs` (the coverage predicate — never a vacuous
 pass on out-of-glob artifacts). `error` short-circuits the whole check pass:
 no further checks run, and none of the accumulated `fail` reasons from
-earlier checks in the same pass are reported (decision 16: an `error`
+earlier checks in the same pass are reported (an `error`
 consumes no retry budget, so which ordinary failures were also present is
 moot — the run doesn't resume either way).
 
@@ -38,8 +38,8 @@ that mutates a "frozen" file earlier in the list must still be caught.
 
 Every path a check consumes (`path`, `path_from` evidence, baseline check
 targets) is re-resolved against `_project` and re-contained inside it here,
-regardless of what the engine already did (decision 12's "belt" — defense
-in depth, not the primary gate).
+regardless of what the engine already did — defense in depth, not the
+primary gate.
 """
 
 from __future__ import annotations
@@ -59,12 +59,12 @@ from typing import Any, Callable
 
 DEFAULT_TIMEOUT = 600
 
-# decision 14: default ignore set for baseline manifests.
+# default ignore set for baseline manifests.
 _IGNORE_DIR_NAMES = {"__pycache__", ".git"}
 
 
 # ---------------------------------------------------------------------------
-# path handling (decision 12 belt)
+# path handling
 # ---------------------------------------------------------------------------
 
 
@@ -190,7 +190,7 @@ def _check_file_matches_hash(check: dict, evidence: dict, ctx: dict) -> list[str
     present, expected = _resolve_state_path(hash_from, ctx.get("_state") or {})
     if not present:
         # RuntimeError -> run_checks' blanket except -> error verdict: no
-        # resume, no retry-budget burn (decision 16)
+        # resume, no retry-budget burn
         raise RuntimeError(f"hash pin '{hash_from}' not present in run state")
     if not isinstance(expected, str) or not expected:
         raise RuntimeError(f"hash pin '{hash_from}' present but not a hex digest: {expected!r}")
@@ -290,7 +290,7 @@ def _check_junit_gate(check: dict, evidence: dict, ctx: dict) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# baseline manifest + checks (decision 14)
+# baseline manifest + checks
 # ---------------------------------------------------------------------------
 
 
@@ -307,12 +307,12 @@ def _hash_file(path: Path) -> str:
 
 def build_manifest(project: Path, globs: list[str]) -> dict[str, str]:
     """Hash every file under `project` matching any pattern in `globs`
-    (decision-14 ignore set applied; symlinks not followed). Returns
+    (the default ignore set applied; symlinks not followed). Returns
     {relative_posix_path: sha256_hex}."""
     project = Path(project).resolve()
     manifest: dict[str, str] = {}
     for pattern in globs:
-        # M2: py3.11+ glob() excludes dotfiles/dot-dirs by default; without
+        # py3.11+ glob() excludes dotfiles/dot-dirs by default; without
         # include_hidden a hidden file inside a declared glob is invisible
         # to the manifest, so editing it never trips `unchanged`/`fresh`/
         # `changed_in`/`diff_only`. The explicit ignore set below still
@@ -321,7 +321,17 @@ def build_manifest(project: Path, globs: list[str]) -> dict[str, str]:
             p = Path(match)
             if p.is_symlink() or not p.is_file():
                 continue
-            rel = p.resolve().relative_to(project).as_posix()
+            try:
+                rel = p.resolve().relative_to(project).as_posix()
+            except ValueError:
+                # Reached through a symlinked PARENT directory (is_symlink()
+                # only tests the leaf), so the real file lives outside the
+                # project. Same rule as a symlinked leaf — not followed, not
+                # hashed. Raising here would be an agent-triggerable wedge:
+                # one `ln -s` inside a baseline glob turns every check into a
+                # permanent `error` verdict, which neither resumes nor burns
+                # retry budget.
+                continue
             if _is_ignored(rel):
                 continue
             manifest[rel] = _hash_file(p)
@@ -405,7 +415,7 @@ def _check_unchanged(check: dict, evidence: dict, ctx: dict) -> list[str]:
 
 
 def _under_prefix(rel: str, declared: str) -> bool:
-    """item 10: a bare `rel.startswith(declared)` treats `declared` as a
+    """A bare `rel.startswith(declared)` treats `declared` as a
     raw string prefix, so `paths: ["src"]` wrongly covers `src-evil/...`
     too (same characters, different directory). Normalize `declared` to
     end with `/` before the prefix check — an exact match on `declared`
@@ -531,7 +541,7 @@ def run_checks(state: dict[str, Any], execute: bool = False) -> dict[str, Any]:
             reasons.extend(fn(check, evidence, ctx))
         for check in deferred:
             reasons.extend(_check_unchanged(check, evidence, ctx))
-    except Exception as e:  # noqa: BLE001 - deliberate: any raise -> error verdict (decision 16)
+    except Exception as e:  # noqa: BLE001 - deliberate: any raise -> error verdict
         return {"verdict_status": "error", "verdict_reasons": [str(e)]}
 
     if reasons:

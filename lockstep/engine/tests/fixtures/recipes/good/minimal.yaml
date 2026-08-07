@@ -1,10 +1,10 @@
 version: "1.0"
-name: lockstep-spike-minimal
+name: lockstep-minimal
 description: >
-  Task-1 spike fixture — one work step (interrupt -> python validator),
+  One work step (interrupt -> python validator),
   a pass/fail conditional loop back to the same step, a loop-limit escalate
-  exit. Dialect frozen here per yamlgraph 0.5.18; see yamlgraph_api.py
-  module docstring for every deviation from the plan's assumed shape.
+  exit. Dialect per yamlgraph 0.5.18; `yamlgraph_api.py`'s module
+  docstring is the authority on every trap it encodes.
 
 state:
   brief: dict
@@ -82,10 +82,10 @@ edges:
 
 # NOTE (deviation, see yamlgraph_api.py docstring): loop_limits/loop_exits key
 # on the REPEATING node (the python validator), never the interrupt — interrupt
-# nodes don't consult loop_limit at all. Value 2 (not the plan's literal 3):
-# check_loop_limit fires BEFORE the count-th execution runs (count >= limit),
-# so limit=2 allows 2 real validate_one executions and blocks the 3rd —
-# matching "3 consecutive fail-resumes trigger escalate" in the spike tests.
+# nodes don't consult loop_limit at all. check_loop_limit fires BEFORE the
+# count-th execution runs (count >= limit), so limit=2 allows 2 real
+# validate_one executions and blocks the 3rd — i.e. 3 consecutive
+# fail-resumes trigger escalate.
 loop_limits:
   validate_one: 2
 loop_exits:

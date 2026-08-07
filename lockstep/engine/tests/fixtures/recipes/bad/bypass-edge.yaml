@@ -1,7 +1,7 @@
 version: "1.0"
 name: lockstep-bad-bypass-edge
 description: >
-  Task-3 bad fixture — step_one has a second outgoing edge straight to the
+  Bad fixture: step_one has a second outgoing edge straight to the
   escalate gate, alongside its validator edge. Expect: "bypass".
 
 state:

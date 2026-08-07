@@ -1,7 +1,7 @@
 version: "1.0"
 name: lockstep-bad-unmarked-escalate
 description: >
-  Task-3 bad fixture — the loop_exits chain (validate_one -> escalate_gate
+  Bad fixture: the loop_exits chain (validate_one -> escalate_gate
   -> escalate) is wired correctly, but `escalate`'s message carries an
   extra field so it no longer matches the {step: escalate} (+ optional
   text) marker exactly. Expect: "escalate marker".

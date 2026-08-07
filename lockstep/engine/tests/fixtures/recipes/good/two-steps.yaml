@@ -1,7 +1,7 @@
 version: "1.0"
 name: lockstep-profile-two-steps
 description: >
-  Task-3 fixture — two chained step triples (interrupt -> python validator),
+  Two chained step triples (interrupt -> python validator),
   each with its own pass/fail loop back to itself and a loop-limit escalate
   exit routed through a shared passthrough gate. Dialect mirrors
   tests/fixtures/recipes/good/minimal.yaml exactly (yamlgraph 0.5.18,
@@ -69,8 +69,8 @@ nodes:
 
   # NOTE: see minimal.yaml for why loop_exits routes through a plain
   # passthrough gate instead of straight to the `escalate` interrupt
-  # (yamlgraph skips the interrupt's prepare_fn on a loop_exits redirect —
-  # spike finding 3). Both step triples share this one gate.
+  # (yamlgraph skips the interrupt's prepare_fn on a loop_exits
+  # redirect). Both step triples share this one gate.
   escalate_gate:
     type: passthrough
     output: {}
@@ -107,7 +107,7 @@ edges:
 
 # loop_limits/loop_exits key on the REPEATING node (the python validator),
 # never the interrupt — see minimal.yaml / yamlgraph_api.py for the full
-# rationale (spike finding 2).
+# rationale.
 loop_limits:
   validate_one: 2
   validate_two: 2

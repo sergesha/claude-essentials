@@ -34,7 +34,7 @@ def test_full_subcall_cycle_with_restart(tmp_path, monkeypatch):
     out = server.scenario_done(r["run_id"], "plan", {"plan_path": ".lockstep/plan.md"})
     assert out["step"] == "_subcall" and out["subcall"]["node"] == "review"
 
-    # 2. while the subcall runs, the parent is untouchable (I10.2a/b)
+    # 2. while the subcall runs, the parent is untouchable
     refused = server.scenario_done(r["run_id"], "review", {"anything": 1})
     assert refused["accepted"] is False and "subcall in progress" in refused["errors"][0]
     for call in (lambda: server.scenario_abort(r["run_id"]),
@@ -46,8 +46,8 @@ def test_full_subcall_cycle_with_restart(tmp_path, monkeypatch):
     assert st["subcall"]["node"] == "review" and st["subcall"]["runner"] == "claude"
 
     # 3. full restart mid-subcall: engine singleton AND the supervisor
-    #    handle registry (I10.4 — _reset_engine alone leaves the Popen
-    #    handles; a real restart has neither). Reattach is files-only.
+    #    handle registry (_reset_engine alone leaves the Popen handles;
+    #    a real restart has neither). Reattach is files-only.
     server._reset_engine()
     subcalls._HANDLES.clear()
 
@@ -66,7 +66,7 @@ def test_full_subcall_cycle_with_restart(tmp_path, monkeypatch):
     monkeypatch.delenv("LOCKSTEP_CHILD_RUN")
     monkeypatch.delenv("LOCKSTEP_CHILD_NONCE")
 
-    # 5. parent auto-polls: child terminal -> envelope collected (I10.2c)
+    # 5. parent auto-polls: child terminal -> envelope collected
     st = server.scenario_status(r["run_id"])
     assert st["step"] == "verify"
     env = server._eng()._peek_state(r["run_id"])["_subcall_envelope"]
@@ -74,7 +74,7 @@ def test_full_subcall_cycle_with_restart(tmp_path, monkeypatch):
     assert env["child_status"] == "done" and env["artifact_hashes"] == {"review": digest}
 
     # 6. tamper -> verify FAILS on file_matches_hash
-    #    (validate_verify loop cap is 2 — this is execution 1 of 2, I10.3)
+    #    (validate_verify loop cap is 2 — this is execution 1 of 2)
     (proj / ".lockstep" / "review.md").write_text("Verdict: PASS\nforged addendum\n")
     out = server.scenario_done(r["run_id"], "verify", {"review_path": ".lockstep/review.md"})
     assert out["passed"] is False and any("hash" in reason for reason in out["reasons"])

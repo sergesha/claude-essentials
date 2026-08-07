@@ -1,7 +1,7 @@
 version: "1.0"
 name: review-gate
 description: >
-  Task-9 example — the CHILD recipe feature-dev-reviewed.yaml's fractal
+  The CHILD recipe feature-dev-reviewed.yaml's fractal
   subcall spawns (scenario: review-gate). One review step whose artifact
   path (.lockstep/review.md) is covered by baseline_globs, so the parent's
   `hash_from: _subcall_envelope.artifact_hashes.review` resolves against

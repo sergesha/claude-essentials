@@ -1,10 +1,10 @@
 version: "1.0"
 name: subcall-fractal
 description: >
-  Task-7 fixture — one work step, then a FRACTAL review subcall (scenario:
+  One work step, then a FRACTAL review subcall (scenario:
   child-review, artifacts pinned) whose done edge lands on a verify step
   that hash-pins the child's artifact. validate_verify's loop limit of 2
-  is LOAD-BEARING (I10.3): the integration tamper burns execution 1, the
+  is LOAD-BEARING: the integration tamper burns execution 1, the
   restore-pass is execution 2. The verify step ALSO pins the reviewed
   sources (`unchanged src/** since previous`): done() advances the
   baseline BEFORE parking on the subcall and auto-poll never advances it,
@@ -74,7 +74,7 @@ nodes:
       checks:
         # the pin proves provenance (bytes unchanged since the child's last
         # PASS); the regex proves the VERDICT — a child that writes
-        # 'Verdict: FAIL' must never walk the parent to done (C1); the
+        # 'Verdict: FAIL' must never walk the parent to done; the
         # `unchanged` pin proves the reviewed SOURCES still are the bytes
         # the subcall launched over — an edit after the child's PASS (when
         # the child can no longer object) fails here.

@@ -1,7 +1,7 @@
 version: "1.0"
 name: feature-dev-reviewed
 description: >
-  Task-9 example recipe — plan, then an INDEPENDENT review gate run as a
+  Plan, then an INDEPENDENT review gate run as a
   fractal subcall (scenario: review-gate): the engine spawns a separate
   `claude -p` session running its own lockstep child run, the worker never
   sees that session, and the verify step BOTH hash-pins the child's own

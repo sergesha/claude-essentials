@@ -1,18 +1,18 @@
-"""Task 3: the lockstep recipe profile — pure YAML analysis, NO yamlgraph
+"""the lockstep recipe profile — pure YAML analysis, NO yamlgraph
 import (this module must stay usable to vet a recipe before it is ever
 compiled). Every rule here is enforced structurally against the dict
 `yaml.safe_load` returns; it does not know or care whether the recipe would
 actually compile under yamlgraph — that is `yamlgraph_api.cli_validate`'s
-job (Task 1), run alongside this one wherever recipes are validated
-end-to-end (Task 6's `validate_recipe`).
+job, run alongside this one wherever recipes are validated
+end-to-end.
 
-Rules enforced (errors unless noted; see plan Task 3 + SPIKE FINDINGS):
+Rules enforced (errors unless noted):
 
 - Forbidden node types `llm, agent, router, copilot, race` (Global
   Constraints) anywhere in `nodes:`.
-- No top-level `checkpointer:` block (decision 8 — only the engine controls
-  persistence).
-- Escalate-marker discriminator (decision 9): an `interrupt` node is a
+- No top-level `checkpointer:` block — only the engine controls
+  persistence.
+- Escalate-marker discriminator: an `interrupt` node is a
   "work interrupt" unless its `message` is exactly `{step: escalate}` (plus
   optional `text`). Work interrupts alone are subject to validator-pairing
   and brief-field rules; marked nodes are exempt.
@@ -23,37 +23,34 @@ Rules enforced (errors unless noted; see plan Task 3 + SPIKE FINDINGS):
   `exit_criterion` and at least one check; work-interrupt `step` names are
   unique across the recipe (spawn prediction and `done()` key on them).
 - Every interrupt node (work OR escalate-marked) must declare
-  `idempotent: false` (spike finding 4 — `prepare_fn`'s default
-  `idempotent: true` reuses a stale payload across any interrupt sharing
-  `state_key: brief`).
+  `idempotent: false` — `prepare_fn`'s default `idempotent: true` reuses
+  a stale payload across any interrupt sharing `state_key: brief`.
 - Every retry loop must be capped: this module DFS-walks the `edges:`
   graph from `START` (conditional targets included); a conditional edge
-  whose target is already on the current DFS stack is a back edge. Per
-  spike finding 2, `loop_limits`/`loop_exits` are keyed on the REPEATING
-  node — the back edge's SOURCE (the python validator), never the
+  whose target is already on the current DFS stack is a back edge.
+  `loop_limits`/`loop_exits` are keyed on the REPEATING node — the back edge's SOURCE (the python validator), never the
   interrupt it loops back to — so every back-edge source must appear in
   both `loop_limits` and `loop_exits`.
-- Per spike finding 3, `loop_exits` may never target an interrupt directly
+- `loop_exits` may never target an interrupt directly
   (yamlgraph skips that interrupt's `prepare_fn`, so it parks with a stale
   `brief` instead of the escalate marker): the `loop_exits` target must be
   a `passthrough` gate with exactly one outgoing edge, and that edge's
   target must be a marked escalate interrupt.
-- `command_from` anywhere in a check config is forbidden (decision 7/review
-  C2 — commands are pinned literally in the recipe, never taken from
-  evidence).
-- Placeholder substitution never reaches `checks`/`evidence_schema`
-  (decision 4): any string therein matching `\\{[A-Za-z_]\\w*\\}` is an
+- `command_from` anywhere in a check config is forbidden — commands are
+  pinned literally in the recipe, never taken from evidence.
+- Placeholder substitution never reaches `checks`/`evidence_schema`: any
+  string therein matching `\\{[A-Za-z_]\\w*\\}` is an
   error (regex quantifiers like `\\d{3}` and JSON-schema `pattern` braces
   don't collide with this pattern — letters/underscore only).
 - Every `path_from: key` check requires `evidence_schema.properties[key]
-  .format == "project-path"` (decision 12).
+  .format == "project-path"`.
 - Any baseline check (`fresh`/`unchanged`/`changed_in`/`diff_only`) present
-  while top-level `baseline_globs` is absent/empty is an error (review-5
-  m4 — else the check errors forever at runtime, never a vacuous pass).
+  while top-level `baseline_globs` is absent/empty is an error — else the
+  check errors forever at runtime, never a vacuous pass.
 - A `tools:` entry whose `module` is not under `lockstep_mcp.` is a
   WARNING, not an error (local `tools.py` — last resort, human review).
 
-Task 4 (v2) — the subcall triple (spawn -> `_subcall` marker -> poll), a
+The subcall triple (spawn -> `_subcall` marker -> poll) is a
 THIRD interrupt class alongside work and escalate interrupts. A
 `{step: _subcall}` marker is exempt from the work-interrupt rules
 (validator pairing, task/exit_criterion/checks) but not from
@@ -66,11 +63,12 @@ exist as `<child_recipes_dir or recipe-dir>/<name>.yaml`) and `artifacts`
 Triple shape: spawn -> marker is the spawn's single unconditional edge;
 marker -> poll is the marker's single unconditional edge; every edge into
 a spawn comes from a directly-paired validator conditioned exactly
-`verdict_status == '(pass|fail)'` (pins Task 5's `_predict_spawn`) —
+`verdict_status == '(pass|fail)'` (what the engine's spawn prediction
+keys on) —
 never from START: a start-time spawn would fire on an empty evidence
 channel and bypass the engine's done()-time policy prediction
-(runner/budget/depth), so the profile forbids the shape outright
-(Task 7 decision); every poll out-edge is conditioned exactly
+(runner/budget/depth), so the profile forbids the shape outright. Every
+poll out-edge is conditioned exactly
 `_subcall_status == '(running|done|error)'` with the 'running' back edge
 to the marker required. Poll back edges are exempt from
 `loop_limits`/`loop_exits` (termination is the runner timeout). Subcall
@@ -78,7 +76,7 @@ recipes must declare `_subcall_status`/`_subcall_envelope` in `state:`;
 every `hash_from` must match
 `_subcall_envelope.artifact_hashes.<declared artifact>`.
 
-Conditional-edge dialect (spike finding 1): edges are `{from, to,
+Conditional-edge dialect: edges are `{from, to,
 condition}` triples. An edge dict carrying a `conditions:` list (the
 `type: conditional` router shape) is a different, unsupported dialect —
 flagged as an invalid edge shape rather than silently parsed.
@@ -91,6 +89,8 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
 
 from lockstep_mcp.validators import _path_covered
 
@@ -98,9 +98,9 @@ FORBIDDEN_NODE_TYPES = {"llm", "agent", "router", "copilot", "race"}
 BASELINE_CHECK_TYPES = {"fresh", "unchanged", "changed_in", "diff_only"}
 PLACEHOLDER_RE = re.compile(r"\{[A-Za-z_]\w*\}")
 
-# Task 4 (v2): the subcall triple (spawn -> _subcall marker -> poll).
+# the subcall triple (spawn -> _subcall marker -> poll).
 _RUNNER_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
-_ARTIFACT_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]*$")  # no dots: dotted-path resolution (Task 6)
+_ARTIFACT_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]*$")  # no dots: dotted-path resolution
 _SPAWN_EDGE_COND_RE = re.compile(r"^verdict_status == '(pass|fail)'$")
 _POLL_EDGE_COND_RE = re.compile(r"^_subcall_status == '(running|done|error)'$")
 _HASH_FROM_RE = re.compile(r"^_subcall_envelope\.artifact_hashes\.([a-z][a-z0-9_-]*)$")
@@ -111,7 +111,7 @@ def _is_subcall_marker(message: Any) -> bool:
 
 
 def subcall_node_kind(node: Any, tools: dict) -> str | None:
-    """Classify by RESOLVED module/function, never by tool NAME (I4.3): a
+    """Classify by RESOLVED module/function, never by tool NAME: a
     recipe aliasing `my_spawn: {module: lockstep_mcp.subcalls, function:
     spawn}` must hit every subcall rule. Shared with Engine._predict_spawn."""
     if not isinstance(node, dict) or node.get("type") != "python":
@@ -160,7 +160,7 @@ def _build_edges_by_from(raw_edges: list, errors: list[str]) -> dict[str, list[d
 def _find_back_edges(edges_by_from: dict[str, list[dict]]) -> list[tuple[str, str]]:
     """DFS from START (conditional targets included). A conditional edge
     whose target is already on the current DFS stack is a back edge —
-    (source, target) pairs, source = the repeating node (finding 2)."""
+    (source, target) pairs, source = the repeating node."""
     back_edges: list[tuple[str, str]] = []
     visited: set[str] = set()
     stack: list[str] = []
@@ -261,7 +261,7 @@ def _check_interrupt_node(
     checks = message.get("checks") or []
     schema = message.get("evidence_schema")
 
-    # finding 4: idempotent: false required on EVERY interrupt, work or
+    # idempotent: false required on EVERY interrupt, work or
     # escalate-marked (a shared state_key: brief means the default
     # idempotent: true reuses whichever payload parked first).
     if node.get("idempotent") is not False:
@@ -272,7 +272,7 @@ def _check_interrupt_node(
     # rules live in _check_subcall_rules. They are NOT exempt from the
     # idempotent check above or the checks:/placeholder scan further down —
     # marker checks are never executed, but a command_from smuggled onto one
-    # must still be refused where v1 scans every interrupt (fresh finding C).
+    # must still be refused where v1 scans every interrupt.
     if not _is_escalate_marker(message) and not _is_subcall_marker(message):
         # validator pairing: ALL outgoing edges must target one node, and
         # that node must be the python validator.
@@ -337,6 +337,15 @@ def _check_interrupt_node(
             )
             break
     if schema is not None:
+        # A malformed schema raises SchemaError from every later
+        # `iter_errors`, i.e. from inside `scenario_done` — after the recipe
+        # already validated ok. Refuse it here, where a recipe error belongs.
+        try:
+            Draft202012Validator.check_schema(schema)
+        except SchemaError as exc:
+            errors.append(
+                f"invalid evidence_schema (interrupt '{name}'): {exc.message}"
+            )
         for s in _walk_strings(schema):
             if PLACEHOLDER_RE.search(s):
                 errors.append(
@@ -381,7 +390,7 @@ def _check_subcall_rules(doc: dict, nodes: dict, edges_by_from: dict,
         for src, elist in edges_by_from.items():
             for e in elist:
                 edges_by_to.setdefault(e.get("to"), []).append(e)
-        # validators DIRECTLY PAIRED with a work interrupt (I4.5): the single
+        # validators DIRECTLY PAIRED with a work interrupt: the single
         # edge-target of some non-marker, non-escalate interrupt.
         paired_validators: set[str] = set()
         for n, cfg in nodes.items():
@@ -474,7 +483,7 @@ def _check_subcall_rules(doc: dict, nodes: dict, edges_by_from: dict,
             for e in edges_by_to.get(sname, []):
                 src, cond = e.get("from"), (e.get("condition") or "").strip()
                 if src == "START":
-                    # Task 7 decision: a START -> spawn edge is forbidden.
+                    # a START -> spawn edge is forbidden.
                     # It would fire the spawn hook on an EMPTY evidence
                     # channel (guaranteed error envelope) and bypass the
                     # engine's done()-time policy prediction — the only
@@ -519,7 +528,7 @@ def check_recipe_full(
 
     edges_by_from = _build_edges_by_from(raw_edges, errors)
 
-    # I6: work-interrupt `step` names must be UNIQUE across the recipe —
+    # work-interrupt `step` names must be UNIQUE across the recipe —
     # `Engine._predict_spawn` and `done(run_id, step, ...)` both key on the
     # parked step name; a collision makes the prediction read the wrong
     # validator (an orphan child holding a live credential, or a spawn with
