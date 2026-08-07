@@ -44,9 +44,8 @@ reviews" paragraph for the authoritative spec):
   graph checkpoint first (`yamlgraph_api.resume`), then the index second.
   `_reconcile`, called from `status()`/`done()`, reads the checkpoint via
   `yamlgraph_api.peek()` (Task 5 addition) and repairs the index on
-  disagreement — EXCEPT it never overrides a terminal (`aborted`/
-  `escalated`) index status; those have no checkpoint counterpart to
-  disagree with in the first place.
+  disagreement — EXCEPT it never overrides a terminal index status
+  (`runs.TERMINAL_STATUSES`, the single definition of terminal).
 """
 
 from __future__ import annotations
@@ -64,7 +63,7 @@ from lockstep_mcp import evidence as evidence_mod
 from lockstep_mcp import profile_check
 from lockstep_mcp import validators
 from lockstep_mcp import yamlgraph_api as yg
-from lockstep_mcp.runs import RunIndex, RunRecord
+from lockstep_mcp.runs import TERMINAL_STATUSES, RunIndex, RunRecord
 
 _PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_]\w*)\}")
 
@@ -245,9 +244,11 @@ class Engine:
 
     def _reconcile(self, run_id: str) -> RunRecord:
         record = self._runs.get(run_id)
-        if record.status in ("escalated", "aborted"):
-            # terminal index statuses have no checkpoint counterpart to
-            # disagree with — never overridden.
+        if record.status in TERMINAL_STATUSES:
+            # ONE definition of terminal (runs.TERMINAL_STATUSES) — a
+            # terminal index status is never overridden: escalated/aborted
+            # have no checkpoint counterpart to disagree with, and a done
+            # record must not regain a live step+brief from a checkpoint.
             return record
 
         try:
