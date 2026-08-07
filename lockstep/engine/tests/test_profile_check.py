@@ -8,6 +8,7 @@ case) - 14 bad fixtures total, plus one warning fixture.
 from pathlib import Path
 
 import pytest
+import yaml
 
 from lockstep_mcp import yamlgraph_api as yg
 from lockstep_mcp.profile_check import check_recipe, check_recipe_full
@@ -111,3 +112,20 @@ def test_example_recipes_pass_profile_and_validate():
         assert check_recipe(recipe) == [], f"{recipe.name}: profile errors: {check_recipe(recipe)}"
         ok, msg = yg.cli_validate(recipe)
         assert ok, f"{recipe.name}: cli_validate failed: {msg}"
+
+
+def test_reviewed_example_declares_channels_and_pins_the_artifact():
+    doc = yaml.safe_load((EXAMPLES / "feature-dev-reviewed.yaml").read_text())
+    assert {"_subcall_status", "_subcall_envelope"} <= set(doc["state"])
+    markers = [(n.get("message") or {}) for n in doc["nodes"].values()
+               if n.get("type") == "interrupt"
+               and (n.get("message") or {}).get("step") == "_subcall"]
+    assert len(markers) == 1
+    assert markers[0]["scenario"] == "review-gate"
+    assert markers[0]["artifacts"] == {"review": ".lockstep/review.md"}
+    assert "pre-approval" in markers[0]["prompt"]          # the poisoning warning ships in the prompt
+    checks = [c for n in doc["nodes"].values() if n.get("type") == "interrupt"
+              for c in ((n.get("message") or {}).get("checks") or [])]
+    assert any(c.get("type") == "file_matches_hash"
+               and c.get("hash_from") == "_subcall_envelope.artifact_hashes.review"
+               for c in checks)

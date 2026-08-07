@@ -67,6 +67,35 @@ a project-relative path, IS the evidence: point `scenario_done` at that file. Th
 server does not know or care that a subagent produced it — it checks the artifact exactly like
 any other.
 
+## Subcalls (v2) — when a step parks on an independent session
+
+Some steps park on a **subcall marker** (`step: _subcall` in `scenario_status`):
+the engine has spawned a separate CLI agent session — possibly running its
+own lockstep child run — in its own process, outside this conversation.
+While a subcall is in flight:
+
+- **`scenario_status`/`scenario_done` auto-poll it for you** — you never
+  drive the poll loop yourself. Call `scenario_status` to see whether it is
+  still `running` or has reached `done`/`error`; do not fabricate progress
+  or guess at its outcome. Liveness only advances on a tool call —
+  `scenario_status`/`scenario_done` — nothing polls in the background, so a
+  subcall makes no progress until you (or the parent's own retry) call one
+  of them.
+- **`scenario_done` is refused while a subcall is running** — read the
+  refusal message; it names the subcall's node and how long it's been
+  running. There is no step of your own to report evidence for yet — poll
+  again instead.
+- **`scenario_abort`/`scenario_escalate` are ALSO refused while the subcall
+  runs.** This is deliberate, documented behavior, not a bug: a poisoned
+  child session must not be able to talk you into killing its own parent
+  run. The refusal names the escape hatch — the subcall's runner timeout is
+  finite; once it fires the subcall resolves to an error envelope and
+  abort/escalate become available again.
+- You cannot read the spawned session's transcript or influence what it is
+  told from here — that independence is the entire point of a subcall. See
+  README.md "Subcalls (v2)" for the precise guarantee this gives you and,
+  just as importantly, what it does NOT give you.
+
 ## Terminal statuses
 
 `escalated` and `aborted` are **terminal** — there is no resume path in v1. Once a run lands in
