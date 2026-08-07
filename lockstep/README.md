@@ -106,7 +106,7 @@ vars (even just to their defaults, e.g. `LOCKSTEP_STATE_DIR=~/.lockstep`) before
 Claude Code, or drop the `env` block from a local copy of the plugin config if you want the
 engine's own built-in defaults to apply untouched.
 
-## Protecting the state dir and recipes
+## Protecting the state dir, recipes, and the engine itself
 
 The honest guarantee above is conditional on this. Deny the agent write access to:
 
@@ -114,9 +114,15 @@ The honest guarantee above is conditional on this. Deny the agent write access t
   live there; a write-capable agent could edit `runs.json` directly, forge a baseline, or drop
   a policy file to unlock its own gate)
 - the recipe source directory (`$LOCKSTEP_RECIPES`, typically `<project>/.lockstep/recipes/`) —
-  `scenario_start` snapshots the recipe at start and validates only that snapshot, so a live
-  edit mid-run is inert, but an agent that can edit the *live* file before ever calling
-  `scenario_start` can smuggle a weakened recipe into the very run it then starts
+  `scenario_start` snapshots the recipe — and every fractal child recipe its subcall markers
+  name via `scenario:` — at start, and every launch (the run itself, and any child run it
+  spawns later) uses only those snapshots, so a live edit mid-run is inert; but an agent that
+  can edit the *live* file before ever calling `scenario_start` can smuggle a weakened recipe
+  into the very run it then starts
+- the plugin/engine source itself (the plugin's cloned files — `${CLAUDE_PLUGIN_ROOT}`,
+  including `lockstep/engine/`): v2 executes `lockstep_mcp/_subcall_wrapper.py` by path as the
+  subcall supervisor, and every hook/server invocation runs the cloned `lockstep_mcp` code — an
+  agent that can rewrite it replaces the supervisor and owns the "independent" session outright
 - the hooks/plugin config itself and `.claude/settings.json`, for the same reason
 
 via your permission system (Claude Code's `permissions.deny` in project or user settings).
@@ -177,10 +183,20 @@ caller without that credential is refused). Validated artifact bytes are
 hash-pinned from the DENIED side — the child's own validated baseline
 snapshot for a fractal subcall, or the runner's captured output file under
 the state dir for a one-shot subcall — never from collect-time project
-bytes, which the worker owns and could have edited after the fact. A
-fractal child is a full lockstep run: every v1 guarantee above applies to
-it recursively, and the policy gate unlocks only descendants of an
-**awaiting** run of the policy's recipe.
+bytes, which the worker owns and could have edited after the fact. Be
+precise about what the pin means: it proves the bytes are **unchanged
+since the child run's last validated PASS** — nothing more. The worker
+can author those bytes up to that instant; what vouches for the content
+is the child's own checks plus the parent's own content checks (the
+shipped example pairs the pin with a `Verdict: PASS` regex — keep both
+whenever you copy it). A fractal child is a full lockstep run: every v1
+guarantee above applies to it recursively. The policy gate's linkage: the
+worker session is unlocked by an awaiting run of the policy's recipe in
+the project (v1 predicate, unchanged), and a spawned child session — its
+environment carries `LOCKSTEP_CHILD_RUN` — is unlocked ONLY while that
+run's own ancestry chain is fully awaiting and terminates in an awaiting
+run of the policy's recipe in the project; a child whose chain is dead is
+denied even while another policy run keeps the worker unlocked.
 
 **What it does NOT guarantee:**
 
@@ -211,7 +227,11 @@ it recursively, and the policy gate unlocks only descendants of an
 the same permission rule as the rest of the state dir. It pins the
 runner's executable by ABSOLUTE path (never resolved from `PATH`) and a
 non-empty model allowlist; an unlisted runner, a relative path, or an empty
-model list is a loud start-time refusal, never a silent fallback. The state
+model list is a loud start-time refusal (`scenario_start` resolves every
+subcall marker's runner against the allowlist before any run is created),
+never a silent fallback. The engine always launches with the FIRST model in
+the runner's `models` list; later entries are reserved for future
+per-marker selection. The state
 dir itself must not sit inside the project tree — the engine refuses to
 start a run if it does (`runners.assert_state_dir_sane`), because a state
 dir under the gate would hand the agent the allowlist it's supposed to be

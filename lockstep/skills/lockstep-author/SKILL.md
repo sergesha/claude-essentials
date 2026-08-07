@@ -90,6 +90,12 @@ is no `type: conditional` node with a `conditions:` list — that shape does not
 dialect and the profile flags it as an invalid edge shape rather than silently accepting it.
 Always write two separate edges (pass / fail) out of a validator, each with its own `condition`.
 
+**Trap — work-interrupt `step` names must be UNIQUE across the recipe.** The engine keys
+`scenario_done(run_id, step, ...)` and its subcall spawn prediction on the parked step name; two
+work interrupts sharing a `step` would make it read the wrong validator. The profile refuses the
+recipe (`duplicate step name`). The `escalate` and `_subcall` markers share their step by
+construction and are exempt.
+
 **Trap — `idempotent: false` on EVERY interrupt, no exceptions.** All interrupts in one recipe
 share `state_key: brief`. The default (`idempotent: true`) reuses whichever payload parked
 first at that state key across ANY interrupt sharing it — so a work step without
@@ -205,7 +211,7 @@ recipe, never sourced from evidence.
 | `unchanged` | `glob` (fnmatch-style pattern, e.g. `"tests/**"`); `since: start\|previous` (default `start`) | No file matching `glob` differs from the selected baseline snapshot. | Deferred to the END of the check pass regardless of list position, and re-hashes AFTER every `cmd_ok`/`junit_gate` in the same pass (TOCTOU guard — a command earlier in the list that mutates a "frozen" file is still caught). **Coverage rule differs from the others**: `glob` must appear **verbatim** as an entry in `baseline_globs` (or match existing manifest entries) or the check raises — not just prefix-covered. `since: start` treats "absent at start and absent now" as pass (a project with no `pytest.ini` stays clean; *creating* one mid-run counts as a change → fail). |
 | `changed_in` | `paths: [str, ...]`; `since: start\|previous` (default `start`) | At least one file under any of `paths` differs from the selected baseline snapshot. | Each declared path must be covered by `baseline_globs` (prefix-match) or the check raises. |
 | `diff_only` | `paths: [str, ...]` | No file OUTSIDE `paths` differs from the **previous**-step baseline snapshot. | **Always compares against the previous step's snapshot — there is no `since:` option for `diff_only`, it is hardwired to `previous`.** Each declared path must be covered by `baseline_globs` or the check raises. Use this on the LAST step too, not just implementation steps — a recipe that only fences intermediate steps lets post-gate weakening of tests/config slip through clean at the very end (see `feature-dev.yaml`'s review step). |
-| `file_matches_hash` | `path_from` (evidence-relative); `hash_from` (recipe-pinned string, must match `_subcall_envelope.artifact_hashes.<name>`) | File's SHA-256 must equal the hash pinned at `hash_from` in graph state. | **Fractal subcalls only** — `hash_from` resolves against the child run's own validated baseline snapshot, never against collect-time project bytes (the point: the worker owns the project dir and could have edited the file after the child wrote it; the hash comes from the DENIED side). A one-shot subcall (no `scenario:` on the marker) never populates `artifact_hashes` — it validates the **envelope** instead (`output`/`exit_code`/`session_id`), not a project file. `hash_from` naming an artifact no marker declares in `artifacts:` is a profile error. |
+| `file_matches_hash` | `path_from` (evidence-relative); `hash_from` (recipe-pinned string, must match `_subcall_envelope.artifact_hashes.<name>`) | File's SHA-256 must equal the hash pinned at `hash_from` in graph state. | **Fractal subcalls only** — `hash_from` resolves against the child run's own validated baseline snapshot, never against collect-time project bytes. **Be precise about what that buys**: the pin proves the bytes are unchanged **since the child run's last validated PASS** — the worker can author them up to that instant, so the pin is provenance, not content. Always pair it with a content check on the same file (the shipped example adds `file_matches` on `Verdict:\s*PASS` — without it a FAIL verdict passes the gate). A one-shot subcall (no `scenario:` on the marker) never populates `artifact_hashes` — it validates the **envelope** instead (`output`/`exit_code`/`session_id`), not a project file. `hash_from` naming an artifact no marker declares in `artifacts:` is a profile error. |
 
 **`baseline_globs`** (top-level recipe key, required whenever any baseline check above is used):
 a list of glob patterns (supports `**`, resolved via Python's recursive glob) defining which
@@ -332,7 +338,10 @@ name resolvable at all:
 runners:
   claude:
     path: /usr/local/bin/claude   # ABSOLUTE — the engine never PATH-resolves
-    models: [haiku, sonnet]       # required, non-empty — fail-closed otherwise
+    models: [haiku, sonnet]       # required, non-empty — fail-closed otherwise.
+                                  # The engine always launches with the FIRST
+                                  # entry; later entries are reserved for
+                                  # future per-marker model selection.
     timeout_minutes: 30           # optional override; falls back to budgets/defaults
 budgets:
   max_subcalls_per_run: 8
@@ -342,7 +351,11 @@ budgets:
 `path` MUST be an absolute, executable file — the engine checks this again
 immediately before every spawn, never from a cached value. A `runner:`
 name with no matching entry, or an entry with an empty `models` list, is a
-loud start-time refusal, never a silent fallback. See README.md "Subcalls
+loud start-time refusal (`scenario_start` resolves every marker's runner
+before creating the run), never a silent fallback. A marker's `runner:` is
+optional — the adapter default (`LOCKSTEP_RUNNER`) applies when absent, and
+it passes through to fractal child sessions, so a depth-2 recipe may rely
+on it too. See README.md "Subcalls
 (v2)" for why the path must be absolute and the state dir must sit outside
 the project tree, and for what this setup does and does NOT guarantee.
 
