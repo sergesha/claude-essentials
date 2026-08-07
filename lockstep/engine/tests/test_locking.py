@@ -152,3 +152,147 @@ def test_stale_break_survives_original_holder_release(tmp_path):
     assert breaker_holding.is_set()
     assert state.get("holder_finally_ran") is True
     assert state.get("lock_exists_after_holder_release") is True
+
+def test_four_plus_way_stale_break_mutual_exclusion(tmp_path):
+    # Required property test: N>=4 threads racing to break the SAME
+    # pre-created stale lock must admit at most one holder at a time.
+    # Each holder appends enter/exit markers under the lock; any depth>1
+    # in the event stream proves a double-admit. Repeated rounds because
+    # the failure is interleaving-dependent.
+    import threading
+
+    target = tmp_path / "runs.json"
+    lock = tmp_path / "runs.json.lock"
+    nthreads = 5
+    rounds = 80
+
+    for _ in range(rounds):
+        lock.write_text(json.dumps({"pid": 999999, "ts": time.time() - 3600}))
+        old = time.time() - 3600
+        os.utime(lock, (old, old))
+
+        events = []
+        events_lock = threading.Lock()
+        barrier = threading.Barrier(nthreads)
+        errors = []
+
+        def worker():
+            try:
+                barrier.wait(timeout=5.0)
+                with file_lock(target, timeout=10.0, stale_after=60.0):
+                    with events_lock:
+                        events.append("enter")
+                    time.sleep(0.001)
+                    with events_lock:
+                        events.append("exit")
+            except Exception as exc:  # pragma: no cover - failure reporting
+                errors.append(exc)
+
+        ts = [threading.Thread(target=worker) for _ in range(nthreads)]
+        [t.start() for t in ts]
+        [t.join(timeout=30.0) for t in ts]
+
+        assert not errors, f"workers failed: {errors}"
+        assert len(events) == nthreads * 2, f"livelock/lost workers: {events}"
+        depth = 0
+        for kind in events:
+            depth += 1 if kind == "enter" else -1
+            assert depth <= 1, f"overlap detected: {events}"
+
+def test_crashed_holder_lock_is_eventually_acquirable(tmp_path):
+    # Crash recovery: a lock left behind with a back-dated mtime (holder
+    # died) must be acquirable well within a reasonable timeout.
+    target = tmp_path / "runs.json"
+    lock = tmp_path / "runs.json.lock"
+    lock.write_text("half-written garbage from a dead process")
+    old = time.time() - 3600
+    os.utime(lock, (old, old))
+    t0 = time.monotonic()
+    with file_lock(target, timeout=5.0, stale_after=60.0):
+        pass
+    assert time.monotonic() - t0 < 2.0
+
+def test_crashed_breaker_orphaned_break_mutex_recovers(tmp_path):
+    # Double-crash recovery: holder died (stale lock) AND a breaker died
+    # mid-session (stale orphaned break-mutex). Both must be recovered;
+    # the lock must still be acquirable.
+    target = tmp_path / "runs.json"
+    lock = tmp_path / "runs.json.lock"
+    brk = tmp_path / "runs.json.lock.break"
+    old = time.time() - 3600
+    lock.write_text("dead holder")
+    os.utime(lock, (old, old))
+    brk.write_text(json.dumps({"token": "dead:1", "pid": 999999}))
+    os.utime(brk, (old, old))
+    with file_lock(target, timeout=5.0, stale_after=60.0):
+        pass
+    assert not lock.exists()
+    assert not brk.exists()
+
+def test_live_hold_within_stale_after_is_not_stolen(tmp_path):
+    # A legitimate hold shorter than stale_after must never be broken,
+    # however hard a waiter tries: the holder's lock file must survive
+    # the whole hold with its owner unchanged.
+    import threading
+
+    target = tmp_path / "runs.json"
+    lock = tmp_path / "runs.json.lock"
+    holder_in = threading.Event()
+    state = {}
+
+    def holder():
+        with file_lock(target, timeout=5.0, stale_after=30.0):
+            owner_at_entry = json.loads(lock.read_text())["owner"]
+            holder_in.set()
+            time.sleep(0.6)  # long hold, but well within stale_after
+            state["owner_stable"] = json.loads(lock.read_text())["owner"] == owner_at_entry
+
+    th = threading.Thread(target=holder)
+    th.start()
+    assert holder_in.wait(timeout=5.0)
+    with pytest.raises(LockTimeout):
+        with file_lock(target, timeout=0.3, stale_after=30.0):
+            pass
+    th.join(timeout=5.0)
+    assert state.get("owner_stable") is True
+    # and once released, it is acquirable normally
+    with file_lock(target, timeout=1.0, stale_after=30.0):
+        pass
+
+def test_no_break_mutex_residue(tmp_path):
+    # Normal operation must not leave the break-mutex sidecar behind.
+    target = tmp_path / "runs.json"
+    for _ in range(5):
+        with file_lock(target):
+            pass
+    assert not (tmp_path / "runs.json.lock").exists()
+    assert not (tmp_path / "runs.json.lock.break").exists()
+
+def test_breaker_session_does_not_unlink_foreign_session_in_its_empty_window(tmp_path, monkeypatch):
+    # Deterministic regression for the level-1 empty-window fix (adjudication
+    # hardening 2): if OUR payload write succeeded (no exception) but, by
+    # the time our `finally` looks at the mutex file, it reads empty because
+    # it was vacated and a THIRD PARTY's new session is caught in its own
+    # empty window (between its O_EXCL and its own json.dump), our session
+    # must not conclude "empty means ours" and unlink that live foreign
+    # session's mutex. Force the exact interleaving deterministically —
+    # no repetition, no timing — by making the payload write itself perform
+    # the vacate-and-foreign-recreate before returning successfully.
+    import lockstep_mcp.locking as locking
+
+    brk = tmp_path / "runs.json.lock.break"
+
+    def fake_dump(obj, fh, *a, **k):
+        # our own write "succeeds" (returns normally, no exception) ...
+        fh.close()
+        # ... but a foreign process vacated our mutex and recreated it for
+        # its own session, still in ITS empty window, before we return.
+        os.unlink(brk)
+        os.close(os.open(brk, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+
+    monkeypatch.setattr(json, "dump", fake_dump)
+    with locking._breaker_session(brk, stale_after=60.0) as in_session:
+        assert in_session is True
+
+    # the foreign session's (still-empty) mutex must survive our `finally`
+    assert brk.exists()
