@@ -31,7 +31,7 @@ extends to: artifacts were produced during the run (`fresh`), the test
 tree the pinned command ran against is byte-identical to baseline
 (`unchanged`), and a step cannot PASS while its diff touches undeclared
 paths (`diff_only`). In policy-marked projects the PreToolUse gate adds:
-no writes at all outside an active run, while hooks fire. What is NOT
+no writes at all outside a run this session drives, while hooks fire. What is NOT
 guaranteed: work *quality* (shape checks are tripwires), and anything
 hook-borne — a hook that dies, dies silently; nothing observes hook
 liveness. The load-bearing layer is the engine's evidence gate, which
@@ -87,13 +87,13 @@ Two environment variables, read by the MCP server process:
 
 | Var | Default | Purpose |
 |---|---|---|
-| `LOCKSTEP_STATE_DIR` | `~/.lockstep` | Durable run state: SQLite checkpoints, `runs.json`, recipe snapshots, baseline manifests, `policy.d/`. Deliberately outside the project — not in git, easy to deny writes to. |
+| `LOCKSTEP_STATE_DIR` | `~/.lockstep` | Durable run state: SQLite checkpoints, `runs.json`, recipe snapshots, baseline manifests, `policy.d/`, `bindings/`. Deliberately outside the project — not in git, easy to deny writes to. |
 | `LOCKSTEP_RECIPES` | `<cwd>/.lockstep/recipes` | Where `list_recipes`/`scenario_start` resolve recipe names from. |
 
-`LOCKSTEP_STALE_HOURS` (default `24`) is the run-expiry threshold, read in two places:
-`lockstep-mcp hook-pretool` treats an awaiting run older than this as expired for the policy
-gate (see below), and `lockstep-mcp hook-session-start` flags such a run on its context line.
-It never affects engine behavior — the engine itself has no expiry.
+`LOCKSTEP_SESSION_STALE_MINUTES` (default `30`) is the session-liveness window for the policy
+gate's session binding (see below): a run's driving session counts as live while its binding's
+`last_seen` stamp is within the window, and an abandoned run becomes adoptable once its driver
+has been silent longer. Read only by the hooks — the engine neither reads nor writes bindings.
 
 The plugin's `mcpServers.lockstep.env` block passes both of the first two through as
 `${LOCKSTEP_STATE_DIR}` / `${LOCKSTEP_RECIPES}` — set them in your own shell/settings before
@@ -110,9 +110,10 @@ engine's own built-in defaults to apply untouched.
 
 The honest guarantee above is conditional on this. Deny the agent write access to:
 
-- `$LOCKSTEP_STATE_DIR` (all of it — the run index, checkpoints, baselines, and policy files
-  live there; a write-capable agent could edit `runs.json` directly, forge a baseline, or drop
-  a policy file to unlock its own gate)
+- `$LOCKSTEP_STATE_DIR` (all of it — the run index, checkpoints, baselines, policy files, and
+  session bindings live there; a write-capable agent could edit `runs.json` directly, forge a
+  baseline, drop a policy file to unlock its own gate, or rewrite a `bindings/` sidecar to
+  claim another session's run)
 - the recipe source directory (`$LOCKSTEP_RECIPES`, typically `<project>/.lockstep/recipes/`) —
   `scenario_start` snapshots the recipe — and every fractal child recipe its subcall markers
   name via `scenario:` — at start, and every launch (the run itself, and any child run it
@@ -134,23 +135,37 @@ file permissions on those paths, nothing lockstep-specific enforces it.
 **Policy gate** (opt-in per project): `lockstep-mcp policy require --project <path> --recipe
 <name>` writes a policy file under `$LOCKSTEP_STATE_DIR/policy.d/`, owner-authored only (the
 agent can't write there per the previous section). Once set, the PreToolUse hook denies
-`Write|Edit|NotebookEdit|Bash|Task` in that project unless an **active run of exactly that
-recipe** exists for that project — any other recipe, or no run, is denied. No Bash-command
+`Write|Edit|NotebookEdit|Bash|Task` in that project unless **the calling session is driving an
+active run of exactly that recipe** — session binding, not mere run existence: the platform
+delivers `session_id` in every hook input, and each run carries a hook-owned binding sidecar
+(`$LOCKSTEP_STATE_DIR/bindings/<run-id>.json`) naming the one session that drives it. The run
+is bound to its starter at `scenario_start` (a PostToolUse hook on the lockstep MCP tools reads
+the run id from the tool response), and every gated tool call or lockstep call by the owner
+refreshes the binding's `last_seen` stamp — so another session's awaiting run never unlocks
+yours, and a fresh session is never let in by yesterday's abandoned run. No Bash-command
 parsing — it's a wholesale deny, so heredoc/quoting tricks don't matter, `Read`/`Grep` stay
-open. An awaiting run **expires**: once its `updated` timestamp is older than
-`LOCKSTEP_STALE_HOURS` (default 24h — the same threshold the SessionStart flag uses), it no
-longer satisfies the gate. An expired run is dead — `scenario_abort` it, then `scenario_start`
-a fresh run of the recipe. `scenario_status` does NOT refresh `updated` (only real progress
-writes do), so checking status never reopens the gate — and must not, or one status call would
-defeat expiry. Expiry is crash cleanup, not a defense against a live agent: an agent still
-working keeps its run unexpired through its ordinary `scenario_done` reports. The same rule
-applies to a spawned child session's ancestry chain — every run on the chain must be awaiting
-AND unexpired. One honest caveat: a finished child's terminal report nudges its ancestors
-(`_nudge_ancestors`), and a parent parked on that subcall advances and gets a fresh `updated`
-stamp — restarting the expiry clock in exactly the dead-worker case expiry targets. The real
-fix is session binding (separate, planned work), not a tweak to this rule.
+open. Absent `session_id` in the hook input is ambiguity and denies.
+
+**Crash recovery (adoption)**: a resumed conversation gets a NEW session id, so binding alone
+would lock the human out of their own project after a crash. The door: once the driver has
+been silent longer than `LOCKSTEP_SESSION_STALE_MINUTES` (default 30m — silence means no gated
+tool call and no lockstep MCP call), a `scenario_status` call on the run ADOPTS it: the
+PostToolUse hook rebinds it to the calling session, recording the previous owner as
+`adopted_from`. The gate itself never adopts — a stray Write in the project cannot take over
+an abandoned run; only the deliberate lockstep-tool touch can, and never from a live driver
+(a live session's ordinary work keeps its stamp fresh, so the touch is a no-op and the gate
+stays shut). The impatient alternative needs no window: `scenario_abort` the run, then
+`scenario_start` a fresh one — bound to you at birth. There is no timestamp expiry on runs:
+`RunRecord.updated` does not tick during real work (not on Write/Edit, not on status polls,
+not while a subcall runs), so its age measured nothing — the binding's `last_seen`, which does
+tick, replaced it. That also retires the old `_nudge_ancestors` caveat: a finished child's
+nudge refreshes the parent's `updated`, which the gate no longer reads, and never touches
+bindings. A spawned child session's gate is unchanged by bindings — its `LOCKSTEP_CHILD_RUN`
+credential plus an all-awaiting ancestry chain rooted in a policy-recipe run is the whole
+predicate; the env credential binds the child to its run more tightly than a sidecar could.
 `lockstep-mcp policy clear --project <path>` removes the gate. No policy file for a
-project → always allowed (opt-in only); policy file present but state unreadable → deny
+project → always allowed (opt-in only, and bindings are policy-gate machinery only — no
+policy, no gate, regardless of bindings); policy file present but state unreadable → deny
 (internally fail-closed — the only hook that can, since it's the only one that actually blocks
 an action).
 
@@ -196,13 +211,12 @@ is the child's own checks plus the parent's own content checks (the
 shipped example pairs the pin with a `Verdict: PASS` regex — keep both
 whenever you copy it). A fractal child is a full lockstep run: every v1
 guarantee above applies to it recursively. The policy gate's linkage: the
-worker session is unlocked by an awaiting, fresh run of the policy's
-recipe in the project (v1 predicate plus the staleness rule above), and a
-spawned child session — its environment carries `LOCKSTEP_CHILD_RUN` — is
-unlocked ONLY while that run's own ancestry chain is fully awaiting and
-fresh and terminates in an awaiting run of the policy's recipe in the
-project; a child whose chain is dead or stale is denied even while
-another policy run keeps the worker unlocked.
+worker session is unlocked by the awaiting policy-recipe run BOUND to it
+(session binding — see "Policy gate" above), and a spawned child session
+— its environment carries `LOCKSTEP_CHILD_RUN` — is unlocked ONLY while
+that run's own ancestry chain is fully awaiting and terminates in an
+awaiting run of the policy's recipe in the project; a child whose chain
+is dead is denied even while the worker stays unlocked by its own run.
 
 **What it does NOT guarantee:**
 

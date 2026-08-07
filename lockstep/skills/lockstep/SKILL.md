@@ -105,13 +105,16 @@ either status, `scenario_done` on it will simply fail with "terminal". A genuine
 stays blocked until a human looks at it and starts a **new** run (`scenario_start`) — do not
 try to route around a terminal run by inventing workarounds.
 
-An `awaiting` run also **expires**: in a policy-gated project, a run whose last update is older
-than `LOCKSTEP_STALE_HOURS` (default 24h) no longer opens the write gate. An expired run is
-dead — `scenario_abort` it, then `scenario_start` a fresh run. `scenario_status` does not
-refresh the run's timestamp, so checking status will never reopen the gate; abort-and-restart
-is the only exit. (One interaction worth knowing: a finished child's terminal report nudges its
-parked parent forward, which also stamps the parent's timestamp fresh — so a parent whose
-worker died can still get a new expiry window from its child finishing.)
+An `awaiting` run is also **session-bound**: in a policy-gated project the write gate opens
+only for the session driving the run — yours automatically, from the moment your session
+called `scenario_start`. Your ordinary work keeps that claim alive; nobody can take a run
+from a session that is still working. If the write gate denies you because a run belongs to a
+session that died (a crash, a closed window), the run falls silent, and after
+`LOCKSTEP_SESSION_STALE_MINUTES` (default 30m) of silence a `scenario_status` call on it from
+your session **adopts** it — then continue it as your own. If you cannot wait out the window,
+`scenario_abort` the run and `scenario_start` a fresh one, which is bound to you at birth. A
+run whose driver is live can never be adopted — the deny message means that session's work is
+in flight, not that the gate is broken.
 
 ## Never end a turn with an active run unreported
 

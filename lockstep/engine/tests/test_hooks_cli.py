@@ -6,22 +6,26 @@ equality-or-parent-prefix: a run whose `project` is an ancestor of (or equal
 to) the hook's `cwd` matches. Stop blocks with a `decision: block` JSON on
 stdout naming the run_id, step, and all three exits. SessionStart returns
 plain text (no block capability). PreToolUse (decision 15) is opt-in via
-policy files and fails closed on any internal exception.
+policy files and fails closed on any internal exception; its worker
+predicate is SESSION BINDING — the deep matrix for that (ownership,
+adoption, theft-resistance, PostToolUse) lives in
+`tests/test_session_binding.py`.
 """
 
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import yaml
 
 import lockstep_mcp.cli as cli
+from lockstep_mcp import sessions
 from lockstep_mcp.engine import Engine
 from lockstep_mcp.runs import RunIndex
 
 GOOD_RECIPES = Path(__file__).parent / "fixtures" / "recipes" / "good"
+SESSION = "session-under-test"
 
 
 def _mk_run(state_dir: Path, project: str, step: str = "one", recipe: str = "feature-dev") -> str:
@@ -29,13 +33,6 @@ def _mk_run(state_dir: Path, project: str, step: str = "one", recipe: str = "fea
     record = idx.create(recipe, project)
     idx.update(record.run_id, step=step, brief={"step": step, "task": "t", "exit_criterion": "x"})
     return record.run_id
-
-
-def _set_updated(state_dir: Path, run_id: str, iso: str) -> None:
-    path = state_dir / "runs.json"
-    data = json.loads(path.read_text())
-    data[run_id]["updated"] = iso
-    path.write_text(json.dumps(data))
 
 
 def _write_policy(state_dir: Path, project: str, recipe: str) -> Path:
@@ -137,21 +134,10 @@ def test_stop_matches_subdirectory_cwd(tmp_path):
     assert run_id in data["reason"]
 
 
-def test_session_start_flags_expired_runs(tmp_path):
-    proj = tmp_path / "proj"
-    proj.mkdir()
-    state_dir = tmp_path / "state"
-    run_id = _mk_run(state_dir, str(proj.resolve()))
-    expired_ts = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
-    _set_updated(state_dir, run_id, expired_ts)
-
-    text = cli.hook_session_start(state_dir, str(proj))
-
-    assert "expired" in text
-    assert "scenario_abort" in text
-
-
-def test_session_start_ignores_fresh_runs(tmp_path):
+def test_session_start_flags_runs_with_no_live_driver(tmp_path):
+    # The liveness signal is the binding sidecar, never RunRecord.updated
+    # (which does not tick during real work). An unbound run — typically
+    # the aftermath of a crash — is flagged with its adoption door.
     proj = tmp_path / "proj"
     proj.mkdir()
     state_dir = tmp_path / "state"
@@ -159,7 +145,20 @@ def test_session_start_ignores_fresh_runs(tmp_path):
 
     text = cli.hook_session_start(state_dir, str(proj))
 
-    assert "expired" not in text
+    assert "no live driving session" in text
+    assert "scenario_status" in text
+
+
+def test_session_start_does_not_flag_a_driven_run(tmp_path):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    state_dir = tmp_path / "state"
+    run_id = _mk_run(state_dir, str(proj.resolve()))
+    sessions.touch(state_dir, run_id, SESSION, 30.0)
+
+    text = cli.hook_session_start(state_dir, str(proj))
+
+    assert "no live driving session" not in text
 
 
 # ---------------------------------------------------------------------------
@@ -175,13 +174,16 @@ def test_pretool_no_policy_allows(tmp_path):
 
 
 def test_pretool_matching_policy_and_run_allows(tmp_path):
+    # The happy path: a run of the policy recipe, bound to the session
+    # asking (normally by hook_posttool at scenario_start), unlocks it.
     proj = tmp_path / "proj"
     proj.mkdir()
     state_dir = tmp_path / "state"
     _write_policy(state_dir, str(proj), "feature-dev")
-    _mk_run(state_dir, str(proj.resolve()), recipe="feature-dev")
+    run_id = _mk_run(state_dir, str(proj.resolve()), recipe="feature-dev")
+    sessions.touch(state_dir, run_id, SESSION, 30.0)
 
-    exit_code, out = cli.hook_pretool({"cwd": str(proj)}, state_dir)
+    exit_code, out = cli.hook_pretool({"cwd": str(proj), "session_id": SESSION}, state_dir)
 
     assert exit_code == 0
     assert out == ""
@@ -277,58 +279,12 @@ def test_pretool_child_env_with_unknown_run_fails_closed(tmp_path, monkeypatch):
     assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
-def test_pretool_without_child_env_keeps_v1_predicate(tmp_path, monkeypatch):
-    # The worker session (no LOCKSTEP_CHILD_RUN) keeps v1 behaviour: an
-    # awaiting run of the policy recipe unlocks the project; once it is
-    # terminal, a still-awaiting descendant of another recipe does not.
+def test_pretool_worker_predicate_is_session_binding(tmp_path, monkeypatch):
+    # The worker session (no LOCKSTEP_CHILD_RUN) is unlocked by owning a
+    # run of the POLICY recipe: a bound run of another recipe (the child
+    # below) never satisfies the gate, and once the policy run is terminal
+    # the project locks again.
     monkeypatch.delenv("LOCKSTEP_CHILD_RUN", raising=False)
-    proj = tmp_path / "proj"
-    proj.mkdir()
-    state_dir = tmp_path / "state"
-    _write_policy(state_dir, str(proj), "feature-dev")
-    idx = RunIndex(state_dir)
-    parent = idx.create("feature-dev", str(proj.resolve()))
-    idx.create("child-review", str(proj.resolve()), parent_run=parent.run_id, nonce="n")
-
-    exit_code, out = cli.hook_pretool({"cwd": str(proj)}, state_dir)
-    assert exit_code == 0 and out == ""
-
-    idx.update(parent.run_id, status="escalated")
-    exit_code, out = cli.hook_pretool({"cwd": str(proj)}, state_dir)
-    assert exit_code == 0
-    data = json.loads(out)
-    assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
-
-
-def test_pretool_expired_awaiting_run_no_longer_unlocks(tmp_path, monkeypatch):
-    # Run expiry: an abandoned run stays `awaiting` forever, so before this
-    # rule it held the gate open indefinitely. An awaiting run counts only
-    # until it EXPIRES (updated older than LOCKSTEP_STALE_HOURS, the same
-    # threshold hook_session_start flags with); expired -> deny.
-    monkeypatch.delenv("LOCKSTEP_CHILD_RUN", raising=False)
-    proj = tmp_path / "proj"
-    proj.mkdir()
-    state_dir = tmp_path / "state"
-    _write_policy(state_dir, str(proj), "feature-dev")
-    run_id = _mk_run(state_dir, str(proj.resolve()), recipe="feature-dev")
-
-    exit_code, out = cli.hook_pretool({"cwd": str(proj)}, state_dir)
-    assert exit_code == 0 and out == ""            # unexpired awaiting run: still unlocked
-
-    expired_ts = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
-    _set_updated(state_dir, run_id, expired_ts)
-    exit_code, out = cli.hook_pretool({"cwd": str(proj)}, state_dir)
-    assert exit_code == 0
-    data = json.loads(out)
-    assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
-    reason = data["hookSpecificOutput"]["permissionDecisionReason"]
-    assert "expired" in reason and "scenario_abort" in reason   # the exit that works
-
-
-def test_pretool_child_chain_with_expired_ancestor_denies(tmp_path, monkeypatch):
-    # The chain predicate carries the same rule: every member must be
-    # awaiting AND unexpired — an expired ancestor closes the gate for the
-    # child.
     proj = tmp_path / "proj"
     proj.mkdir()
     state_dir = tmp_path / "state"
@@ -336,76 +292,62 @@ def test_pretool_child_chain_with_expired_ancestor_denies(tmp_path, monkeypatch)
     idx = RunIndex(state_dir)
     parent = idx.create("feature-dev", str(proj.resolve()))
     child = idx.create("child-review", str(proj.resolve()), parent_run=parent.run_id, nonce="n")
-    monkeypatch.setenv("LOCKSTEP_CHILD_RUN", child.run_id)
+    sessions.touch(state_dir, parent.run_id, SESSION, 30.0)
+    sessions.touch(state_dir, child.run_id, SESSION, 30.0)
 
-    exit_code, out = cli.hook_pretool({"cwd": str(proj)}, state_dir)
-    assert exit_code == 0 and out == ""            # unexpired chain: unlocked
+    exit_code, out = cli.hook_pretool({"cwd": str(proj), "session_id": SESSION}, state_dir)
+    assert exit_code == 0 and out == ""
 
-    expired_ts = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
-    _set_updated(state_dir, parent.run_id, expired_ts)
-    exit_code, out = cli.hook_pretool({"cwd": str(proj)}, state_dir)
+    idx.update(parent.run_id, status="escalated")
+    exit_code, out = cli.hook_pretool({"cwd": str(proj), "session_id": SESSION}, state_dir)
     assert exit_code == 0
     data = json.loads(out)
     assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
-def test_pretool_expiry_threshold_configurable_via_env(tmp_path, monkeypatch):
-    # Reuses the ONE expiry notion: LOCKSTEP_STALE_HOURS drives the gate
-    # exactly as it drives hook_session_start's flag.
-    monkeypatch.delenv("LOCKSTEP_CHILD_RUN", raising=False)
-    proj = tmp_path / "proj"
-    proj.mkdir()
-    state_dir = tmp_path / "state"
-    _write_policy(state_dir, str(proj), "feature-dev")
-    run_id = _mk_run(state_dir, str(proj.resolve()), recipe="feature-dev")
-    _set_updated(state_dir, run_id,
-                 (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat())
-
-    monkeypatch.setenv("LOCKSTEP_STALE_HOURS", "1")
-    exit_code, out = cli.hook_pretool({"cwd": str(proj)}, state_dir)
-    assert exit_code == 0
-    assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
-
-    monkeypatch.setenv("LOCKSTEP_STALE_HOURS", "24")
-    exit_code, out = cli.hook_pretool({"cwd": str(proj)}, state_dir)
-    assert exit_code == 0 and out == ""
-
-
-def test_pretool_expired_run_deny_advice_works_end_to_end(tmp_path, monkeypatch):
-    # The deny message's own advice must actually reopen the gate:
-    # expired run -> deny (naming abort + fresh start) -> scenario_abort ->
-    # scenario_start -> allow. Driven through the real engine, not index pokes.
+def test_pretool_deny_advice_works_end_to_end(tmp_path, monkeypatch):
+    # The deny message's own advice must actually open the gate. A session
+    # facing a run with no live driver is told scenario_status (adoption) —
+    # simulate the full round: MCP call + its PostToolUse fire — and also
+    # the abort + fresh-start road. Driven through the real engine.
     monkeypatch.delenv("LOCKSTEP_CHILD_RUN", raising=False)
     proj = tmp_path / "proj"
     proj.mkdir()
     state_dir = tmp_path / "state"
     _write_policy(state_dir, str(proj), "minimal")
     eng = Engine(state_dir, GOOD_RECIPES)
-    run_id = eng.start("minimal", {}, str(proj.resolve()))["run_id"]
-    _set_updated(state_dir, run_id,
-                 (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat())
+    run_id = eng.start("minimal", {}, str(proj.resolve()))["run_id"]  # crashed owner: no binding
 
-    exit_code, out = cli.hook_pretool({"cwd": str(proj)}, state_dir)
+    exit_code, out = cli.hook_pretool({"cwd": str(proj), "session_id": SESSION}, state_dir)
     assert exit_code == 0
     data = json.loads(out)
     assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
     reason = data["hookSpecificOutput"]["permissionDecisionReason"]
-    # The ONLY advice given is the one that works: abort, then a fresh start.
-    # scenario_status does not refresh `updated`, so it must not be named.
-    assert "scenario_abort" in reason and "scenario_start" in reason
-    assert "scenario_status" not in reason
+    assert "scenario_status" in reason and run_id in reason
 
-    eng.abort(run_id)                                    # advice step 1
-    eng.start("minimal", {}, str(proj.resolve()))        # advice step 2
-    exit_code, out = cli.hook_pretool({"cwd": str(proj)}, state_dir)
-    assert exit_code == 0 and out == ""                  # gate open again
+    status = eng.status(run_id)                          # advice road 1: touch the run…
+    cli.hook_posttool({"cwd": str(proj), "session_id": SESSION,   # …and the hook that fire brings
+                       "tool_name": "mcp__lockstep__scenario_status",
+                       "tool_input": {"run_id": run_id}, "tool_response": status},
+                      state_dir)
+    exit_code, out = cli.hook_pretool({"cwd": str(proj), "session_id": SESSION}, state_dir)
+    assert exit_code == 0 and out == ""                  # adopted: gate open
+
+    eng.abort(run_id)                                    # advice road 2: abort…
+    out2 = eng.start("minimal", {}, str(proj.resolve()))  # …fresh start…
+    cli.hook_posttool({"cwd": str(proj), "session_id": SESSION,
+                       "tool_name": "mcp__lockstep__scenario_start",
+                       "tool_input": {"recipe": "minimal"}, "tool_response": out2},
+                      state_dir)                         # …bound at birth
+    exit_code, out = cli.hook_pretool({"cwd": str(proj), "session_id": SESSION}, state_dir)
+    assert exit_code == 0 and out == ""
 
 
-def test_pretool_scenario_status_does_not_reopen_expired_gate(tmp_path, monkeypatch):
-    # Anti-fix pin: scenario_status on an expired run must NOT refresh
-    # `updated` (RunIndex.update is the sole writer of `updated`; _reconcile
-    # writes the index only on inconsistency) — otherwise any agent could
-    # reopen the gate with one status call, defeating expiry outright.
+def test_pretool_engine_calls_alone_never_open_the_gate(tmp_path, monkeypatch):
+    # Anti-fix pin: the ENGINE never writes bindings — a bare status call
+    # (e.g. _nudge_ancestors' internal poll, or an MCP status whose
+    # PostToolUse hook never fired) must not bind the run to anyone or
+    # open the gate for a non-owner. Only the hook-mediated touch does.
     monkeypatch.delenv("LOCKSTEP_CHILD_RUN", raising=False)
     proj = tmp_path / "proj"
     proj.mkdir()
@@ -413,13 +355,11 @@ def test_pretool_scenario_status_does_not_reopen_expired_gate(tmp_path, monkeypa
     _write_policy(state_dir, str(proj), "minimal")
     eng = Engine(state_dir, GOOD_RECIPES)
     run_id = eng.start("minimal", {}, str(proj.resolve()))["run_id"]
-    expired_ts = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
-    _set_updated(state_dir, run_id, expired_ts)
 
     eng.status(run_id)                                   # the tempting "recovery" step
 
-    assert RunIndex(state_dir).get(run_id).updated == expired_ts
-    exit_code, out = cli.hook_pretool({"cwd": str(proj)}, state_dir)
+    assert sessions.read_binding(state_dir, run_id) is None
+    exit_code, out = cli.hook_pretool({"cwd": str(proj), "session_id": SESSION}, state_dir)
     assert exit_code == 0
     assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
 
@@ -498,13 +438,19 @@ def test_doctor_flags_missing_dirs(tmp_path):
 
 
 def test_hooks_write_nothing_to_the_state_dir(tmp_path):
-    # Hooks are read-only on the state dir by contract — no heartbeat, no
-    # side files. A hook fire against an empty state dir leaves it absent.
+    # Hooks are read-only on ENGINE-owned state by contract; their one own
+    # write is the bindings/ sidecar tree, and even that only for a live
+    # policy-relevant run. A hook fire against an empty state dir — the
+    # posttool observer included — leaves it absent.
     state_dir = tmp_path / "state"
 
     cli.hook_stop({"stop_hook_active": False}, state_dir, str(tmp_path))
     cli.hook_session_start(state_dir, str(tmp_path))
     cli.hook_pretool({"cwd": str(tmp_path)}, state_dir)
+    cli.hook_posttool({"cwd": str(tmp_path), "session_id": SESSION,
+                       "tool_name": "mcp__lockstep__scenario_status",
+                       "tool_input": {"run_id": "no-such-run"}, "tool_response": {}},
+                      state_dir)
 
     assert not state_dir.exists()
 
