@@ -19,6 +19,12 @@
       "description": "Persistent cross-session memory for AI agents. Two storage modes: semantic vector search (mem_*) for knowledge found by meaning, and key-value store (kv_*) for instant lookup. Auto-expiry via TTL + volatile-lru eviction.",
       "source": "./redis-memory-mcp",
       "category": "memory"
+    },
+    {
+      "name": "lockstep",
+      "description": "Flow-enforcement engine for coding agents: declarative yamlgraph recipes, durable runs, deterministic evidence gates",
+      "source": "./lockstep",
+      "category": "developer-tools"
     }
   ]
 }
