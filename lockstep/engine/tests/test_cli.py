@@ -1,6 +1,6 @@
 """Task 6 base: cli.py verb routing. `serve` is the default verb and runs
-the FastMCP app; `hook-stop`/`hook-session-start`/`hook-pretool`/`policy`
-are no-ops with nothing configured. `doctor`'s exit code now reflects
+the FastMCP app; `hook-stop`/`hook-session-start`/`hook-pretool`/
+`hook-posttool`/`policy` are no-ops with nothing configured. `doctor`'s exit code now reflects
 health (m8: missing dirs -> 1). This test asserts
 DISPATCH — the right handler is called for each verb — not a closed verb
 set.
@@ -35,7 +35,7 @@ def test_serve_verb_dispatches_explicitly(monkeypatch):
 def test_stub_verbs_exit_zero_without_side_effects(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("LOCKSTEP_RECIPES", str(tmp_path / "recipes"))
-    for verb in ["hook-stop", "hook-session-start", "hook-pretool", "policy"]:
+    for verb in ["hook-stop", "hook-session-start", "hook-pretool", "hook-posttool", "policy"]:
         assert cli.main([verb]) == 0
 
 

@@ -37,22 +37,20 @@ DESIGN.md.
   PARENT's start (`runs/<parent>.child.<scenario>.yaml`), profiled from
   that copy, and the child run launches only from it — a live edit to a
   child recipe after the parent started is inert.
-- **Gate linkage, as implemented**: `hook_pretool` keeps the v1 predicate
-  for sessions without `LOCKSTEP_CHILD_RUN` in their environment (an
-  awaiting policy-recipe run unlocks the project). A spawned child
-  session carries `LOCKSTEP_CHILD_RUN`; for it the hook walks that run's
-  `parent_run` chain and unlocks ONLY while every run on the chain is
-  awaiting and the root is an awaiting run of the policy recipe in the
-  project. Both predicates additionally enforce run EXPIRY (`updated`
-  within `LOCKSTEP_STALE_HOURS`, default 24h): an expired awaiting run
-  is dead and no longer satisfies the gate — the deny names the only
-  working exit, `scenario_abort` then a fresh `scenario_start`;
-  `scenario_status` never refreshes `updated`, so it cannot reopen the
-  gate (README, policy gate). Honest caveat: a finished child's
-  `_nudge_ancestors` poll advances a parent parked on that subcall and
-  stamps its `updated` fresh — restarting the expiry clock in exactly
-  the dead-worker case expiry targets; the real fix is session binding,
-  a separate piece of work.
+- **Gate linkage, as implemented**: for sessions without
+  `LOCKSTEP_CHILD_RUN` in their environment, `hook_pretool` unlocks the
+  project only for the session BOUND to an awaiting policy-recipe run
+  (session binding: `sessions.py` sidecars, bound at `scenario_start` by
+  the PostToolUse hook, adoptable via a lockstep-tool touch once the
+  driver has been silent past `LOCKSTEP_SESSION_STALE_MINUTES` — README,
+  policy gate). A spawned child session carries `LOCKSTEP_CHILD_RUN`;
+  for it the hook walks that run's `parent_run` chain and unlocks ONLY
+  while every run on the chain is awaiting and the root is an awaiting
+  run of the policy recipe in the project — bindings play no part on
+  this path (the env credential is the tighter bind), and neither
+  predicate reads `RunRecord.updated` (it does not tick during real
+  work, so age measures nothing; `_nudge_ancestors` refreshing it is
+  therefore gate-inert).
 - **Child identity, as implemented**: `LOCKSTEP_CHILD_RUN`/
   `LOCKSTEP_CHILD_NONCE` env + an ENGINE-generated preamble prepended to
   the marker prompt naming the child run id and the report path
