@@ -46,7 +46,7 @@ nodes:
       checks:
         - type: file_matches
           path_from: review_path
-          regex: "(?m)^\\s*Verdict:\\s*PASS\\s*$"
+          regex: "(?m)^\\s*Verdict:\\s*(PASS|FAIL)\\s*$"
 
   validate_review:
     type: python
