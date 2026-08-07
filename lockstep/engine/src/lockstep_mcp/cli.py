@@ -261,19 +261,22 @@ def _deny(reason: str) -> tuple[int, str]:
     )
 
 
-def _child_chain_unlocked(idx: RunIndex, child_run: str, recipe: str, cwd: str) -> bool:
+def _child_chain_unlocked(idx: RunIndex, child_run: str, recipe: str, cwd: str,
+                          stale_hours: float) -> bool:
     """Walk `parent_run` from the session's own run to the root. Unlocked
-    iff every run on the chain is awaiting and the root is a run of the
-    policy recipe in this project. Fail closed: unknown id, cycle, or any
-    terminal ancestor (a cascade that has not reaped this descendant yet
-    must not hold the gate open) all deny."""
+    iff every run on the chain is awaiting AND fresh (updated within
+    `stale_hours`) and the root is a run of the policy recipe in this
+    project. Fail closed: unknown id, cycle, any terminal ancestor (a
+    cascade that has not reaped this descendant yet must not hold the gate
+    open), or any stale ancestor (a forever-parked run must not either)
+    all deny."""
     seen: set[str] = set()
     try:
         rec = idx.get(child_run)
     except KeyError:
         return False
     while True:
-        if rec.run_id in seen or rec.status != ACTIVE_STATUS:
+        if rec.run_id in seen or rec.status != ACTIVE_STATUS or _is_stale(rec.updated, stale_hours):
             return False
         seen.add(rec.run_id)
         if rec.parent_run is None:
@@ -306,29 +309,40 @@ def hook_pretool(stdin_json: dict, state_dir: Path) -> tuple[int, str]:
             return 0, ""
 
         recipe = matching_policy.get("recipe")
+        # Fail-closed liveness: an awaiting run unlocks only while FRESH.
+        # A forever-parked run (dead worker; nothing ever polls it again)
+        # stays `awaiting`, and before this rule it held the gate open
+        # indefinitely. Same threshold hook_session_start flags with.
+        stale_hours = float(os.environ.get("LOCKSTEP_STALE_HOURS", "24"))
         idx = RunIndex(state_dir)
         child_run = os.environ.get("LOCKSTEP_CHILD_RUN")
         if child_run:
             # I2: a spawned child session (this hook inherits the session's
             # env, so LOCKSTEP_CHILD_RUN names ITS run) is unlocked only
             # through its own ancestry — every run on the chain still
-            # awaiting, terminating in an awaiting run of the policy recipe
-            # in this project. A worker-visible awaiting policy run
-            # elsewhere in the project does NOT unlock a child whose own
-            # chain is dead.
-            if _child_chain_unlocked(idx, child_run, recipe, cwd):
+            # awaiting and fresh, terminating in an awaiting run of the
+            # policy recipe in this project. A worker-visible awaiting
+            # policy run elsewhere in the project does NOT unlock a child
+            # whose own chain is dead.
+            if _child_chain_unlocked(idx, child_run, recipe, cwd, stale_hours):
                 return 0, ""
             return _deny(
                 f"lockstep policy: this session's child run {child_run} has no "
-                f"awaiting ancestry chain to a run of recipe {recipe}"
+                f"awaiting, fresh ancestry chain to a run of recipe {recipe}"
             )
-        unlocked = any(
-            _project_matches(r.project, cwd) and r.recipe == recipe
-            for r in idx.list(active_only=True)
-        )
-        if unlocked:
+        candidates = [
+            r for r in idx.list(active_only=True)
+            if _project_matches(r.project, cwd) and r.recipe == recipe
+        ]
+        if any(not _is_stale(r.updated, stale_hours) for r in candidates):
             return 0, ""
-
+        if candidates:
+            return _deny(
+                f"lockstep policy: run {candidates[0].run_id} of recipe {recipe} is "
+                f"awaiting but stale (no update in {stale_hours:g}h) — a stalled run "
+                "closes the gate; call scenario_status on it (or scenario_abort it) "
+                "to resume work"
+            )
         return _deny(f"lockstep policy: start recipe {recipe} via scenario_start first")
     except Exception:  # noqa: BLE001 - fail-closed: internal error must never fail-open
         return _deny("lockstep: internal error — failing closed")
