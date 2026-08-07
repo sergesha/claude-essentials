@@ -32,12 +32,13 @@ start/status/done/escalate/abort/recipe_path/route_log_path, per the
 plan's frozen interface list; those two stores are the underlying
 persistence Task 6 needs read access to, not new engine behavior).
 
-`run_trace`/`render_flow` read `Engine.route_log_path(run_id)`: nothing in
-Tasks 1-5 currently writes that file (the yamlgraph route-log env-var
-mechanism is documented in `yamlgraph_api.py` but never wired into
-`engine.py`'s `start`/`resume` calls) — an absent route log is the honest
-v1 answer (`run_trace` -> `""`, `render_flow` renders with no overlay),
-not a bug to work around here.
+`run_trace`/`render_flow` read `Engine.route_log_path(run_id)`. The
+yamlgraph route-log env-var mechanism documented in `yamlgraph_api.py` is
+still never wired into `engine.py`'s `start`/`resume` calls — instead
+`Engine.done()` appends its own best-effort JSONL transition line to that
+path on every completed transition (Task 10 fallback promised by the Task
+1 probe list). A run with no completed transition yet still has no file:
+`run_trace` -> `""`, `render_flow` renders with no overlay, honestly.
 """
 
 from __future__ import annotations

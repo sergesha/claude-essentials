@@ -54,6 +54,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -121,6 +122,25 @@ class Engine:
 
     def route_log_path(self, run_id: str) -> Path:
         return self._runs_dir() / f"{run_id}.route.jsonl"
+
+    def _log_transition(self, run_id: str, from_step: str, verdict: str, to_step: str | None) -> None:
+        """Route-log fallback (Task 1 probe, spike M7): yamlgraph exposes no
+        per-run route-log hook, so the engine witnesses its own completed
+        `done()` transitions here — best-effort, JSONL, failures ignored.
+        """
+        entry = {
+            "event": "transition",
+            "run": run_id,
+            "from": from_step,
+            "verdict": verdict,
+            "to": to_step,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+        try:
+            with open(self.route_log_path(run_id), "a") as f:
+                f.write(json.dumps(entry) + "\n")
+        except Exception:  # noqa: BLE001 - best-effort, never blocks a transition
+            pass
 
     # ------------------------------------------------------------------
     # small persisted-state helpers
@@ -395,6 +415,7 @@ class Engine:
                     step="escalate",
                     brief={"step": "escalate", "reason": "; ".join(reasons) or "loop limit reached"},
                 )
+                self._log_transition(run_id, step, "fail", "escalate")
                 return {
                     "accepted": True,
                     "passed": False,
@@ -408,6 +429,7 @@ class Engine:
             self._runs.update(
                 run_id, step=substituted.step, brief=self._brief_to_dict(substituted)
             )
+            self._log_transition(run_id, step, "fail", substituted.step)
             return {"accepted": True, "passed": False, "reasons": reasons, "step": step}
 
         # vstatus == "pass"
@@ -415,6 +437,7 @@ class Engine:
 
         if adv.done:
             self._runs.update(run_id, status="done", step=step, brief=None)
+            self._log_transition(run_id, step, "pass", None)
             return {
                 "accepted": True,
                 "passed": True,
@@ -427,6 +450,7 @@ class Engine:
         vars_ = self._read_vars(run_id)
         substituted = self._substitute_brief(adv.brief, vars_)
         self._runs.update(run_id, step=substituted.step, brief=self._brief_to_dict(substituted))
+        self._log_transition(run_id, step, "pass", substituted.step)
         return {
             "accepted": True,
             "passed": True,
