@@ -9,7 +9,7 @@ uuid4>`; active_only means status == "awaiting".
 
 import re
 
-from lockstep_mcp.runs import RunIndex
+from lockstep_mcp.runs import RunIndex, TERMINAL_STATUSES
 
 ISO_PREFIX_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
 
@@ -95,3 +95,59 @@ def test_brief_round_trip_through_fresh_index(tmp_path):
     fresh = RunIndex(tmp_path)
     got = fresh.get(r.run_id)
     assert got.brief == brief
+
+
+def test_terminal_cas_refuses_resurrection(tmp_path):
+    idx = RunIndex(tmp_path)
+    r = idx.create("rec", "/proj")
+    idx.update(r.run_id, status="aborted")
+    idx.update(r.run_id, status="awaiting", step="one")   # cascade race simulation
+    assert idx.get(r.run_id).status == "aborted"
+
+
+def test_terminal_set_includes_done(tmp_path):
+    idx = RunIndex(tmp_path)
+    r = idx.create("rec", "/proj")
+    idx.update(r.run_id, status="done")
+    idx.update(r.run_id, status="aborted")               # parent-done cascade must not rewrite
+    assert idx.get(r.run_id).status == "done"
+    assert TERMINAL_STATUSES == {"done", "escalated", "aborted"}
+
+
+def test_non_status_fields_still_update_on_terminal(tmp_path):
+    idx = RunIndex(tmp_path)
+    r = idx.create("rec", "/proj")
+    idx.update(r.run_id, status="done")
+    idx.update(r.run_id, brief={"step": "x"})
+    assert idx.get(r.run_id).brief == {"step": "x"}
+
+
+def test_parent_and_nonce_roundtrip(tmp_path):
+    idx = RunIndex(tmp_path)
+    parent = idx.create("parent", "/proj")
+    child = idx.create("child", "/proj", parent_run=parent.run_id, nonce="abc123")
+    fresh = RunIndex(tmp_path).get(child.run_id)
+    assert fresh.parent_run == parent.run_id and fresh.nonce == "abc123"
+    assert RunIndex(tmp_path).get(parent.run_id).parent_run is None
+
+
+def test_descendants_are_recursive(tmp_path):
+    idx = RunIndex(tmp_path)
+    a = idx.create("a", "/p"); b = idx.create("b", "/p", parent_run=a.run_id)
+    c = idx.create("c", "/p", parent_run=b.run_id)
+    ids = {r.run_id for r in idx.descendants(a.run_id)}
+    assert ids == {b.run_id, c.run_id}
+    assert [r.run_id for r in idx.children(a.run_id)] == [b.run_id]
+
+
+def test_writes_are_serialized_under_lock(tmp_path):
+    import threading
+    idx = RunIndex(tmp_path)
+    runs = [idx.create(f"r{i}", "/p") for i in range(4)]
+    def bump(rec):
+        for i in range(25):
+            RunIndex(tmp_path).update(rec.run_id, step=f"s{i}")
+    ts = [threading.Thread(target=bump, args=(r,)) for r in runs]
+    [t.start() for t in ts]; [t.join() for t in ts]
+    assert len(RunIndex(tmp_path).list()) == 4          # no record lost to a racing write
+    assert all(RunIndex(tmp_path).get(r.run_id).step == "s24" for r in runs)
