@@ -393,6 +393,25 @@ def test_index_repair(tmp_path):
     assert RunIndex(state_dir).get(run_id).step == "one"
 
 
+def test_reconcile_never_rewrites_a_done_record(tmp_path):
+    # I2: `done` is terminal like escalated/aborted — reconcile must
+    # early-return on the WHOLE terminal set, not keep writing the
+    # checkpoint's live step+brief back onto a closed record forever.
+    state_dir = tmp_path / "state"
+    eng = Engine(state_dir, GOOD)
+    project = _project(tmp_path)
+    res = eng.start("minimal", {}, str(project))
+    run_id = res["run_id"]
+
+    # index goes terminal while the checkpoint still holds a parked live step
+    eng._runs.update(run_id, status="done", step=None, brief=None)
+
+    status = eng.status(run_id)
+    assert status["status"] == "done"
+    rec = eng._runs.get(run_id)
+    assert rec.step is None and rec.brief is None
+
+
 # ---------------------------------------------------------------------------
 # anti-forgery (decision 16 + reserved `_` prefix)
 # ---------------------------------------------------------------------------

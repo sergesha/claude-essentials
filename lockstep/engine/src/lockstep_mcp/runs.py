@@ -12,7 +12,10 @@ runs).
 Statuses: `awaiting | done | escalated | aborted`. `done`/`escalated`/
 `aborted` are TERMINAL (`TERMINAL_STATUSES`) and enforced here: `update`
 refuses any status transition OUT of a terminal status (non-status fields
-still apply). `active_only` means `status == "awaiting"`.
+still apply), and rejects any status value outside `VALID_STATUSES` and
+any field outside the mutable set — `run_id`/`started` (identity) and
+`parent_run`/`nonce` (the anti-forgery credential) are set only at
+`create`. `active_only` means `status == "awaiting"`.
 """
 
 from __future__ import annotations
@@ -20,7 +23,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields as dataclass_fields
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -29,6 +32,7 @@ from lockstep_mcp.locking import file_lock
 
 ACTIVE_STATUS = "awaiting"
 TERMINAL_STATUSES = {"done", "escalated", "aborted"}
+VALID_STATUSES = {ACTIVE_STATUS} | TERMINAL_STATUSES
 
 
 def _now() -> str:
@@ -47,6 +51,12 @@ class RunRecord:
     updated: str
     parent_run: str | None = None
     nonce: str | None = None
+
+
+# Set only at create(): run_id/started are identity; parent_run/nonce are the
+# anti-forgery credential (and a parent_run rewrite could forge a cycle).
+_IMMUTABLE_FIELDS = {"run_id", "started", "parent_run", "nonce"}
+_MUTABLE_FIELDS = {f.name for f in dataclass_fields(RunRecord)} - _IMMUTABLE_FIELDS
 
 
 class RunIndex:
@@ -90,6 +100,8 @@ class RunIndex:
         )
         with file_lock(self._path):
             data = self._load()
+            if run_id in data:
+                raise RuntimeError(f"run_id collision: {run_id!r} already exists")
             data[run_id] = asdict(record)
             self._save(data)
         return record
@@ -101,15 +113,27 @@ class RunIndex:
         return RunRecord(**data[run_id])
 
     def update(self, run_id: str, **fields: Any) -> RunRecord:
+        # Both validations run BEFORE any save: a persisted unknown field
+        # poisons every later get()/list() (TypeError → Stop hook fails
+        # open); a persisted `null`/bogus status defeats the terminal CAS
+        # on the next update.
+        unknown = set(fields) - _MUTABLE_FIELDS
+        if unknown:
+            raise ValueError(f"update: field(s) not updatable: {sorted(unknown)}")
+        if "status" in fields and fields["status"] not in VALID_STATUSES:
+            raise ValueError(
+                f"update: invalid status {fields['status']!r} (valid: {sorted(VALID_STATUSES)})"
+            )
         with file_lock(self._path):
             data = self._load()
             if run_id not in data:
                 raise KeyError(run_id)
             current = data[run_id]
-            new_status = fields.get("status")
-            if new_status is not None and current.get("status") in TERMINAL_STATUSES:
+            if "status" in fields and current.get("status") in TERMINAL_STATUSES:
                 # terminal CAS: a run that reached done/escalated/aborted is never
                 # moved out of it (cascade racing a child's own closing update).
+                # Keyed on presence, not value — `status=None` never reaches here
+                # (rejected above), and absence alone skips the CAS.
                 fields = {k: v for k, v in fields.items() if k != "status"}
             current.update(fields)
             current["updated"] = _now()
@@ -129,10 +153,21 @@ class RunIndex:
         return [r for r in self.list() if r.parent_run == run_id]
 
     def descendants(self, run_id: str) -> list[RunRecord]:
-        out, frontier = [], [run_id]
+        # ONE snapshot, walked in memory: per-frontier re-listing could
+        # splice two index states into one answer. Visited set keeps a
+        # forged on-disk parent cycle from looping forever.
+        by_parent: dict[str | None, list[RunRecord]] = {}
+        for r in self.list():
+            by_parent.setdefault(r.parent_run, []).append(r)
+        out: list[RunRecord] = []
+        seen = {run_id}
+        frontier = [run_id]
         while frontier:
             cur = frontier.pop()
-            for child in self.children(cur):
+            for child in by_parent.get(cur, []):
+                if child.run_id in seen:
+                    continue
+                seen.add(child.run_id)
                 out.append(child)
                 frontier.append(child.run_id)
         return out

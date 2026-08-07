@@ -7,7 +7,11 @@ os.replace); timestamps are ISO-8601 UTC; run_id = `<recipe>-<8 hex
 uuid4>`; active_only means status == "awaiting".
 """
 
+import json
 import re
+from pathlib import Path
+
+import pytest
 
 from lockstep_mcp.runs import RunIndex, TERMINAL_STATUSES
 
@@ -140,14 +144,171 @@ def test_descendants_are_recursive(tmp_path):
     assert [r.run_id for r in idx.children(a.run_id)] == [b.run_id]
 
 
-def test_writes_are_serialized_under_lock(tmp_path):
-    import threading
+def test_status_none_cannot_bypass_terminal_cas(tmp_path):
+    # C1: `status=None` must not slip past the CAS (which keys on presence,
+    # not truthiness) nor write `status: null` — the springboard for a later
+    # resurrection.
     idx = RunIndex(tmp_path)
-    runs = [idx.create(f"r{i}", "/p") for i in range(4)]
-    def bump(rec):
-        for i in range(25):
-            RunIndex(tmp_path).update(rec.run_id, step=f"s{i}")
-    ts = [threading.Thread(target=bump, args=(r,)) for r in runs]
-    [t.start() for t in ts]; [t.join() for t in ts]
-    assert len(RunIndex(tmp_path).list()) == 4          # no record lost to a racing write
-    assert all(RunIndex(tmp_path).get(r.run_id).step == "s24" for r in runs)
+    r = idx.create("rec", "/proj")
+    idx.update(r.run_id, status="done")
+    with pytest.raises(ValueError):
+        idx.update(r.run_id, status=None)
+    assert idx.get(r.run_id).status == "done"
+    idx.update(r.run_id, status="awaiting")              # CAS strips it silently
+    assert idx.get(r.run_id).status == "done"
+
+
+def test_bogus_status_string_is_rejected(tmp_path):
+    # C1: any status outside {"awaiting"} | TERMINAL_STATUSES is refused —
+    # terminal or not — so no unknown value can ever sit in the index.
+    idx = RunIndex(tmp_path)
+    r = idx.create("rec", "/proj")
+    with pytest.raises(ValueError):
+        idx.update(r.run_id, status="zombie")
+    assert idx.get(r.run_id).status == "awaiting"
+    idx.update(r.run_id, status="done")
+    with pytest.raises(ValueError):
+        idx.update(r.run_id, status="resurrected")
+    assert idx.get(r.run_id).status == "done"
+
+
+def test_update_rejects_unknown_fields_before_save(tmp_path):
+    # I1: an unknown field must raise BEFORE _save — a persisted bogus key
+    # would make every later get()/list() raise TypeError (index poisoned,
+    # Stop hook fails open).
+    idx = RunIndex(tmp_path)
+    r = idx.create("rec", "/proj")
+    with pytest.raises(ValueError):
+        idx.update(r.run_id, bogus="x")
+    assert idx.get(r.run_id).status == "awaiting"        # index still loads
+    assert len(RunIndex(tmp_path).list()) == 1
+
+
+def test_update_refuses_identity_and_credential_fields(tmp_path):
+    # I1: run_id/started are identity, parent_run/nonce are the anti-forgery
+    # credential — all set only at create(), never via update().
+    idx = RunIndex(tmp_path)
+    r = idx.create("rec", "/proj")
+    # `run_id` can't even be spelled as a field kwarg (collides with the
+    # positional parameter → TypeError at the call layer); the other three
+    # hit the mutable-field validation.
+    with pytest.raises(TypeError):
+        idx.update(r.run_id, **{"run_id": "forged"})
+    for field in ("started", "parent_run", "nonce"):
+        with pytest.raises(ValueError):
+            idx.update(r.run_id, **{field: "forged"})
+    got = idx.get(r.run_id)
+    assert got.parent_run is None and got.nonce is None and got.started == r.started
+
+
+def test_create_raises_on_run_id_collision(tmp_path, monkeypatch):
+    import lockstep_mcp.runs as runs_mod
+
+    class _FixedUUID:
+        hex = "deadbeefcafef00d"
+
+    monkeypatch.setattr(runs_mod.uuid, "uuid4", lambda: _FixedUUID)
+    idx = RunIndex(tmp_path)
+    idx.create("rec", "/p")
+    with pytest.raises(RuntimeError):
+        idx.create("rec", "/p")
+
+
+def test_descendants_survive_a_forged_parent_cycle(tmp_path):
+    # update() refuses parent_run rewrites, so forge the cycle on disk —
+    # descendants must terminate, not loop forever.
+    idx = RunIndex(tmp_path)
+    a = idx.create("a", "/p")
+    b = idx.create("b", "/p", parent_run=a.run_id)
+    data = json.loads((tmp_path / "runs.json").read_text())
+    data[a.run_id]["parent_run"] = b.run_id
+    (tmp_path / "runs.json").write_text(json.dumps(data))
+    assert {r.run_id for r in idx.descendants(a.run_id)} == {b.run_id}
+
+
+def test_descendants_take_one_snapshot(tmp_path, monkeypatch):
+    # One list() snapshot walked in memory — per-frontier re-listing can
+    # splice two different index states into one answer.
+    idx = RunIndex(tmp_path)
+    a = idx.create("a", "/p")
+    b = idx.create("b", "/p", parent_run=a.run_id)
+    idx.create("c", "/p", parent_run=b.run_id)
+    calls = []
+    real_list = RunIndex.list
+
+    def counting(self, *args, **kwargs):
+        calls.append(1)
+        return real_list(self, *args, **kwargs)
+
+    monkeypatch.setattr(RunIndex, "list", counting)
+    assert len(idx.descendants(a.run_id)) == 2
+    assert len(calls) == 1
+
+
+def _mp_worker(state_dir: str, wid: int, n_updates: int, barrier) -> None:
+    # Module-level: spawn-pickled into a GENUINELY separate process, so the
+    # lock under test is the on-disk sidecar, not any process-local state.
+    idx = RunIndex(Path(state_dir))
+    barrier.wait()
+    rec = idx.create(f"w{wid}", "/p")
+    for i in range(n_updates):
+        idx.update(rec.run_id, step=f"s{i}")
+
+
+def test_writes_are_serialized_under_lock(tmp_path):
+    # I8: separate PROCESSES, barrier-released together, each create+update
+    # racing the shared runs.json — a process-local or null lock loses
+    # records/updates here.
+    import multiprocessing as mp
+
+    ctx = mp.get_context("spawn")
+    n_workers, n_updates = 4, 10
+    barrier = ctx.Barrier(n_workers)
+    procs = [
+        ctx.Process(target=_mp_worker, args=(str(tmp_path), w, n_updates, barrier))
+        for w in range(n_workers)
+    ]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(120)
+    assert all(p.exitcode == 0 for p in procs)
+    records = RunIndex(tmp_path).list()
+    assert len(records) == n_workers                     # no create lost to a racing writer
+    assert {r.recipe for r in records} == {f"w{w}" for w in range(n_workers)}
+    assert all(r.step == f"s{n_updates - 1}" for r in records)
+
+
+def test_every_save_happens_inside_a_lock_hold(tmp_path, monkeypatch):
+    # I8 (deterministic half): every _save — create's included — must occur
+    # between file_lock enter and exit.
+    import lockstep_mcp.runs as runs_mod
+    from contextlib import contextmanager
+
+    real_lock = runs_mod.file_lock
+    counters = {"held": 0, "saves": 0, "saves_in_hold": 0}
+
+    @contextmanager
+    def recording_lock(target, **kwargs):
+        with real_lock(target, **kwargs):
+            counters["held"] += 1
+            try:
+                yield
+            finally:
+                counters["held"] -= 1
+
+    real_save = runs_mod.RunIndex._save
+
+    def spying_save(self, data):
+        counters["saves"] += 1
+        if counters["held"] == 1:
+            counters["saves_in_hold"] += 1
+        return real_save(self, data)
+
+    monkeypatch.setattr(runs_mod, "file_lock", recording_lock)
+    monkeypatch.setattr(runs_mod.RunIndex, "_save", spying_save)
+    idx = runs_mod.RunIndex(tmp_path)
+    r = idx.create("rec", "/p")
+    idx.update(r.run_id, step="x")
+    assert counters["saves"] == 2
+    assert counters["saves_in_hold"] == 2
