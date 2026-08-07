@@ -43,9 +43,16 @@ DESIGN.md.
   session carries `LOCKSTEP_CHILD_RUN`; for it the hook walks that run's
   `parent_run` chain and unlocks ONLY while every run on the chain is
   awaiting and the root is an awaiting run of the policy recipe in the
-  project. Both predicates additionally require freshness (`updated`
-  within `LOCKSTEP_STALE_HOURS`, default 24h): a stalled awaiting run
-  closes the gate instead of holding it open (README, policy gate).
+  project. Both predicates additionally enforce run EXPIRY (`updated`
+  within `LOCKSTEP_STALE_HOURS`, default 24h): an expired awaiting run
+  is dead and no longer satisfies the gate — the deny names the only
+  working exit, `scenario_abort` then a fresh `scenario_start`;
+  `scenario_status` never refreshes `updated`, so it cannot reopen the
+  gate (README, policy gate). Honest caveat: a finished child's
+  `_nudge_ancestors` poll advances a parent parked on that subcall and
+  stamps its `updated` fresh — restarting the expiry clock in exactly
+  the dead-worker case expiry targets; the real fix is session binding,
+  a separate piece of work.
 - **Child identity, as implemented**: `LOCKSTEP_CHILD_RUN`/
   `LOCKSTEP_CHILD_NONCE` env + an ENGINE-generated preamble prepended to
   the marker prompt naming the child run id and the report path

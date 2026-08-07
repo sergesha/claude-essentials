@@ -137,13 +137,18 @@ agent can't write there per the previous section). Once set, the PreToolUse hook
 `Write|Edit|NotebookEdit|Bash|Task` in that project unless an **active run of exactly that
 recipe** exists for that project — any other recipe, or no run, is denied. No Bash-command
 parsing — it's a wholesale deny, so heredoc/quoting tricks don't matter, `Read`/`Grep` stay
-open. An awaiting run counts only while **fresh**: once its `updated` timestamp is older than
-`LOCKSTEP_STALE_HOURS` (default 24h — the same threshold the SessionStart stale flag and
-`doctor` use), it no longer satisfies the gate. Fail-closed on liveness: a stalled run closes
-the gate rather than holding it open forever. To resume work, touch the run: `scenario_status`
-advances one whose subcall/child already resolved, `scenario_done` reports a finished step —
-either refreshes `updated` — or `scenario_abort` clears it. The same rule applies to a spawned
-child session's ancestry chain — every run on the chain must be awaiting AND fresh.
+open. An awaiting run **expires**: once its `updated` timestamp is older than
+`LOCKSTEP_STALE_HOURS` (default 24h — the same threshold the SessionStart flag uses), it no
+longer satisfies the gate. An expired run is dead — `scenario_abort` it, then `scenario_start`
+a fresh run of the recipe. `scenario_status` does NOT refresh `updated` (only real progress
+writes do), so checking status never reopens the gate — and must not, or one status call would
+defeat expiry. Expiry is crash cleanup, not a defense against a live agent: an agent still
+working keeps its run unexpired through its ordinary `scenario_done` reports. The same rule
+applies to a spawned child session's ancestry chain — every run on the chain must be awaiting
+AND unexpired. One honest caveat: a finished child's terminal report nudges its ancestors
+(`_nudge_ancestors`), and a parent parked on that subcall advances and gets a fresh `updated`
+stamp — restarting the expiry clock in exactly the dead-worker case expiry targets. The real
+fix is session binding (separate, planned work), not a tweak to this rule.
 `lockstep-mcp policy clear --project <path>` removes the gate. No policy file for a
 project → always allowed (opt-in only); policy file present but state unreadable → deny
 (internally fail-closed — the only hook that can, since it's the only one that actually blocks

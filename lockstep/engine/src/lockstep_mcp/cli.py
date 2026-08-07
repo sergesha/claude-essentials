@@ -210,7 +210,8 @@ def hook_session_start(state_dir: Path, cwd: str) -> str:
         own_run = os.environ.get("LOCKSTEP_CHILD_RUN")
         lines = []
         for r in matches:
-            suffix = " (stale — consider scenario_abort)" if _is_stale(r.updated, stale_hours) else ""
+            suffix = (" (expired — scenario_abort it and scenario_start a fresh run)"
+                      if _is_expired(r.updated, stale_hours) else "")
             if r.run_id == own_run:
                 suffix += (" — THIS SESSION'S OWN child run: your session holds its "
                            "credential; drive and report it here")
@@ -233,13 +234,13 @@ def hook_session_start(state_dir: Path, cwd: str) -> str:
         return ""
 
 
-def _is_stale(updated_iso: str, hours: float) -> bool:
+def _is_expired(updated_iso: str, hours: float) -> bool:
     try:
         updated = datetime.fromisoformat(updated_iso)
         if updated.tzinfo is None:
             updated = updated.replace(tzinfo=timezone.utc)
         return datetime.now(timezone.utc) - updated > timedelta(hours=hours)
-    except Exception:  # noqa: BLE001 - unparsable timestamp: never flagged stale
+    except Exception:  # noqa: BLE001 - unparsable timestamp: never flagged expired
         return False
 
 
@@ -264,19 +265,19 @@ def _deny(reason: str) -> tuple[int, str]:
 def _child_chain_unlocked(idx: RunIndex, child_run: str, recipe: str, cwd: str,
                           stale_hours: float) -> bool:
     """Walk `parent_run` from the session's own run to the root. Unlocked
-    iff every run on the chain is awaiting AND fresh (updated within
+    iff every run on the chain is awaiting AND unexpired (updated within
     `stale_hours`) and the root is a run of the policy recipe in this
     project. Fail closed: unknown id, cycle, any terminal ancestor (a
     cascade that has not reaped this descendant yet must not hold the gate
-    open), or any stale ancestor (a forever-parked run must not either)
-    all deny."""
+    open), or any expired ancestor (an abandoned run is dead — abort and
+    re-enter through the recipe) all deny."""
     seen: set[str] = set()
     try:
         rec = idx.get(child_run)
     except KeyError:
         return False
     while True:
-        if rec.run_id in seen or rec.status != ACTIVE_STATUS or _is_stale(rec.updated, stale_hours):
+        if rec.run_id in seen or rec.status != ACTIVE_STATUS or _is_expired(rec.updated, stale_hours):
             return False
         seen.add(rec.run_id)
         if rec.parent_run is None:
@@ -309,10 +310,18 @@ def hook_pretool(stdin_json: dict, state_dir: Path) -> tuple[int, str]:
             return 0, ""
 
         recipe = matching_policy.get("recipe")
-        # Fail-closed liveness: an awaiting run unlocks only while FRESH.
-        # A forever-parked run (dead worker; nothing ever polls it again)
-        # stays `awaiting`, and before this rule it held the gate open
-        # indefinitely. Same threshold hook_session_start flags with.
+        # Run expiry (fail-closed): an awaiting run satisfies the gate only
+        # until `updated` is older than LOCKSTEP_STALE_HOURS. An abandoned
+        # run (dead worker; nothing writes it again) stays `awaiting`
+        # forever, and before this rule it held the gate open indefinitely.
+        # An expired run is dead — the only exit is scenario_abort plus a
+        # fresh scenario_start; scenario_status does NOT refresh `updated`
+        # (RunIndex.update is the sole writer), so checking status never
+        # reopens the gate. Same threshold hook_session_start flags with.
+        # Known interaction: a finished child's _nudge_ancestors poll
+        # advances a parked parent and stamps its `updated` fresh,
+        # restarting that parent's expiry clock — session binding (future
+        # work) is the real fix, not a tweak here.
         stale_hours = float(os.environ.get("LOCKSTEP_STALE_HOURS", "24"))
         idx = RunIndex(state_dir)
         child_run = os.environ.get("LOCKSTEP_CHILD_RUN")
@@ -328,20 +337,20 @@ def hook_pretool(stdin_json: dict, state_dir: Path) -> tuple[int, str]:
                 return 0, ""
             return _deny(
                 f"lockstep policy: this session's child run {child_run} has no "
-                f"awaiting, fresh ancestry chain to a run of recipe {recipe}"
+                f"awaiting, unexpired ancestry chain to a run of recipe {recipe}"
             )
         candidates = [
             r for r in idx.list(active_only=True)
             if _project_matches(r.project, cwd) and r.recipe == recipe
         ]
-        if any(not _is_stale(r.updated, stale_hours) for r in candidates):
+        if any(not _is_expired(r.updated, stale_hours) for r in candidates):
             return 0, ""
         if candidates:
             return _deny(
-                f"lockstep policy: run {candidates[0].run_id} of recipe {recipe} is "
-                f"awaiting but stale (no update in {stale_hours:g}h) — a stalled run "
-                "closes the gate; call scenario_status on it (or scenario_abort it) "
-                "to resume work"
+                f"lockstep policy: run {candidates[0].run_id} of recipe {recipe} has "
+                f"expired (awaiting, but no update in {stale_hours:g}h) — an expired "
+                "run is dead: scenario_abort it, then scenario_start a fresh run of "
+                "the recipe"
             )
         return _deny(f"lockstep policy: start recipe {recipe} via scenario_start first")
     except Exception:  # noqa: BLE001 - fail-closed: internal error must never fail-open
