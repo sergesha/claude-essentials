@@ -239,6 +239,61 @@ def test_touch_ignores_terminal_and_unknown_runs(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# the REAL platform payload — recorded live (Claude Code 2.1.220, 2026-08-07)
+# from a plugin-manifest install, NOT invented. Two facts it pins: plugin
+# MCP tools are named `mcp__plugin_<plugin>_<server>__<tool>` (the original
+# `mcp__lockstep__.*`-only matcher never fired — bindings were never written
+# and the gate locked out the very session that started the run), and
+# `tool_response` arrives as a bare LIST of content blocks whose text is the
+# JSON — not a dict, not `{"content": [...]}`.
+# ---------------------------------------------------------------------------
+
+
+def _recorded_payload() -> dict:
+    p = Path(__file__).parent / "fixtures" / "hooks" / "posttool_scenario_start_plugin_install.json"
+    return json.loads(p.read_text())
+
+
+def _force_run_id(state: Path, old: str, new: str) -> None:
+    path = state / "runs.json"
+    data = json.loads(path.read_text())
+    rec = data.pop(old)
+    rec["run_id"] = new
+    data[new] = rec
+    path.write_text(json.dumps(data))
+
+
+def test_bind_from_recorded_plugin_install_payload(tmp_path):
+    from lockstep_mcp import sessions
+
+    proj, state = _setup(tmp_path)
+    payload = _recorded_payload()
+    run_id = payload["tool_response"][0]["text"]
+    run_id = json.loads(run_id)["run_id"]              # the hook must dig it out itself
+    _force_run_id(state, _mk_run(state, str(proj.resolve())), run_id)
+
+    cli.hook_posttool(payload, state)                  # byte-for-byte as the platform sent it
+
+    binding = sessions.read_binding(state, run_id)
+    assert binding is not None, "recorded payload did not bind — matcher or parser regressed"
+    assert binding["session_id"] == payload["session_id"]
+
+
+def test_recorded_payload_matches_shipped_hook_matcher():
+    # The shipped hooks.json matcher must match the OBSERVED plugin-install
+    # tool name and the `.mcp.json`-install name — asserted mechanically,
+    # against the file that ships, not a copy of its pattern.
+    import re
+
+    hooks = json.loads((Path(__file__).parents[2] / "hooks" / "hooks.json").read_text())
+    (entry,) = hooks["hooks"]["PostToolUse"]
+    matcher = entry["matcher"]
+    assert re.fullmatch(matcher, _recorded_payload()["tool_name"])
+    assert re.fullmatch(matcher, "mcp__lockstep__scenario_start")
+    assert not re.fullmatch(matcher, "mcp__plugin_other_lockstep__scenario_start")
+
+
+# ---------------------------------------------------------------------------
 # adoption: the crash-recovery door — and its abuse boundary
 # ---------------------------------------------------------------------------
 

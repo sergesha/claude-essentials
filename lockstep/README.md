@@ -297,6 +297,23 @@ was read back directly and asserted byte-equal to the scratch directory path —
 MCP server does launch with the project directory as its cwd when Claude Code spawns it per
 its `.mcp.json` entry, and `Path.cwd()` at server-start time is exactly that project directory.
 
+**MCP tool names depend on the install shape.** A `.mcp.json` server named `lockstep` yields
+`mcp__lockstep__<tool>`; a plugin-manifest install yields
+`mcp__plugin_<plugin>_<server>__<tool>` — observed live (2026-08-07, Claude Code 2.1.220,
+`--plugin-dir` install): `mcp__plugin_lockstep_lockstep__scenario_start`, with
+`tool_response` delivered to PostToolUse as a bare LIST of content blocks whose `text` is the
+JSON. Both name shapes are matched by `hooks/hooks.json`'s PostToolUse matcher and
+`cli.py`'s `_LOCKSTEP_TOOL_PREFIXES` — keep them in sync; the recorded payload is pinned
+verbatim as `engine/tests/fixtures/hooks/posttool_scenario_start_plugin_install.json`
+(before the fix, the plugin-install matcher never fired: no binding was ever written and the
+gate denied the very session that had started the run, with the advertised
+`scenario_status` adoption door equally dead). **Session binding VERIFIED live** (2026-08-07,
+plugin install, haiku driver): `scenario_start` bound the starting session
+(`bindings/<run-id>.json` created), that session's gated `Write` was allowed, a second
+session inside the liveness window was denied with the run named, and after the stale window
+(`LOCKSTEP_SESSION_STALE_MINUTES=0.05` for the test) a `scenario_status` touch adopted the
+run — `adopted_from` recorded — and the adopter's gated `Write` was allowed.
+
 ## Honesty notes
 
 - **The Stop hook is a nudge, not a wall.** It blocks once per stop chain — our handler checks
