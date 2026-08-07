@@ -23,10 +23,14 @@ _RUNNER_KEYS = {"path", "models", *_BUDGET_KEYS}
 # Process essentials only (POSIX + Windows). No SHELL — a `-p` child spawns
 # no interactive shell. LOCKSTEP_RECIPES passes through so a fractal child
 # resolves recipes where its parent did, not against its own cwd.
+# LOCKSTEP_RUNNER passes through so a depth-2 child whose markers rely on
+# the adapter default can still spawn — it is a NAME resolved against the
+# owner's runners.yaml allowlist, never a path, so the allowlist boundary
+# holds regardless of its value.
 _ENV_ALLOWLIST = (
     "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR", "TEMP", "TMP",
     "SystemRoot", "COMSPEC", "PATHEXT", "USERPROFILE",
-    "LOCKSTEP_RECIPES",
+    "LOCKSTEP_RECIPES", "LOCKSTEP_RUNNER",
 )
 
 

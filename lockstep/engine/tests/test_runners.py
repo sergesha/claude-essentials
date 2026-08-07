@@ -309,3 +309,16 @@ def test_partial_child_credential_refuses(tmp_path):
         child_env({"PATH": "/bin"}, tmp_path, "run-1", None)
     with pytest.raises(RunnerError):
         child_env({"PATH": "/bin"}, tmp_path, None, "n1")
+
+
+def test_depth2_child_inherits_the_adapter_runner_default(tmp_path):
+    # I7: LOCKSTEP_RUNNER is a NAME resolved against the owner allowlist,
+    # not a path — it must survive child_env so a depth-2 child whose
+    # markers rely on the adapter default can still spawn. Fails against
+    # the pre-fix allowlist (which dropped it): resolve() raises
+    # "no runner named".
+    exe = _fake_exe(tmp_path); _write_runners(tmp_path, exe)
+    env = child_env({"PATH": "/bin", "LOCKSTEP_RUNNER": "claude"}, tmp_path, "run-1", "n1")
+    assert env["LOCKSTEP_RUNNER"] == "claude"
+    spec = resolve(tmp_path, None, env)                    # marker names no runner
+    assert spec.name == "claude"
