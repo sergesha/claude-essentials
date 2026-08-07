@@ -275,6 +275,35 @@ def test_fail_verdict_never_walks_the_parent_to_done(tmp_path, monkeypatch):
     assert e.status(r["run_id"])["status"] == "escalated"
 
 
+def test_fail_verdict_that_mentions_pass_never_walks_the_parent_to_done(tmp_path, monkeypatch):
+    # C1 variant: an UNANCHORED file_matches regex (`Verdict:\s*PASS`) is
+    # found anywhere in the file by re.search — so a review that REFUSES
+    # but discusses the phrase (exactly what the child prompt provokes: it
+    # tells the reviewer to end with a verdict line, so a refusal naturally
+    # explains itself in terms of that line) would satisfy the regex even
+    # though the file's actual verdict is FAIL. The parent's verify check
+    # must gate on the anchored, whole-line verdict — never a substring
+    # match buried in prose.
+    e, proj = make_engine(tmp_path, monkeypatch, sleep=5.0)
+    r = e.start("subcall-fractal", vars={}, project=str(proj))
+    pass_plan(e, proj, r)
+    child = e._runs.children(r["run_id"])[0]
+    (proj / ".lockstep" / "review.md").write_text(
+        "# Review\n\n"
+        "I cannot give a Verdict: PASS for this work — the tests are hollow.\n\n"
+        "Verdict: FAIL\n"
+    )
+    assert e.done(child.run_id, "review", {"review_path": ".lockstep/review.md"})["done"] is True
+    assert e.status(r["run_id"])["step"] == "verify"
+    for _ in range(3):                                     # loop cap 2 -> escalate, never done
+        if e.status(r["run_id"])["status"] != "awaiting":
+            break
+        out = e.done(r["run_id"], "verify", {"review_path": ".lockstep/review.md"})
+        assert out.get("done") is not True                 # a refusal mentioning PASS never passes
+        assert out["passed"] is False
+    assert e.status(r["run_id"])["status"] == "escalated"
+
+
 def test_child_recipe_is_pinned_at_parent_start(tmp_path, monkeypatch):
     # C2: the child recipe is snapshotted when the PARENT starts; a worker
     # edit to the live recipes dir AFTER start (but before the spawn — one
