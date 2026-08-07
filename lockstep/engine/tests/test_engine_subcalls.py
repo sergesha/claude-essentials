@@ -495,6 +495,75 @@ def test_honest_reviewed_cycle_with_untouched_sources_reaches_done(tmp_path, mon
     assert e.status(r["run_id"])["status"] == "done"
 
 
+# --- Fix 1: a terminal child nudges its parked parent -------------------------
+#
+# The server is not a daemon: a run parked on a subcall advances only when a
+# call touches THAT run. If the worker session dies while the child works, the
+# child's own terminal transition is the last provably-alive instant of any
+# session that can poll the parent — so it must, as its closing act.
+
+
+def test_terminal_child_nudges_its_parked_parent_without_any_parent_call(tmp_path, monkeypatch):
+    # Broken variant (pre-fix RED): the child's done() flips only the child;
+    # the parent's index record stays parked on '_subcall' until some later
+    # call against the PARENT — which a dead worker will never make.
+    e, proj = make_engine(tmp_path, monkeypatch, sleep=5.0)
+    r = e.start("subcall-fractal", vars={}, project=str(proj))
+    pass_plan(e, proj, r)
+    child = e._runs.children(r["run_id"])[0]
+    rec = e._runs.get(r["run_id"])                         # raw index read, never a tool call
+    assert rec.status == "awaiting" and (rec.brief or {}).get("step") == "_subcall"  # parked
+    (proj / ".lockstep" / "review.md").write_text("Verdict: PASS\n")
+    out = e.done(child.run_id, "review", {"review_path": ".lockstep/review.md"})
+    assert out["done"] is True                             # the child's outcome is authoritative
+    rec = e._runs.get(r["run_id"])                         # still no call against the parent
+    assert rec.step == "verify" and (rec.brief or {}).get("step") == "verify"
+
+
+def test_aborted_child_nudges_parent_to_its_terminal_outcome(tmp_path, monkeypatch):
+    # Same nudge on the other terminal statuses: an aborted child's parent
+    # must observe the dead subcall (-> escalated) without any parent call.
+    e, proj = make_engine(tmp_path, monkeypatch, sleep=5.0)
+    r = e.start("subcall-fractal", vars={}, project=str(proj))
+    pass_plan(e, proj, r)
+    child = e._runs.children(r["run_id"])[0]
+    e.abort(child.run_id)
+    assert e._runs.get(r["run_id"]).status == "escalated"  # raw index read only
+
+
+def test_nudge_failure_never_affects_the_childs_own_result(tmp_path, monkeypatch):
+    # Best-effort contract: the nudge target raising must change neither the
+    # child's returned result nor its terminal status. (RED against an
+    # unguarded nudge: done() would propagate the RuntimeError.)
+    e, proj = make_engine(tmp_path, monkeypatch, sleep=5.0)
+    r = e.start("subcall-fractal", vars={}, project=str(proj))
+    pass_plan(e, proj, r)
+    child = e._runs.children(r["run_id"])[0]
+    (proj / ".lockstep" / "review.md").write_text("Verdict: PASS\n")
+
+    def boom(self, run_id):
+        raise RuntimeError("nudge target down")
+
+    monkeypatch.setattr(Engine, "status", boom)            # the nudge's poll target
+    out = e.done(child.run_id, "review", {"review_path": ".lockstep/review.md"})
+    assert out["done"] is True
+    assert e._runs.get(child.run_id).status == "done"
+
+
+def test_nudge_survives_a_forged_parent_cycle(tmp_path, monkeypatch):
+    # parent_run is immutable through update(), but the walk must not trust
+    # the on-disk bytes: a forged cycle terminates via the visited set
+    # (same shape as RunIndex.descendants), never loops.
+    e, proj = make_engine(tmp_path, monkeypatch)
+    a = e._runs.create("rec", str(proj))
+    b = e._runs.create("rec", str(proj), parent_run=a.run_id, nonce="n")
+    path = tmp_path / "state" / "runs.json"
+    data = json.loads(path.read_text())
+    data[a.run_id]["parent_run"] = b.run_id                # forge a <-> b on disk
+    path.write_text(json.dumps(data))
+    e._nudge_ancestors(b.run_id)                           # must return, not loop
+
+
 def test_poisoned_child_cannot_kill_parent_but_dead_runner_escalates_and_cascades(tmp_path, monkeypatch):
     # end-to-end: the fake runner dies without driving its child run ->
     # fractal poll rule 4 -> error -> parent escalates via _auto_poll ->
