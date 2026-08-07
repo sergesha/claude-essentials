@@ -39,10 +39,15 @@ EXPECTED_TOOLS = {
 
 
 def _configure(monkeypatch, tmp_path, recipes_dir=GOOD):
+    # state dir is a SIBLING of the project cwd, never inside it — a state
+    # dir inside the project tree is refused (runners.assert_state_dir_sane).
+    project = tmp_path / "proj"
+    project.mkdir(exist_ok=True)
     monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("LOCKSTEP_RECIPES", str(recipes_dir))
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.chdir(project)
     server._reset_engine()
+    return project
 
 
 # ---------------------------------------------------------------------------
@@ -61,7 +66,7 @@ def test_tools_registered():
 
 
 def test_start_and_done_roundtrip(tmp_path, monkeypatch):
-    _configure(monkeypatch, tmp_path)
+    project = _configure(monkeypatch, tmp_path)
 
     res = server.scenario_start("minimal", {})
     run_id = res["run_id"]
@@ -72,7 +77,7 @@ def test_start_and_done_roundtrip(tmp_path, monkeypatch):
     assert status["status"] == "awaiting"
     assert status["step"] == "one"
 
-    artifact_dir = tmp_path / ".lockstep"
+    artifact_dir = project / ".lockstep"
     artifact_dir.mkdir()
     (artifact_dir / "a.md").write_text("hi")
 
@@ -109,10 +114,10 @@ def test_validate_recipe_reports_profile(tmp_path, monkeypatch):
 
 
 def test_scenario_dryrun_is_shape_only_and_leaves_nothing_durable(tmp_path, monkeypatch):
-    _configure(monkeypatch, tmp_path)
+    project = _configure(monkeypatch, tmp_path)
 
     sentinel = tmp_path / "DRYRUN-SENTINEL-SHOULD-NOT-EXIST"
-    artifact_dir = tmp_path / ".lockstep"
+    artifact_dir = project / ".lockstep"
     artifact_dir.mkdir()
     (artifact_dir / "a.md").write_text("hi")
 
