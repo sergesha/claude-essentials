@@ -105,6 +105,14 @@ either status, `scenario_done` on it will simply fail with "terminal". A genuine
 stays blocked until a human looks at it and starts a **new** run (`scenario_start`) — do not
 try to route around a terminal run by inventing workarounds.
 
+An `awaiting` run also **expires**: in a policy-gated project, a run whose last update is older
+than `LOCKSTEP_STALE_HOURS` (default 24h) no longer opens the write gate. An expired run is
+dead — `scenario_abort` it, then `scenario_start` a fresh run. `scenario_status` does not
+refresh the run's timestamp, so checking status will never reopen the gate; abort-and-restart
+is the only exit. (One interaction worth knowing: a finished child's terminal report nudges its
+parked parent forward, which also stamps the parent's timestamp fresh — so a parent whose
+worker died can still get a new expiry window from its child finishing.)
+
 ## Never end a turn with an active run unreported
 
 If `scenario_status` (or your own memory of the conversation) shows an `awaiting` run whose
