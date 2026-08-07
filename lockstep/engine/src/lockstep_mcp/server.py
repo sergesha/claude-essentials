@@ -4,8 +4,10 @@ almost everything to `Engine` (Task 5); the only logic that lives here is
 executes commands) and thin introspection wrappers around the recipes dir
 and `RunIndex`.
 
-**mcp SDK note:** this repo pins `mcp>=1.0` (Task 0); the resolved version
-is 2.0.0, which renamed `FastMCP` (the class the plan's sketch names) to
+**mcp SDK note:** this repo pins `mcp>=2.0,<3` (M3: the code below imports
+`mcp.server.mcpserver`, which only exists from 2.0 onward — `mcp>=1.0`
+would silently resolve to a 1.x install with no such module). The resolved
+version is 2.0.0, which renamed `FastMCP` (the class the plan's sketch names) to
 `mcp.server.mcpserver.MCPServer` — there is no `mcp.server.fastmcp` module
 in this SDK version at all. Imported here `as FastMCP` so the rest of this
 module reads exactly like the plan's sketch; the object is otherwise a
