@@ -201,3 +201,17 @@ its `.mcp.json` entry, and `Path.cwd()` at server-start time is exactly that pro
   because it's the only one that can actually block an action). `doctor` + `heartbeat.jsonl`
   exist specifically to make hook death observable rather than silent — they don't make it
   impossible.
+
+## Known issues (v1)
+
+- **Glob semantics for `**`-prefixed patterns**: `unchanged`/`fresh` filter the
+  stored manifest with `fnmatch` (where `**/` requires a literal `/`) while the
+  current tree is scanned with `glob` (where `**` matches zero segments). A bare
+  `**/*`-style glob therefore reports spurious "changed"/"not covered" results
+  for TOP-LEVEL files. Direction is strictly fail-closed (no bypass possible).
+  Workaround: use directory-anchored globs (`tests/**`, `src/**`) and literal
+  filenames (`pytest.ini`) — the shapes every shipped recipe uses.
+- **Hidden trees are hashed**: baseline manifests include hidden files by design
+  (a dotfile inside a fenced glob must not be an invisible edit channel). Under
+  broad globs this also pulls in `.venv/`-style trees — only `.git/`,
+  `__pycache__/`, `*.pyc` are ignored. Keep `baseline_globs` narrow.
