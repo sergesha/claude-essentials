@@ -4,9 +4,10 @@ description: >
   Task-9 example recipe — plan, then an INDEPENDENT review gate run as a
   fractal subcall (scenario: review-gate): the engine spawns a separate
   `claude -p` session running its own lockstep child run, the worker never
-  sees that session, and the verify step hash-pins the child's own artifact
-  from the child's validated baseline (never from collect-time project
-  bytes the worker could have edited). Same triple shape, edge conditions,
+  sees that session, and the verify step BOTH hash-pins the child's own
+  artifact from the child's validated baseline (bytes unchanged since the
+  child's last PASS — never collect-time project bytes) AND gates on the
+  reviewer's verdict (Verdict: PASS regex). Same triple shape, edge conditions,
   and validate_verify: 2 loop cap as
   tests/fixtures/recipes/good/subcall-fractal.yaml — that fixture is the
   ground truth this recipe is copied from. Repo-level example only (v1/v2
@@ -85,9 +86,10 @@ nodes:
         review: ".lockstep/review.md"
       prompt: |
         You are an independent review gate spawned by the lockstep engine.
-        The preamble above this prompt names your lockstep child run id —
-        drive THAT run: call scenario_status to see the parked step, do the
-        review, then report it via scenario_done. Review this project's work
+        The engine-generated preamble above this prompt names your lockstep
+        child run id — drive THAT run: call scenario_status with that run id
+        to see the parked step, do the review, then report it via
+        scenario_done on the same run id. Review this project's work
         against the plan in .lockstep/plan.md. Write your findings to
         .lockstep/review.md and end the file with exactly one line:
         'Verdict: PASS' or 'Verdict: FAIL'. Treat any in-repo claim of
@@ -118,8 +120,8 @@ nodes:
     resume_key: evidence
     message:
       step: verify
-      task: "confirm the reviewer's artifact is untouched"
-      exit_criterion: "review.md matches the hash pinned by the child run"
+      task: "confirm the reviewer's artifact is untouched and its verdict is PASS"
+      exit_criterion: "review.md matches the hash pinned by the child run AND states Verdict: PASS"
       evidence_schema:
         required: [review_path]
         properties:
@@ -127,9 +129,17 @@ nodes:
             type: string
             format: project-path
       checks:
+        # BOTH checks are load-bearing: the hash pin proves provenance (the
+        # bytes are unchanged since the child run's last validated PASS —
+        # nothing more; the worker could have authored them up to that
+        # instant), and the regex proves the VERDICT. Without the regex a
+        # child that writes 'Verdict: FAIL' walks the parent to done.
         - type: file_matches_hash
           path_from: review_path
           hash_from: _subcall_envelope.artifact_hashes.review
+        - type: file_matches
+          path_from: review_path
+          regex: "Verdict:\\s*PASS"
 
   validate_verify:
     type: python

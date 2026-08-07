@@ -54,6 +54,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import time
 import uuid
 from datetime import datetime, timezone
@@ -121,6 +122,22 @@ class Engine:
 
     def _snapshot_path(self, run_id: str) -> Path:
         return self._runs_dir() / f"{run_id}.recipe.yaml"
+
+    def _child_snapshot_path(self, run_id: str, scenario: str) -> Path:
+        """C2: the pinned copy of a fractal child recipe, taken when THIS run
+        started. `_start_child` launches from it — never from the live,
+        agent-writable recipes dir — so a mid-run edit to a child recipe is
+        as inert as one to the parent's own recipe."""
+        return self._runs_dir() / f"{run_id}.child.{scenario}.yaml"
+
+    @staticmethod
+    def _marker_messages(doc: dict) -> list[dict]:
+        out = []
+        for cfg in (doc.get("nodes") or {}).values():
+            msg = cfg.get("message") if isinstance(cfg, dict) else None
+            if isinstance(msg, dict) and msg.get("step") == "_subcall":
+                out.append(msg)
+        return out
 
     def _vars_path(self, run_id: str) -> Path:
         return self._runs_dir() / f"{run_id}.vars.json"
@@ -343,13 +360,16 @@ class Engine:
         return self._launch(recipe, vars, project)
 
     def _launch(self, recipe: str, vars: dict, project: str,  # noqa: A002 - mirrors start()
-                parent_run: str | None = None, nonce: str | None = None) -> dict:
+                parent_run: str | None = None, nonce: str | None = None,
+                src: Path | None = None) -> dict:
         """m7.8: start()'s body after the hostile-var check, extracted so a
         fractal child run launches through the exact same staging + profile
         + cli_validate + baseline path. `RunIndex.create` is the ONLY writer
-        of parent_run/nonce (immutability holds)."""
+        of parent_run/nonce (immutability holds). `src` overrides recipe-name
+        resolution — `_start_child` passes the parent's PINNED child copy so
+        the child never launches from the live recipes dir (C2)."""
         vars = vars or {}  # noqa: A001 - mirrors start()
-        src = self.recipe_path(recipe)
+        src = src if src is not None else self.recipe_path(recipe)
         if not src.exists():
             raise LockstepError(f"recipe not found: {recipe}")
         raw_bytes = src.read_bytes()
@@ -357,11 +377,25 @@ class Engine:
         runs_dir = self._runs_dir()
         staging = runs_dir / f".staging-{uuid.uuid4().hex}.yaml"
         staging.write_bytes(raw_bytes)
+        # C2: fractal child recipes are copied out of the agent-writable
+        # recipes dir ONCE, here, at this run's start. The profile check runs
+        # against these staged copies (no check-then-act on a name the worker
+        # owns), and on success they become runs/<id>.child.<scenario>.yaml —
+        # the ONLY source `_start_child` will launch from.
+        doc = yaml.safe_load(raw_bytes) or {}
+        scenarios = sorted({m["scenario"] for m in self._marker_messages(doc)
+                            if isinstance(m.get("scenario"), str) and m["scenario"]})
+        child_staging = runs_dir / f".staging-children-{uuid.uuid4().hex}"
         try:
+            child_staging.mkdir()
+            for scenario in scenarios:
+                live = self._recipes_dir / f"{scenario}.yaml"
+                if live.exists():
+                    (child_staging / f"{scenario}.yaml").write_bytes(live.read_bytes())
             # child_recipes_dir: the staging copy lives in state_dir/runs/,
             # where "beside the recipe" resolves to nothing.
             profile_errors = profile_check.check_recipe(
-                staging, child_recipes_dir=self._recipes_dir
+                staging, child_recipes_dir=child_staging
             )
             if profile_errors:
                 raise LockstepError(
@@ -371,11 +405,31 @@ class Engine:
             if not ok:
                 raise LockstepError(f"recipe {recipe!r} failed to compile: {msg}")
 
+            # I1: loud START-time refusal for an unlisted runner, a relative/
+            # non-executable path, or an empty models allowlist — never N steps
+            # of real work followed by a wedge at the first spawn-bearing gate.
+            # Budgets/depth stay done()-time (they depend on runtime state);
+            # this resolve also re-runs there, so a mid-run runners.yaml
+            # removal is still refused at the gate.
+            for m in self._marker_messages(doc):
+                try:
+                    runners.resolve(self._state_dir, m.get("runner"), os.environ)
+                except runners.RunnerError as exc:
+                    raise LockstepError(
+                        f"recipe {recipe!r}, subcall marker "
+                        f"'{m.get('node')}': runner unavailable at start: {exc}"
+                    ) from exc
+
             record = self._runs.create(recipe, project, parent_run=parent_run, nonce=nonce)
             staging.replace(self._snapshot_path(record.run_id))
+            for scenario in scenarios:
+                staged = child_staging / f"{scenario}.yaml"
+                if staged.exists():
+                    staged.replace(self._child_snapshot_path(record.run_id, scenario))
         finally:
             if staging.exists():
                 staging.unlink()
+            shutil.rmtree(child_staging, ignore_errors=True)
 
         run_id = record.run_id
         self._vars_path(run_id).write_text(json.dumps(vars))
@@ -774,13 +828,20 @@ class Engine:
     # ------------------------------------------------------------------
 
     def _start_child(self, parent: RunRecord, scenario: str) -> tuple[str, str]:
-        """Mint the child run through the ONE launch path. The child recipe
-        resolves against the PARENT engine's recipes_dir (recipe_path) —
-        the ONE resolution path (m7.9); the child session's own server gets
-        the same dir via the pinned LOCKSTEP_RECIPES in child_env."""
+        """Mint the child run through the ONE launch path — from the child
+        recipe copy PINNED at the parent's start (C2), never the live
+        recipes dir: the spawn happens one or more worker turns after
+        start(), and the live file is agent-writable in that window. The
+        pinned copy carries the parent run's provenance; the child's own
+        markers (depth-2) are pinned again at the child's start."""
         nonce = secrets.token_hex(16)
+        pinned = self._child_snapshot_path(parent.run_id, scenario)
+        if not pinned.exists():
+            raise LockstepError(
+                f"pinned child recipe missing for run {parent.run_id}: {scenario!r} "
+                "(the parent snapshot was made without it — state dir corrupt?)")
         out = self._launch(scenario, {}, parent.project,
-                           parent_run=parent.run_id, nonce=nonce)
+                           parent_run=parent.run_id, nonce=nonce, src=pinned)
         return out["run_id"], nonce
 
     def _ensure_child(self, parent: RunRecord, scenario: str, workdir: Path) -> tuple[str, str]:
@@ -875,6 +936,19 @@ class Engine:
         child_run = nonce = None
         if marker.get("scenario"):
             child_run, nonce = self._ensure_child(record, str(marker["scenario"]), workdir)
+            # C3: the child learns its run id HERE, in an engine-generated
+            # preamble prepended to the author prompt — never author-supplied
+            # (the author prompt is verbatim recipe text; the run id exists
+            # only now). Without this the spawned session must guess its run
+            # from the SessionStart listing or shell out for the env var.
+            prompt = (
+                f"Your lockstep child run id is {child_run}. The engine started that run "
+                "for you and this session holds its credential — no other session can "
+                "report for it. Drive THAT run: call the lockstep MCP tool scenario_status "
+                f"with run_id {child_run!r} to see the parked step, do the work, then report "
+                "it via scenario_done on the same run id (scenario_escalate if blocked).\n\n"
+                + prompt
+            )
         env = runners.child_env(os.environ, self._state_dir, child_run, nonce)
         env["LOCKSTEP_RECIPES"] = str(self._recipes_dir)   # child resolves recipes where its parent did — pinned, not inherited
         argv = subcalls.safe_argv(spec, prompt, None, None)  # model defaults to spec.models[0]; v2 never resumes runner sessions
