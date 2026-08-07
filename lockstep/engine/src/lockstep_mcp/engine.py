@@ -480,6 +480,7 @@ class Engine:
             "_baseline_start": str(self._baseline_start_path(run_id)),
             "_baseline_prev": str(self._current_prev_baseline_path(run_id)),
             "_baseline_globs": globs,
+            "_state": self._peek_state(run_id),
         }
         verdict = validators.run_checks(state, execute=True)
         vstatus = verdict["verdict_status"]

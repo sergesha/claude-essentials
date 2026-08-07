@@ -169,6 +169,41 @@ def _check_file_matches(check: dict, evidence: dict, ctx: dict) -> list[str]:
     return []
 
 
+def _resolve_state_path(dotted: str, state_blob: dict) -> tuple[bool, Any]:
+    """(present, value) — the flag distinguishes 'key absent' from 'value
+    falsy'; a bare .get() chain conflates them into fail-open ambiguity."""
+    cur: Any = state_blob
+    for part in dotted.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return False, None
+        cur = cur[part]
+    return True, cur
+
+
+def _check_file_matches_hash(check: dict, evidence: dict, ctx: dict) -> list[str]:
+    raw, err = _get_path(check, evidence)
+    if err:
+        return [f"file_matches_hash: {err}"]
+    hash_from = check.get("hash_from")
+    if not isinstance(hash_from, str) or not hash_from:
+        return ["file_matches_hash requires 'hash_from'"]
+    present, expected = _resolve_state_path(hash_from, ctx.get("_state") or {})
+    if not present:
+        # RuntimeError -> run_checks' blanket except -> error verdict: no
+        # resume, no retry-budget burn (decision 16)
+        raise RuntimeError(f"hash pin '{hash_from}' not present in run state")
+    if not isinstance(expected, str) or not expected:
+        raise RuntimeError(f"hash pin '{hash_from}' present but not a hex digest: {expected!r}")
+    resolved = _resolve_path(raw, ctx.get("_project"))
+    if not resolved.exists():
+        return [f"file_matches_hash: {raw} does not exist"]
+    actual = hashlib.sha256(resolved.read_bytes()).hexdigest()
+    if actual != expected:
+        return [f"file_matches_hash: hash mismatch for {raw} — "
+                "artifact changed after the subcall pinned it"]
+    return []
+
+
 # ---------------------------------------------------------------------------
 # command checks
 # ---------------------------------------------------------------------------
@@ -443,6 +478,7 @@ CHECKS: dict[str, Callable[[dict, dict, dict], list[str]]] = {
     "file_nonempty": _check_file_nonempty,
     "md_has_sections": _check_md_has_sections,
     "file_matches": _check_file_matches,
+    "file_matches_hash": _check_file_matches_hash,
     "cmd_ok": _check_cmd_ok,
     "git_clean": _check_git_clean,
     "junit_gate": _check_junit_gate,
@@ -472,6 +508,7 @@ def run_checks(state: dict[str, Any], execute: bool = False) -> dict[str, Any]:
         "_baseline_start": state.get("_baseline_start"),
         "_baseline_prev": state.get("_baseline_prev"),
         "_baseline_globs": state.get("_baseline_globs") or [],
+        "_state": state.get("_state") or {},
     }
 
     if not checks:
