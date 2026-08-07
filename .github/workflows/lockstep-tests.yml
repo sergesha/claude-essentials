@@ -1,0 +1,35 @@
+name: lockstep-tests
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "lockstep/engine/**"
+      - ".github/workflows/lockstep-tests.yml"
+  pull_request:
+    paths:
+      - "lockstep/engine/**"
+      - ".github/workflows/lockstep-tests.yml"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+
+      - name: uv sync
+        working-directory: lockstep/engine
+        run: uv sync
+
+      - name: pytest
+        working-directory: lockstep/engine
+        run: uv run pytest tests -v
