@@ -53,6 +53,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import secrets
 import time
 import uuid
 from datetime import datetime, timezone
@@ -263,6 +264,7 @@ class Engine:
         if adv.done:
             if record.status != "done":
                 record = self._runs.update(run_id, status="done", brief=None)
+                self._cascade_terminate(run_id)
             return record
 
         if adv.brief is None:
@@ -276,6 +278,7 @@ class Engine:
                     step="escalate",
                     brief={"step": "escalate", "reason": "loop limit reached"},
                 )
+                self._cascade_terminate(run_id)
             return record
 
         if adv.brief.step == "_subcall":
@@ -337,6 +340,15 @@ class Engine:
         hostile = sorted(k for k in vars if k.startswith("_") or k in _RESERVED_VAR_KEYS)
         if hostile:
             raise LockstepError(f"reserved/hostile var key(s) rejected: {hostile}")
+        return self._launch(recipe, vars, project)
+
+    def _launch(self, recipe: str, vars: dict, project: str,  # noqa: A002 - mirrors start()
+                parent_run: str | None = None, nonce: str | None = None) -> dict:
+        """m7.8: start()'s body after the hostile-var check, extracted so a
+        fractal child run launches through the exact same staging + profile
+        + cli_validate + baseline path. `RunIndex.create` is the ONLY writer
+        of parent_run/nonce (immutability holds)."""
+        vars = vars or {}  # noqa: A001 - mirrors start()
         src = self.recipe_path(recipe)
         if not src.exists():
             raise LockstepError(f"recipe not found: {recipe}")
@@ -359,7 +371,7 @@ class Engine:
             if not ok:
                 raise LockstepError(f"recipe {recipe!r} failed to compile: {msg}")
 
-            record = self._runs.create(recipe, project)
+            record = self._runs.create(recipe, project, parent_run=parent_run, nonce=nonce)
             staging.replace(self._snapshot_path(record.run_id))
         finally:
             if staging.exists():
@@ -533,6 +545,7 @@ class Engine:
                     step="escalate",
                     brief={"step": "escalate", "reason": "; ".join(reasons) or "loop limit reached"},
                 )
+                self._cascade_terminate(run_id)
                 self._log_transition(run_id, step, "fail", "escalate")
                 return {
                     "accepted": True,
@@ -577,6 +590,7 @@ class Engine:
                 step="escalate",
                 brief={"step": "escalate", "reason": note},
             )
+            self._cascade_terminate(run_id)
             self._log_transition(run_id, step, "pass", "escalate")
             return {
                 "accepted": True,
@@ -595,6 +609,7 @@ class Engine:
 
         if adv.done:
             self._runs.update(run_id, status="done", step=step, brief=None)
+            self._cascade_terminate(run_id)
             self._log_transition(run_id, step, "pass", None)
             return {
                 "accepted": True,
@@ -638,6 +653,7 @@ class Engine:
             step="escalate",
             brief={"step": "escalate", "reason": reason},
         )
+        self._cascade_terminate(run_id)
         return {"run_id": run_id, "status": "escalated", "reason": reason}
 
     def abort(self, run_id: str) -> dict:
@@ -646,6 +662,7 @@ class Engine:
         if record.status != "awaiting":
             raise LockstepError(f"run {run_id} is {record.status} — terminal")
         self._runs.update(run_id, status="aborted")
+        self._cascade_terminate(run_id)
         return {"run_id": run_id, "status": "aborted"}
 
     # ------------------------------------------------------------------
@@ -752,6 +769,94 @@ class Engine:
                         f"max_fractal_depth={spec.max_fractal_depth}")
         return None
 
+    # ------------------------------------------------------------------
+    # Task 7: fractal child runs — creation + recursive termination
+    # ------------------------------------------------------------------
+
+    def _start_child(self, parent: RunRecord, scenario: str) -> tuple[str, str]:
+        """Mint the child run through the ONE launch path. The child recipe
+        resolves against the PARENT engine's recipes_dir (recipe_path) —
+        the ONE resolution path (m7.9); the child session's own server gets
+        the same dir via the pinned LOCKSTEP_RECIPES in child_env."""
+        nonce = secrets.token_hex(16)
+        out = self._launch(scenario, {}, parent.project,
+                           parent_run=parent.run_id, nonce=nonce)
+        return out["run_id"], nonce
+
+    def _ensure_child(self, parent: RunRecord, scenario: str, workdir: Path) -> tuple[str, str]:
+        """C7.1 idempotence, race-safe (fresh finding A): a plain
+        read-check-create on child.json is last-writer-wins under two
+        concurrent scenario_done calls parked on the same marker — both
+        would mint a child, and the runner spawned with the LOSING child's
+        nonce could never drive the winner's child. So the workdir's
+        child.json is CLAIMED with O_CREAT|O_EXCL BEFORE _start_child (the
+        claim pattern of locking.file_lock / the single-start claim); the
+        loser reads back the winner's (child_run, index-record nonce).
+        Called ONLY from _subcall_ctx (spawn path) — _poll_ctx reads
+        child.json and NEVER creates."""
+        workdir = Path(workdir)
+        workdir.mkdir(parents=True, exist_ok=True)
+        child_file = workdir / "child.json"
+        deadline = time.time() + 30.0
+        while True:
+            try:
+                fd = os.open(child_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                try:
+                    data = json.loads(child_file.read_text())
+                except (OSError, ValueError):
+                    data = None
+                if isinstance(data, dict) and data.get("child_run"):
+                    child_run = str(data["child_run"])
+                    return child_run, self._runs.get(child_run).nonce
+                # Claimed but unfilled: the winner is mid-_start_child (wait
+                # for the fill) or died between claim and fill. O_EXCL can
+                # never win against an EXISTING empty file, so self-healing
+                # needs the stale claim removed first — only after a wait
+                # long past any legitimate fill.
+                if time.time() > deadline:
+                    try:
+                        os.unlink(child_file)
+                    except OSError:
+                        pass
+                    deadline = time.time() + 30.0
+                else:
+                    time.sleep(0.01)
+                continue
+            os.close(fd)
+            try:
+                child_run, nonce = self._start_child(parent, scenario)
+            except BaseException:
+                try:
+                    os.unlink(child_file)   # release the claim: nothing was minted
+                except OSError:
+                    pass
+                raise
+            tmp = workdir / f"child.json.{os.getpid()}.{time.time_ns()}.tmp"
+            tmp.write_text(json.dumps({"child_run": child_run}))
+            os.replace(tmp, child_file)     # atomic fill: a reader never sees a torn record
+            return child_run, nonce
+
+    def _cascade_terminate(self, run_id: str) -> None:
+        """I7.6/I7.7: called after EVERY index write that sets a terminal
+        status (double-calls are harmless: terminate()'s verdict claim is
+        first-writer-wins and the terminal CAS is idempotent). Recursion is
+        RunIndex.descendants — grandchildren included, cycle-safe."""
+        affected = [self._runs.get(run_id)] + self._runs.descendants(run_id)
+        # kill FIRST, then flip: a flipped-but-alive child could still race
+        # one last tool call (its server refuses on the terminal record
+        # either way, but the order removes the window instead of
+        # tolerating it).
+        for rec in affected:
+            subcalls_dir = self._state_dir / "runs" / f"{rec.run_id}.subcalls"
+            if subcalls_dir.exists():
+                for wd in subcalls_dir.glob("*"):
+                    if wd.is_dir():
+                        subcalls.terminate(wd)   # claims 'cancelled' first-writer-wins; already-terminal workdirs untouched
+        for rec in self._runs.descendants(run_id):
+            if rec.status not in TERMINAL_STATUSES:
+                self._runs.update(rec.run_id, status="aborted")   # CAS skips completed children
+
     def _subcall_ctx(self, run_id: str, record: RunRecord, spawn_node: str) -> dict:
         doc = self._snapshot_doc(run_id)
         marker = self._spawn_marker(doc, spawn_node)
@@ -769,7 +874,7 @@ class Engine:
         prompt = marker["prompt"]                          # profile-required; KeyError impossible on a profiled snapshot
         child_run = nonce = None
         if marker.get("scenario"):
-            raise LockstepError("fractal subcalls land in Task 7")
+            child_run, nonce = self._ensure_child(record, str(marker["scenario"]), workdir)
         env = runners.child_env(os.environ, self._state_dir, child_run, nonce)
         env["LOCKSTEP_RECIPES"] = str(self._recipes_dir)   # child resolves recipes where its parent did — pinned, not inherited
         argv = subcalls.safe_argv(spec, prompt, None, None)  # model defaults to spec.models[0]; v2 never resumes runner sessions
@@ -821,12 +926,14 @@ class Engine:
             # actually just finished.
             marker = record.brief or {}
             self._runs.update(run_id, status="done", step=marker.get("node", "_subcall"), brief=None)
+            self._cascade_terminate(run_id)
             self._log_transition(run_id, "_subcall", "done", None)
         elif adv.brief is not None and adv.brief.step == "escalate":
             env = self._peek_state(run_id).get("_subcall_envelope") or {}
             reason = "; ".join(str(r) for r in (env.get("reasons") or [])) or "subcall failed"
             self._runs.update(run_id, status="escalated", step="escalate",
                               brief={"step": "escalate", "reason": reason})
+            self._cascade_terminate(run_id)
             self._log_transition(run_id, "_subcall", "error", "escalate")
         elif adv.brief is not None and adv.brief.step == "_subcall":
             pass                                           # still parked; index brief already true

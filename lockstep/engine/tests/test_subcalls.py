@@ -229,6 +229,84 @@ def test_poll_preserves_spawn_failure_reason_over_probe_miss(tmp_path):
     assert any("spawn failed" in r for r in res["_subcall_envelope"]["reasons"])
 
 
+# --- fractal poll units: hand-written child index + baseline, no live child
+# --- (C7.2) ------------------------------------------------------------------
+
+def _fractal_src(tmp_path, wd, child_run="child-review-aaaa1111"):
+    state_dir = tmp_path / "state"
+    (state_dir / "runs").mkdir(parents=True, exist_ok=True)
+    return {"_subcall_workdir": str(wd), "_subcall_node": "review",
+            "_subcall_runner": "claude", "_subcall_child_run": child_run,
+            "_subcall_state_dir": str(state_dir),
+            "_subcall_artifacts": {"review": ".lockstep/review.md"}}, state_dir
+
+
+def _seed_child(state_dir, child_run, status):
+    rec = {"run_id": child_run, "recipe": "child-review", "project": "/proj",
+           "status": status, "step": None, "brief": None,
+           "started": "2026-08-07T00:00:00+00:00", "updated": "2026-08-07T00:00:00+00:00",
+           "parent_run": "parent-1", "nonce": "n"}
+    (state_dir / "runs.json").write_text(json.dumps({child_run: rec}))
+
+
+def _seed_child_baseline(state_dir, child_run, manifest):
+    (state_dir / "runs" / f"{child_run}.baseline_index").write_text("1")
+    (state_dir / "runs" / f"{child_run}.baseline.1.json").write_text(json.dumps(manifest))
+
+
+def test_fractal_poll_running_while_child_awaiting_and_process_alive(tmp_path):
+    src, state_dir = _fractal_src(tmp_path, tmp_path / "wd")
+    _seed_child(state_dir, src["_subcall_child_run"], "awaiting")
+    subcalls.start_process(_argv("--sleep", "30"), cwd=str(tmp_path),
+                           env=dict(os.environ), workdir=tmp_path / "wd", timeout_minutes=5)
+    out = subcalls.poll({"evidence": src})
+    assert out["_subcall_status"] == "running"
+
+
+def test_fractal_poll_done_collects_child_baseline_hashes_and_is_stable(tmp_path):
+    src, state_dir = _fractal_src(tmp_path, tmp_path / "wd")
+    _seed_child(state_dir, src["_subcall_child_run"], "done")
+    digest = "f" * 64
+    _seed_child_baseline(state_dir, src["_subcall_child_run"], {".lockstep/review.md": digest})
+    out = subcalls.poll({"evidence": src})
+    env = out["_subcall_envelope"]
+    assert out["_subcall_status"] == "done"
+    assert env["child_status"] == "done" and env["artifact_hashes"] == {"review": digest}
+    # stable: child terminal decides BEFORE any probe — terminate()'s
+    # cancelled verdict must never flip a done envelope on the next poll
+    again = subcalls.poll({"evidence": src})
+    assert again["_subcall_status"] == "done"
+    assert again["_subcall_envelope"]["artifact_hashes"] == {"review": digest}
+
+
+def test_fractal_poll_errors_when_artifact_missing_from_child_baseline(tmp_path):
+    src, state_dir = _fractal_src(tmp_path, tmp_path / "wd")
+    _seed_child(state_dir, src["_subcall_child_run"], "done")
+    _seed_child_baseline(state_dir, src["_subcall_child_run"], {})   # nothing pinned
+    out = subcalls.poll({"evidence": src})
+    assert out["_subcall_status"] == "error"
+    assert any("review" in r for r in out["_subcall_envelope"]["reasons"])
+
+
+def test_fractal_poll_errors_on_escalated_child(tmp_path):
+    src, state_dir = _fractal_src(tmp_path, tmp_path / "wd")
+    _seed_child(state_dir, src["_subcall_child_run"], "escalated")
+    out = subcalls.poll({"evidence": src})
+    assert out["_subcall_status"] == "error"
+    assert out["_subcall_envelope"]["child_status"] == "escalated"
+
+
+def test_fractal_poll_errors_when_process_died_but_child_awaiting(tmp_path):
+    src, state_dir = _fractal_src(tmp_path, tmp_path / "wd")
+    _seed_child(state_dir, src["_subcall_child_run"], "awaiting")
+    subcalls.start_process(_argv("--mode", "ok"), cwd=str(tmp_path),
+                           env=dict(os.environ), workdir=tmp_path / "wd", timeout_minutes=5)
+    _wait_terminal(tmp_path / "wd")
+    out = subcalls.poll({"evidence": src})
+    assert out["_subcall_status"] == "error"
+    assert any(src["_subcall_child_run"] in r for r in out["_subcall_envelope"]["reasons"])
+
+
 # --- resume_session shape gate (obligation 2) --------------------------------
 
 def _spec():

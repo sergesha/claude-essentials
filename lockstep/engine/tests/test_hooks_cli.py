@@ -230,6 +230,33 @@ def test_pretool_cross_project_run_stays_denied(tmp_path):
     assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
+def test_pretool_descendant_unlock_dies_with_terminal_ancestor(tmp_path):
+    # I7.4: descendant unlock is IMPLIED by the v1 predicate — a fractal
+    # child exists only while its parent chain ends in an AWAITING run of
+    # the policy recipe, and that run alone unlocks the project. This test
+    # pins the death half: once the ancestor is terminal, a still-awaiting
+    # descendant (as if the cascade had not caught it yet) must NOT hold
+    # the gate open. Catches the naive descendant-linkage variant that
+    # unlocks whenever any run's parent chain reaches a policy-recipe run,
+    # regardless of that ancestor's status.
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    state_dir = tmp_path / "state"
+    _write_policy(state_dir, str(proj), "feature-dev")
+    idx = RunIndex(state_dir)
+    parent = idx.create("feature-dev", str(proj.resolve()))
+    idx.create("child-review", str(proj.resolve()), parent_run=parent.run_id, nonce="n")
+
+    exit_code, out = cli.hook_pretool({"cwd": str(proj)}, state_dir)
+    assert exit_code == 0 and out == ""        # ancestor awaiting: unlocked
+
+    idx.update(parent.run_id, status="escalated")
+    exit_code, out = cli.hook_pretool({"cwd": str(proj)}, state_dir)
+    assert exit_code == 0
+    data = json.loads(out)
+    assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
 def test_pretool_exception_denies(tmp_path, monkeypatch):
     proj = tmp_path / "proj"
     proj.mkdir()

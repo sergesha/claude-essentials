@@ -44,6 +44,10 @@ MARKERS = {
     "subcall-infinite-timeout.yaml": "positive number of minutes",
     "subcall-spawn-edge-condition.yaml": "verdict_status equality",
     "subcall-no-prompt.yaml": "prompt",
+    # Task 7: a START -> spawn edge bypasses done()-time policy prediction
+    # and fires with an empty evidence channel — a spawn must follow a
+    # validator.
+    "subcall-start-spawn.yaml": "must not be entered from START",
 }
 
 
@@ -53,7 +57,7 @@ def test_good_recipes_pass():
 
 
 def test_each_bad_fixture_yields_its_violation():
-    assert len(MARKERS) == 21
+    assert len(MARKERS) == 22
     for fixture, marker in MARKERS.items():
         errors = check_recipe(BAD / fixture)
         assert errors, f"{fixture}: expected errors, got none"

@@ -44,6 +44,7 @@ from pathlib import Path
 from typing import Any
 
 from lockstep_mcp.runners import RunnerError, RunnerSpec, build_argv, verified_path
+from lockstep_mcp.runs import RunIndex  # no cycle: runs imports only locking
 
 _PROC = "proc.json"
 _OUT = "stdout.txt"
@@ -328,6 +329,82 @@ def spawn(state: dict) -> dict:
     return {"_subcall_status": "running", "_subcall_envelope": _envelope(src)}
 
 
+def _collect_artifacts(state_dir: Path, child_run: str, artifacts: dict) -> tuple[dict, list[str]]:
+    """Resolve the marker's `artifacts:` map against the child run's LAST
+    baseline snapshot (`runs/<child>.baseline.<n>.json`, `n` from
+    `runs/<child>.baseline_index` — written by the child's OWN engine at
+    its last PASS, inside the denied state dir). A mapped path absent from
+    the manifest is a problem naming the artifact (fail closed)."""
+    runs_dir = Path(state_dir) / "runs"
+    try:
+        n = int((runs_dir / f"{child_run}.baseline_index").read_text().strip())
+        manifest = json.loads((runs_dir / f"{child_run}.baseline.{n}.json").read_text())
+    except (OSError, ValueError) as exc:
+        return {}, [f"child run {child_run}: cannot read its final baseline snapshot ({exc})"]
+    if not isinstance(manifest, dict):
+        return {}, [f"child run {child_run}: final baseline snapshot is not a manifest"]
+    hashes: dict = {}
+    problems: list[str] = []
+    for name, path in (artifacts or {}).items():
+        digest = manifest.get(path)
+        if digest is None:
+            problems.append(f"artifact '{name}' ({path}) is absent from child run "
+                            f"{child_run}'s final baseline — fail closed")
+        else:
+            hashes[name] = digest
+    return hashes, problems
+
+
+def _poll_fractal(src: dict, workdir: Path) -> dict:
+    """C7.2 — completion is the CHILD RUN's terminal status, never the OS
+    process (a `claude -p` child can exit while its run is still awaiting,
+    and vice versa). The status comes from a plain lock-free
+    `RunIndex(state_dir).get(child_run)` — safe because every writer
+    publishes via atomic os.replace; this reads the file the lock protects,
+    never the child's checkpoint db. Child-terminal decides BEFORE any
+    probe, so repeated polls are stable: terminate()'s cancelled verdict
+    can never flip a done envelope."""
+    child_run = str(src["_subcall_child_run"])
+    state_dir = Path(src.get("_subcall_state_dir") or "")
+    try:
+        rec = RunIndex(state_dir).get(child_run)
+    except (KeyError, OSError, ValueError):
+        return {"_subcall_status": "error",
+                "_subcall_envelope": _envelope(
+                    src, reasons=[f"child run {child_run} not found in the run index"])}
+    if rec.status == "done":
+        hashes, problems = _collect_artifacts(state_dir, child_run,
+                                              src.get("_subcall_artifacts") or {})
+        try:
+            terminate(workdir)   # best-effort: a session whose run is terminal has no purpose
+        except Exception:  # noqa: BLE001
+            pass
+        if problems:
+            return {"_subcall_status": "error",
+                    "_subcall_envelope": _envelope(src, child_status="done", reasons=problems)}
+        return {"_subcall_status": "done",
+                "_subcall_envelope": _envelope(src, child_status="done", artifact_hashes=hashes)}
+    if rec.status in ("escalated", "aborted"):
+        try:
+            terminate(workdir)
+        except Exception:  # noqa: BLE001
+            pass
+        return {"_subcall_status": "error",
+                "_subcall_envelope": _envelope(
+                    src, child_status=rec.status,
+                    reasons=[f"child run {child_run} is {rec.status}"])}
+    # child still awaiting: only now does the OS session matter
+    res = probe(workdir)
+    if res["status"] == "running":
+        return {"_subcall_status": "running",
+                "_subcall_envelope": _envelope(src, child_status=rec.status)}
+    return {"_subcall_status": "error",
+            "_subcall_envelope": _envelope(
+                src, child_status=rec.status, exit_code=res.get("exit_code"),
+                reasons=[f"runner session ended ({res['status']}) while child run "
+                         f"{child_run} is still awaiting"])}
+
+
 def poll(state: dict) -> dict:
     # Keeps the FULL top-level `state` too: `_subcall_envelope` is a declared
     # top-level channel threading across ticks — the PRIOR envelope (e.g. the
@@ -339,6 +416,8 @@ def poll(state: dict) -> dict:
     wd = _workdir(src)
     if wd is None:
         return {"_subcall_status": "error", "_subcall_envelope": _envelope(src, reasons=["subcall ctx missing"])}
+    if src.get("_subcall_child_run"):
+        return _poll_fractal(src, wd)
     res = probe(wd)
     status = {"running": "running", "done": "done", "error": "error", "timeout": "error"}[res["status"]]
     reasons = list(res.get("reasons") or [])
