@@ -7,6 +7,8 @@ case) - 14 bad fixtures total, plus one warning fixture.
 
 from pathlib import Path
 
+import pytest
+
 from lockstep_mcp import yamlgraph_api as yg
 from lockstep_mcp.profile_check import check_recipe, check_recipe_full
 
@@ -34,6 +36,14 @@ MARKERS = {
     "not-idempotent.yaml": "idempotent",
     # EXTRA (spike finding 3 gate shape): loop_exits -> interrupt directly.
     "loop-exit-direct-to-interrupt.yaml": "gated through passthrough",
+    # Task 4 (v2): subcall triple rules
+    "subcall-no-poll.yaml": "poll",
+    "subcall-spawn-not-direct.yaml": "direct conditional successor",
+    "subcall-undeclared-state.yaml": "_subcall_status",
+    "subcall-bad-runner-name.yaml": "runner name",
+    "subcall-infinite-timeout.yaml": "positive number of minutes",
+    "subcall-spawn-edge-condition.yaml": "verdict_status equality",
+    "subcall-no-prompt.yaml": "prompt",
 }
 
 
@@ -43,7 +53,7 @@ def test_good_recipes_pass():
 
 
 def test_each_bad_fixture_yields_its_violation():
-    assert len(MARKERS) == 14
+    assert len(MARKERS) == 21
     for fixture, marker in MARKERS.items():
         errors = check_recipe(BAD / fixture)
         assert errors, f"{fixture}: expected errors, got none"
@@ -64,6 +74,30 @@ def test_bad_fixture_count_matches_marker_map():
     # every fixture in BAD/ is either a marker-mapped error case or the
     # dedicated warning fixture - nothing stray, nothing missing.
     assert bad_fixtures == set(MARKERS) | {"local-tools-py.yaml"}
+
+
+SUB = GOOD / "subcall-one-shot.yaml"
+
+
+def test_good_subcall_recipe_passes():
+    # errs == [] also proves the marker exemption: this marker has no
+    # task/exit_criterion/checks and no validator pairing — only the
+    # third-interrupt-class exemption lets it pass (m4.8: no separate
+    # vacuous exemption test).
+    assert check_recipe(SUB) == []
+
+
+@pytest.mark.skipif(
+    not (GOOD / "subcall-fractal.yaml").exists(), reason="Task 7 fixture"
+)
+def test_child_recipes_dir_kwarg_resolves_fractal_children(tmp_path):
+    # Engine.start() profiles a staging copy inside state_dir/runs/ —
+    # "beside the recipe" resolves to nothing there. The kwarg must fix it,
+    # and its ABSENCE must fail (proves the default is really beside-file).
+    staged = tmp_path / "staged.yaml"
+    staged.write_bytes((GOOD / "subcall-fractal.yaml").read_bytes())
+    assert any("not found" in e for e in check_recipe(staged))
+    assert check_recipe(staged, child_recipes_dir=GOOD) == []
 
 
 def test_example_recipes_pass_profile_and_validate():

@@ -1,0 +1,65 @@
+version: "1.0"
+name: subcall-one-shot
+description: >
+  Task-4 fixture — one work step, then a one-shot subcall triple
+  (spawn -> marker -> poll) with done -> END and error -> escalate.
+baseline_globs: [".lockstep/**"]
+state:
+  brief: dict
+  evidence: dict
+  verdict_status: str
+  verdict_reasons: list
+  _subcall_status: str
+  _subcall_envelope: dict
+tools:
+  run_checks:    {type: python, module: lockstep_mcp.validators, function: run_checks}
+  subcall_spawn: {type: python, module: lockstep_mcp.subcalls, function: spawn}
+  subcall_poll:  {type: python, module: lockstep_mcp.subcalls, function: poll}
+nodes:
+  step_plan:
+    type: interrupt
+    idempotent: false
+    state_key: brief
+    resume_key: evidence
+    message:
+      step: plan
+      task: "write the plan"
+      exit_criterion: "plan file exists"
+      evidence_schema:
+        required: [plan_path]
+        properties: {plan_path: {type: string, format: project-path}}
+      checks: [{type: file_exists, path_from: plan_path}]
+  validate_plan: {type: python, tool: run_checks}
+  review_spawn:  {type: python, tool: subcall_spawn}
+  review_wait:
+    type: interrupt
+    idempotent: false
+    state_key: brief
+    resume_key: evidence
+    message:
+      step: _subcall
+      node: review
+      runner: claude
+      timeout_minutes: 30
+      prompt: "Review the plan in .lockstep/plan.md and print a one-line verdict."
+  review_poll: {type: python, tool: subcall_poll}
+  escalate_gate: {type: passthrough, output: {}}
+  escalate:
+    type: interrupt
+    idempotent: false
+    state_key: brief
+    resume_key: evidence
+    message: {step: escalate}
+edges:
+  - {from: START, to: step_plan}
+  - {from: step_plan, to: validate_plan}
+  - {from: validate_plan, to: review_spawn, condition: "verdict_status != 'fail'"}
+  - {from: validate_plan, to: step_plan, condition: "verdict_status == 'fail'"}
+  - {from: review_spawn, to: review_wait}
+  - {from: review_wait, to: review_poll}
+  - {from: review_poll, to: review_wait, condition: "_subcall_status == 'running'"}
+  - {from: review_poll, to: END, condition: "_subcall_status == 'done'"}
+  - {from: review_poll, to: escalate_gate, condition: "_subcall_status == 'error'"}
+  - {from: escalate_gate, to: escalate}
+loop_limits: {validate_plan: 2}
+loop_exits:  {validate_plan: escalate_gate}
