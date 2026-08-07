@@ -1,7 +1,7 @@
 """Task 6 base: cli.py verb routing. `serve` is the default verb and runs
 the FastMCP app; `hook-stop`/`hook-session-start`/`hook-pretool`/`policy`
 are no-ops with nothing configured. `doctor`'s exit code now reflects
-health (m8: `--hooks-json`/dirs/heartbeat issues -> 1). This test asserts
+health (m8: dirs/heartbeat issues -> 1). This test asserts
 DISPATCH — the right handler is called for each verb — not a closed verb
 set.
 

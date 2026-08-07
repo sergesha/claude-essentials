@@ -10,8 +10,9 @@ Task 7 fills the hook/policy/doctor handlers:
   calls them directly) — the CLI wrappers are thin stdin/stdout plumbing.
 - `policy require|clear` writes/removes an owner-authored `policy.d/<slug>.yaml`
   file (decision 15) — the PreToolUse no-run gate reads these.
-- `doctor` is a v1-trimmed diagnostic report (dirs exist, hooks.json pin vs
-  installed version, heartbeat age, a suggested `uvx` pre-warm one-liner).
+- `doctor` is a v1-trimmed diagnostic report (dirs exist, heartbeat age,
+  installed version self-report — distribution is the plugin's own cloned
+  files run via `uv run`, so there is no version pin to check against).
 
 Fail-open vs fail-closed (Global Constraints): PreToolUse is the only gate
 that can actually stop an action, so `hook_pretool` is internally
@@ -287,13 +288,15 @@ def policy_clear(state_dir: Path, project: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# doctor (v1 trimmed — dirs exist, pin matches installed version, heartbeat
-# age, uvx pre-warm one-liner. NOT implemented: effective-settings
-# inspection, handler self-exec — those are v2.)
+# doctor (v1 trimmed — dirs exist, heartbeat age, installed version
+# self-report. No version-pin check: distribution is the plugin's own
+# cloned files run via `uv run --project ${CLAUDE_PLUGIN_ROOT}/engine`, so
+# there is nothing external to fall out of sync with. NOT implemented:
+# effective-settings inspection, handler self-exec — those are v2.)
 # ---------------------------------------------------------------------------
 
 
-def doctor(state_dir: Path, recipes_dir: Path, hooks_json: Path | str | None = None) -> tuple[bool, str]:
+def doctor(state_dir: Path, recipes_dir: Path) -> tuple[bool, str]:
     state_dir = Path(state_dir)
     recipes_dir = Path(recipes_dir)
     lines: list[str] = []
@@ -309,25 +312,6 @@ def doctor(state_dir: Path, recipes_dir: Path, hooks_json: Path | str | None = N
     check("recipes dir exists", recipes_dir.exists(), str(recipes_dir))
 
     installed = __version__
-    if hooks_json:
-        hp = Path(hooks_json)
-        if not hp.exists():
-            check("hooks.json pin matches installed version", False, f"not found: {hp}")
-        else:
-            import re
-
-            m = re.search(r"lockstep-mcp==([0-9]+\.[0-9]+\.[0-9]+)", hp.read_text())
-            if not m:
-                check("hooks.json pin matches installed version", False, "no version pin found")
-            else:
-                pinned = m.group(1)
-                check(
-                    "hooks.json pin matches installed version",
-                    pinned == installed,
-                    f"pinned={pinned} installed={installed}",
-                )
-    else:
-        lines.append("[SKIP] hooks.json pin check — no --hooks-json given")
 
     heartbeat_path = state_dir / "heartbeat.jsonl"
     if not heartbeat_path.exists():
@@ -355,7 +339,7 @@ def doctor(state_dir: Path, recipes_dir: Path, hooks_json: Path | str | None = N
         except Exception as exc:  # noqa: BLE001 - report, don't crash doctor
             check("heartbeat readable", False, str(exc))
 
-    lines.append(f"pre-warm: uvx lockstep-mcp=={installed} --version")
+    lines.append(f"installed version: {installed}")
 
     header = "lockstep doctor: " + ("all green" if ok else "issues found")
     return ok, header + "\n" + "\n".join(lines)
@@ -424,7 +408,7 @@ def _cmd_policy(args: argparse.Namespace) -> int:
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
-    ok, report = doctor(_state_dir(), _recipes_dir(), hooks_json=getattr(args, "hooks_json", None))
+    ok, report = doctor(_state_dir(), _recipes_dir())
     print(report)
     # m8: exit 1 on issues found — a CI/operator invocation must be able to
     # gate on this without scraping the report text. Distinct from the
@@ -458,8 +442,7 @@ def _build_parser() -> argparse.ArgumentParser:
             clear_parser = policy_sub.add_parser("clear")
             clear_parser.add_argument("--project", required=True)
         elif verb == "doctor":
-            doctor_parser = sub.add_parser("doctor")
-            doctor_parser.add_argument("--hooks-json", dest="hooks_json", default=None)
+            sub.add_parser("doctor")
         else:
             sub.add_parser(verb)
     return parser

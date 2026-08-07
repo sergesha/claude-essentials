@@ -288,34 +288,16 @@ def test_doctor_all_green(tmp_path):
     recipes_dir = tmp_path / "recipes"
     state_dir.mkdir()
     recipes_dir.mkdir()
-    hooks_json = tmp_path / "hooks.json"
-    hooks_json.write_text(
-        json.dumps(
-            {
-                "hooks": {
-                    "Stop": [
-                        {
-                            "hooks": [
-                                {
-                                    "type": "command",
-                                    "command": "uvx lockstep-mcp==0.1.0 hook-stop",
-                                }
-                            ]
-                        }
-                    ]
-                }
-            }
-        )
-    )
     heartbeat = state_dir / "heartbeat.jsonl"
     heartbeat.write_text(
         json.dumps({"event": "SessionStart", "ts": datetime.now(timezone.utc).isoformat()}) + "\n"
     )
 
-    ok, report = cli.doctor(state_dir, recipes_dir, hooks_json=hooks_json)
+    ok, report = cli.doctor(state_dir, recipes_dir)
 
     assert ok is True
     assert "all green" in report
+    assert "installed version:" in report
 
 
 def test_doctor_flags_missing_dirs(tmp_path):
