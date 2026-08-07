@@ -215,7 +215,7 @@ Escape hatch: recipe-local `tools.py` python nodes — last resort,
 
 **Baseline manifest.** At `scenario_start` the engine hashes
 recipe-declared `baseline_globs` (resolved against `run.project`;
-`{path: sha256}` + `git rev-parse HEAD` when available; default ignore set
+`{path: sha256}`; default ignore set
 `__pycache__/`, `*.pyc`, `.git/` — else a pytest run dirties its own
 `unchanged` gate; symlinks not followed) into TWO artifacts: the immutable
 run-start manifest `runs/<run-id>.baseline.json` and per-step snapshots
