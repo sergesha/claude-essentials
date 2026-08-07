@@ -5,7 +5,7 @@ against a fresh tmp state/recipes dir.
 
 Uses the mcp SDK's real `MCPServer` (imported here as `FastMCP` — see
 server.py docstring for why: the 2.0.0 `mcp` package this repo pins under
-`mcp>=1.0` renamed the class, there is no `mcp.server.fastmcp` module).
+`mcp>=2.0,<3` renamed the class, there is no `mcp.server.fastmcp` module).
 Tool registration is introspected via `app._tool_manager.list_tools()`
 (the actual SDK's registry — the plan's `_tool_manager` fallback landed).
 """

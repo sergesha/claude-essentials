@@ -68,6 +68,16 @@ from lockstep_mcp.runs import RunIndex, RunRecord
 
 _PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_]\w*)\}")
 
+# C1: `start()`'s vars dict is passed straight into the initial LangGraph
+# state (`yg.start(self._app(run_id), dict(vars), run_id)`). Any key that
+# collides with a graph-internal state key (`brief`/`evidence`/
+# `verdict_status`/`verdict_reasons`) or starts with `_` (yamlgraph's own
+# internal bookkeeping, e.g. `_loop_counts`) must never reach that call —
+# a hostile var could otherwise overwrite the parked brief, forge a
+# verdict, or pre-seed/reset the loop-limit counter and defeat
+# `loop_limits` entirely. Rejected at `start()`, before any run is created.
+_RESERVED_VAR_KEYS = {"brief", "evidence", "verdict_status", "verdict_reasons"}
+
 
 class LockstepError(Exception):
     """Raised for terminal-run violations, wrong-step calls, and recipes
@@ -287,6 +297,9 @@ class Engine:
 
     def start(self, recipe: str, vars: dict, project: str) -> dict:  # noqa: A002 - frozen name
         vars = vars or {}
+        hostile = sorted(k for k in vars if k.startswith("_") or k in _RESERVED_VAR_KEYS)
+        if hostile:
+            raise LockstepError(f"reserved/hostile var key(s) rejected: {hostile}")
         src = self.recipe_path(recipe)
         if not src.exists():
             raise LockstepError(f"recipe not found: {recipe}")
@@ -433,6 +446,34 @@ class Engine:
             return {"accepted": True, "passed": False, "reasons": reasons, "step": step}
 
         # vstatus == "pass"
+
+        # C2: yamlgraph's loop guard runs BEFORE the validator node
+        # executes (see yamlgraph_api.py module docstring, "loop_limits /
+        # loop_exits" probe). A step whose checks PASS on what would be its
+        # (limit+1)th validator execution never gets that execution: the
+        # guard trips first and routes straight to the escalate marker,
+        # same as a `fail` at the cap — regardless of the passing verdict
+        # this engine already computed. Report that honestly instead of the
+        # generic "passed" shape: the run IS terminal, and the baseline
+        # must NOT advance (this was not a real accepted step).
+        if not adv.done and adv.brief is not None and adv.brief.step == "escalate":
+            note = "loop cap reached; work validated but the run requires human review"
+            self._runs.update(
+                run_id,
+                status="escalated",
+                step="escalate",
+                brief={"step": "escalate", "reason": note},
+            )
+            self._log_transition(run_id, step, "pass", "escalate")
+            return {
+                "accepted": True,
+                "passed": True,
+                "escalated": True,
+                "step": "escalate",
+                "done": False,
+                "reasons": [note],
+            }
+
         self._advance_baseline(run_id, record.project, globs)
 
         if adv.done:

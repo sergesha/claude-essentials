@@ -129,6 +129,59 @@ def test_fail_verdict_retries_then_escalates(tmp_path):
         eng.done(run_id, "one", bad_evidence)
 
 
+def test_pass_at_loop_cap_reports_honest_escalation(tmp_path):
+    """C2, sequence empirically derived (probed against `minimal.yaml`'s
+    `loop_limits: {validate_one: 2}` before writing this test): yamlgraph's
+    loop guard runs BEFORE the validator node executes, keyed on a count
+    that starts at 0 and blocks once count >= limit. fail (count 0->1),
+    fail (count 1->2) both stay under the cap and resume normally; the
+    THIRD `done()` call is where the engine's own checks pass (evidence now
+    real) — but `yg.resume()`'s graph-side execution of `validate_one` for
+    what would be its 3rd real run is the one the loop guard blocks
+    (count 2 >= limit 2), diverting straight to the escalate marker
+    regardless of the passing verdict. Without the C2 fix this came back
+    as `{"passed": True, "step": "escalate", ...}` with no `escalated` flag
+    and the run index still `awaiting` until some later `_reconcile` call
+    happened to notice — a false "it passed" report on a run that is, in
+    fact, terminal.
+    """
+    eng = _engine(tmp_path)
+    project = _project(tmp_path)
+    res = eng.start("minimal", {}, str(project))
+    run_id = res["run_id"]
+
+    bad_evidence = {"path": "missing.md"}
+    r1 = eng.done(run_id, "one", bad_evidence)
+    assert r1["passed"] is False and r1.get("escalated") is not True
+
+    r2 = eng.done(run_id, "one", bad_evidence)
+    assert r2["passed"] is False and r2.get("escalated") is not True
+
+    baseline_counter_before = eng._read_baseline_counter(run_id)
+
+    d = project / ".lockstep"
+    d.mkdir()
+    (d / "a.md").write_text("hi")
+    r3 = eng.done(run_id, "one", {"path": ".lockstep/a.md"})
+
+    assert r3["accepted"] is True
+    assert r3["passed"] is True
+    assert r3["escalated"] is True
+    assert r3["step"] == "escalate"
+    assert r3["done"] is False
+    assert any("human review" in reason for reason in r3["reasons"])
+
+    # the baseline snapshot must NOT advance on this branch — the run is
+    # terminal, not a real passed step.
+    assert eng._read_baseline_counter(run_id) == baseline_counter_before
+
+    status = eng.status(run_id)
+    assert status["status"] == "escalated"
+
+    with pytest.raises(LockstepError):
+        eng.done(run_id, "one", {"path": ".lockstep/a.md"})
+
+
 def test_abort_is_terminal(tmp_path):
     eng = _engine(tmp_path)
     project = _project(tmp_path)
@@ -192,6 +245,50 @@ def test_vars_cannot_reach_checks(tmp_path):
     bad_eng = Engine(tmp_path / "state-bad", BAD)
     with pytest.raises(LockstepError):
         bad_eng.start("placeholder-in-checks", {}, str(project))
+
+
+# ---------------------------------------------------------------------------
+# C1 — hostile vars must never reach graph state
+# ---------------------------------------------------------------------------
+
+
+def test_hostile_underscore_var_key_rejected(tmp_path):
+    eng = _engine(tmp_path)
+    project = _project(tmp_path)
+
+    with pytest.raises(LockstepError):
+        eng.start("minimal", {"_loop_counts": {"validate_one": 99}}, str(project))
+
+
+def test_reserved_state_key_var_rejected(tmp_path):
+    eng = _engine(tmp_path)
+    project = _project(tmp_path)
+
+    with pytest.raises(LockstepError):
+        eng.start("minimal", {"verdict_status": "pass"}, str(project))
+
+
+def test_benign_var_still_works_after_reserved_check(tmp_path):
+    eng = _engine(tmp_path)
+    project = _project(tmp_path)
+
+    res = eng.start("minimal", {"task_name": "widget"}, str(project))
+    assert res["task"] == "Do the widget thing"
+
+
+def test_hostile_loop_counts_var_cannot_defeat_the_loop_cap(tmp_path):
+    """The reviewer's probe: an agent-supplied `_loop_counts` var, if it ever
+    reached the initial graph state, could pre-seed/reset yamlgraph's
+    internal loop counter and defeat `loop_limits` entirely. With the C1
+    rejection in place, the attack never gets that far — `start()` itself
+    raises, so no run (and no seeded counter) is ever created."""
+    eng = _engine(tmp_path)
+    project = _project(tmp_path)
+
+    with pytest.raises(LockstepError):
+        eng.start("minimal", {"_loop_counts": {"validate_one": 0}}, str(project))
+
+    assert eng._runs.list() == []
 
 
 # ---------------------------------------------------------------------------
