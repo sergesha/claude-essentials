@@ -1,12 +1,55 @@
 # lockstep v2 — sub-invocations (subcalls) design spec
 
-Date: 2026-08-07, rev 4 (round-3 review READY + its 2 majors/5 minors
-folded; + OS-agnostic directive applied — no platform-specific primitive
-anywhere). Status: ready for writing-plans.
+Date: 2026-08-07, rev 4, corrected to AS-BUILT after implementation.
+Status: describes the shipped v2 code; where the original design and the
+code diverged, this file states what the code does (the "As built" list
+below names every divergence).
 Base: lockstep v1 (branch `feat/lockstep`, tag `lockstep-v1-checkpoint`,
 119 tests, review CLEAN). Work continues on the same branch; v1 tag is the
 squash boundary. Final home: `claude-essentials/lockstep/docs/` beside
 DESIGN.md.
+
+## As built — divergences from the pre-implementation design
+
+- **`copilot` stays forbidden.** The conditional shim-runner allowance
+  ("copilot leaves the forbidden list when the shim runner is enabled")
+  was NOT built: `copilot` remains in `FORBIDDEN_NODE_TYPES`
+  unconditionally, and no PATH-shim mechanism exists. Deferred (README
+  "Explicit deferrals").
+- **Runner sessions are never resumed.** The envelope's `session_id` is
+  informational; `safe_argv`'s resume gate exists only for a future
+  continuation path.
+- **Model selection**: the engine always launches with `models[0]` from
+  the runner spec; nothing in the recipe dialect selects a model. Later
+  entries are reserved.
+- **Process model**: there is no pidfile-based liveness or kill. A small
+  supervisor (`_subcall_wrapper.py`) owns the child handle and records
+  the terminal verdict in `<workdir>/exit.json` (first writer wins);
+  termination is requested by touching `<workdir>/cancel`, never by pid.
+  A probe past the deadline with no verdict claims `timed_out` itself.
+- **Start-time policy**: runner resolution (allowlist, absolute
+  executable path, non-empty models) IS checked at `scenario_start` for
+  every subcall marker in the snapshot — refusing the run before any
+  work. Budgets and fractal depth are enforced at `done()` time,
+  engine-side before any resume (they depend on runtime state).
+- **Child recipe pinning** (beyond the original design): every fractal
+  child recipe a marker names via `scenario:` is snapshotted at the
+  PARENT's start (`runs/<parent>.child.<scenario>.yaml`), profiled from
+  that copy, and the child run launches only from it — a live edit to a
+  child recipe after the parent started is inert.
+- **Gate linkage, as implemented**: `hook_pretool` keeps the v1 predicate
+  for sessions without `LOCKSTEP_CHILD_RUN` in their environment (an
+  awaiting policy-recipe run unlocks the project). A spawned child
+  session carries `LOCKSTEP_CHILD_RUN`; for it the hook walks that run's
+  `parent_run` chain and unlocks ONLY while every run on the chain is
+  awaiting and the root is an awaiting run of the policy recipe in the
+  project.
+- **Child identity, as implemented**: `LOCKSTEP_CHILD_RUN`/
+  `LOCKSTEP_CHILD_NONCE` env + an ENGINE-generated preamble prepended to
+  the marker prompt naming the child run id and the report path
+  (scenario_status/scenario_done on that run); the SessionStart hook
+  additionally marks the run matching the session's `LOCKSTEP_CHILD_RUN`
+  as "THIS SESSION'S OWN child run".
 
 ## Goal
 
@@ -79,7 +122,7 @@ Division of labor:
 |---|---|
 | Park, checkpoint, resume, poll loop, loop exit | yamlgraph/langgraph native (proven) |
 | Triple structure | recipe convention (profile-checked, like step triples) |
-| `subcall_spawn` / `subcall_poll` hooks | plugin module (`lockstep_mcp.subcalls`): spawn a detached child via stdlib `subprocess` (portable options only — no `setsid`/`creationflags` platform branches in core logic; a spawn helper isolates any unavoidable difference behind ONE function with a portable default), pidfile (pid + start-time) + output file under `runs/<id>.subcalls/`, liveness/termination via stdlib process APIs, budget check, reattach after server restart |
+| `subcall_spawn` / `subcall_poll` hooks | plugin module (`lockstep_mcp.subcalls`): spawn the child under a supervisor (`_subcall_wrapper.py`) via stdlib `subprocess` (portable options only — no `setsid`/`creationflags` platform branches); `proc.json` + captured output + first-writer-wins `exit.json` under `runs/<id>.subcalls/`; termination by touching the `cancel` file (the supervisor owns the handle — no pid-based liveness or kill); reattach after server restart is files-only |
 | ONE new engine rule | a run parked on a `{step: _subcall}` marker is AUTO-POLLED on `scenario_status`/`scenario_done` entry (engine resumes with an internal `{_subcall_poll: true}` tick — `_`-prefixed = engine-internal channel, consistent with the verdict convention) instead of being served to the agent as a brief; a worker's `scenario_done` while a subcall is in progress is REFUSED with "subcall in progress: <node>, <runner>, <minutes>m"; status reports `{subcall: {node, runner, running_minutes}}` |
 
 Liveness model (honest, review M2): polling happens ONLY on
@@ -109,7 +152,10 @@ project files at collect is a hash of possibly-forged bytes.
   final validated baseline snapshot (`runs/<child>.baseline.<n>.json`,
   written by the CHILD's engine at its last PASS, inside the
   agent-denied state dir). The parent trusts the child's own gates, not
-  the project tree. **Required rule** (review round-3 major-1): every
+  the project tree. Precisely: the digest pins the artifact bytes AS OF
+  the child's last validated PASS — the worker can author them up to
+  that instant, so the pin is provenance, and the child's checks plus
+  the parent's own content checks are what vouch for content. **Required rule** (review round-3 major-1): every
   artifact a parent names in `hash_from: _subcall_envelope.
   artifact_hashes.<name>` MUST be covered by the CHILD recipe's
   `baseline_globs` — else there is no hash to copy and the check errors
@@ -173,11 +219,9 @@ time. Everything else about evidence rules is unchanged.
   pattern as policy.d) — stated, not accidental; mid-run runners.yaml
   edits do not affect a compiled run except that the ABSOLUTE exec path
   is re-read per spawn (owner tightening takes effect immediately).
-- Alternative for SHORT one-shot prompts (no loop, blocking ≤300s): the
-  stock `copilot` node + our PATH-shim — allowed by profile as an opt-in
-  (`copilot` leaves the forbidden list ONLY when the shim runner is
-  enabled in runners.yaml). Marked "delete when upstream lands
-  configurable argv".
+- The `copilot`-node PATH-shim alternative for short one-shot prompts was
+  NOT built (see "As built" above): `copilot` stays in
+  `FORBIDDEN_NODE_TYPES` unconditionally.
 
 ## Fractal child runs
 
@@ -207,13 +251,14 @@ project with the child run pre-started. RunRecord gains
   OS caveat from origin binding applies to the whole gate story: shell
   access defeats it, as in v1.) Parent
   terminal (done/escalated/aborted) ⇒ the engine walks the `parent_run`
-  chain RECURSIVELY over grandchildren (review F3): kills each subcall
-  OS process via its pidfile, then flips each descendant run's index to
-  `aborted` via terminal-CAS `update()`. The engine reaches only the OS
-  process and the shared index — not another server's in-memory graph;
-  the index flip + process kill is what stops the child (its next tool
-  call sees a terminal run and refuses). No orphaned unlocks past the
-  human-review point.
+  chain RECURSIVELY over grandchildren (review F3): requests each
+  subcall's termination through its workdir (`cancel` file — the
+  supervisor owning the handle does the kill), then flips each descendant
+  run's index to `aborted` via terminal-CAS `update()`. The engine
+  reaches only the workdir files and the shared index — not another
+  server's in-memory graph; the index flip + cancellation is what stops
+  the child (its next tool call sees a terminal run and refuses). No
+  orphaned unlocks past the human-review point.
 - **Child-run origin binding** (review F2 — THE independence fix; the
   round-1/2 guarantee was void without it): a run with `parent_run` set
   accepts `scenario_done`/`escalate`/`abort` ONLY from a server whose
@@ -240,8 +285,9 @@ project with the child run pre-started. RunRecord gains
   pre-allowed by project settings stalls the child until the runner
   timeout, surfacing as an error envelope. The child learns its run
   identity explicitly: `LOCKSTEP_CHILD_RUN`/`LOCKSTEP_CHILD_NONCE` env +
-  a prompt preamble naming the run id; SessionStart hook prefixes the
-  child's OWN run. Spawn environment is sanitized (not just PATH) via an
+  an engine-generated prompt preamble naming the run id and the report
+  path; the SessionStart hook marks the run matching the session's
+  `LOCKSTEP_CHILD_RUN` as its own. Spawn environment is sanitized (not just PATH) via an
   ALLOWLIST (review round-3 minor): `LOCKSTEP_STATE_DIR` PRESERVED (the
   shared index is load-bearing for gate linkage + poll),
   `LOCKSTEP_CHILD_RUN`/`NONCE` always overwritten on fractal respawn (so
@@ -340,10 +386,14 @@ suite must be green on both with zero platform skips in the core paths.
   EXEMPT from the step-triple loop_limits→escalate rule — a long subcall polled many times must not
   falsely escalate; termination is guaranteed by the runner TIMEOUT in
   the poll hook (timeout → error-style envelope → recipe routes), which
-  the profile requires to be finite; `copilot` conditional allowance.
-- `cli.py` hook_pretool: descendant-aware unlock; `hook_session_start`
-  and `_reconcile` text align with subcall-aware wording (don't surface
-  a raw `_subcall` marker as "awaiting step '_subcall'").
+  the profile requires to be finite. (No `copilot` allowance — see
+  "As built".)
+- `cli.py` hook_pretool: child-session unlock narrowed to the session's
+  own awaiting ancestry chain (see "As built" for the exact predicate;
+  sessions without the child env keep the v1 predicate);
+  `hook_session_start` and `_reconcile` text align with subcall-aware
+  wording (don't surface a raw `_subcall` marker as "awaiting step
+  '_subcall'").
 - `server.py`: `scenario_done`/`escalate`/`abort` enforce origin
   binding for parented runs (credential from env); `scenario_status`
   result gains the subcall progress block.
