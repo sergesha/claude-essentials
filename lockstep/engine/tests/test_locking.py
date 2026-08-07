@@ -38,8 +38,26 @@ def test_stale_lock_is_broken(tmp_path):
     target = tmp_path / "runs.json"
     lock = tmp_path / "runs.json.lock"
     lock.write_text(json.dumps({"pid": 999999, "ts": time.time() - 3600}))
+    # backdate mtime too: staleness must be judged by age, not parsed content
+    old = time.time() - 3600
+    os.utime(lock, (old, old))
     with file_lock(target, timeout=1.0, stale_after=60.0):
         pass  # must not raise: the lock is older than stale_after
+
+def test_empty_lock_window_is_not_stolen(tmp_path):
+    # Regression: a lock file that exists but is still EMPTY (the window
+    # between O_CREAT|O_EXCL and the json.dump that fills it) must NOT be
+    # treated as stale just because it fails to parse. Only age may decide
+    # staleness. A fresh empty lock is young -> a waiter must keep waiting
+    # and time out, never steal it.
+    target = tmp_path / "runs.json"
+    lock = tmp_path / "runs.json.lock"
+    lock.write_text("")  # simulate the just-created, not-yet-written lock
+    with pytest.raises(LockTimeout):
+        with file_lock(target, timeout=0.3):
+            pass
+    # the empty lock must still be there: it was never stolen
+    assert lock.exists()
 
 def test_lock_released_on_exception(tmp_path):
     target = tmp_path / "runs.json"

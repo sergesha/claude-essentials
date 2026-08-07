@@ -28,13 +28,19 @@ def _lock_path(target: Path) -> Path:
 
 
 def _is_stale(path: Path, stale_after: float) -> bool:
+    # Staleness is decided by the lock file's MODIFICATION TIME, never by
+    # parsing its content. There is a window between the O_CREAT|O_EXCL
+    # create and the json.dump that fills it where the lock file exists but
+    # is still empty; a competing waiter reading it in that window must NOT
+    # treat "fails to parse" as "stale" — that would delete a live lock out
+    # from under its holder. A missing file (raced away by another waiter
+    # who just broke/released it) is not stale either — the acquire loop
+    # will simply retry.
     try:
-        payload = json.loads(path.read_text())
-        ts = float(payload.get("ts", 0))
-    except (OSError, ValueError, TypeError):
-        # unreadable/garbage lock file: treat as stale so a crash can't wedge us
-        return True
-    return (time.time() - ts) > stale_after
+        mtime = path.stat().st_mtime
+    except OSError:
+        return False
+    return (time.time() - mtime) > stale_after
 
 
 @contextmanager
