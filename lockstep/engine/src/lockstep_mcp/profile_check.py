@@ -64,9 +64,12 @@ exist as `<child_recipes_dir or recipe-dir>/<name>.yaml`) and `artifacts`
 (dot-free names, relative paths covered by the child's `baseline_globs`).
 Triple shape: spawn -> marker is the spawn's single unconditional edge;
 marker -> poll is the marker's single unconditional edge; every edge into
-a spawn comes from START (unconditional) or a directly-paired validator
-conditioned exactly `verdict_status == '(pass|fail)'` (pins Task 5's
-`_predict_spawn`); every poll out-edge is conditioned exactly
+a spawn comes from a directly-paired validator conditioned exactly
+`verdict_status == '(pass|fail)'` (pins Task 5's `_predict_spawn`) —
+never from START: a start-time spawn would fire on an empty evidence
+channel and bypass the engine's done()-time policy prediction
+(runner/budget/depth), so the profile forbids the shape outright
+(Task 7 decision); every poll out-edge is conditioned exactly
 `_subcall_status == '(running|done|error)'` with the 'running' back edge
 to the marker required. Poll back edges are exempt from
 `loop_limits`/`loop_exits` (termination is the runner timeout). Subcall
@@ -470,8 +473,14 @@ def _check_subcall_rules(doc: dict, nodes: dict, edges_by_from: dict,
             for e in edges_by_to.get(sname, []):
                 src, cond = e.get("from"), (e.get("condition") or "").strip()
                 if src == "START":
-                    if cond:
-                        errors.append(f"edge into spawn node '{sname}' from START must be unconditional")
+                    # Task 7 decision: a START -> spawn edge is forbidden.
+                    # It would fire the spawn hook on an EMPTY evidence
+                    # channel (guaranteed error envelope) and bypass the
+                    # engine's done()-time policy prediction — the only
+                    # point where runner/budget/depth are checked.
+                    errors.append(f"spawn node '{sname}' must not be entered from START — "
+                                  "a spawn must follow a validator (a start-time spawn has "
+                                  "no evidence ctx and bypasses subcall policy prediction)")
                     continue
                 if src not in paired_validators:
                     errors.append(f"spawn node '{sname}' must be a direct conditional successor "
