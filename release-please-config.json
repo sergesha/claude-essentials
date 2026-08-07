@@ -20,6 +20,17 @@
         { "type": "json", "path": ".claude-plugin/plugin.json", "jsonpath": "$.version" },
         { "type": "toml", "path": "server/pyproject.toml", "jsonpath": "$.project.version" }
       ]
+    },
+    "lockstep": {
+      "package-name": "lockstep",
+      "changelog-path": "CHANGELOG.md",
+      "initial-version": "0.1.0",
+      "extra-files": [
+        { "type": "toml", "path": "engine/pyproject.toml", "jsonpath": "$.project.version" },
+        { "type": "json", "path": ".claude-plugin/plugin.json", "jsonpath": "$.version" },
+        { "type": "generic", "path": ".claude-plugin/plugin.json" },
+        { "type": "generic", "path": "hooks/hooks.json" }
+      ]
     }
   }
 }
