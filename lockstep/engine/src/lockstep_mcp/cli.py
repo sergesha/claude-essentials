@@ -44,7 +44,7 @@ import yaml
 
 from lockstep_mcp import __version__
 from lockstep_mcp.locking import file_lock
-from lockstep_mcp.runs import RunIndex
+from lockstep_mcp.runs import ACTIVE_STATUS, RunIndex
 
 # ---------------------------------------------------------------------------
 # shared paths / env
@@ -203,9 +203,17 @@ def hook_session_start(state_dir: Path, cwd: str) -> str:
         if not matches:
             return ""
 
+        # C3: a spawned child session inherits LOCKSTEP_CHILD_RUN — mark
+        # that run as THIS session's own, so the child never has to guess
+        # which listed run is its (it also gets the id in the engine
+        # preamble; this is the survives-compaction copy).
+        own_run = os.environ.get("LOCKSTEP_CHILD_RUN")
         lines = []
         for r in matches:
             suffix = " (stale — consider scenario_abort)" if _is_stale(r.updated, stale_hours) else ""
+            if r.run_id == own_run:
+                suffix += (" — THIS SESSION'S OWN child run: your session holds its "
+                           "credential; drive and report it here")
             b = r.brief or {}
             if b.get("step") == "_subcall":
                 # Task 8 (I8.1): name the subcall, never the raw '_subcall'
@@ -253,6 +261,29 @@ def _deny(reason: str) -> tuple[int, str]:
     )
 
 
+def _child_chain_unlocked(idx: RunIndex, child_run: str, recipe: str, cwd: str) -> bool:
+    """Walk `parent_run` from the session's own run to the root. Unlocked
+    iff every run on the chain is awaiting and the root is a run of the
+    policy recipe in this project. Fail closed: unknown id, cycle, or any
+    terminal ancestor (a cascade that has not reaped this descendant yet
+    must not hold the gate open) all deny."""
+    seen: set[str] = set()
+    try:
+        rec = idx.get(child_run)
+    except KeyError:
+        return False
+    while True:
+        if rec.run_id in seen or rec.status != ACTIVE_STATUS:
+            return False
+        seen.add(rec.run_id)
+        if rec.parent_run is None:
+            return rec.recipe == recipe and _project_matches(rec.project, cwd)
+        try:
+            rec = idx.get(rec.parent_run)
+        except KeyError:
+            return False
+
+
 def hook_pretool(stdin_json: dict, state_dir: Path) -> tuple[int, str]:
     state_dir = Path(state_dir)
     _heartbeat(state_dir, "PreToolUse")
@@ -276,6 +307,21 @@ def hook_pretool(stdin_json: dict, state_dir: Path) -> tuple[int, str]:
 
         recipe = matching_policy.get("recipe")
         idx = RunIndex(state_dir)
+        child_run = os.environ.get("LOCKSTEP_CHILD_RUN")
+        if child_run:
+            # I2: a spawned child session (this hook inherits the session's
+            # env, so LOCKSTEP_CHILD_RUN names ITS run) is unlocked only
+            # through its own ancestry — every run on the chain still
+            # awaiting, terminating in an awaiting run of the policy recipe
+            # in this project. A worker-visible awaiting policy run
+            # elsewhere in the project does NOT unlock a child whose own
+            # chain is dead.
+            if _child_chain_unlocked(idx, child_run, recipe, cwd):
+                return 0, ""
+            return _deny(
+                f"lockstep policy: this session's child run {child_run} has no "
+                f"awaiting ancestry chain to a run of recipe {recipe}"
+            )
         unlocked = any(
             _project_matches(r.project, cwd) and r.recipe == recipe
             for r in idx.list(active_only=True)
