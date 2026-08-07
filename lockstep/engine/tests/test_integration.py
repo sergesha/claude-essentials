@@ -1,11 +1,11 @@
-"""Task 10: end-to-end fake-agent cycle over the REAL `feature-dev` example
+"""end-to-end fake-agent cycle over the REAL `feature-dev` example
 recipe (`lockstep/recipes/examples/feature-dev.yaml`) — the one thing no
 unit test exercises: durability across a full engine restart, terminal
 escalation, and abort, all through the same surfaces a real agent/hook
 setup uses (`server.py` tools + `cli.hook_stop`).
 
 Only the "plan" step is driven to completion here (shape + `fresh` checks).
-Accepted v1 gap (round-6 m7): `junit_gate`/`changed_in`/`diff_only`/
+Accepted gap: `junit_gate`/`changed_in`/`diff_only`/
 `unchanged` have unit coverage in `test_validators.py` but no e2e pass in
 this file — driving `implement`/`test`/`review` to completion would mean
 actually running `pytest` on a nested fixture project, out of scope here.
@@ -62,7 +62,7 @@ def test_full_cycle_restart_durability_terminal_escalation_abort(tmp_path, monke
     assert trace != ""
     assert "plan" in trace
 
-    # --- M1: the route log is in yamlgraph's OWN `event: "route"` shape,
+    # --- the route log is in yamlgraph's OWN `event: "route"` shape,
     # so render_flow's overlay actually picks it up (not just a private
     # "transition" event only our own code could ever read back) ---------
     overlay = server.render_flow("feature-dev", run_id)

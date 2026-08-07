@@ -1,8 +1,8 @@
 version: "1.0"
 name: lockstep-bad-placeholder-in-checks
 description: >
-  Task-3 bad fixture — step_one's check regex carries a `{var}` placeholder.
-  Var substitution never reaches checks (decision 4). Expect: "placeholder".
+  Bad fixture: step_one's check regex carries a `{var}` placeholder.
+  Var substitution never reaches checks. Expect: "placeholder".
 
 state:
   brief: dict

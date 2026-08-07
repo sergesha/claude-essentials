@@ -1,7 +1,7 @@
 version: "1.0"
 name: lockstep-bad-uncapped-loop
 description: >
-  Task-3 bad fixture — the retry loop (validate_one -> step_one on fail)
+  Bad fixture: the retry loop (validate_one -> step_one on fail)
   exists but loop_limits is missing entirely. Expect: "loop_limits".
 
 state:

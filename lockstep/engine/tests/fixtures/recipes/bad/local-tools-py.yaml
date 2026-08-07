@@ -1,7 +1,7 @@
 version: "1.0"
 name: lockstep-warn-local-tools-py
 description: >
-  Task-3 warning fixture — otherwise identical to good/minimal.yaml, plus
+  Warning fixture: otherwise identical to good/minimal.yaml, plus
   a second tools: entry pointing outside lockstep_mcp (a project-local
   tools.py — last resort, human review). Expect: zero errors, one warning
   mentioning "tools.py".

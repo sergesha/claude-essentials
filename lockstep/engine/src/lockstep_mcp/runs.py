@@ -1,8 +1,8 @@
-"""RunIndex — runs.json persistence (Task 4).
+"""RunIndex — runs.json persistence.
 
-Persists RunRecord entries, including the FULL brief of the parked step
-(review C4), so `scenario_status` never needs to peek into the graph
-checkpoint — restart-safe by construction (decision 3). Every mutation
+Persists RunRecord entries, including the FULL brief of the parked step,
+so `scenario_status` never needs to peek into the graph checkpoint —
+restart-safe by construction. Every mutation
 takes the sidecar lock (`locking.file_lock`) around a load→mutate→save,
 then writes `runs.json.tmp` in the state dir and `os.replace`s it into
 place — no torn reads visible to a concurrent reader, and no lost update
@@ -77,16 +77,24 @@ class RunIndex:
         tmp.write_text(json.dumps(data, indent=2, sort_keys=True))
         os.replace(tmp, self._path)
 
-    def create(
+    def reserve(
         self,
         recipe: str,
         project: str,
         parent_run: str | None = None,
         nonce: str | None = None,
     ) -> RunRecord:
+        """Mint a run_id and its record WITHOUT registering it.
+
+        A reserved record names paths (snapshot, vars, baselines, the
+        checkpoint db) but is invisible to `get`/`list`/the hooks, so a
+        start that dies after this point leaves inert files and NO
+        half-alive run. `insert` publishes it once the graph has actually
+        produced a work step.
+        """
         run_id = f"{recipe}-{uuid.uuid4().hex[:8]}"
         now = _now()
-        record = RunRecord(
+        return RunRecord(
             run_id=run_id,
             recipe=recipe,
             project=project,
@@ -98,13 +106,25 @@ class RunIndex:
             parent_run=parent_run,
             nonce=nonce,
         )
+
+    def insert(self, record: RunRecord) -> RunRecord:
+        """Publish a reserved record into the index."""
         with file_lock(self._path):
             data = self._load()
-            if run_id in data:
-                raise RuntimeError(f"run_id collision: {run_id!r} already exists")
-            data[run_id] = asdict(record)
+            if record.run_id in data:
+                raise RuntimeError(f"run_id collision: {record.run_id!r} already exists")
+            data[record.run_id] = asdict(record)
             self._save(data)
         return record
+
+    def create(
+        self,
+        recipe: str,
+        project: str,
+        parent_run: str | None = None,
+        nonce: str | None = None,
+    ) -> RunRecord:
+        return self.insert(self.reserve(recipe, project, parent_run=parent_run, nonce=nonce))
 
     def get(self, run_id: str) -> RunRecord:
         data = self._load()

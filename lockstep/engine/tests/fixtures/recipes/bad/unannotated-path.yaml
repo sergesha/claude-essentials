@@ -1,7 +1,7 @@
 version: "1.0"
 name: lockstep-bad-unannotated-path
 description: >
-  Task-3 bad fixture — step_one's check uses path_from: path, but the
+  Bad fixture: step_one's check uses path_from: path, but the
   schema's `path` property is missing `format: project-path`. Expect:
   "project-path annotation".
 

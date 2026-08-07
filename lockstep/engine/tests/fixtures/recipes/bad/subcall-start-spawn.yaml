@@ -1,7 +1,7 @@
 version: "1.0"
 name: subcall-start-spawn
 description: >
-  Task-7 bad fixture — a spawn entered straight from START. Such a spawn
+  Bad fixture: a spawn entered straight from START. Such a spawn
   bypasses done()-time policy prediction (budget/depth/runner checks) and
   fires with an empty evidence channel, so the profile forbids it: a spawn
   must always follow a validator.

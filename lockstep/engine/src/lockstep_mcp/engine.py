@@ -1,22 +1,21 @@
-"""Task 5: `Engine` — the run manager. Composes Tasks 1-4 (`yamlgraph_api`,
-`validators`, `evidence`, `runs`) into the durable start/status/done/
-escalate/abort surface the MCP server (Task 6) delegates to.
+"""`Engine` — the run manager. Composes `yamlgraph_api`, `validators`,
+`evidence` and `runs` into the durable start/status/done/escalate/abort
+surface the MCP server delegates to.
 
-Mechanics implemented here (see the plan's Task 5 "Mechanics fixed by
-reviews" paragraph for the authoritative spec):
+Mechanics implemented here:
 
-- **Substitution whitelist** (decision 4): `_subst` rewrites `{var}`
+- **Substitution whitelist**: `_subst` rewrites `{var}`
   placeholders from run vars into `task`/`exit_criterion` ONLY. `checks`/
   `evidence_schema` are carried verbatim from the recipe snapshot — the
-  profile (Task 3) already refuses any recipe with a placeholder in either,
+  profile already refuses any recipe with a placeholder in either,
   so nothing here ever substitutes them.
-- **Recipe snapshot** (decision 8): `start()` copies recipe bytes to
+- **Recipe snapshot**: `start()` copies recipe bytes to
   `runs/<run-id>.recipe.yaml` and validates (profile + `cli_validate`) ONLY
   that snapshot; `_app()` recompiles from the snapshot path for the run's
   entire lifetime, so a live mid-run edit to the source recipe is inert.
   Validation happens on a staging copy BEFORE the run is ever registered in
   the index, so a bad recipe never creates a half-alive run.
-- **Baseline lifecycle** (decision 14): `start()` writes the immutable
+- **Baseline lifecycle**: `start()` writes the immutable
   run-start manifest (`runs/<id>.baseline.json`, the `_baseline_start` ctx
   key forever) plus `baseline.0.json` (step 1's `_baseline_prev`). Every
   PASS (including the final one) writes `baseline.<n+1>.json` and bumps a
@@ -24,26 +23,26 @@ reviews" paragraph for the authoritative spec):
   survives across Engine instances because it is a file, not in-memory
   state. The four ctx keys are passed inside the `state` dict handed
   straight to `validators.run_checks(state, execute=True)` — never as
-  graph state (review-3 M6).
-- **Anti-forgery + single check execution** (decision 16): `done()` rejects
+  graph state.
+- **Anti-forgery + single check execution**: `done()` rejects
   any raw evidence key starting with `_` BEFORE schema validation, then
   runs the step's checks exactly once via the engine's own direct
   `run_checks(state, execute=True)` call. `error` verdicts never resume
   the graph (loop budget untouched by construction); `pass`/`fail` resume
   with the verdict embedded in the payload (`{**evidence, "_verdict_status":
   ..., "_verdict_reasons": ...}`) so the in-graph node only republishes.
-- **Path handling** (decision 12): validate raw evidence against schema →
+- **Path handling**: validate raw evidence against schema →
   resolve every `format: project-path` property against `run.project` →
   reject any resolved path escaping the project root — all BEFORE checks
   ever run. `validators.py` re-resolves/re-contains independently (belt).
-- **Escalate is terminal** (decision 5): both loop-exhaustion (the graph
+- **Escalate is terminal**: both loop-exhaustion (the graph
   parks on the `{step: escalate}` marker after a `fail` resume) and an
   explicit `escalate()` call flip the run to terminal `escalated`; no
   resume path exists afterward. `abort()` is the same shape for `aborted`.
-- **Write order + `_reconcile`** (decision 13): a transition writes the
+- **Write order + `_reconcile`**: a transition writes the
   graph checkpoint first (`yamlgraph_api.resume`), then the index second.
   `_reconcile`, called from `status()`/`done()`, reads the checkpoint via
-  `yamlgraph_api.peek()` (Task 5 addition) and repairs the index on
+  `yamlgraph_api.peek()` and repairs the index on
   disagreement — EXCEPT it never overrides a terminal index status
   (`runs.TERMINAL_STATUSES`, the single definition of terminal).
 """
@@ -73,7 +72,7 @@ from lockstep_mcp.runs import TERMINAL_STATUSES, RunIndex, RunRecord
 
 _PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_]\w*)\}")
 
-# C1: `start()`'s vars dict is passed straight into the initial LangGraph
+# `start()`'s vars dict is passed straight into the initial LangGraph
 # state (`yg.start(self._app(run_id), dict(vars), run_id)`). Any key that
 # collides with a graph-internal state key (`brief`/`evidence`/
 # `verdict_status`/`verdict_reasons`) or starts with `_` (yamlgraph's own
@@ -124,7 +123,7 @@ class Engine:
         return self._runs_dir() / f"{run_id}.recipe.yaml"
 
     def _child_snapshot_path(self, run_id: str, scenario: str) -> Path:
-        """C2: the pinned copy of a fractal child recipe, taken when THIS run
+        """The pinned copy of a fractal child recipe, taken when THIS run
         started. `_start_child` launches from it — never from the live,
         agent-writable recipes dir — so a mid-run edit to a child recipe is
         as inert as one to the parent's own recipe."""
@@ -155,11 +154,11 @@ class Engine:
         return self._runs_dir() / f"{run_id}.route.jsonl"
 
     def _log_transition(self, run_id: str, from_step: str, verdict: str, to_step: str | None) -> None:
-        """Route-log fallback (Task 1 probe, spike M7): yamlgraph exposes no
+        """Route-log fallback: yamlgraph exposes no
         per-run route-log hook, so the engine witnesses its own completed
         `done()` transitions here — best-effort, JSONL, failures ignored.
 
-        M1: `event` must be `"route"` with `node`/`target`/`thread_id` —
+        `event` must be `"route"` with `node`/`target`/`thread_id` —
         yamlgraph's own `parse_route_lines` (consumed by `render_flow`'s
         `--overlay`, see `yamlgraph_api.cli_mermaid`) only picks up objects
         matching its own frozen grammar (`yamlgraph.utils.route_log`
@@ -216,13 +215,24 @@ class Engine:
         return self._baseline_n_path(run_id, self._read_baseline_counter(run_id))
 
     def _write_json(self, path: Path, data: Any) -> None:
-        path.write_text(json.dumps(data))
+        self._write_atomic(path, json.dumps(data))
 
-    def _advance_baseline(self, run_id: str, project: str, globs: list[str]) -> None:
+    def _write_atomic(self, path: Path, text: str) -> None:
+        # tmp + os.replace, like RunIndex/sessions/subcalls: a crash mid-write
+        # must not leave a truncated manifest or counter — both are parsed
+        # unguarded on the done() path (a permanent `error` verdict, or an
+        # uncaught ValueError after the graph already resumed).
+        tmp = path.parent / (path.name + ".tmp")
+        tmp.write_text(text)
+        os.replace(tmp, path)
+
+    def _advance_baseline(self, run_id: str, project: str, globs: list[str],
+                          manifest: dict[str, str] | None = None) -> None:
         counter = self._read_baseline_counter(run_id) + 1
-        manifest = validators.build_manifest(Path(project), globs)
+        if manifest is None:
+            manifest = validators.build_manifest(Path(project), globs)
         self._write_json(self._baseline_n_path(run_id, counter), manifest)
-        self._baseline_counter_path(run_id).write_text(str(counter))
+        self._write_atomic(self._baseline_counter_path(run_id), str(counter))
 
     # ------------------------------------------------------------------
     # brief substitution
@@ -261,7 +271,7 @@ class Engine:
         return yg.compile_recipe(self._snapshot_path(run_id), db_path=self._runs.db_path(run_id))
 
     # ------------------------------------------------------------------
-    # decision 13: checkpoint-first write order + repair
+    # checkpoint-first write order + repair
     # ------------------------------------------------------------------
 
     def _reconcile(self, run_id: str) -> RunRecord:
@@ -321,7 +331,7 @@ class Engine:
         return record
 
     # ------------------------------------------------------------------
-    # decision 12: evidence path containment
+    # evidence path containment
     # ------------------------------------------------------------------
 
     def _check_path_containment(self, schema: Any, evidence: dict, project: str) -> list[str]:
@@ -362,12 +372,12 @@ class Engine:
     def _launch(self, recipe: str, vars: dict, project: str,  # noqa: A002 - mirrors start()
                 parent_run: str | None = None, nonce: str | None = None,
                 src: Path | None = None) -> dict:
-        """m7.8: start()'s body after the hostile-var check, extracted so a
+        """start()'s body after the hostile-var check, extracted so a
         fractal child run launches through the exact same staging + profile
         + cli_validate + baseline path. `RunIndex.create` is the ONLY writer
         of parent_run/nonce (immutability holds). `src` overrides recipe-name
         resolution — `_start_child` passes the parent's PINNED child copy so
-        the child never launches from the live recipes dir (C2)."""
+        the child never launches from the live recipes dir."""
         vars = vars or {}  # noqa: A001 - mirrors start()
         src = src if src is not None else self.recipe_path(recipe)
         if not src.exists():
@@ -377,7 +387,7 @@ class Engine:
         runs_dir = self._runs_dir()
         staging = runs_dir / f".staging-{uuid.uuid4().hex}.yaml"
         staging.write_bytes(raw_bytes)
-        # C2: fractal child recipes are copied out of the agent-writable
+        # fractal child recipes are copied out of the agent-writable
         # recipes dir ONCE, here, at this run's start. The profile check runs
         # against these staged copies (no check-then-act on a name the worker
         # owns), and on success they become runs/<id>.child.<scenario>.yaml —
@@ -392,6 +402,30 @@ class Engine:
                 live = self._recipes_dir / f"{scenario}.yaml"
                 if live.exists():
                     (child_staging / f"{scenario}.yaml").write_bytes(live.read_bytes())
+            # A child recipe that fails its own profile check or fails to
+            # compile is otherwise discovered only at the spawn gate, where
+            # `_start_child`'s failure returns an `error` verdict — no
+            # resume, no budget burn, so the run wedges forever. Same
+            # reasoning as the runner pre-check below: refuse at START.
+            # Grandchildren are resolved against the LIVE recipes dir here
+            # (they are not staged at this depth) — a read-only existence
+            # and coverage check; the authoritative staged-copy check runs
+            # when the child itself launches.
+            for scenario in scenarios:
+                staged = child_staging / f"{scenario}.yaml"
+                if not staged.exists():
+                    continue  # missing child: reported by the parent's own check
+                child_errors = profile_check.check_recipe(
+                    staged, child_recipes_dir=self._recipes_dir
+                )
+                if child_errors:
+                    raise LockstepError(
+                        f"child recipe {scenario!r} failed profile check: "
+                        + "; ".join(child_errors)
+                    )
+                ok, msg = yg.cli_validate(staged)
+                if not ok:
+                    raise LockstepError(f"child recipe {scenario!r} failed to compile: {msg}")
             # child_recipes_dir: the staging copy lives in state_dir/runs/,
             # where "beside the recipe" resolves to nothing.
             profile_errors = profile_check.check_recipe(
@@ -405,7 +439,7 @@ class Engine:
             if not ok:
                 raise LockstepError(f"recipe {recipe!r} failed to compile: {msg}")
 
-            # I1: loud START-time refusal for an unlisted runner, a relative/
+            # loud START-time refusal for an unlisted runner, a relative/
             # non-executable path, or an empty models allowlist — never N steps
             # of real work followed by a wedge at the first spawn-bearing gate.
             # Budgets/depth stay done()-time (they depend on runtime state);
@@ -420,7 +454,12 @@ class Engine:
                         f"'{m.get('node')}': runner unavailable at start: {exc}"
                     ) from exc
 
-            record = self._runs.create(recipe, project, parent_run=parent_run, nonce=nonce)
+            # Reserved, NOT registered: everything below can still refuse the
+            # start, and a run that never produced a work step must leave no
+            # trace in the index (an `awaiting` orphan blocks the Stop hook and
+            # denies every write for the rest of the project's life). It is
+            # published by `insert` once the graph has parked on a real step.
+            record = self._runs.reserve(recipe, project, parent_run=parent_run, nonce=nonce)
             staging.replace(self._snapshot_path(record.run_id))
             for scenario in scenarios:
                 staged = child_staging / f"{scenario}.yaml"
@@ -445,7 +484,9 @@ class Engine:
             raise LockstepError(f"recipe {recipe!r} produced no work step at start")
 
         substituted = self._substitute_brief(adv.brief, vars)
-        self._runs.update(run_id, step=substituted.step, brief=self._brief_to_dict(substituted))
+        record.step = substituted.step
+        record.brief = self._brief_to_dict(substituted)
+        self._runs.insert(record)
 
         return {
             "run_id": run_id,
@@ -553,7 +594,7 @@ class Engine:
         reasons = list(verdict.get("verdict_reasons") or [])
 
         if vstatus == "error":
-            # decision 16: never resume; loop budget untouched by
+            # never resume; loop budget untouched by
             # construction (no yamlgraph_api.resume call on this path).
             return {
                 "accepted": True,
@@ -587,6 +628,18 @@ class Engine:
         # keeps the credential out of every later `_peek_state`/check
         # `_state`. The checkpoint db lives inside the denied state dir;
         # tolerable, not gratuitous.
+        # The next `previous` baseline is the project as of BEFORE this
+        # resume: the resume EXECUTES the spawn node, which starts the child
+        # runner process. Hashing afterwards bakes whatever the child wrote in
+        # its first moments into "previous" — and `unchanged src/** since:
+        # previous` at the verify step is exactly what pins reviewed bytes ==
+        # shipped bytes. Computed here, published only on the paths that
+        # really advance (never on the loop-cap escalate below).
+        pending_baseline = (
+            validators.build_manifest(Path(record.project), globs)
+            if vstatus == "pass"
+            else None
+        )
         resume_payload = {**raw_evidence, "_verdict_status": vstatus,
                           "_verdict_reasons": reasons, **ctx}
         adv = yg.resume(self._app(run_id), resume_payload, run_id)
@@ -615,7 +668,7 @@ class Engine:
 
             vars_ = self._read_vars(run_id)
             substituted = self._substitute_brief(adv.brief, vars_)
-            # item 11: persist the fail reasons into the parked brief so a
+            # persist the fail reasons into the parked brief so a
             # restart (fresh Engine, `status()` reading only runs.json)
             # still surfaces WHY the last attempt failed, not just that a
             # step is awaiting retry.
@@ -627,7 +680,7 @@ class Engine:
 
         # vstatus == "pass"
 
-        # C2: yamlgraph's loop guard runs BEFORE the validator node
+        # yamlgraph's loop guard runs BEFORE the validator node
         # executes (see yamlgraph_api.py module docstring, "loop_limits /
         # loop_exits" probe). A step whose checks PASS on what would be its
         # (limit+1)th validator execution never gets that execution: the
@@ -655,7 +708,7 @@ class Engine:
                 "reasons": [note],
             }
 
-        self._advance_baseline(run_id, record.project, globs)
+        self._advance_baseline(run_id, record.project, globs, manifest=pending_baseline)
 
         parked = self._maybe_park_subcall(run_id, step, "pass", adv)
         if parked is not None:
@@ -824,12 +877,12 @@ class Engine:
         return None
 
     # ------------------------------------------------------------------
-    # Task 7: fractal child runs — creation + recursive termination
+    # fractal child runs — creation + recursive termination
     # ------------------------------------------------------------------
 
     def _start_child(self, parent: RunRecord, scenario: str) -> tuple[str, str]:
         """Mint the child run through the ONE launch path — from the child
-        recipe copy PINNED at the parent's start (C2), never the live
+        recipe copy PINNED at the parent's start, never the live
         recipes dir: the spawn happens one or more worker turns after
         start(), and the live file is agent-writable in that window. The
         pinned copy carries the parent run's provenance; the child's own
@@ -845,8 +898,8 @@ class Engine:
         return out["run_id"], nonce
 
     def _ensure_child(self, parent: RunRecord, scenario: str, workdir: Path) -> tuple[str, str]:
-        """C7.1 idempotence, race-safe (fresh finding A): a plain
-        read-check-create on child.json is last-writer-wins under two
+        """Race-safe idempotence: a plain read-check-create on child.json
+        would be last-writer-wins under two
         concurrent scenario_done calls parked on the same marker — both
         would mint a child, and the runner spawned with the LOSING child's
         nonce could never drive the winner's child. So the workdir's
@@ -899,7 +952,7 @@ class Engine:
             return child_run, nonce
 
     def _cascade_terminate(self, run_id: str) -> None:
-        """I7.6/I7.7: called after EVERY index write that sets a terminal
+        """Called after EVERY index write that sets a terminal
         status (double-calls are harmless: terminate()'s verdict claim is
         first-writer-wins and the terminal CAS is idempotent). Recursion is
         RunIndex.descendants — grandchildren included, cycle-safe."""
@@ -966,7 +1019,7 @@ class Engine:
         child_run = nonce = None
         if marker.get("scenario"):
             child_run, nonce = self._ensure_child(record, str(marker["scenario"]), workdir)
-            # C3: the child learns its run id HERE, in an engine-generated
+            # the child learns its run id HERE, in an engine-generated
             # preamble prepended to the author prompt — never author-supplied
             # (the author prompt is verbatim recipe text; the run id exists
             # only now). Without this the spawned session must guess its run

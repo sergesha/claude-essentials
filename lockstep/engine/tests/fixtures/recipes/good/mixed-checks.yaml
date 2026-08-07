@@ -1,9 +1,9 @@
 version: "1.0"
 name: lockstep-server-mixed-checks
 description: >
-  Task-6 fixture — single step whose checks mix a SHAPE type (file_exists)
-  and a COMMAND type (cmd_ok), for `scenario_dryrun`'s shape-only contract
-  (decision 17): dryrun must report the shape check's real verdict while
+  Single step whose checks mix a SHAPE type (file_exists) and a COMMAND
+  type (cmd_ok), for `scenario_dryrun`'s shape-only contract: dryrun must
+  report the shape check's real verdict while
   reporting the cmd_ok check `skipped (dryrun)` without ever running its
   command. Dialect mirrors tests/fixtures/recipes/good/minimal.yaml.
 

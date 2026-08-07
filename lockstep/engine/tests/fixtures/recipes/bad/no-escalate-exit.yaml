@@ -1,7 +1,7 @@
 version: "1.0"
 name: lockstep-bad-no-escalate-exit
 description: >
-  Task-3 bad fixture — the retry loop is capped (loop_limits present) but
+  Bad fixture: the retry loop is capped (loop_limits present) but
   loop_exits has no entry for the looping validator, so a blown budget has
   nowhere defined to go. Expect: "loop_exits must target".
 

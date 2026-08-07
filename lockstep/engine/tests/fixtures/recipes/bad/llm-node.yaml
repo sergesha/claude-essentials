@@ -1,7 +1,7 @@
 version: "1.0"
 name: lockstep-bad-llm-node
 description: >
-  Task-3 bad fixture — otherwise identical to good/minimal.yaml, plus one
+  Bad fixture: otherwise identical to good/minimal.yaml, plus one
   unreferenced node of a forbidden type. Expect: "forbidden node type".
 
 state:

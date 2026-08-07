@@ -1,4 +1,4 @@
-"""Task 4: evidence.py — jsonschema Draft 2020-12 validation.
+"""evidence.py — jsonschema Draft 2020-12 validation.
 
 `validate_evidence(schema, evidence) -> list[str]`: [] means accepted;
 non-empty means rejected (collected `e.message` strings). `schema is None`

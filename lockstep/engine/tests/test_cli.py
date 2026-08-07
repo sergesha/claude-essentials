@@ -1,7 +1,7 @@
-"""Task 6 base: cli.py verb routing. `serve` is the default verb and runs
+"""cli.py verb routing. `serve` is the default verb and runs
 the FastMCP app; `hook-stop`/`hook-session-start`/`hook-pretool`/
-`hook-posttool`/`policy` are no-ops with nothing configured. `doctor`'s exit code now reflects
-health (m8: missing dirs -> 1). This test asserts
+`hook-posttool`/`policy` are no-ops with nothing configured. `doctor`'s
+exit code reflects health (missing dirs -> 1). This test asserts
 DISPATCH — the right handler is called for each verb — not a closed verb
 set.
 

@@ -1,4 +1,4 @@
-"""Task 8: origin binding — a fractal child run is drivable ONLY by the
+"""origin binding — a fractal child run is drivable ONLY by the
 session the engine spawned for it (the process holding the matching
 LOCKSTEP_CHILD_RUN + LOCKSTEP_CHILD_NONCE pair). Without this, a worker
 simply calls scenario_done on the child's run_id (readable via
@@ -13,7 +13,7 @@ import pytest
 from lockstep_mcp import server
 from lockstep_mcp.runs import RunIndex
 
-GOOD = Path(__file__).parent / "fixtures" / "recipes" / "good"    # absolute, not cwd-dependent (m8.4)
+GOOD = Path(__file__).parent / "fixtures" / "recipes" / "good"    # absolute, not cwd-dependent
 
 
 def _setup(tmp_path, monkeypatch):
@@ -48,7 +48,7 @@ def test_wrong_nonce_is_refused(tmp_path, monkeypatch):
 
 
 def test_parented_record_with_no_nonce_refuses_even_with_empty_env(tmp_path, monkeypatch):
-    # I8.3's fail-open trap: compare_digest("", "") MATCHES — a record with
+    # the fail-open trap: compare_digest("", "") MATCHES — a record with
     # parent_run set but nonce None must refuse UNCONDITIONALLY.
     idx = _setup(tmp_path, monkeypatch)
     parent = idx.create("parent", str(tmp_path))

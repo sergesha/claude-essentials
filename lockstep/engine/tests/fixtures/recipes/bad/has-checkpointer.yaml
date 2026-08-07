@@ -1,8 +1,8 @@
 version: "1.0"
 name: lockstep-bad-has-checkpointer
 description: >
-  Task-3 bad fixture — a recipe-level checkpointer block, which only the
-  engine may own (decision 8). Expect: "checkpointer".
+  Bad fixture: a recipe-level checkpointer block, which only the
+  engine may own. Expect: "checkpointer".
 
 state:
   brief: dict

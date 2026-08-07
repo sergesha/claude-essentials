@@ -1,9 +1,9 @@
 version: "1.0"
 name: lockstep-engine-error-check
 description: >
-  Task-5 fixture — single step whose check is a `cmd_ok` pointed at a
-  nonexistent binary, so `run_checks` RAISES on every attempt (decision 16:
-  a raising check yields verdict `error`, not `fail` — never resumes,
+  Single step whose check is a `cmd_ok` pointed at a
+  nonexistent binary, so `run_checks` RAISES on every attempt (a raising
+  check yields verdict `error`, not `fail` — never resumes,
   never consumes the loop budget). Dialect mirrors
   tests/fixtures/recipes/good/two-steps.yaml exactly.
 

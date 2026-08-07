@@ -1,7 +1,7 @@
 """`main()` argparse-routes the console-script verbs. `serve` (the default
 when no verb is given) runs the FastMCP app over stdio.
 
-Task 7 fills the hook/policy/doctor handlers:
+The hook/policy/doctor handlers:
 
 - `hook-stop` / `hook-session-start` / `hook-pretool` / `hook-posttool`
   read one JSON object from stdin (best-effort — malformed/absent stdin
@@ -11,7 +11,7 @@ Task 7 fills the hook/policy/doctor handlers:
   `tests/test_session_binding.py` call them directly) — the CLI wrappers
   are thin stdin/stdout plumbing.
 - `policy require|clear` writes/removes an owner-authored `policy.d/<slug>.yaml`
-  file (decision 15) — the PreToolUse no-run gate reads these.
+  file — the PreToolUse no-run gate reads these.
 - `doctor` is a diagnostic report (dirs exist, installed version
   self-report — distribution is the plugin's own cloned files run via
   `uv run`, so there is no version pin to check against) plus the loud
@@ -24,9 +24,9 @@ that can actually stop an action, so `hook_pretool` is internally
 fail-closed — any exception inside it still produces a `deny` JSON on exit
 0 (never a bare crash, which non-0/2 exit codes turn into fail-OPEN per the
 platform's hook contract). Stop/SessionStart can only delay/annotate, never
-block a determined stop (README honesty line, Task 9) — they fail OPEN
-(allow / no context) on internal error, matching the pre-Task-7 stub
-contract ("never look like a failure to whatever invoked it").
+block a determined stop (the README says so plainly) — they fail OPEN
+(allow / no context) on internal error: a hook must never look like a
+failure to whatever invoked it.
 
 Hooks are read-only on ENGINE-owned state (`runs.json`, `policy.d/`,
 checkpoints) — they never mutate a run. Their one OWN write is the
@@ -87,8 +87,8 @@ def _session_stale_minutes() -> float:
 
 
 def _project_matches(run_project: str, cwd: str) -> bool:
-    """decision 11 / review M8: resolved equality OR run_project is a
-    parent of cwd (cwd may be a subdirectory of the run's project)."""
+    """Resolved equality, or run_project is a parent of cwd (the caller may
+    sit in a subdirectory of the run's project)."""
     try:
         rp = Path(run_project).resolve()
         cp = Path(cwd).resolve()
@@ -98,7 +98,7 @@ def _project_matches(run_project: str, cwd: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# fast path (review-2 minor): both runs.json and policy.d/ empty/absent ->
+# fast path: both runs.json and policy.d/ empty/absent ->
 # skip all further work.
 # ---------------------------------------------------------------------------
 
@@ -135,7 +135,7 @@ def hook_stop(stdin_json: dict, state_dir: Path, cwd: str) -> tuple[int, str]:
         if not matches:
             return 0, ""
 
-        # Task 8 (m8.5): ONE line per run, not one joined sentence — a run
+        # ONE line per run, not one joined sentence — a run
         # parked in a subcall must NOT be told to scenario_done (that call
         # is refused while the subcall is in flight).
         lines = []
@@ -176,7 +176,7 @@ def hook_session_start(state_dir: Path, cwd: str) -> str:
         if not matches:
             return ""
 
-        # C3: a spawned child session inherits LOCKSTEP_CHILD_RUN — mark
+        # a spawned child session inherits LOCKSTEP_CHILD_RUN — mark
         # that run as THIS session's own, so the child never has to guess
         # which listed run is its (it also gets the id in the engine
         # preamble; this is the survives-compaction copy).
@@ -194,7 +194,7 @@ def hook_session_start(state_dir: Path, cwd: str) -> str:
                            "credential; drive and report it here")
             b = r.brief or {}
             if b.get("step") == "_subcall":
-                # Task 8 (I8.1): name the subcall, never the raw '_subcall'
+                # name the subcall, never the raw '_subcall'
                 # marker — it is machinery, not a work step.
                 lines.append(
                     f"lockstep: run {r.run_id} — subcall in progress: "
@@ -212,7 +212,7 @@ def hook_session_start(state_dir: Path, cwd: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# PreToolUse hook (decision 15) — the only gate that can actually stop an
+# PreToolUse hook — the only gate that can actually stop an
 # action, so this is internally fail-closed: ANY exception -> deny.
 # ---------------------------------------------------------------------------
 
@@ -278,7 +278,7 @@ def hook_pretool(stdin_json: dict, state_dir: Path) -> tuple[int, str]:
         idx = RunIndex(state_dir)
         child_run = os.environ.get("LOCKSTEP_CHILD_RUN")
         if child_run:
-            # I2: a spawned child session (this hook inherits the session's
+            # a spawned child session (this hook inherits the session's
             # env, so LOCKSTEP_CHILD_RUN names ITS run) is unlocked only
             # through its own ancestry — every run on the chain still
             # awaiting, terminating in an awaiting run of the policy recipe
@@ -644,7 +644,7 @@ def _cmd_policy(args: argparse.Namespace) -> int:
 def _cmd_doctor(args: argparse.Namespace) -> int:
     ok, report = doctor(_state_dir(), _recipes_dir())
     print(report)
-    # m8: exit 1 on issues found — a CI/operator invocation must be able to
+    # exit 1 on issues found — a CI/operator invocation must be able to
     # gate on this without scraping the report text. Distinct from the
     # hook verbs (which must never look like a crash): doctor is a
     # deliberate diagnostic command, run on purpose, not a hook the

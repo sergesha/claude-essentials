@@ -80,7 +80,7 @@ def test_refusal_lifts_when_the_subcall_resolves(tmp_path, monkeypatch):
 
 
 def test_missing_runner_is_a_loud_start_time_refusal(tmp_path, monkeypatch):
-    # I1: an unlisted runner (here: no runners.yaml at all) refuses at
+    # an unlisted runner (here: no runners.yaml at all) refuses at
     # START — never N steps of real work followed by a wedge at the gate.
     monkeypatch.delenv("LOCKSTEP_RUNNER", raising=False)
     state = tmp_path / "state"
@@ -116,7 +116,7 @@ def test_subcall_budget_refused_before_resume(tmp_path, monkeypatch):
 
 
 def test_pass_at_loop_cap_escalates_never_spawns(tmp_path, monkeypatch):
-    # m5.12: _predict_spawn must replicate the pre-execution loop guard —
+    # _predict_spawn must replicate the pre-execution loop guard —
     # a PASS arriving AT the cap routes to escalate, never the spawn.
     # max_subcalls=0 makes a mispredicted spawn observable: prediction that
     # ignores the cap would refuse on budget instead of escalating.
@@ -133,23 +133,23 @@ def test_pass_at_loop_cap_escalates_never_spawns(tmp_path, monkeypatch):
 
 def test_envelope_visible_via_peek_state(tmp_path, monkeypatch):
     # This proves the envelope written by the poll node IS in graph state
-    # after completion. The engine->run_checks `_state` WIRING test lives in
-    # Task 7 (test_verify_step_hash_check_wired_through_engine) — it needs
-    # the fractal fixture (I6.2).
+    # after completion. The engine->run_checks `_state` WIRING is covered by
+    # test_verify_step_hash_check_wired_through_engine, which needs the
+    # fractal fixture.
     e, proj = make_engine(tmp_path, monkeypatch)
     r = e.start("subcall-one-shot", vars={}, project=str(proj))
     pass_plan(e, proj, r)
     assert _wait_status(e, r["run_id"], "done")["status"] == "done"
     env = e._peek_state(r["run_id"])["_subcall_envelope"]
     assert env["session_id"] == "fake-session-1" and env["exit_code"] == 0
-    assert env["artifact_hashes"] == {}                    # one-shot: the envelope IS the artifact (I6.3)
+    assert env["artifact_hashes"] == {}                    # one-shot: the envelope IS the artifact
 
 
-# --- Task 7: fractal child runs ----------------------------------------------
+# --- fractal child runs ----------------------------------------------
 
 
 def test_fractal_child_run_is_created_exactly_once(tmp_path, monkeypatch):
-    # C7.1: polling repeatedly must NOT mint children — the id is persisted
+    # polling repeatedly must NOT mint children — the id is persisted
     # in the spawn workdir and read back.
     e, proj = make_engine(tmp_path, monkeypatch, sleep=5.0)
     r = e.start("subcall-fractal", vars={}, project=str(proj))
@@ -164,7 +164,7 @@ def test_fractal_child_run_is_created_exactly_once(tmp_path, monkeypatch):
 
 
 def test_ensure_child_is_race_safe_under_concurrent_claims(tmp_path, monkeypatch):
-    # Fresh finding A: a plain read-check-create on child.json is
+    # A plain read-check-create on child.json is
     # last-writer-wins under two concurrent scenario_done calls on the same
     # parked marker — each racer would mint its own child, and the runner
     # already spawned with the LOSING child's nonce can never drive the
@@ -174,7 +174,7 @@ def test_ensure_child_is_race_safe_under_concurrent_claims(tmp_path, monkeypatch
     import threading
     e, proj = make_engine(tmp_path, monkeypatch)
     parent = e._runs.create("subcall-fractal", str(proj))
-    # a run minted through start() always has its child recipe pinned (C2);
+    # a run minted through start() always has its child recipe pinned;
     # this hand-built record needs the same invariant satisfied.
     runs_dir = tmp_path / "state" / "runs"
     runs_dir.mkdir(parents=True, exist_ok=True)
@@ -207,7 +207,8 @@ def test_fractal_poll_completes_on_child_terminal_and_pins_hashes(tmp_path, monk
     assert e.status(r["run_id"])["subcall"]["node"] == "review"    # child awaiting, process alive -> running
     (proj / ".lockstep" / "review.md").write_text("Verdict: PASS\n")
     # engine-direct done bypasses origin binding BY DESIGN (documented
-    # same-user residual); Task 10 exercises the credentialed server path.
+    # same-user residual); the credentialed server path is covered in
+    # test_integration_subcalls.py.
     assert e.done(child.run_id, "review", {"review_path": ".lockstep/review.md"})["done"] is True
     st = e.status(r["run_id"])                             # auto-poll collects
     assert st["step"] == "verify"
@@ -217,8 +218,8 @@ def test_fractal_poll_completes_on_child_terminal_and_pins_hashes(tmp_path, monk
 
 
 def test_verify_step_hash_check_wired_through_engine(tmp_path, monkeypatch):
-    # I6.2: the ONE test that fails if done() forgets `"_state":
-    # self._peek_state(run_id)` — both Task-6 unit tests pass without it.
+    # the ONE test that fails if done() forgets `"_state":
+    # self._peek_state(run_id)` — the unit tests above pass without it.
     e, proj = make_engine(tmp_path, monkeypatch, sleep=5.0)
     r = e.start("subcall-fractal", vars={}, project=str(proj))
     pass_plan(e, proj, r)
@@ -235,7 +236,7 @@ def test_verify_step_hash_check_wired_through_engine(tmp_path, monkeypatch):
 
 
 def test_cascade_terminates_descendants_recursively(tmp_path, monkeypatch):
-    # C7.3/I7.7: unit-shaped — hand-built depth-2 chain + one live workdir;
+    # unit-shaped — hand-built depth-2 chain + one live workdir;
     # never depends on abort being allowed mid-subcall.
     e, proj = make_engine(tmp_path, monkeypatch)
     parent = e._runs.create("feature-dev", str(proj))
@@ -255,7 +256,7 @@ def test_cascade_terminates_descendants_recursively(tmp_path, monkeypatch):
 
 
 def test_fail_verdict_never_walks_the_parent_to_done(tmp_path, monkeypatch):
-    # C1: the child recipe's own regex accepts either verdict (the child's
+    # the child recipe's own regex accepts either verdict (the child's
     # job is to STATE one); the PARENT's verify step must gate on it. A
     # 'Verdict: FAIL' review must end in escalation, never `done`.
     # Broken variant: with step_verify's file_matches Verdict-PASS check
@@ -278,7 +279,7 @@ def test_fail_verdict_never_walks_the_parent_to_done(tmp_path, monkeypatch):
 
 
 def test_fail_verdict_that_mentions_pass_never_walks_the_parent_to_done(tmp_path, monkeypatch):
-    # C1 variant: an UNANCHORED file_matches regex (`Verdict:\s*PASS`) is
+    # an UNANCHORED file_matches regex (`Verdict:\s*PASS`) is
     # found anywhere in the file by re.search — so a review that REFUSES
     # but discusses the phrase (exactly what the child prompt provokes: it
     # tells the reviewer to end with a verdict line, so a refusal naturally
@@ -348,7 +349,7 @@ def test_review_gate_child_format_check_fails_with_no_verdict_line(tmp_path, mon
 
 
 def test_child_recipe_is_pinned_at_parent_start(tmp_path, monkeypatch):
-    # C2: the child recipe is snapshotted when the PARENT starts; a worker
+    # the child recipe is snapshotted when the PARENT starts; a worker
     # edit to the live recipes dir AFTER start (but before the spawn — one
     # or more worker turns later) must be inert, exactly as README promises
     # for the parent's own recipe.
@@ -381,7 +382,7 @@ def test_child_recipe_is_pinned_at_parent_start(tmp_path, monkeypatch):
 
 
 def test_child_prompt_carries_engine_preamble_with_run_id(tmp_path, monkeypatch):
-    # C3: the spawned session's prompt = engine-generated preamble naming
+    # the spawned session's prompt = engine-generated preamble naming
     # the child run id, THEN the author prompt — the child must not have to
     # guess its run from the SessionStart listing or shell out for env.
     # Broken variant: shipped code passes marker["prompt"] verbatim — the
@@ -401,11 +402,11 @@ def test_child_prompt_carries_engine_preamble_with_run_id(tmp_path, monkeypatch)
 
 # --- reviewed-sources pinning: a review covers the bytes that ship -----------
 #
-# The hole (reproduced before the fix): during a subcall the PreToolUse gate
-# is unlocked, so the worker can edit src/** while the reviewer child reads
-# it AND after the child's final validated PASS. The recipes pinned only
-# .lockstep/review.md — clean code got reviewed, dirty code shipped. The fix
-# pins the reviewed sources themselves: the child's review step carries
+# The hole these tests close: during a subcall the PreToolUse gate is
+# unlocked, so the worker can edit src/** while the reviewer child reads it
+# AND after the child's final validated PASS. Pinning only
+# .lockstep/review.md would let clean code be reviewed and dirty code ship.
+# The recipes therefore pin the reviewed sources themselves: the child's review step carries
 # `unchanged src/** since start` (an edit made while the reviewer works
 # fails the child's own step, loop cap 1 -> human), and the parent's verify
 # step carries `unchanged src/** since previous` (done() advances the
@@ -432,7 +433,7 @@ def _make_reviewed_engine(tmp_path, monkeypatch, recipes_dir):
 @pytest.mark.parametrize("recipes_dir,parent", REVIEWED_PAIRS)
 def test_source_edit_during_the_review_fails_the_childs_own_step(tmp_path, monkeypatch, recipes_dir, parent):
     # Attack leg 1: worker edits src/** WHILE the reviewer child is working.
-    # Broken variant (the shipped recipes before the fix): the child's step
+    # Broken variant (parametrized alongside the shipped one): its step
     # has no `unchanged src/**` check, its done() returns done=True on the
     # tampered tree, and the parent walks on to verify none the wiser.
     e, proj = _make_reviewed_engine(tmp_path, monkeypatch, recipes_dir)
@@ -456,7 +457,7 @@ def test_source_edit_after_the_childs_pass_fails_the_parents_verify(tmp_path, mo
     # Attack leg 2: worker edits src/** AFTER the child's final validated
     # PASS — the child is terminal and can never object; only the parent's
     # verify step stands between the edit and done.
-    # Broken variant (the shipped recipes before the fix): verify pins only
+    # Broken variant (parametrized alongside the shipped one): verify pins only
     # review.md, the first verify done() returns done=True, and the
     # post-review bytes ship under a PASS verdict.
     e, proj = _make_reviewed_engine(tmp_path, monkeypatch, recipes_dir)
@@ -567,7 +568,7 @@ def test_nudge_survives_a_forged_parent_cycle(tmp_path, monkeypatch):
 def test_poisoned_child_cannot_kill_parent_but_dead_runner_escalates_and_cascades(tmp_path, monkeypatch):
     # end-to-end: the fake runner dies without driving its child run ->
     # fractal poll rule 4 -> error -> parent escalates via _auto_poll ->
-    # cascade aborts the orphaned child. Also proves C5.4's refusal lifts.
+    # cascade aborts the orphaned child. Also proves the refusal lifts.
     e, proj = make_engine(tmp_path, monkeypatch)           # mode=ok: exits immediately, child left awaiting
     r = e.start("subcall-fractal", vars={}, project=str(proj))
     pass_plan(e, proj, r)
@@ -579,3 +580,57 @@ def test_poisoned_child_cannot_kill_parent_but_dead_runner_escalates_and_cascade
         st = e.status(r["run_id"])
     assert st["status"] == "escalated"
     assert e._runs.get(child.run_id).status == "aborted"
+
+
+# ---------------------------------------------------------------------------
+# child recipes are vetted where the parent starts, never at the gate
+# ---------------------------------------------------------------------------
+
+
+def test_broken_child_recipe_is_refused_at_start(tmp_path, monkeypatch):
+    # A child that fails only at the spawn gate returns an `error` verdict —
+    # which neither resumes nor burns retry budget — so the parent wedges
+    # there forever, N steps of real work in. Refuse it at START instead.
+    recipes = tmp_path / "recipes"
+    recipes.mkdir()
+    for f in (FIX / "good").glob("*.yaml"):
+        (recipes / f.name).write_bytes(f.read_bytes())
+    child = recipes / "child-review.yaml"
+    child.write_text(child.read_text().replace("    idempotent: false\n", "", 1))
+
+    monkeypatch.setenv("LOCKSTEP_RUNNER", "claude")
+    state = tmp_path / "state"
+    write_runners_yaml(state)
+    proj = tmp_path / "proj"; proj.mkdir()
+    e = Engine(state_dir=state, recipes_dir=recipes, memory_only=False)
+
+    with pytest.raises(LockstepError) as exc:
+        e.start("subcall-fractal", vars={}, project=str(proj))
+    assert "child recipe 'child-review'" in str(exc.value)
+
+
+def test_previous_baseline_is_snapshotted_before_the_child_is_spawned(tmp_path, monkeypatch):
+    # `unchanged src/** since: previous` at the verify step is what pins
+    # reviewed bytes == shipped bytes, so `previous` must be the project as
+    # of BEFORE the runner process exists — whatever the child writes in its
+    # first moments must not be baked into it. The write from inside the
+    # resume is the deterministic stand-in for that racing child.
+    from lockstep_mcp import engine as engine_mod
+
+    e, proj = make_engine(tmp_path, monkeypatch)
+    src = proj / "src"; src.mkdir()
+    (src / "a.py").write_text("keep")
+    r = e.start("subcall-fractal", vars={}, project=str(proj))
+
+    real_resume = engine_mod.yg.resume
+
+    def racing_resume(app, payload, run_id):
+        (src / "evil.py").write_text("landed while the runner booted")
+        return real_resume(app, payload, run_id)
+
+    monkeypatch.setattr(engine_mod.yg, "resume", racing_resume)
+    pass_plan(e, proj, r)
+
+    manifest = json.loads(e._current_prev_baseline_path(r["run_id"]).read_text())
+    assert "src/a.py" in manifest
+    assert "src/evil.py" not in manifest

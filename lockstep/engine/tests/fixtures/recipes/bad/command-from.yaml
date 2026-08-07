@@ -1,7 +1,7 @@
 version: "1.0"
 name: lockstep-bad-command-from
 description: >
-  Task-3 bad fixture — step_one's check takes its command from evidence
+  Bad fixture: step_one's check takes its command from evidence
   instead of pinning it literally in the recipe. Expect: "command_from".
 
 state:

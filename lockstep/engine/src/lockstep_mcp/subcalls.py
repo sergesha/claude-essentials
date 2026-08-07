@@ -356,7 +356,7 @@ def _collect_artifacts(state_dir: Path, child_run: str, artifacts: dict) -> tupl
 
 
 def _poll_fractal(src: dict, workdir: Path) -> dict:
-    """C7.2 — completion is the CHILD RUN's terminal status, never the OS
+    """Completion is the CHILD RUN's terminal status, never the OS
     process (a `claude -p` child can exit while its run is still awaiting,
     and vice versa). The status comes from a plain lock-free
     `RunIndex(state_dir).get(child_run)` — safe because every writer

@@ -1,7 +1,7 @@
 version: "1.0"
 name: lockstep-bad-brief-missing-fields
 description: >
-  Task-3 bad fixture — step_one's brief drops exit_criterion. Expect:
+  Bad fixture: step_one's brief drops exit_criterion. Expect:
   "exit_criterion".
 
 state:

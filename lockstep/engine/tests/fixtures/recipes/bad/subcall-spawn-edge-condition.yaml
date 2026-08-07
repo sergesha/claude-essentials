@@ -1,7 +1,7 @@
 version: "1.0"
 name: subcall-one-shot
 description: >
-  Task-4 fixture — one work step, then a one-shot subcall triple
+  One work step, then a one-shot subcall triple
   (spawn -> marker -> poll) with done -> END and error -> escalate.
 baseline_globs: [".lockstep/**"]
 state:

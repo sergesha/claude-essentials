@@ -1,8 +1,8 @@
-"""Task 3: the lockstep recipe profile (pure YAML analysis, no yamlgraph
-import). Bad fixtures: the plan's original 12, plus 2 EXTRA fixtures for
-rules the spike findings introduced/reshaped after the plan's fixture list
-was written (spike finding 4 - idempotent; spike finding 3's gate-shape
-case) - 14 bad fixtures total, plus one warning fixture.
+"""The lockstep recipe profile (pure YAML analysis, no yamlgraph import).
+
+Every bad fixture under fixtures/recipes/bad/ maps to exactly one rule via
+MARKERS below, plus one warning-only fixture; the mapping is asserted to be
+exhaustive so a new fixture cannot land unmapped.
 """
 
 from pathlib import Path
@@ -16,7 +16,7 @@ from lockstep_mcp.profile_check import check_recipe, check_recipe_full
 FIXTURES = Path(__file__).parent / "fixtures" / "recipes"
 GOOD = FIXTURES / "good"
 BAD = FIXTURES / "bad"
-# Task 8: repo-level example recipes — engine/tests/../../recipes/examples.
+# repo-level example recipes — engine/tests/../../recipes/examples.
 EXAMPLES = Path(__file__).resolve().parents[2] / "recipes" / "examples"
 
 # fixture stem -> substring that MUST appear in check_recipe(fixture)
@@ -33,11 +33,11 @@ MARKERS = {
     "placeholder-in-checks.yaml": "placeholder",
     "unannotated-path.yaml": "project-path annotation",
     "baseline-check-no-globs.yaml": "baseline_globs",
-    # EXTRA (spike finding 4): every interrupt must declare idempotent: false.
+    # EXTRA: every interrupt must declare idempotent: false.
     "not-idempotent.yaml": "idempotent",
-    # EXTRA (spike finding 3 gate shape): loop_exits -> interrupt directly.
+    # EXTRA: loop_exits -> interrupt directly.
     "loop-exit-direct-to-interrupt.yaml": "gated through passthrough",
-    # Task 4 (v2): subcall triple rules
+    # subcall triple rules
     "subcall-no-poll.yaml": "poll",
     "subcall-spawn-not-direct.yaml": "direct conditional successor",
     "subcall-undeclared-state.yaml": "_subcall_status",
@@ -45,13 +45,16 @@ MARKERS = {
     "subcall-infinite-timeout.yaml": "positive number of minutes",
     "subcall-spawn-edge-condition.yaml": "verdict_status equality",
     "subcall-no-prompt.yaml": "prompt",
-    # Task 7: a START -> spawn edge bypasses done()-time policy prediction
+    # a START -> spawn edge bypasses done()-time policy prediction
     # and fires with an empty evidence channel — a spawn must follow a
     # validator.
     "subcall-start-spawn.yaml": "must not be entered from START",
-    # I6: work-interrupt step names must be unique — spawn prediction and
+    # work-interrupt step names must be unique — spawn prediction and
     # scenario_done key on them; a collision reads the wrong validator.
     "duplicate-step.yaml": "duplicate step name",
+    # a schema jsonschema itself rejects fails here, not from inside every
+    # later scenario_done.
+    "invalid-evidence-schema.yaml": "invalid evidence_schema",
 }
 
 
@@ -61,7 +64,7 @@ def test_good_recipes_pass():
 
 
 def test_each_bad_fixture_yields_its_violation():
-    assert len(MARKERS) == 23
+    assert len(MARKERS) == 24
     for fixture, marker in MARKERS.items():
         errors = check_recipe(BAD / fixture)
         assert errors, f"{fixture}: expected errors, got none"
@@ -90,13 +93,12 @@ SUB = GOOD / "subcall-one-shot.yaml"
 def test_good_subcall_recipe_passes():
     # errs == [] also proves the marker exemption: this marker has no
     # task/exit_criterion/checks and no validator pairing — only the
-    # third-interrupt-class exemption lets it pass (m4.8: no separate
-    # vacuous exemption test).
+    # third-interrupt-class exemption lets it pass.
     assert check_recipe(SUB) == []
 
 
 @pytest.mark.skipif(
-    not (GOOD / "subcall-fractal.yaml").exists(), reason="Task 7 fixture"
+    not (GOOD / "subcall-fractal.yaml").exists(), reason="fractal fixture absent"
 )
 def test_child_recipes_dir_kwarg_resolves_fractal_children(tmp_path):
     # Engine.start() profiles a staging copy inside state_dir/runs/ —
@@ -132,3 +134,10 @@ def test_reviewed_example_declares_channels_and_pins_the_artifact():
     assert any(c.get("type") == "file_matches_hash"
                and c.get("hash_from") == "_subcall_envelope.artifact_hashes.review"
                for c in checks)
+
+
+def test_invalid_evidence_schema_is_a_recipe_error():
+    # A schema jsonschema itself rejects raises SchemaError from every
+    # scenario_done on that step, so the recipe must not validate ok.
+    errors = check_recipe(BAD / "invalid-evidence-schema.yaml")
+    assert any("invalid evidence_schema" in e for e in errors)

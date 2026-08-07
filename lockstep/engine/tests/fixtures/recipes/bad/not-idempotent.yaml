@@ -1,9 +1,7 @@
 version: "1.0"
 name: lockstep-bad-not-idempotent
 description: >
-  Task-3 EXTRA bad fixture (spike finding 4 — not one of the plan's
-  original 12, added because the fixture list predates the spike):
-  step_one omits `idempotent: false`, so the default `idempotent: true`
+  Bad fixture: step_one omits `idempotent: false`, so the default `idempotent: true`
   would reuse a stale payload across any interrupt sharing state_key:
   brief. Expect: "idempotent".
 

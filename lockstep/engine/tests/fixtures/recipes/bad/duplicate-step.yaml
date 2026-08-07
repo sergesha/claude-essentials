@@ -1,7 +1,7 @@
 version: "1.0"
 name: lockstep-profile-duplicate-step
 description: >
-  Bad fixture (I6) — two work interrupts share the step name `one`.
+  Bad fixture — two work interrupts share the step name `one`.
   Engine._predict_spawn and done() key on the parked step name; a
   collision reads the wrong interrupt/validator, so the profile refuses it.
 

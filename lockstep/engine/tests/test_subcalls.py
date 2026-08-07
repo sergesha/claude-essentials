@@ -230,7 +230,7 @@ def test_poll_preserves_spawn_failure_reason_over_probe_miss(tmp_path):
 
 
 # --- fractal poll units: hand-written child index + baseline, no live child
-# --- (C7.2) ------------------------------------------------------------------
+# --- ------------------------------------------------------------------
 
 def _fractal_src(tmp_path, wd, child_run="child-review-aaaa1111"):
     state_dir = tmp_path / "state"

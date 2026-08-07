@@ -73,7 +73,7 @@ State survives session/server/host restarts.
 | `validate_recipe(path)` | native `graph validate` + `lint --gate` + our profile |
 | `render_flow(recipe, run?)` | native `--mermaid` (+ `--overlay` = taken route) |
 | `list_runs()` | we build (own index; sqlite checkpointer exposes no history) |
-| `run_trace(run)` | spike-probed; fallback: engine-written transition JSONL |
+| `run_trace(run)` | engine-written transition JSONL |
 | `scenario_dryrun(recipe, step, evidence)` | we build — SHAPE checks only (file/content); command and baseline checks report `skipped (dryrun)` — otherwise dryrun of an agent-written recipe is arbitrary command execution bypassing the PreToolUse gate. Project root = server cwd; `_`-rejection and schema validation still apply. README notes: dryrun lets an agent probe tripwire regexes outside the retry budget |
 
 Out of v1: checkpoint time-travel/fork (yamlgraph does not surface it; route
@@ -93,8 +93,8 @@ A step is a triple: `interrupt → validator → conditional edges
 Abridged example (only the `plan` step shown; further steps follow the same
 triple pattern, chained the way `validate_plan`'s pass edge below would
 target `step_implement` instead of `END`). This is copied verbatim in shape
-from the spike-frozen fixture (`lockstep/engine/tests/fixtures/recipes/good/
-two-steps.yaml`) — not an abridged sketch of a different, easier dialect.
+from the fixture the engine's own tests compile and run
+(`lockstep/engine/tests/fixtures/recipes/good/two-steps.yaml`) — not an abridged sketch of a different, easier dialect.
 Conventions — ONE dialect, this one: reused state keys
 `brief`/`evidence`/`verdict_status`/`verdict_reasons` across all steps
 (sequential graphs make reuse safe; one generic validator serves every
@@ -283,8 +283,7 @@ scenario. The dogfooded variant (authoring runs under lockstep itself, on a
 packaged `author.yaml`) is deferred to v2 — it drags in recipe packaging into
 the wheel, a builtin+project recipe search path, and an owner-approval
 channel for the review step (a deterministic check cannot verify a human);
-adversarial review 2026-08-07 showed all three need real design, not a
-side-effect of v1.
+all three need real design of their own, not a side-effect of v1.
 
 ## Evidence contract
 

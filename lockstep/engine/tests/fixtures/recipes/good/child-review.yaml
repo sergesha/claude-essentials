@@ -1,7 +1,7 @@
 version: "1.0"
 name: child-review
 description: >
-  Task-7 fixture — the child recipe a fractal review subcall runs: one
+  The child recipe a fractal review subcall runs: one
   review step whose artifact is covered by baseline_globs so the parent's
   hash pin resolves. The reviewed sources (src/**) are pinned too: a
   worker edit made WHILE the reviewer works fails this step (`unchanged`

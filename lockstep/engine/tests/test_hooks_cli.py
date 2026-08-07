@@ -1,11 +1,11 @@
-"""Task 7: hook handlers in cli.py — Stop / SessionStart / PreToolUse, plus
+"""hook handlers in cli.py — Stop / SessionStart / PreToolUse, plus
 the `policy` and `doctor` CLI verbs.
 
-All path matching (decision 11 / review M8) is `Path.resolve()`
+All path matching is `Path.resolve()`
 equality-or-parent-prefix: a run whose `project` is an ancestor of (or equal
 to) the hook's `cwd` matches. Stop blocks with a `decision: block` JSON on
 stdout naming the run_id, step, and all three exits. SessionStart returns
-plain text (no block capability). PreToolUse (decision 15) is opt-in via
+plain text (no block capability). PreToolUse is opt-in via
 policy files and fails closed on any internal exception; its worker
 predicate is SESSION BINDING — the deep matrix for that (ownership,
 adoption, theft-resistance, PostToolUse) lives in
@@ -201,7 +201,7 @@ def test_pretool_policy_no_run_denies(tmp_path):
     data = json.loads(out)
     assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert "feature-dev" in data["hookSpecificOutput"]["permissionDecisionReason"]
-    # M4: mirrors the SessionStart wrapper's convention of naming the
+    # mirrors the SessionStart wrapper's convention of naming the
     # hook event inside hookSpecificOutput.
     assert data["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
 
@@ -237,7 +237,7 @@ def test_pretool_cross_project_run_stays_denied(tmp_path):
 
 
 def test_pretool_child_session_unlock_narrowed_to_its_own_chain(tmp_path, monkeypatch):
-    # I2: a spawned child session (LOCKSTEP_CHILD_RUN in its env) is
+    # a spawned child session (LOCKSTEP_CHILD_RUN in its env) is
     # unlocked ONLY while its own ancestry chain terminates in an AWAITING
     # run of the policy recipe. The v1 predicate unlocked the whole project
     # for anyone whenever ANY awaiting policy run existed — so `other`
@@ -508,7 +508,7 @@ def test_hooks_write_nothing_to_the_state_dir(tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# Task 8: subcall-aware hook surfaces
+# subcall-aware hook surfaces
 # ---------------------------------------------------------------------------
 
 
@@ -521,7 +521,7 @@ def test_stop_text_is_subcall_aware_per_run(tmp_path):
     idx.update(working.run_id, step="one", brief={"step": "one"})
     code, out = cli.hook_stop({"stop_hook_active": False, "cwd": "/proj"}, tmp_path, cwd="/proj")
     payload = json.loads(out)["reason"]
-    # m8.5: the parked run's line must NOT say scenario_done; the working
+    # the parked run's line must NOT say scenario_done; the working
     # run's line still must — per-run rendering, not one joined sentence.
     parked_line = next(l for l in payload.split("lockstep:") if parked.run_id in l)
     working_line = next(l for l in payload.split("lockstep:") if working.run_id in l)
@@ -530,7 +530,7 @@ def test_stop_text_is_subcall_aware_per_run(tmp_path):
 
 
 def test_session_start_marks_the_sessions_own_child_run(tmp_path, monkeypatch):
-    # C3: a spawned child session inherits LOCKSTEP_CHILD_RUN; the listing
+    # a spawned child session inherits LOCKSTEP_CHILD_RUN; the listing
     # must single out that run as the session's own, not leave the child to
     # guess between its parent's line and its own.
     idx = RunIndex(tmp_path)
@@ -554,6 +554,6 @@ def test_session_start_names_the_subcall_not_the_raw_marker(tmp_path):
                brief={"step": "_subcall", "node": "review", "runner": "claude"})
     ctx = cli.hook_session_start(tmp_path, cwd="/proj")
     # v1 renders the step repr-quoted: awaiting step '_subcall' — that
-    # exact token must be gone (I8.1: the old replace()-based assertion was
-    # tautological and passed against unmodified v1 text).
+    # exact token must be gone. Asserted on the token itself: a
+    # replace()-based assertion here is tautological.
     assert "subcall in progress" in ctx and "'_subcall'" not in ctx
