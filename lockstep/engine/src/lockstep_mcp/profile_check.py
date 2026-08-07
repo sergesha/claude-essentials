@@ -20,7 +20,8 @@ Rules enforced (errors unless noted; see plan Task 3 + SPIKE FINDINGS):
   and that node must be a `python` node (its validator) — kills bypass
   edges and undiscovered validators.
 - Every work interrupt's `message` brief must declare `step`/`task`/
-  `exit_criterion` and at least one check.
+  `exit_criterion` and at least one check; work-interrupt `step` names are
+  unique across the recipe (spawn prediction and `done()` key on them).
 - Every interrupt node (work OR escalate-marked) must declare
   `idempotent: false` (spike finding 4 — `prepare_fn`'s default
   `idempotent: true` reuses a stale payload across any interrupt sharing
@@ -517,6 +518,30 @@ def check_recipe_full(
             errors.append(f"forbidden node type: '{ntype}' (node '{name}')")
 
     edges_by_from = _build_edges_by_from(raw_edges, errors)
+
+    # I6: work-interrupt `step` names must be UNIQUE across the recipe —
+    # `Engine._predict_spawn` and `done(run_id, step, ...)` both key on the
+    # parked step name; a collision makes the prediction read the wrong
+    # validator (an orphan child holding a live credential, or a spawn with
+    # no ctx). Escalate markers (all `escalate`) and subcall markers (all
+    # `_subcall`) share their step by construction and are exempt.
+    seen_steps: dict[str, str] = {}
+    for name, node in nodes.items():
+        if not isinstance(node, dict) or node.get("type") != "interrupt":
+            continue
+        msg = node.get("message") or {}
+        if _is_escalate_marker(msg) or _is_subcall_marker(msg):
+            continue
+        step = msg.get("step")
+        if not isinstance(step, str) or not step:
+            continue  # the missing-field rule reports this one
+        if step in seen_steps:
+            errors.append(
+                f"duplicate step name '{step}' (interrupts '{seen_steps[step]}' and "
+                f"'{name}') — spawn prediction and scenario_done are keyed on it"
+            )
+        else:
+            seen_steps[step] = name
 
     for name, node in nodes.items():
         if not isinstance(node, dict) or node.get("type") != "interrupt":
