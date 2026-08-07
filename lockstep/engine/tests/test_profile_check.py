@@ -7,11 +7,14 @@ case) - 14 bad fixtures total, plus one warning fixture.
 
 from pathlib import Path
 
+from lockstep_mcp import yamlgraph_api as yg
 from lockstep_mcp.profile_check import check_recipe, check_recipe_full
 
 FIXTURES = Path(__file__).parent / "fixtures" / "recipes"
 GOOD = FIXTURES / "good"
 BAD = FIXTURES / "bad"
+# Task 8: repo-level example recipes — engine/tests/../../recipes/examples.
+EXAMPLES = Path(__file__).resolve().parents[2] / "recipes" / "examples"
 
 # fixture stem -> substring that MUST appear in check_recipe(fixture)
 MARKERS = {
@@ -61,3 +64,12 @@ def test_bad_fixture_count_matches_marker_map():
     # every fixture in BAD/ is either a marker-mapped error case or the
     # dedicated warning fixture - nothing stray, nothing missing.
     assert bad_fixtures == set(MARKERS) | {"local-tools-py.yaml"}
+
+
+def test_example_recipes_pass_profile_and_validate():
+    recipes = sorted(EXAMPLES.glob("*.yaml"))
+    assert recipes, f"no example recipes found under {EXAMPLES}"
+    for recipe in recipes:
+        assert check_recipe(recipe) == [], f"{recipe.name}: profile errors: {check_recipe(recipe)}"
+        ok, msg = yg.cli_validate(recipe)
+        assert ok, f"{recipe.name}: cli_validate failed: {msg}"
