@@ -3,14 +3,16 @@
 Persists RunRecord entries, including the FULL brief of the parked step
 (review C4), so `scenario_status` never needs to peek into the graph
 checkpoint — restart-safe by construction (decision 3). Every mutation
-writes `runs.json.tmp` in the state dir then `os.replace`s it into place —
-no torn reads visible to a concurrent reader (decision 13: hooks are
-read-only on this file).
+takes the sidecar lock (`locking.file_lock`) around a load→mutate→save,
+then writes `runs.json.tmp` in the state dir and `os.replace`s it into
+place — no torn reads visible to a concurrent reader, and no lost update
+across concurrent writers (multi-writer since v2's spawned subagent/child
+runs).
 
-Statuses: `awaiting | done | escalated | aborted`. `escalated`/`aborted`
-are TERMINAL (Global Constraints) — this module doesn't enforce that (the
-engine does); it just stores whatever status it's given. `active_only`
-means `status == "awaiting"`.
+Statuses: `awaiting | done | escalated | aborted`. `done`/`escalated`/
+`aborted` are TERMINAL (`TERMINAL_STATUSES`) and enforced here: `update`
+refuses any status transition OUT of a terminal status (non-status fields
+still apply). `active_only` means `status == "awaiting"`.
 """
 
 from __future__ import annotations
@@ -23,7 +25,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from lockstep_mcp.locking import file_lock
+
 ACTIVE_STATUS = "awaiting"
+TERMINAL_STATUSES = {"done", "escalated", "aborted"}
 
 
 def _now() -> str:
@@ -40,6 +45,8 @@ class RunRecord:
     brief: dict | None
     started: str
     updated: str
+    parent_run: str | None = None
+    nonce: str | None = None
 
 
 class RunIndex:
@@ -60,7 +67,13 @@ class RunIndex:
         tmp.write_text(json.dumps(data, indent=2, sort_keys=True))
         os.replace(tmp, self._path)
 
-    def create(self, recipe: str, project: str) -> RunRecord:
+    def create(
+        self,
+        recipe: str,
+        project: str,
+        parent_run: str | None = None,
+        nonce: str | None = None,
+    ) -> RunRecord:
         run_id = f"{recipe}-{uuid.uuid4().hex[:8]}"
         now = _now()
         record = RunRecord(
@@ -72,10 +85,13 @@ class RunIndex:
             brief=None,
             started=now,
             updated=now,
+            parent_run=parent_run,
+            nonce=nonce,
         )
-        data = self._load()
-        data[run_id] = asdict(record)
-        self._save(data)
+        with file_lock(self._path):
+            data = self._load()
+            data[run_id] = asdict(record)
+            self._save(data)
         return record
 
     def get(self, run_id: str) -> RunRecord:
@@ -85,13 +101,20 @@ class RunIndex:
         return RunRecord(**data[run_id])
 
     def update(self, run_id: str, **fields: Any) -> RunRecord:
-        data = self._load()
-        if run_id not in data:
-            raise KeyError(run_id)
-        data[run_id].update(fields)
-        data[run_id]["updated"] = _now()
-        self._save(data)
-        return RunRecord(**data[run_id])
+        with file_lock(self._path):
+            data = self._load()
+            if run_id not in data:
+                raise KeyError(run_id)
+            current = data[run_id]
+            new_status = fields.get("status")
+            if new_status is not None and current.get("status") in TERMINAL_STATUSES:
+                # terminal CAS: a run that reached done/escalated/aborted is never
+                # moved out of it (cascade racing a child's own closing update).
+                fields = {k: v for k, v in fields.items() if k != "status"}
+            current.update(fields)
+            current["updated"] = _now()
+            self._save(data)
+            return RunRecord(**current)
 
     def list(self, project: str | None = None, active_only: bool = False) -> list[RunRecord]:
         data = self._load()
@@ -101,6 +124,18 @@ class RunIndex:
         if active_only:
             records = [r for r in records if r.status == ACTIVE_STATUS]
         return records
+
+    def children(self, run_id: str) -> list[RunRecord]:
+        return [r for r in self.list() if r.parent_run == run_id]
+
+    def descendants(self, run_id: str) -> list[RunRecord]:
+        out, frontier = [], [run_id]
+        while frontier:
+            cur = frontier.pop()
+            for child in self.children(cur):
+                out.append(child)
+                frontier.append(child.run_id)
+        return out
 
     def db_path(self, run_id: str) -> Path:
         return self._state_dir / "runs" / f"{run_id}.db"
