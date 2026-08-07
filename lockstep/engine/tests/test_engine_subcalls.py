@@ -11,6 +11,8 @@ from lockstep_mcp import subcalls
 from lockstep_mcp.engine import Engine, LockstepError
 from _subcall_helpers import FAKE, FIX, make_engine, pass_plan
 
+EXAMPLES = Path(__file__).resolve().parents[2] / "recipes" / "examples"
+
 
 def _wait_status(e, run_id, want, deadline_s=10.0):
     deadline = time.time() + deadline_s
@@ -302,6 +304,47 @@ def test_fail_verdict_that_mentions_pass_never_walks_the_parent_to_done(tmp_path
         assert out.get("done") is not True                 # a refusal mentioning PASS never passes
         assert out["passed"] is False
     assert e.status(r["run_id"])["status"] == "escalated"
+
+
+def test_review_gate_child_completes_on_a_well_formed_fail_verdict(tmp_path, monkeypatch):
+    # review-gate.yaml (recipes/examples) is a FORMAT check, not a verdict
+    # gate: its job is only to confirm the reviewer STATED a verdict. The
+    # PARENT (feature-dev-reviewed.yaml / subcall-fractal.yaml) is what
+    # rejects FAIL. Anchoring the child's own check to PASS-only conflates
+    # the two: a legitimate 'Verdict: FAIL' review would then fail this
+    # step's format check and loop/escalate instead of the run reaching
+    # its own terminal END, same as a real PASS review would.
+    # Broken variant: the child regex tightened to PASS-only — the first
+    # done() call returns passed=False and this test fails there.
+    state = tmp_path / "state"
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    e = Engine(state_dir=state, recipes_dir=EXAMPLES, memory_only=False)
+    r = e.start("review-gate", vars={}, project=str(proj))
+    assert e.status(r["run_id"])["step"] == "review"
+    lockstep_dir = proj / ".lockstep"
+    lockstep_dir.mkdir()
+    (lockstep_dir / "review.md").write_text("# Review\n\nlooks broken.\n\nVerdict: FAIL\n")
+    out = e.done(r["run_id"], "review", {"review_path": ".lockstep/review.md"})
+    assert out["passed"] is True                          # format check: a verdict WAS stated
+    assert out["done"] is True                             # the child's own run reaches END
+    assert e.status(r["run_id"])["status"] == "done"        # never escalated on an honest FAIL
+
+
+def test_review_gate_child_format_check_fails_with_no_verdict_line(tmp_path, monkeypatch):
+    # Cheap companion check: a body that states no verdict at all must
+    # still fail the format check (the anchoring must not have widened
+    # the check into a no-op).
+    state = tmp_path / "state"
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    e = Engine(state_dir=state, recipes_dir=EXAMPLES, memory_only=False)
+    r = e.start("review-gate", vars={}, project=str(proj))
+    lockstep_dir = proj / ".lockstep"
+    lockstep_dir.mkdir()
+    (lockstep_dir / "review.md").write_text("# Review\n\nstill thinking about it.\n")
+    out = e.done(r["run_id"], "review", {"review_path": ".lockstep/review.md"})
+    assert out["passed"] is False
 
 
 def test_child_recipe_is_pinned_at_parent_start(tmp_path, monkeypatch):
