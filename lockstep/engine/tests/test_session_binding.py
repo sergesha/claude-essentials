@@ -279,18 +279,122 @@ def test_bind_from_recorded_plugin_install_payload(tmp_path):
     assert binding["session_id"] == payload["session_id"]
 
 
-def test_recorded_payload_matches_shipped_hook_matcher():
+def test_shipped_hook_matcher_covers_install_shapes():
     # The shipped hooks.json matcher must match the OBSERVED plugin-install
-    # tool name and the `.mcp.json`-install name — asserted mechanically,
-    # against the file that ships, not a copy of its pattern.
+    # tool name, the `.mcp.json`-install name, AND a plugin installed under
+    # ANY name (the plugin segment is the user's install name; the server
+    # segment `lockstep` is pinned by the shipped manifest's mcpServers
+    # key) — asserted mechanically against the file that ships, and against
+    # cli.py's single-home copy of the same pattern.
     import re
 
     hooks = json.loads((Path(__file__).parents[2] / "hooks" / "hooks.json").read_text())
     (entry,) = hooks["hooks"]["PostToolUse"]
     matcher = entry["matcher"]
+    assert matcher == cli.LOCKSTEP_TOOL_MATCHER    # ONE pattern, two homes, byte-equal
     assert re.fullmatch(matcher, _recorded_payload()["tool_name"])
     assert re.fullmatch(matcher, "mcp__lockstep__scenario_start")
-    assert not re.fullmatch(matcher, "mcp__plugin_other_lockstep__scenario_start")
+    # the live-smoke hole: our plugin installed under a different name
+    assert re.fullmatch(matcher, "mcp__plugin_myfork_lockstep__scenario_start")
+    assert re.fullmatch(matcher, "mcp__plugin_team-tools_lockstep__scenario_status")
+    # foreign tools stay outside: another plugin's own server...
+    assert not re.fullmatch(matcher, "mcp__plugin_other_gitlab__create_issue")
+    # ...a plugin whose NAME merely contains "lockstep" but whose server differs...
+    assert not re.fullmatch(matcher, "mcp__plugin_my_lockstep_other__scenario_start")
+    # ...and a bare server under another key (doctor's territory, via the marker)
+    assert not re.fullmatch(matcher, "mcp__mystep__scenario_start")
+
+
+def test_bind_from_plugin_install_under_any_plugin_name(tmp_path):
+    # The recorded payload with ONLY the plugin install name changed — the
+    # third shape the smoke report warned about. Binding must be
+    # independent of what the user named the plugin.
+    from lockstep_mcp import sessions
+
+    proj, state = _setup(tmp_path)
+    payload = _recorded_payload()
+    payload["tool_name"] = "mcp__plugin_myfork_lockstep__scenario_start"
+    run_id = json.loads(payload["tool_response"][0]["text"])["run_id"]
+    _force_run_id(state, _mk_run(state, str(proj.resolve())), run_id)
+
+    cli.hook_posttool(payload, state)
+
+    binding = sessions.read_binding(state, run_id)
+    assert binding is not None, "renamed-plugin payload did not bind"
+    assert binding["session_id"] == payload["session_id"]
+
+
+# ---------------------------------------------------------------------------
+# the name-agnostic door: an install under a fully custom server name only
+# needs its shape added to the PLATFORM matcher — the hook then recognizes
+# the lockstep response by the server-stamped marker, never by name. And a
+# foreign tool's response must never pass for one: a bare `run_id` (e.g. a
+# file-read surfacing runs.json) is NOT the marker.
+# ---------------------------------------------------------------------------
+
+
+def _marked(payload: dict) -> dict:
+    from lockstep_mcp import sessions
+
+    return {**payload, sessions.BINDING_MARKER_KEY: sessions.BINDING_MARKER_VALUE}
+
+
+def test_custom_server_name_binds_via_response_marker(tmp_path):
+    from lockstep_mcp import sessions
+
+    proj, state = _setup(tmp_path)
+    run_id = _mk_run(state, str(proj.resolve()))
+
+    _posttool(state, proj, S1, tool="mcp__mystep__scenario_start",
+              tool_input={"recipe": "feature-dev"},
+              tool_response=[{"type": "text",
+                              "text": json.dumps(_marked({"run_id": run_id, "step": "one"}))}])
+
+    assert sessions.read_binding(state, run_id)["session_id"] == S1
+
+
+def test_foreign_tool_bare_run_id_never_binds(tmp_path):
+    # A foreign mcp tool whose response happens to carry a live run_id —
+    # the runs.json-through-a-file-read shape — must bind nothing.
+    from lockstep_mcp import sessions
+
+    proj, state = _setup(tmp_path)
+    run_id = _mk_run(state, str(proj.resolve()))
+
+    _posttool(state, proj, S2, tool="mcp__filesystem__read_file",
+              tool_input={"path": "state/runs.json"},
+              tool_response={"run_id": run_id, "status": "awaiting"})
+    _posttool(state, proj, S2, tool="mcp__filesystem__read_file",
+              tool_input={"run_id": run_id})          # input run_id is no better
+
+    assert sessions.read_binding(state, run_id) is None
+
+
+def test_marker_must_sit_beside_run_id_in_one_object(tmp_path):
+    # Scattered coincidence is not identity: the marker key in one object
+    # and a run_id in another must not combine into a binding.
+    from lockstep_mcp import sessions
+
+    proj, state = _setup(tmp_path)
+    run_id = _mk_run(state, str(proj.resolve()))
+
+    _posttool(state, proj, S2, tool="mcp__other__tool",
+              tool_response=[{sessions.BINDING_MARKER_KEY: sessions.BINDING_MARKER_VALUE},
+                             {"run_id": run_id}])
+
+    assert sessions.read_binding(state, run_id) is None
+
+
+def test_non_mcp_tools_never_bind(tmp_path):
+    from lockstep_mcp import sessions
+
+    proj, state = _setup(tmp_path)
+    run_id = _mk_run(state, str(proj.resolve()))
+
+    _posttool(state, proj, S2, tool="Bash",
+              tool_response=_marked({"run_id": run_id}))
+
+    assert sessions.read_binding(state, run_id) is None
 
 
 # ---------------------------------------------------------------------------

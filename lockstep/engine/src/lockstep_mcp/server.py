@@ -55,6 +55,7 @@ from mcp.server.mcpserver import MCPServer as FastMCP
 
 from lockstep_mcp import evidence as evidence_mod
 from lockstep_mcp import profile_check
+from lockstep_mcp import sessions
 from lockstep_mcp import validators
 from lockstep_mcp import yamlgraph_api as yg
 from lockstep_mcp.engine import Engine, LockstepError
@@ -158,35 +159,46 @@ def _assert_origin(run_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _mark(res: dict) -> dict:
+    """Stamp the binding marker into a response that names a run — the
+    PostToolUse hook's name-agnostic recognition signal (see
+    `sessions.BINDING_MARKER_KEY`). Responses without a `run_id` (done
+    verdicts, terminal status shapes, listings) stay unstamped: nothing in
+    them identifies a bindable touch."""
+    if isinstance(res, dict) and isinstance(res.get("run_id"), str) and res["run_id"]:
+        return {**res, sessions.BINDING_MARKER_KEY: sessions.BINDING_MARKER_VALUE}
+    return res
+
+
 @app.tool()
 def scenario_start(recipe: str, vars: dict | None = None) -> dict:
     """Start a new run of `recipe`. `run.project` = the server process cwd
     (decision 11) — never an argument here."""
     project = str(Path.cwd().resolve())
-    return _eng().start(recipe, vars or {}, project)
+    return _mark(_eng().start(recipe, vars or {}, project))
 
 
 @app.tool()
 def scenario_status(run_id: str) -> dict:
-    return _eng().status(run_id)
+    return _mark(_eng().status(run_id))
 
 
 @app.tool()
 def scenario_done(run_id: str, step: str, evidence: dict) -> dict:
     _assert_origin(run_id)
-    return _eng().done(run_id, step, evidence)
+    return _mark(_eng().done(run_id, step, evidence))
 
 
 @app.tool()
 def scenario_escalate(run_id: str, reason: str) -> dict:
     _assert_origin(run_id)
-    return _eng().escalate(run_id, reason)
+    return _mark(_eng().escalate(run_id, reason))
 
 
 @app.tool()
 def scenario_abort(run_id: str) -> dict:
     _assert_origin(run_id)
-    return _eng().abort(run_id)
+    return _mark(_eng().abort(run_id))
 
 
 @app.tool()

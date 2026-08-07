@@ -437,6 +437,58 @@ def test_doctor_flags_missing_dirs(tmp_path):
     assert "issues found" in report
 
 
+def test_doctor_screams_on_active_run_without_binding(tmp_path):
+    # THE silent-lockout detector: an active run whose binding sidecar was
+    # never written means the PostToolUse hook never fired for it — the
+    # installed matcher does not match this installation's tool names.
+    # Doctor must fail loudly and hand the user the exact matcher to fix.
+    state_dir = tmp_path / "state"
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    run_id = _mk_run(state_dir, str(proj.resolve()))
+
+    ok, report = cli.doctor(state_dir, recipes_dir)
+
+    assert ok is False
+    assert run_id in report
+    assert "PostToolUse" in report
+    assert cli.LOCKSTEP_TOOL_MATCHER in report         # the exact matcher, verbatim
+    assert "scenario_status" in report                 # ...and the recovery touch
+
+
+def test_doctor_green_when_active_run_is_bound(tmp_path):
+    state_dir = tmp_path / "state"
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    run_id = _mk_run(state_dir, str(proj.resolve()))
+    assert sessions.touch(state_dir, run_id, SESSION, 30.0) == "bound"
+
+    ok, report = cli.doctor(state_dir, recipes_dir)
+
+    assert ok is True
+    assert run_id in report and SESSION in report
+
+
+def test_doctor_ignores_terminal_runs_without_bindings(tmp_path):
+    # Only ACTIVE runs prove the hook should have fired; terminal runs
+    # (their sidecars GC'd or never made) are not a finding.
+    state_dir = tmp_path / "state"
+    recipes_dir = tmp_path / "recipes"
+    recipes_dir.mkdir()
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    run_id = _mk_run(state_dir, str(proj.resolve()))
+    RunIndex(state_dir).update(run_id, status="aborted")
+
+    ok, report = cli.doctor(state_dir, recipes_dir)
+
+    assert ok is True
+
+
 def test_hooks_write_nothing_to_the_state_dir(tmp_path):
     # Hooks are read-only on ENGINE-owned state by contract; their one own
     # write is the bindings/ sidecar tree, and even that only for a live

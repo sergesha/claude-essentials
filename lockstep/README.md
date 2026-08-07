@@ -169,11 +169,20 @@ policy, no gate, regardless of bindings); policy file present but state unreadab
 (internally fail-closed — the only hook that can, since it's the only one that actually blocks
 an action).
 
-**`lockstep-mcp doctor`**: v1-trimmed diagnostic — state/recipes dirs exist, and the
-installed version (self-reported, informational — there's no external pin to check it against;
-distribution is the plugin's own cloned files). Exits `1` if any check failed, `0` if all green —
-a CI/operator script can gate on the process exit code, not just scrape the report text. Not
-implemented in v1 (planned v2): effective-settings inspection, handler self-exec.
+**`lockstep-mcp doctor`**: diagnostic — state/recipes dirs exist, the installed version
+(self-reported, informational — there's no external pin to check it against; distribution is
+the plugin's own cloned files), and the **binding-liveness check**: every ACTIVE run must have
+a `bindings/<run-id>.json` sidecar, written by the PostToolUse hook on the very
+`scenario_start` that created the run. An active run with no sidecar proves that hook never
+fired — the installed PostToolUse matcher does not match this installation's lockstep tool
+names — which is the silent-lockout failure (the gate denies everyone, including the starting
+session); doctor fails loudly on it, printing the shipped matcher and the exact remedy: find
+the real tool name in the session's tool list and add its prefix + `.*` to the PostToolUse
+matcher (responses are marker-verified, so no code change is needed). Run doctor after the
+first `scenario_start` of a fresh install to prove the binding path end to end. Exits `1` if
+any check failed, `0` if all green — a CI/operator script can gate on the process exit code,
+not just scrape the report text. Not implemented (planned v2): effective-settings inspection,
+handler self-exec.
 
 ## Subcalls (v2)
 
@@ -297,22 +306,43 @@ was read back directly and asserted byte-equal to the scratch directory path —
 MCP server does launch with the project directory as its cwd when Claude Code spawns it per
 its `.mcp.json` entry, and `Path.cwd()` at server-start time is exactly that project directory.
 
-**MCP tool names depend on the install shape.** A `.mcp.json` server named `lockstep` yields
-`mcp__lockstep__<tool>`; a plugin-manifest install yields
-`mcp__plugin_<plugin>_<server>__<tool>` — observed live (2026-08-07, Claude Code 2.1.220,
-`--plugin-dir` install): `mcp__plugin_lockstep_lockstep__scenario_start`, with
+**MCP tool names depend on the install shape — binding does not.** A `.mcp.json` server named
+`lockstep` yields `mcp__lockstep__<tool>`; a plugin-manifest install yields
+`mcp__plugin_<plugin-install-name>_<server>__<tool>` — observed live (2026-08-07, Claude Code
+2.1.220, `--plugin-dir` install): `mcp__plugin_lockstep_lockstep__scenario_start`, with
 `tool_response` delivered to PostToolUse as a bare LIST of content blocks whose `text` is the
-JSON. Both name shapes are matched by `hooks/hooks.json`'s PostToolUse matcher and
-`cli.py`'s `_LOCKSTEP_TOOL_PREFIXES` — keep them in sync; the recorded payload is pinned
-verbatim as `engine/tests/fixtures/hooks/posttool_scenario_start_plugin_install.json`
-(before the fix, the plugin-install matcher never fired: no binding was ever written and the
-gate denied the very session that had started the run, with the advertised
-`scenario_status` adoption door equally dead). **Session binding VERIFIED live** (2026-08-07,
+JSON (recorded payload pinned verbatim as
+`engine/tests/fixtures/hooks/posttool_scenario_start_plugin_install.json`; before the first
+fix, the plugin-install matcher never fired: no binding was ever written and the gate denied
+the very session that had started the run, with the advertised `scenario_status` adoption door
+equally dead). Three layers make binding independent of the spelling:
+
+1. The shipped PostToolUse matcher (`hooks/hooks.json`, single-home copy
+   `cli.LOCKSTEP_TOOL_MATCHER`, byte-equality pinned by test) is plugin-name-agnostic:
+   `mcp__lockstep__.*|mcp__plugin_.+_lockstep__.*` — the plugin segment is the user's install
+   name, free text; the server segment `lockstep` is pinned by the shipped manifest's
+   `mcpServers` key.
+2. Every server response that names a `run_id` carries a stamped binding marker
+   (`lockstep_protocol` — `sessions.BINDING_MARKER_KEY`). For any tool name outside the known
+   shapes, the PostToolUse hook accepts a `run_id` ONLY from a response object carrying the
+   marker beside it — so an install under a fully custom server name needs exactly one change,
+   adding its prefix to the platform matcher, and no code edit; and a foreign tool's response
+   containing a bare `run_id` (e.g. a file-read surfacing `runs.json`) can never bind.
+3. `lockstep-mcp doctor` detects the residual case loudly (see "Policy gate + doctor"): an
+   active run with no binding sidecar fails the report and names the matcher to fix.
+
+**Session binding VERIFIED live** (2026-08-07,
 plugin install, haiku driver): `scenario_start` bound the starting session
 (`bindings/<run-id>.json` created), that session's gated `Write` was allowed, a second
 session inside the liveness window was denied with the run named, and after the stale window
 (`LOCKSTEP_SESSION_STALE_MINUTES=0.05` for the test) a `scenario_status` touch adopted the
-run — `adopted_from` recorded — and the adopter's gated `Write` was allowed.
+run — `adopted_from` recorded — and the adopter's gated `Write` was allowed. **All three
+layers above VERIFIED live** (2026-08-08, haiku driver): a plugin installed under the wrong
+name (`mcp__plugin_renamed-lockstep_lockstep__scenario_start` observed) bound at birth and
+wrote freely; a plugin with the SERVER key renamed (`mcp__plugin_renamed2_oddname__…`)
+reproduced the lockout, `doctor` failed with exit 1 naming the matcher, and applying exactly
+its remedy (one matcher line, no code edit) made the next `scenario_status` bind through the
+response marker — gated `Write` allowed, doctor green.
 
 ## Honesty notes
 
