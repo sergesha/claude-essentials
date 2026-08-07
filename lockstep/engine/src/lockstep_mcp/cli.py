@@ -43,6 +43,7 @@ from pathlib import Path
 import yaml
 
 from lockstep_mcp import __version__
+from lockstep_mcp.locking import file_lock
 from lockstep_mcp.runs import RunIndex
 
 # ---------------------------------------------------------------------------
@@ -102,13 +103,18 @@ def _heartbeat(state_dir: Path, event: str) -> None:
 
 
 def _rotate_heartbeat(path: Path) -> None:
+    # Task 8: concurrent child servers are normal now — the read→trim→replace
+    # runs under the sidecar lock so two rotators can't splice each other's
+    # os.replace. A LockTimeout lands in the blanket except: rotation simply
+    # skips that tick. Appends stay lock-free append-only, as in v1.
     try:
-        lines = path.read_text().splitlines(keepends=True)
-        if len(lines) > _HEARTBEAT_ROTATE_ABOVE:
-            keep = lines[-_HEARTBEAT_KEEP:]
-            tmp = path.parent / (path.name + ".tmp")
-            tmp.write_text("".join(keep))
-            os.replace(tmp, path)
+        with file_lock(path, timeout=1.0):
+            lines = path.read_text().splitlines(keepends=True)
+            if len(lines) > _HEARTBEAT_ROTATE_ABOVE:
+                keep = lines[-_HEARTBEAT_KEEP:]
+                tmp = path.parent / (path.name + ".tmp")
+                tmp.write_text("".join(keep))
+                os.replace(tmp, path)
     except Exception:  # noqa: BLE001 - concurrent-append loss during rotation is accepted
         pass
 
@@ -154,13 +160,26 @@ def hook_stop(stdin_json: dict, state_dir: Path, cwd: str) -> tuple[int, str]:
         if not matches:
             return 0, ""
 
-        named = "; ".join(f"{r.run_id} (step: {r.step})" for r in matches)
-        reason = (
-            f"lockstep: active run(s) awaiting a report — {named}. "
-            "Report the step via scenario_done with evidence, scenario_escalate "
-            "if blocked, or scenario_abort to cancel the run."
-        )
-        return 0, json.dumps({"decision": "block", "reason": reason})
+        # Task 8 (m8.5): ONE line per run, not one joined sentence — a run
+        # parked in a subcall must NOT be told to scenario_done (that call
+        # is refused while the subcall is in flight).
+        lines = []
+        for r in matches:
+            b = r.brief or {}
+            if b.get("step") == "_subcall":
+                lines.append(
+                    f"lockstep: run {r.run_id} — subcall in progress: "
+                    f"{b.get('node')} ({b.get('runner')}) — check scenario_status; "
+                    "done/escalate/abort are refused until the subcall completes."
+                )
+            else:
+                lines.append(
+                    f"lockstep: active run(s) awaiting a report — {r.run_id} "
+                    f"(step: {r.step}). Report the step via scenario_done with "
+                    "evidence, scenario_escalate if blocked, or scenario_abort "
+                    "to cancel the run."
+                )
+        return 0, json.dumps({"decision": "block", "reason": " ".join(lines)})
     except Exception:  # noqa: BLE001 - Stop can only delay a turn; fail OPEN on internal error
         return 0, ""
 
@@ -187,10 +206,20 @@ def hook_session_start(state_dir: Path, cwd: str) -> str:
         lines = []
         for r in matches:
             suffix = " (stale — consider scenario_abort)" if _is_stale(r.updated, stale_hours) else ""
-            lines.append(
-                f"lockstep: run {r.run_id} awaiting step {r.step!r}{suffix} "
-                "— check via scenario_status"
-            )
+            b = r.brief or {}
+            if b.get("step") == "_subcall":
+                # Task 8 (I8.1): name the subcall, never the raw '_subcall'
+                # marker — it is machinery, not a work step.
+                lines.append(
+                    f"lockstep: run {r.run_id} — subcall in progress: "
+                    f"{b.get('node')} ({b.get('runner')}){suffix} "
+                    "— check via scenario_status"
+                )
+            else:
+                lines.append(
+                    f"lockstep: run {r.run_id} awaiting step {r.step!r}{suffix} "
+                    "— check via scenario_status"
+                )
         return "\n".join(lines)
     except Exception:  # noqa: BLE001 - SessionStart cannot block; fail OPEN (no context) on error
         return ""

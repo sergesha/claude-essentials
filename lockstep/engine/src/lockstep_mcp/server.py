@@ -45,6 +45,7 @@ path on every completed transition (Task 10 fallback promised by the Task
 
 from __future__ import annotations
 
+import hmac
 import os
 from dataclasses import asdict
 from pathlib import Path
@@ -56,7 +57,7 @@ from lockstep_mcp import evidence as evidence_mod
 from lockstep_mcp import profile_check
 from lockstep_mcp import validators
 from lockstep_mcp import yamlgraph_api as yg
-from lockstep_mcp.engine import Engine
+from lockstep_mcp.engine import Engine, LockstepError
 
 app = FastMCP("lockstep")
 
@@ -125,6 +126,33 @@ def _load_step_brief(recipe_path: Path, step: str) -> dict | None:
     return None
 
 
+def _assert_origin(run_id: str) -> None:
+    """Task 8 origin binding: a run with `parent_run` set was minted for a
+    spawned child session, and only the process carrying that session's
+    credential (the LOCKSTEP_CHILD_RUN + LOCKSTEP_CHILD_NONCE pair
+    `runners.child_env` injected at spawn) may drive it through the three
+    mutating verbs. Read-only tools stay unbound; in-process `Engine` calls
+    bypass this by construction (Task 7's tests rely on that).
+
+    "Origin binding closes the SANCTIONED MCP surface. It does NOT close
+    same-user OS access: on a multi-user OS a process environment may be
+    reachable by other same-user processes through ordinary OS facilities,
+    and a worker with shell can Bash-launch its own credentialed engine.
+    That is the SAME same-user residual class v1 already carries."
+    """
+    record = _eng()._runs.get(run_id)  # noqa: SLF001
+    if record.parent_run is None:
+        return
+    env_run = os.environ.get("LOCKSTEP_CHILD_RUN")
+    env_nonce = os.environ.get("LOCKSTEP_CHILD_NONCE", "")
+    # ORDER MATTERS: a parented record with a falsy nonce refuses BEFORE any
+    # comparison — compare_digest("", "") matches, and the "" default for
+    # env_nonce is safe ONLY because of this guard (I8.3).
+    if not record.nonce or env_run != run_id or not hmac.compare_digest(env_nonce, record.nonce):
+        raise LockstepError(
+            "this run belongs to a spawned subcall session; the caller lacks its credential")
+
+
 # ---------------------------------------------------------------------------
 # scenario_* — delegate to Engine
 # ---------------------------------------------------------------------------
@@ -145,16 +173,19 @@ def scenario_status(run_id: str) -> dict:
 
 @app.tool()
 def scenario_done(run_id: str, step: str, evidence: dict) -> dict:
+    _assert_origin(run_id)
     return _eng().done(run_id, step, evidence)
 
 
 @app.tool()
 def scenario_escalate(run_id: str, reason: str) -> dict:
+    _assert_origin(run_id)
     return _eng().escalate(run_id, reason)
 
 
 @app.tool()
 def scenario_abort(run_id: str) -> dict:
+    _assert_origin(run_id)
     return _eng().abort(run_id)
 
 
@@ -257,7 +288,12 @@ def render_flow(recipe: str, run_id: str | None = None) -> str:
 @app.tool()
 def list_runs(project: str | None = None, active_only: bool = False) -> list[dict]:
     records = _eng()._runs.list(project=project, active_only=active_only)  # noqa: SLF001
-    return [asdict(r) for r in records]
+    out = []
+    for r in records:
+        d = asdict(r)
+        d.pop("nonce", None)                               # the spawn credential never goes on the wire
+        out.append(d)
+    return out
 
 
 @app.tool()
