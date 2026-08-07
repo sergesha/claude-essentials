@@ -27,13 +27,18 @@ def _wait_terminal(wd, tries=140):
 
 
 def _ctx(tmp_path, wd, *extra):
+    # The REAL graph-delivered shape: resume payloads land ONLY inside the
+    # `evidence` channel — the hooks never read top-level ctx or `brief`.
     return {
-        "_subcall_workdir": str(wd),
-        "_subcall_argv": _argv(*extra),
-        "_subcall_cwd": str(tmp_path),
-        "_subcall_env": dict(os.environ),
-        "_subcall_timeout_minutes": 5,
-        "brief": {"step": "_subcall", "node": "review", "runner": "claude"},
+        "evidence": {
+            "_subcall_workdir": str(wd),
+            "_subcall_argv": _argv(*extra),
+            "_subcall_cwd": str(tmp_path),
+            "_subcall_env": dict(os.environ),
+            "_subcall_timeout_minutes": 5,
+            "_subcall_node": "review",
+            "_subcall_runner": "claude",
+        },
     }
 
 
@@ -155,11 +160,13 @@ def test_poll_hook_transitions_to_done_with_envelope(tmp_path):
     env = out["_subcall_envelope"]
     assert out["_subcall_status"] == "done"
     assert env["exit_code"] == 0 and env["session_id"] == "fake-session-1"
-    assert env["artifact_hashes"] == {}                 # one-shot: filled by engine from captured output
+    assert env["artifact_hashes"] == {}                 # stays {} for one-shot: the envelope itself
+    #                                                     (output/exit_code/session_id) is the
+    #                                                     validated artifact; hashes are fractal-only
 
 
 def test_spawn_error_when_workdir_ctx_missing(tmp_path):
-    out = subcalls.spawn({"brief": {"step": "_subcall", "node": "n"}})
+    out = subcalls.spawn({"evidence": {}})
     assert out["_subcall_status"] == "error"
     assert "ctx" in " ".join(out["_subcall_envelope"]["reasons"]).lower()
 
@@ -168,7 +175,7 @@ def test_spawn_error_when_workdir_ctx_missing(tmp_path):
                                      "_subcall_env", "_subcall_timeout_minutes"])
 def test_spawn_requires_full_ctx_no_silent_fallbacks(tmp_path, missing):
     state = _ctx(tmp_path, tmp_path / "wd")
-    del state[missing]
+    del state["evidence"][missing]
     out = subcalls.spawn(state)
     assert out["_subcall_status"] == "error"
     assert "ctx" in " ".join(out["_subcall_envelope"]["reasons"]).lower()
@@ -178,7 +185,7 @@ def test_spawn_hook_refuses_env_none(tmp_path):
     # env=None would make Popen inherit the engine's FULL environment,
     # bypassing the child_env allowlist — fail closed.
     state = _ctx(tmp_path, tmp_path / "wd")
-    state["_subcall_env"] = None
+    state["evidence"]["_subcall_env"] = None
     out = subcalls.spawn(state)
     assert out["_subcall_status"] == "error"
 
@@ -193,7 +200,7 @@ def test_spawn_hook_reattaches_instead_of_double_spawning(tmp_path):
 
 def test_spawn_hook_reports_error_on_unverified_binary(tmp_path):
     state = _ctx(tmp_path, tmp_path / "wd")
-    state["_subcall_argv"] = [str(tmp_path / "planted-runner")]
+    state["evidence"]["_subcall_argv"] = [str(tmp_path / "planted-runner")]
     out = subcalls.spawn(state)   # RunnerError must become an error envelope, not escape
     assert out["_subcall_status"] == "error"
     assert out["_subcall_envelope"]["reasons"]
@@ -201,11 +208,25 @@ def test_spawn_hook_reports_error_on_unverified_binary(tmp_path):
 
 def test_poll_hook_maps_timeout_to_error_status(tmp_path):
     state = _ctx(tmp_path, tmp_path / "wd", "--sleep", "30")
-    state["_subcall_timeout_minutes"] = 0
+    state["evidence"]["_subcall_timeout_minutes"] = 0
     subcalls.spawn(state)
     out = subcalls.poll(state)
     assert out["_subcall_status"] == "error"
     assert "timeout" in " ".join(out["_subcall_envelope"]["reasons"]).lower()
+
+
+def test_poll_preserves_spawn_failure_reason_over_probe_miss(tmp_path):
+    # A spawn that failed before writing proc.json leaves its real cause in
+    # the threaded top-level `_subcall_envelope`; the first poll tick's
+    # generic "no subcall process record" must not overwrite it.
+    state = _ctx(tmp_path, tmp_path / "wd")
+    state["evidence"]["_subcall_argv"] = [str(tmp_path / "planted-runner")]
+    out = subcalls.spawn(state)
+    assert out["_subcall_status"] == "error"
+    state["_subcall_envelope"] = out["_subcall_envelope"]  # threads as a top-level channel
+    res = subcalls.poll(state)
+    assert res["_subcall_status"] == "error"
+    assert any("spawn failed" in r for r in res["_subcall_envelope"]["reasons"])
 
 
 # --- resume_session shape gate (obligation 2) --------------------------------

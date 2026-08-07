@@ -51,7 +51,9 @@ reviews" paragraph for the authoritative spec):
 from __future__ import annotations
 
 import json
+import os
 import re
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -62,6 +64,7 @@ import yaml
 from lockstep_mcp import evidence as evidence_mod
 from lockstep_mcp import profile_check
 from lockstep_mcp import runners
+from lockstep_mcp import subcalls
 from lockstep_mcp import validators
 from lockstep_mcp import yamlgraph_api as yg
 from lockstep_mcp.runs import TERMINAL_STATUSES, RunIndex, RunRecord
@@ -275,6 +278,17 @@ class Engine:
                 )
             return record
 
+        if adv.brief.step == "_subcall":
+            # Persist the FULL marker as the index brief — but only if the
+            # index isn't already parked on it (preserve an existing
+            # `started_at`). A repair that never saw the park writes the
+            # marker without `started_at` — the "?m" path.
+            if record.status != "awaiting" or (record.brief or {}).get("step") != "_subcall":
+                record = self._runs.update(
+                    run_id, status="awaiting", step="_subcall", brief=dict(adv.brief.raw)
+                )
+            return record
+
         if record.status != "awaiting" or adv.brief.step != record.step or record.brief is None:
             vars_ = self._read_vars(run_id)
             substituted = self._substitute_brief(adv.brief, vars_)
@@ -332,7 +346,11 @@ class Engine:
         staging = runs_dir / f".staging-{uuid.uuid4().hex}.yaml"
         staging.write_bytes(raw_bytes)
         try:
-            profile_errors = profile_check.check_recipe(staging)
+            # child_recipes_dir: the staging copy lives in state_dir/runs/,
+            # where "beside the recipe" resolves to nothing.
+            profile_errors = profile_check.check_recipe(
+                staging, child_recipes_dir=self._recipes_dir
+            )
             if profile_errors:
                 raise LockstepError(
                     f"recipe {recipe!r} failed profile check: " + "; ".join(profile_errors)
@@ -371,8 +389,37 @@ class Engine:
             "evidence_schema": substituted.evidence_schema,
         }
 
-    def status(self, run_id: str) -> dict:
+    def _reconcile_polling(self, run_id: str) -> RunRecord:
+        """Entry head for status/done/escalate/abort: reconcile, and if the
+        run is parked in a subcall, auto-poll it ONCE. The caller decides
+        what a still-parked run means (refuse / raise / report)."""
         record = self._reconcile(run_id)
+        if self._is_subcall_parked(record):
+            record = self._auto_poll(run_id)
+        return record
+
+    def status(self, run_id: str) -> dict:
+        record = self._reconcile_polling(run_id)
+        if self._is_subcall_parked(record):
+            marker = record.brief or {}
+            started = marker.get("started_at")
+            return {
+                "status": record.status,
+                "recipe": record.recipe,
+                "run_id": record.run_id,
+                "step": record.step,
+                "task": marker.get("task"),
+                "exit_criterion": marker.get("exit_criterion"),
+                "evidence_schema": marker.get("evidence_schema"),
+                "last_fail_reasons": marker.get("last_fail_reasons"),
+                "subcall": {
+                    "node": marker.get("node"),
+                    "runner": marker.get("runner"),
+                    "running_minutes": int((time.time() - float(started)) // 60)
+                    if started
+                    else None,
+                },
+            }
         if record.status != "awaiting":
             return {"status": record.status, "recipe": record.recipe, "step": record.step}
         brief = record.brief or {}
@@ -388,7 +435,15 @@ class Engine:
         }
 
     def done(self, run_id: str, step: str, evidence: dict) -> dict:
-        record = self._reconcile(run_id)
+        # Auto-poll BEFORE the terminal raise, so a subcall that just
+        # resolved reports its accurate terminal status.
+        record = self._reconcile_polling(run_id)
+        if self._is_subcall_parked(record):
+            marker = record.brief or {}
+            started = marker.get("started_at")
+            mins = f"{int((time.time() - float(started)) // 60)}m" if started else "?m"
+            return {"accepted": False, "errors": [
+                f"subcall in progress: {marker.get('node')} ({marker.get('runner')}), {mins}"]}
         if record.status != "awaiting":
             raise LockstepError(f"run {run_id} is {record.status} — terminal")
         if record.step != step:
@@ -441,7 +496,32 @@ class Engine:
                 "step": step,
             }
 
-        resume_payload = {**raw_evidence, "_verdict_status": vstatus, "_verdict_reasons": reasons}
+        # Pre-resume policy prediction: if this verdict would route into a
+        # spawn node, refuse (unknown runner / budget / depth) ENGINE-SIDE
+        # before any resume — the v1 no-resume path, loop budget untouched.
+        spawn_node = self._predict_spawn(run_id, vstatus)
+        ctx: dict = {}
+        if spawn_node is not None:
+            policy_error = self._check_subcall_policy(run_id, record, spawn_node)
+            if policy_error is not None:
+                return {"accepted": True, "passed": False, "error": True,
+                        "reasons": [policy_error], "step": step}
+            try:
+                ctx = self._subcall_ctx(run_id, record, spawn_node)
+            except (runners.RunnerError, LockstepError) as exc:
+                return {"accepted": True, "passed": False, "error": True,
+                        "reasons": [str(exc)], "step": step}
+
+        # The ctx keys are `_`-prefixed, so the worker can never smuggle them
+        # in raw evidence (rejected above). NOTE, stated so nobody "optimizes"
+        # it away: the spawn payload (including `_subcall_env` with the child
+        # nonce) persists in the checkpoint's `evidence` channel until the
+        # FIRST poll tick replaces it — the slim tick (`_poll_ctx`) is what
+        # keeps the credential out of every later `_peek_state`/check
+        # `_state`. The checkpoint db lives inside the denied state dir;
+        # tolerable, not gratuitous.
+        resume_payload = {**raw_evidence, "_verdict_status": vstatus,
+                          "_verdict_reasons": reasons, **ctx}
         adv = yg.resume(self._app(run_id), resume_payload, run_id)
 
         if vstatus == "fail":
@@ -460,6 +540,10 @@ class Engine:
                     "step": step,
                     "escalated": True,
                 }
+
+            parked = self._maybe_park_subcall(run_id, step, "fail", adv)
+            if parked is not None:
+                return parked
 
             vars_ = self._read_vars(run_id)
             substituted = self._substitute_brief(adv.brief, vars_)
@@ -504,6 +588,10 @@ class Engine:
 
         self._advance_baseline(run_id, record.project, globs)
 
+        parked = self._maybe_park_subcall(run_id, step, "pass", adv)
+        if parked is not None:
+            return parked
+
         if adv.done:
             self._runs.update(run_id, status="done", step=step, brief=None)
             self._log_transition(run_id, step, "pass", None)
@@ -529,8 +617,18 @@ class Engine:
             "exit_criterion": substituted.exit_criterion,
         }
 
+    def _raise_if_subcall_parked(self, record: RunRecord) -> None:
+        # A poisoned child must not kill its parent; the finite runner
+        # timeout is the escape.
+        if self._is_subcall_parked(record):
+            marker = record.brief or {}
+            raise LockstepError(
+                f"subcall in progress: {marker.get('node')} ({marker.get('runner')}) — "
+                "abort/escalate unavailable until it completes or times out")
+
     def escalate(self, run_id: str, reason: str) -> dict:
-        record = self._reconcile(run_id)
+        record = self._reconcile_polling(run_id)
+        self._raise_if_subcall_parked(record)
         if record.status != "awaiting":
             raise LockstepError(f"run {run_id} is {record.status} — terminal")
         self._runs.update(
@@ -542,8 +640,199 @@ class Engine:
         return {"run_id": run_id, "status": "escalated", "reason": reason}
 
     def abort(self, run_id: str) -> dict:
-        record = self._reconcile(run_id)
+        record = self._reconcile_polling(run_id)
+        self._raise_if_subcall_parked(record)
         if record.status != "awaiting":
             raise LockstepError(f"run {run_id} is {record.status} — terminal")
         self._runs.update(run_id, status="aborted")
         return {"run_id": run_id, "status": "aborted"}
+
+    # ------------------------------------------------------------------
+    # v2 subcalls: auto-poll, park persistence, pre-resume prediction
+    # ------------------------------------------------------------------
+
+    def _snapshot_doc(self, run_id: str) -> dict:
+        with open(self._snapshot_path(run_id)) as f:
+            return yaml.safe_load(f) or {}
+
+    def _peek_state(self, run_id: str) -> dict:
+        return dict(yg.peek(self._app(run_id), run_id).state or {})
+
+    def _is_subcall_parked(self, record: RunRecord) -> bool:
+        return record.status == "awaiting" and (record.brief or {}).get("step") == "_subcall"
+
+    def _maybe_park_subcall(self, run_id: str, step: str, vstatus: str, adv: yg.Advance) -> dict | None:
+        """Park persistence: when a resume routed into the subcall triple and
+        parked on the `_subcall` marker, persist the FULL marker (plus
+        `started_at`) as the index brief and tell the worker a subcall
+        started — never hand it `step: "_subcall", task: ""` as work."""
+        if adv.done or adv.brief is None or adv.brief.step != "_subcall":
+            return None
+        marker = dict(adv.brief.raw)                   # FULL marker: node/runner/prompt/...
+        marker["started_at"] = time.time()
+        self._runs.update(run_id, step="_subcall", brief=marker)
+        self._log_transition(run_id, step, vstatus, "_subcall")
+        return {"accepted": True, "passed": vstatus == "pass", "step": "_subcall",
+                "done": False, "subcall": {"node": marker.get("node"),
+                                           "runner": marker.get("runner"),
+                                           "running_minutes": 0}}
+
+    def _predict_spawn(self, run_id: str, vstatus: str) -> str | None:
+        """Static pre-resume route prediction over the SNAPSHOT (never the
+        live recipe). Sound because the profile pins spawn-edge conditions
+        to exactly verdict_status == '(pass|fail)' and replicates v1's
+        loop-guard preemption: a pass AT the cap routes to escalate, not
+        the spawn (guard is pre-execution >=, count starts 0)."""
+        doc = self._snapshot_doc(run_id)
+        nodes = doc.get("nodes") or {}
+        tools = doc.get("tools") or {}
+        record = self._runs.get(run_id)
+        interrupt = next((n for n, cfg in nodes.items()
+                          if isinstance(cfg, dict) and cfg.get("type") == "interrupt"
+                          and (cfg.get("message") or {}).get("step") == record.step), None)
+        if interrupt is None:
+            return None
+        edges = doc.get("edges") or []
+        validator_targets = {e.get("to") for e in edges if e.get("from") == interrupt}
+        if len(validator_targets) != 1:
+            return None
+        validator = next(iter(validator_targets))
+        limit = (doc.get("loop_limits") or {}).get(validator)
+        if limit is not None:
+            counts = self._peek_state(run_id).get("_loop_counts") or {}
+            if counts.get(validator, 0) >= limit:
+                return None                                # loop guard preempts the spawn route
+        for e in edges:
+            if (e.get("from") == validator
+                    and (e.get("condition") or "").strip() == f"verdict_status == '{vstatus}'"):
+                target = e.get("to")
+                if profile_check.subcall_node_kind(nodes.get(target), tools) == "spawn":
+                    return target
+        return None
+
+    def _spawn_marker(self, doc: dict, spawn_node: str) -> dict:
+        nodes = doc.get("nodes") or {}
+        for e in doc.get("edges") or []:
+            if e.get("from") == spawn_node:
+                return dict((nodes.get(e.get("to")) or {}).get("message") or {})
+        raise LockstepError(f"spawn node '{spawn_node}' has no outgoing marker edge in the snapshot")
+
+    def _check_subcall_policy(self, run_id: str, record: RunRecord, spawn_node: str) -> str | None:
+        doc = self._snapshot_doc(run_id)
+        marker = self._spawn_marker(doc, spawn_node)
+        try:
+            spec = runners.resolve(self._state_dir, marker.get("runner"), os.environ)
+        except runners.RunnerError as exc:
+            return str(exc)
+        siblings_dir = self._state_dir / "runs" / f"{run_id}.subcalls"
+        node_id = str(marker.get("node"))
+        used = ([p for p in siblings_dir.glob("*") if p.is_dir() and p.name != node_id]
+                if siblings_dir.exists() else [])
+        # one workdir == one node == at most one session ever (the
+        # single-start claim): counting sibling dirs IS counting sessions.
+        # Re-entry into the same spawn node cannot re-spawn — spawn
+        # reattaches to the recorded session (and the profile forbids
+        # authored retry-into-spawn edges anyway); do NOT "fix" the
+        # reattach by deleting the claim.
+        if len(used) >= spec.max_subcalls_per_run:
+            return (f"subcall budget exhausted: {len(used)} used, "
+                    f"max_subcalls_per_run={spec.max_subcalls_per_run}")
+        if marker.get("scenario"):
+            # visited-set guard, symmetric with RunIndex.descendants —
+            # parent_run is immutable and API-created records cannot cycle,
+            # but the walk should not trust that unconditionally.
+            depth, cur, seen = 0, record, {record.run_id}
+            while cur.parent_run is not None and cur.parent_run not in seen:
+                seen.add(cur.parent_run)
+                depth += 1
+                cur = self._runs.get(cur.parent_run)
+            if depth + 1 > spec.max_fractal_depth:
+                return (f"fractal depth limit: child would be at depth {depth + 1}, "
+                        f"max_fractal_depth={spec.max_fractal_depth}")
+        return None
+
+    def _subcall_ctx(self, run_id: str, record: RunRecord, spawn_node: str) -> dict:
+        doc = self._snapshot_doc(run_id)
+        marker = self._spawn_marker(doc, spawn_node)
+        spec = runners.resolve(self._state_dir, marker.get("runner"), os.environ)
+        # owner budget is a CEILING: the recipe may tighten, never exceed.
+        # `.get(key, default)` only substitutes the default when the key is
+        # ABSENT — a marker carrying `timeout_minutes: null` still has the
+        # key, so `.get` returns None and `int(None)` would raise uncaught.
+        # Coerce explicitly: null reads the same as absent.
+        tm = marker.get("timeout_minutes")
+        timeout = min(int(tm) if tm is not None else spec.timeout_minutes,
+                      spec.timeout_minutes)
+        node_id = str(marker["node"])
+        workdir = self._state_dir / "runs" / f"{run_id}.subcalls" / node_id
+        prompt = marker["prompt"]                          # profile-required; KeyError impossible on a profiled snapshot
+        child_run = nonce = None
+        if marker.get("scenario"):
+            raise LockstepError("fractal subcalls land in Task 7")
+        env = runners.child_env(os.environ, self._state_dir, child_run, nonce)
+        env["LOCKSTEP_RECIPES"] = str(self._recipes_dir)   # child resolves recipes where its parent did — pinned, not inherited
+        argv = subcalls.safe_argv(spec, prompt, None, None)  # model defaults to spec.models[0]; v2 never resumes runner sessions
+        return {
+            "_subcall_workdir": str(workdir), "_subcall_argv": argv,
+            "_subcall_cwd": record.project, "_subcall_env": env,
+            "_subcall_timeout_minutes": timeout,
+            "_subcall_node": node_id, "_subcall_runner": spec.name,
+            "_subcall_child_run": child_run,
+            "_subcall_state_dir": str(self._state_dir),
+            "_subcall_artifacts": dict(marker.get("artifacts") or {}),
+        }
+
+    def _poll_ctx(self, run_id: str, record: RunRecord) -> dict:
+        """Slim tick: never resends argv/env/cwd — the spawn already
+        happened, and rebroadcasting the credential into the evidence
+        channel on every tick would expose it to every later _peek_state.
+        Built from the PERSISTED raw marker."""
+        marker = record.brief or {}
+        node_id = marker.get("node")
+        if not node_id:
+            raise LockstepError(f"run {run_id}: parked subcall brief lacks 'node' — index corrupt")
+        workdir = self._state_dir / "runs" / f"{run_id}.subcalls" / str(node_id)
+        child_run = None
+        child_file = workdir / "child.json"
+        if child_file.exists():
+            child_run = json.loads(child_file.read_text()).get("child_run")
+        return {
+            "_subcall_poll": True,
+            "_subcall_workdir": str(workdir),
+            "_subcall_node": node_id, "_subcall_runner": marker.get("runner"),
+            "_subcall_child_run": child_run,
+            "_subcall_state_dir": str(self._state_dir),
+            "_subcall_artifacts": dict(marker.get("artifacts") or {}),
+        }
+
+    def _auto_poll(self, run_id: str) -> RunRecord:
+        """ONE poll resume per entry — if the subcall is still running,
+        return immediately; never wait, never loop. Replicates done()'s
+        post-resume bookkeeping for every outcome. NO baseline advance on
+        any path here: a subcall is not a checked step."""
+        record = self._runs.get(run_id)
+        payload = self._poll_ctx(run_id, record)
+        adv = yg.resume(self._app(run_id), payload, run_id)
+        if adv.done:
+            # v1's done tail records the final step name, not a placeholder —
+            # "_subcall" is the marker's own message.step, never a real
+            # recipe step; the parked brief's `node` names the subcall that
+            # actually just finished.
+            marker = record.brief or {}
+            self._runs.update(run_id, status="done", step=marker.get("node", "_subcall"), brief=None)
+            self._log_transition(run_id, "_subcall", "done", None)
+        elif adv.brief is not None and adv.brief.step == "escalate":
+            env = self._peek_state(run_id).get("_subcall_envelope") or {}
+            reason = "; ".join(str(r) for r in (env.get("reasons") or [])) or "subcall failed"
+            self._runs.update(run_id, status="escalated", step="escalate",
+                              brief={"step": "escalate", "reason": reason})
+            self._log_transition(run_id, "_subcall", "error", "escalate")
+        elif adv.brief is not None and adv.brief.step == "_subcall":
+            pass                                           # still parked; index brief already true
+        elif adv.brief is not None:
+            vars_ = self._read_vars(run_id)
+            substituted = self._substitute_brief(adv.brief, vars_)
+            self._runs.update(run_id, step=substituted.step,
+                              brief=self._brief_to_dict(substituted))
+            self._log_transition(run_id, "_subcall", "done", substituted.step)
+        return self._runs.get(run_id)
