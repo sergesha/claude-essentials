@@ -43,7 +43,9 @@ DESIGN.md.
   session carries `LOCKSTEP_CHILD_RUN`; for it the hook walks that run's
   `parent_run` chain and unlocks ONLY while every run on the chain is
   awaiting and the root is an awaiting run of the policy recipe in the
-  project.
+  project. Both predicates additionally require freshness (`updated`
+  within `LOCKSTEP_STALE_HOURS`, default 24h): a stalled awaiting run
+  closes the gate instead of holding it open (README, policy gate).
 - **Child identity, as implemented**: `LOCKSTEP_CHILD_RUN`/
   `LOCKSTEP_CHILD_NONCE` env + an ENGINE-generated preamble prepended to
   the marker prompt naming the child run id and the report path

@@ -137,7 +137,14 @@ agent can't write there per the previous section). Once set, the PreToolUse hook
 `Write|Edit|NotebookEdit|Bash|Task` in that project unless an **active run of exactly that
 recipe** exists for that project — any other recipe, or no run, is denied. No Bash-command
 parsing — it's a wholesale deny, so heredoc/quoting tricks don't matter, `Read`/`Grep` stay
-open. `lockstep-mcp policy clear --project <path>` removes the gate. No policy file for a
+open. An awaiting run counts only while **fresh**: once its `updated` timestamp is older than
+`LOCKSTEP_STALE_HOURS` (default 24h — the same threshold the SessionStart stale flag and
+`doctor` use), it no longer satisfies the gate. Fail-closed on liveness: a stalled run closes
+the gate rather than holding it open forever. To resume work, touch the run: `scenario_status`
+advances one whose subcall/child already resolved, `scenario_done` reports a finished step —
+either refreshes `updated` — or `scenario_abort` clears it. The same rule applies to a spawned
+child session's ancestry chain — every run on the chain must be awaiting AND fresh.
+`lockstep-mcp policy clear --project <path>` removes the gate. No policy file for a
 project → always allowed (opt-in only); policy file present but state unreadable → deny
 (internally fail-closed — the only hook that can, since it's the only one that actually blocks
 an action).
@@ -191,12 +198,13 @@ is the child's own checks plus the parent's own content checks (the
 shipped example pairs the pin with a `Verdict: PASS` regex — keep both
 whenever you copy it). A fractal child is a full lockstep run: every v1
 guarantee above applies to it recursively. The policy gate's linkage: the
-worker session is unlocked by an awaiting run of the policy's recipe in
-the project (v1 predicate, unchanged), and a spawned child session — its
-environment carries `LOCKSTEP_CHILD_RUN` — is unlocked ONLY while that
-run's own ancestry chain is fully awaiting and terminates in an awaiting
-run of the policy's recipe in the project; a child whose chain is dead is
-denied even while another policy run keeps the worker unlocked.
+worker session is unlocked by an awaiting, fresh run of the policy's
+recipe in the project (v1 predicate plus the staleness rule above), and a
+spawned child session — its environment carries `LOCKSTEP_CHILD_RUN` — is
+unlocked ONLY while that run's own ancestry chain is fully awaiting and
+fresh and terminates in an awaiting run of the policy's recipe in the
+project; a child whose chain is dead or stale is denied even while
+another policy run keeps the worker unlocked.
 
 **What it does NOT guarantee:**
 
