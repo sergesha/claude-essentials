@@ -181,6 +181,22 @@ this module's implementation:
   calls `.setup()` for the `sqlite` type, which looks like a latent gap in
   yamlgraph itself; `compile_recipe()` below calls it explicitly so a
   fresh db file works on the first `start()`.
+
+**Task 5 addition — `peek()`:** decision 13 (write-order + `_reconcile`)
+needs a way to read a parked run's current checkpoint state WITHOUT
+resuming it (resume is inherently mutating — it requires an actual verdict
+payload and advances the graph). `start`/`resume` cannot serve this; the
+compiled `app` object `compile_recipe()` returns is a real
+`CompiledStateGraph`, and its own public, stable `get_state(config)` method
+(confirmed empirically: `.next` is a non-empty tuple while parked, empty
+once the graph reaches END; `.values` holds the same `brief`/`evidence`
+dict `start`/`resume` already expose) is the read-only counterpart —
+non-mutating, no new checkpoint write, safe to call from a freshly
+recompiled `app` against the same sqlite db. Trapping this call here (never
+in `engine.py`) keeps the "all yamlgraph/langgraph knowledge lives in this
+one module" invariant intact; `peek()` reuses the same `Advance`/
+`_parse_brief` machinery `start`/`resume` already use, just fed from
+`get_state()` instead of `invoke()`.
 """
 
 from __future__ import annotations
@@ -260,6 +276,20 @@ def resume(app, payload: dict, thread_id: str) -> Advance:
     config = {"configurable": {"thread_id": thread_id}}
     result = app.invoke(Command(resume=payload), config=config)
     return _advance_from_result(result)
+
+
+def peek(app, thread_id: str) -> Advance:
+    """Read-only counterpart to `start`/`resume` (Task 5 addition, see module
+    docstring): current checkpoint state for `thread_id` via `get_state`,
+    without resuming. `done=True` once `.next` is empty (graph reached END);
+    otherwise the parked step's brief, exactly like `start`/`resume`."""
+    config = {"configurable": {"thread_id": thread_id}}
+    snapshot = app.get_state(config)
+    values = dict(snapshot.values or {})
+    done = not snapshot.next
+    raw_brief = None if done else values.get("brief")
+    brief = _parse_brief(raw_brief) if raw_brief is not None else None
+    return Advance(done=done, brief=brief, state=values)
 
 
 def cli_validate(recipe_path: Path) -> tuple[bool, str]:
