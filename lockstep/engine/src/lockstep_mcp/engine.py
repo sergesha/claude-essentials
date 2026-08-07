@@ -975,12 +975,13 @@ class Engine:
                 f"Your lockstep child run id is {child_run}. The engine started that run "
                 "for you and this session holds its credential — no other session can "
                 "report for it. Drive THAT run with the lockstep MCP tools "
-                "mcp__lockstep__scenario_status and mcp__lockstep__scenario_done (exact "
-                "tool names — if your harness defers MCP tools behind a tool-search "
-                "mechanism, load them by these names first; never substitute shell "
-                f"commands for them): call scenario_status with run_id {child_run!r} to "
+                "scenario_status and scenario_done (tool ids carry the install's "
+                "server prefix: mcp__lockstep__ or, under a plugin install, "
+                "mcp__plugin_lockstep_lockstep__ — if your harness defers MCP tools "
+                "behind a tool-search mechanism, load them first; never substitute "
+                f"shell commands for them): call scenario_status with run_id {child_run!r} to "
                 "see the parked step, do the work, then report it via scenario_done on "
-                "the same run id (mcp__lockstep__scenario_escalate if blocked).\n\n"
+                "the same run id (scenario_escalate if blocked).\n\n"
                 + prompt
             )
         env = runners.child_env(os.environ, self._state_dir, child_run, nonce)

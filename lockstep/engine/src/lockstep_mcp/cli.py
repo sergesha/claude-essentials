@@ -334,7 +334,7 @@ def hook_pretool(stdin_json: dict, state_dir: Path) -> tuple[int, str]:
 
 # ---------------------------------------------------------------------------
 # PostToolUse hook — the binding writer. Fires on lockstep MCP tools only
-# (hooks.json matcher `mcp__lockstep__.*`, re-checked here). This is where a
+# (hooks.json matcher, re-checked here via _LOCKSTEP_TOOL_PREFIXES). This is where a
 # run gets BOUND to the session driving it: at scenario_start (run_id read
 # from the tool response) and on every later touch naming the run —
 # scenario_status polls included, so a parent waiting out a long subcall
@@ -343,6 +343,17 @@ def hook_pretool(stdin_json: dict, state_dir: Path) -> tuple[int, str]:
 # a lockstep tool, never just writing a file in the project. Pure observer:
 # no output, fail-OPEN on any internal error.
 # ---------------------------------------------------------------------------
+
+
+# The lockstep MCP tools carry a different name prefix per install shape:
+# a `.mcp.json` server entry named "lockstep" yields `mcp__lockstep__<tool>`
+# (verified live 2026-08-07); a plugin-manifest install yields
+# `mcp__plugin_<plugin>_<server>__<tool>` — observed live on Claude Code
+# 2.1.220: `mcp__plugin_lockstep_lockstep__scenario_start` (fixture:
+# tests/fixtures/hooks/posttool_scenario_start_plugin_install.json). Both
+# here and in hooks/hooks.json's PostToolUse matcher — keep them in sync
+# (pinned by test_recorded_payload_matches_shipped_hook_matcher).
+_LOCKSTEP_TOOL_PREFIXES = ("mcp__lockstep__", "mcp__plugin_lockstep_lockstep__")
 
 
 def _find_run_id(obj, depth: int = 0) -> str | None:
@@ -385,7 +396,7 @@ def hook_posttool(stdin_json: dict, state_dir: Path) -> None:
     try:
         state_dir = Path(state_dir)
         tool_name = str(stdin_json.get("tool_name") or "")
-        if not tool_name.startswith("mcp__lockstep__"):
+        if not tool_name.startswith(_LOCKSTEP_TOOL_PREFIXES):
             return
         session_id = stdin_json.get("session_id")
         if not isinstance(session_id, str) or not session_id:
