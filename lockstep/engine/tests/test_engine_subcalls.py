@@ -9,7 +9,7 @@ import pytest
 
 from lockstep_mcp import subcalls
 from lockstep_mcp.engine import Engine, LockstepError
-from _subcall_helpers import FAKE, FIX, make_engine, pass_plan
+from _subcall_helpers import FAKE, FIX, make_engine, pass_plan, write_runners_yaml
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "recipes" / "examples"
 
@@ -397,6 +397,102 @@ def test_child_prompt_carries_engine_preamble_with_run_id(tmp_path, monkeypatch)
     assert child.run_id in prompt
     assert prompt.endswith(author)                         # author prompt verbatim at the end
     assert prompt.index(child.run_id) < prompt.index(author)   # preamble precedes it
+
+
+# --- reviewed-sources pinning: a review covers the bytes that ship -----------
+#
+# The hole (reproduced before the fix): during a subcall the PreToolUse gate
+# is unlocked, so the worker can edit src/** while the reviewer child reads
+# it AND after the child's final validated PASS. The recipes pinned only
+# .lockstep/review.md — clean code got reviewed, dirty code shipped. The fix
+# pins the reviewed sources themselves: the child's review step carries
+# `unchanged src/** since start` (an edit made while the reviewer works
+# fails the child's own step, loop cap 1 -> human), and the parent's verify
+# step carries `unchanged src/** since previous` (done() advances the
+# baseline BEFORE parking on the subcall, auto-poll never advances it — so
+# `previous` at verify is the snapshot taken when the subcall launched).
+
+REVIEWED_PAIRS = [
+    pytest.param(FIX / "good", "subcall-fractal", id="fixtures"),
+    pytest.param(EXAMPLES, "feature-dev-reviewed", id="examples"),
+]
+
+
+def _make_reviewed_engine(tmp_path, monkeypatch, recipes_dir):
+    monkeypatch.setenv("LOCKSTEP_RUNNER", "claude")
+    state = tmp_path / "state"
+    write_runners_yaml(state, sleep=5.0)
+    proj = tmp_path / "proj"
+    proj.mkdir(exist_ok=True)
+    (proj / "src").mkdir()
+    (proj / "src" / "main.py").write_text("def main():\n    return 'clean'\n")
+    return Engine(state_dir=state, recipes_dir=recipes_dir, memory_only=False), proj
+
+
+@pytest.mark.parametrize("recipes_dir,parent", REVIEWED_PAIRS)
+def test_source_edit_during_the_review_fails_the_childs_own_step(tmp_path, monkeypatch, recipes_dir, parent):
+    # Attack leg 1: worker edits src/** WHILE the reviewer child is working.
+    # Broken variant (the shipped recipes before the fix): the child's step
+    # has no `unchanged src/**` check, its done() returns done=True on the
+    # tampered tree, and the parent walks on to verify none the wiser.
+    e, proj = _make_reviewed_engine(tmp_path, monkeypatch, recipes_dir)
+    r = e.start(parent, vars={}, project=str(proj))
+    pass_plan(e, proj, r)
+    child = e._runs.children(r["run_id"])[0]
+    (proj / "src" / "main.py").write_text("EVIL mid-review\n")     # worker, mid-review
+    (proj / ".lockstep" / "review.md").write_text("Verdict: PASS\n")
+    out = e.done(child.run_id, "review", {"review_path": ".lockstep/review.md"})
+    assert out.get("done") is not True                 # the tampered tree never completes the child
+    assert out["passed"] is False
+    assert any("src/main.py" in reason for reason in out["reasons"])
+    # loop cap 1: the next attempt escalates to a human instead of looping
+    out = e.done(child.run_id, "review", {"review_path": ".lockstep/review.md"})
+    assert out.get("done") is not True
+    assert e.status(child.run_id)["status"] == "escalated"
+
+
+@pytest.mark.parametrize("recipes_dir,parent", REVIEWED_PAIRS)
+def test_source_edit_after_the_childs_pass_fails_the_parents_verify(tmp_path, monkeypatch, recipes_dir, parent):
+    # Attack leg 2: worker edits src/** AFTER the child's final validated
+    # PASS — the child is terminal and can never object; only the parent's
+    # verify step stands between the edit and done.
+    # Broken variant (the shipped recipes before the fix): verify pins only
+    # review.md, the first verify done() returns done=True, and the
+    # post-review bytes ship under a PASS verdict.
+    e, proj = _make_reviewed_engine(tmp_path, monkeypatch, recipes_dir)
+    r = e.start(parent, vars={}, project=str(proj))
+    pass_plan(e, proj, r)
+    child = e._runs.children(r["run_id"])[0]
+    (proj / ".lockstep" / "review.md").write_text("Verdict: PASS\n")
+    assert e.done(child.run_id, "review", {"review_path": ".lockstep/review.md"})["done"] is True
+    assert e.status(r["run_id"])["step"] == "verify"
+    (proj / "src" / "main.py").write_text("EVEN MORE EVIL post-review\n")   # worker, post-PASS
+    out = e.done(r["run_id"], "verify", {"review_path": ".lockstep/review.md"})
+    assert out.get("done") is not True                 # the post-review bytes never ship
+    assert out["passed"] is False
+    assert any("src/main.py" in reason for reason in out["reasons"])
+    for _ in range(3):                                 # loop cap 2 -> escalate, never done
+        if e.status(r["run_id"])["status"] != "awaiting":
+            break
+        out = e.done(r["run_id"], "verify", {"review_path": ".lockstep/review.md"})
+        assert out.get("done") is not True
+    assert e.status(r["run_id"])["status"] == "escalated"
+
+
+@pytest.mark.parametrize("recipes_dir,parent", REVIEWED_PAIRS)
+def test_honest_reviewed_cycle_with_untouched_sources_reaches_done(tmp_path, monkeypatch, recipes_dir, parent):
+    # The honest path with sources present and untouched still walks the
+    # whole cycle to done — the source pin must not tax a clean run.
+    e, proj = _make_reviewed_engine(tmp_path, monkeypatch, recipes_dir)
+    r = e.start(parent, vars={}, project=str(proj))
+    pass_plan(e, proj, r)
+    child = e._runs.children(r["run_id"])[0]
+    (proj / ".lockstep" / "review.md").write_text("# looks good\n\nVerdict: PASS\n")
+    assert e.done(child.run_id, "review", {"review_path": ".lockstep/review.md"})["done"] is True
+    assert e.status(r["run_id"])["step"] == "verify"
+    out = e.done(r["run_id"], "verify", {"review_path": ".lockstep/review.md"})
+    assert out["done"] is True
+    assert e.status(r["run_id"])["status"] == "done"
 
 
 def test_poisoned_child_cannot_kill_parent_but_dead_runner_escalates_and_cascades(tmp_path, monkeypatch):
