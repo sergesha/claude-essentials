@@ -250,12 +250,17 @@ def terminate(workdir: Path) -> None:
 
 
 # --- graph hooks -------------------------------------------------------------
+#
+# Resume payloads land ONLY inside the `evidence` channel (yamlgraph's
+# `interrupt_fn` returns `{resume_key: response}`; undeclared `_subcall_*`
+# top-level channels are dropped by LangGraph), so both hooks read the
+# engine-provided ctx from `state["evidence"]` — never from top-level state.
 
-def _envelope(state: dict, **extra: Any) -> dict:
-    brief = state.get("brief") or {}
-    env = {"node": brief.get("node", ""), "runner": brief.get("runner", ""),
+
+def _envelope(src: dict, **extra: Any) -> dict:
+    env = {"node": src.get("_subcall_node", ""), "runner": src.get("_subcall_runner", ""),
            "output": "", "exit_code": None, "session_id": None,
-           "child_run": state.get("_subcall_child_run"), "child_status": None,
+           "child_run": src.get("_subcall_child_run"), "child_status": None,
            "artifact_hashes": {}, "reasons": []}
     env.update(extra)
     return env
@@ -270,17 +275,24 @@ def _session_id(output: str) -> str | None:
         return None
 
 
-def _ctx(state: dict) -> tuple[dict, list[str]]:
-    """Validate the engine-provided ctx. Every field is REQUIRED — no
-    silent fallbacks: a defaulted timeout hides a budget, a defaulted cwd
-    leaks the engine's own cwd, and env=None would hand the child the
-    engine's full environment past the child_env allowlist."""
+def _workdir(src: dict) -> Path | None:
+    wd = src.get("_subcall_workdir")
+    return Path(wd) if wd else None
+
+
+def _ctx(src: dict) -> tuple[dict, list[str]]:
+    """Validate the engine-provided ctx (read from the `evidence` channel —
+    NO top-level fallback: a second read path is a second thing to audit).
+    Every field is REQUIRED — no silent fallbacks: a defaulted timeout hides
+    a budget, a defaulted cwd leaks the engine's own cwd, and env=None would
+    hand the child the engine's full environment past the child_env
+    allowlist."""
     problems: list[str] = []
-    wd = state.get("_subcall_workdir")
-    argv = state.get("_subcall_argv")
-    cwd = state.get("_subcall_cwd")
-    env = state.get("_subcall_env")
-    tm = state.get("_subcall_timeout_minutes")
+    wd = src.get("_subcall_workdir")
+    argv = src.get("_subcall_argv")
+    cwd = src.get("_subcall_cwd")
+    env = src.get("_subcall_env")
+    tm = src.get("_subcall_timeout_minutes")
     if not wd:
         problems.append("subcall ctx missing: _subcall_workdir")
     if not argv or not isinstance(argv, (list, tuple)):
@@ -299,30 +311,41 @@ def _ctx(state: dict) -> tuple[dict, list[str]]:
 
 
 def spawn(state: dict) -> dict:
-    ctx, problems = _ctx(state)
+    src = state.get("evidence") or {}
+    ctx, problems = _ctx(src)
     if problems:
-        return {"_subcall_status": "error", "_subcall_envelope": _envelope(state, reasons=problems)}
+        return {"_subcall_status": "error", "_subcall_envelope": _envelope(src, reasons=problems)}
     if (ctx["workdir"] / _PROC).exists():
         # Already spawned (e.g. server restarted between spawn and poll):
         # reattach to the recorded session instead of forging a second one.
-        return {"_subcall_status": "running", "_subcall_envelope": _envelope(state)}
+        return {"_subcall_status": "running", "_subcall_envelope": _envelope(src)}
     try:
         start_process(ctx["argv"], cwd=ctx["cwd"], env=ctx["env"],
                       workdir=ctx["workdir"], timeout_minutes=ctx["timeout_minutes"])
     except (OSError, RunnerError) as exc:
         return {"_subcall_status": "error",
-                "_subcall_envelope": _envelope(state, reasons=[f"spawn failed: {exc}"])}
-    return {"_subcall_status": "running", "_subcall_envelope": _envelope(state)}
+                "_subcall_envelope": _envelope(src, reasons=[f"spawn failed: {exc}"])}
+    return {"_subcall_status": "running", "_subcall_envelope": _envelope(src)}
 
 
 def poll(state: dict) -> dict:
-    wd = state.get("_subcall_workdir")
-    if not wd:
-        return {"_subcall_status": "error",
-                "_subcall_envelope": _envelope(state, reasons=["subcall ctx missing: _subcall_workdir"])}
-    res = probe(Path(wd))
+    # Keeps the FULL top-level `state` too: `_subcall_envelope` is a declared
+    # top-level channel threading across ticks — the PRIOR envelope (e.g. the
+    # one spawn() wrote when start_process raised) is only visible there,
+    # never in `evidence`. When probe() finds no proc.json (a spawn that
+    # failed before writing it), its generic reason must not overwrite the
+    # real "spawn failed: ..." cause on the first poll tick.
+    src = state.get("evidence") or {}
+    wd = _workdir(src)
+    if wd is None:
+        return {"_subcall_status": "error", "_subcall_envelope": _envelope(src, reasons=["subcall ctx missing"])}
+    res = probe(wd)
     status = {"running": "running", "done": "done", "error": "error", "timeout": "error"}[res["status"]]
-    env = _envelope(state, output=res.get("output", ""), exit_code=res.get("exit_code"),
-                    session_id=_session_id(res.get("output", "")),
-                    reasons=list(res.get("reasons") or []))
+    reasons = list(res.get("reasons") or [])
+    if reasons == ["no subcall process record"]:
+        prior = (state.get("_subcall_envelope") or {}).get("reasons") or []
+        if prior and list(prior) != reasons:
+            reasons = list(prior)      # preserve the spawn-time reason over the generic probe miss
+    env = _envelope(src, output=res.get("output", ""), exit_code=res.get("exit_code"),
+                    session_id=_session_id(res.get("output", "")), reasons=reasons)
     return {"_subcall_status": status, "_subcall_envelope": env}
