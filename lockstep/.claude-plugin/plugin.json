@@ -1,0 +1,24 @@
+{
+  "// x-release-please-start-version": "pin block — do not remove. release-please's generic-updater bumps every semver-looking string between this marker and the matching \"// x-release-please-end\" marker below, keeping the top-level version field and the uvx lockstep-mcp pin in the mcpServers command in sync with the published lockstep-mcp version. Keys are '//'-prefixed so they read as inert comments; they carry no functional meaning to Claude Code.",
+  "$schema": "https://json.schemastore.org/claude-code-plugin.json",
+  "name": "lockstep",
+  "description": "Flow-enforcement engine for coding agents: declarative yamlgraph recipes, durable runs, deterministic evidence gates — a run cannot report progress without validated, artifact-backed evidence.",
+  "version": "0.1.0",
+  "author": {
+    "name": "sergesha"
+  },
+  "homepage": "https://github.com/sergesha/claude-essentials",
+  "license": "MIT",
+  "hooks": "./hooks/hooks.json",
+  "mcpServers": {
+    "lockstep": {
+      "command": "uvx",
+      "args": ["lockstep-mcp==0.1.0", "serve"],
+      "env": {
+        "LOCKSTEP_STATE_DIR": "${LOCKSTEP_STATE_DIR}",
+        "LOCKSTEP_RECIPES": "${LOCKSTEP_RECIPES}"
+      }
+    }
+  },
+  "// x-release-please-end": "end of pin block"
+}
