@@ -237,6 +237,18 @@ start a run if it does (`runners.assert_state_dir_sane`), because a state
 dir under the gate would hand the agent the allowlist it's supposed to be
 denied.
 
+**Spawned-child tool discovery** (live-smoke finding): on a host with many
+MCP servers, Claude Code defers MCP tools behind its tool-search
+mechanism; a small-model child may fail to load the lockstep tools and
+stall to escalation (fail-closed, but wasted). The engine preamble names
+the exact tool names to load; consumers can additionally pin
+`"alwaysLoad": true` on the lockstep entry in the project's `.mcp.json`
+so a spawned child always has the tools loaded. Also required once per
+host: the project must be trusted for non-interactive runs (an untrusted
+workspace ignores `permissions.allow`, the child cannot write its
+artifact or call MCP tools, and the run escalates — the child's stderr
+names the exact `hasTrustDialogAccepted` fix).
+
 **OS-agnostic**: process spawn, liveness, termination, and the run-index
 lock all use only Python stdlib with portable semantics — no
 `fcntl`/`msvcrt`/`/proc`/`setsid` assumptions anywhere in the core paths;
