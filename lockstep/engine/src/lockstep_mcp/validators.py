@@ -1,20 +1,482 @@
-"""Check registry + run_checks — Task 1 stub.
+"""Deterministic check registry + run_checks (Task 2).
 
-Replaced in Task 2 with the real deterministic check registry
-(file_exists, cmd_ok, junit_gate, baseline checks, ...). For this task
-run_checks is exactly the in-graph republish path the real engine will use
-after decision 16: the graph node never executes checks itself — it reads
-the verdict the engine already embedded in the resume payload's evidence
-and republishes it flat. Per the Task-1 stub spec, default (no embedded
-verdict) is "fail"; Task 2 tightens the no-embedded-verdict case to
-"error" (anti-forgery) as part of the real execute=True/False contract.
+Replaces the Task-1 stub. Two distinct execution modes live behind one
+function, per decision 16 (explicit-execution contract):
+
+- `run_checks(state, execute=True)` — the ENGINE's direct call. Reads checks
+  from `state["brief"]["checks"]` + evidence from `state["evidence"]`, runs
+  every check exactly once, and returns a fresh verdict. Engine-supplied
+  baseline context (`_project` / `_baseline_start` / `_baseline_prev` /
+  `_baseline_globs`) rides inside `state` — never injected as graph state.
+- `run_checks(state)` (execute defaults False) — the IN-GRAPH node's call
+  (`validate_one` in the spike fixture). It never executes checks itself: it
+  only republishes the verdict the engine already embedded in the resume
+  payload's evidence (`evidence["_verdict_status"]`/`_verdict_reasons`). No
+  embedded verdict -> `error` (anti-forgery: combined with the reserved `_`
+  evidence-key prefix rejected upstream in the engine, a forged verdict can
+  never reach this path with a status the graph will trust).
+
+Verdict shape is FLAT and unconditional (decision 10):
+`{"verdict_status": "pass"|"fail"|"error", "verdict_reasons": [str]}`.
+
+`error` means a check RAISED, OR a baseline check's target is not covered
+by `baseline_globs` (decision 14's coverage predicate — never a vacuous
+pass on out-of-glob artifacts). `error` short-circuits the whole check pass:
+no further checks run, and none of the accumulated `fail` reasons from
+earlier checks in the same pass are reported (decision 16: an `error`
+consumes no retry budget, so which ordinary failures were also present is
+moot — the run doesn't resume either way).
+
+Fail-closed rules: no checks configured, an unknown check type, or a
+`path_from` key missing from evidence all yield an ordinary `fail` with a
+reason — never a raise, never a silent pass.
+
+`unchanged` checks are deferred to the END of a check pass regardless of
+their position in the recipe's `checks:` list, and re-hash AFTER every
+`cmd_ok`/`junit_gate` in the same pass has run (TOCTOU guard) — a command
+that mutates a "frozen" file earlier in the list must still be caught.
+
+Every path a check consumes (`path`, `path_from` evidence, baseline check
+targets) is re-resolved against `_project` and re-contained inside it here,
+regardless of what the engine already did (decision 12's "belt" — defense
+in depth, not the primary gate).
 """
 
-from typing import Any
+from __future__ import annotations
+
+import fnmatch
+import glob as glob_mod
+import hashlib
+import json
+import os
+import re
+import shlex
+import subprocess
+import uuid
+import xml.etree.ElementTree as ET
+from pathlib import Path
+from typing import Any, Callable
+
+DEFAULT_TIMEOUT = 600
+
+# decision 14: default ignore set for baseline manifests.
+_IGNORE_DIR_NAMES = {"__pycache__", ".git"}
 
 
-def run_checks(state: dict[str, Any]) -> dict[str, Any]:
-    """In-graph republish path (spike stub — see module docstring)."""
+# ---------------------------------------------------------------------------
+# path handling (decision 12 belt)
+# ---------------------------------------------------------------------------
+
+
+def _resolve_path(raw: str, project: Any) -> Path:
+    """Resolve `raw` against `project` (if given) and reject any resolved
+    path that escapes the project root. `project is None` is the unit-test
+    convenience case (no containment enforced, no project to resolve
+    against)."""
+    if project is None:
+        return Path(raw)
+    base = Path(project).resolve()
+    resolved = (base / raw).resolve()
+    if resolved != base and base not in resolved.parents:
+        raise ValueError(f"path escapes project root: {raw!r}")
+    return resolved
+
+
+def _get_path(check: dict, evidence: dict) -> tuple[str | None, str | None]:
+    """Return (raw_path, error_reason) for a `path`/`path_from` check
+    config. `path` is a literal pinned in the recipe; `path_from` pulls
+    from evidence. Missing/absent -> (None, reason), never a raise."""
+    if "path" in check:
+        return check["path"], None
+    key = check.get("path_from")
+    if not key:
+        return None, "missing 'path' or 'path_from'"
+    if key not in evidence:
+        return None, f"evidence key {key!r} not present"
+    return evidence[key], None
+
+
+def _default_cwd(check: dict, ctx: dict) -> Path:
+    """cwd for command checks: explicit `cwd` (author-pinned, trusted, may
+    be relative to project or absolute) else `_project`."""
+    raw = check.get("cwd")
+    project = ctx.get("_project")
+    if raw:
+        p = Path(raw)
+        if p.is_absolute():
+            return p
+        return (Path(project).resolve() / raw) if project else p.resolve()
+    if project:
+        return Path(project).resolve()
+    return Path.cwd()
+
+
+# ---------------------------------------------------------------------------
+# shape checks
+# ---------------------------------------------------------------------------
+
+
+def _check_file_exists(check: dict, evidence: dict, ctx: dict) -> list[str]:
+    raw, err = _get_path(check, evidence)
+    if err:
+        return [f"file_exists: {err}"]
+    resolved = _resolve_path(raw, ctx.get("_project"))
+    if not resolved.exists():
+        return [f"file_exists: {raw} does not exist"]
+    return []
+
+
+def _check_file_nonempty(check: dict, evidence: dict, ctx: dict) -> list[str]:
+    raw, err = _get_path(check, evidence)
+    if err:
+        return [f"file_nonempty: {err}"]
+    resolved = _resolve_path(raw, ctx.get("_project"))
+    if not resolved.exists():
+        return [f"file_nonempty: {raw} does not exist"]
+    if resolved.stat().st_size == 0:
+        return [f"file_nonempty: {raw} is empty"]
+    return []
+
+
+def _check_md_has_sections(check: dict, evidence: dict, ctx: dict) -> list[str]:
+    raw, err = _get_path(check, evidence)
+    if err:
+        return [f"md_has_sections: {err}"]
+    resolved = _resolve_path(raw, ctx.get("_project"))
+    if not resolved.exists():
+        return [f"md_has_sections: {raw} does not exist"]
+    text = resolved.read_text()
+    reasons = []
+    for section in check.get("sections") or []:
+        pattern = re.compile(rf"^#{{1,6}}\s*{re.escape(section)}\b", re.MULTILINE | re.IGNORECASE)
+        if not pattern.search(text):
+            reasons.append(f"md_has_sections: missing section {section!r}")
+    return reasons
+
+
+def _check_file_matches(check: dict, evidence: dict, ctx: dict) -> list[str]:
+    raw, err = _get_path(check, evidence)
+    if err:
+        return [f"file_matches: {err}"]
+    regex = check.get("regex")
+    if not regex:
+        return ["file_matches requires 'regex'"]
+    resolved = _resolve_path(raw, ctx.get("_project"))
+    if not resolved.exists():
+        return [f"file_matches: {raw} does not exist"]
+    if not re.search(regex, resolved.read_text()):
+        return [f"file_matches: content does not match {regex!r}"]
+    return []
+
+
+# ---------------------------------------------------------------------------
+# command checks
+# ---------------------------------------------------------------------------
+
+
+def _run_cmd(
+    command: str, cwd: Path, timeout: int, extra_args: list[str] | None = None
+) -> subprocess.CompletedProcess:
+    args = shlex.split(command) + (extra_args or [])
+    return subprocess.run(
+        args, cwd=str(cwd), timeout=timeout, capture_output=True, text=True
+    )
+
+
+def _check_cmd_ok(check: dict, evidence: dict, ctx: dict) -> list[str]:
+    command = check.get("command")
+    if not isinstance(command, str) or not command.strip():
+        return ["cmd_ok requires a literal 'command' pinned in the recipe"]
+    cwd = _default_cwd(check, ctx)
+    timeout = check.get("timeout", DEFAULT_TIMEOUT)
+    result = _run_cmd(command, cwd, timeout)
+    if result.returncode != 0:
+        return [f"cmd_ok: {command!r} exited {result.returncode}"]
+    return []
+
+
+def _check_git_clean(check: dict, evidence: dict, ctx: dict) -> list[str]:
+    cwd = _default_cwd(check, ctx)
+    timeout = check.get("timeout", DEFAULT_TIMEOUT)
+    result = _run_cmd("git status --porcelain", cwd, timeout)
+    if result.returncode != 0:
+        return [f"git_clean: git status failed: {result.stderr.strip()}"]
+    if result.stdout.strip():
+        return ["git_clean: working tree not clean"]
+    return []
+
+
+def _state_dir() -> Path:
+    return Path(os.environ.get("LOCKSTEP_STATE_DIR", str(Path.home() / ".lockstep")))
+
+
+def _parse_junit(xml_path: Path) -> dict[str, int]:
+    root = ET.parse(xml_path).getroot()
+    suites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))
+    totals = {"tests": 0, "failures": 0, "errors": 0, "skipped": 0}
+    for suite in suites:
+        for key in totals:
+            totals[key] += int(suite.get(key, 0) or 0)
+    return totals
+
+
+def _check_junit_gate(check: dict, evidence: dict, ctx: dict) -> list[str]:
+    command = check.get("command")
+    if not isinstance(command, str) or not command.strip():
+        return ["junit_gate requires a literal 'command' pinned in the recipe"]
+    if "min_tests" not in check:
+        return ["junit_gate requires 'min_tests'"]
+    min_tests = check["min_tests"]
+    max_skipped = check.get("max_skipped")
+    cwd = _default_cwd(check, ctx)
+    timeout = check.get("timeout", DEFAULT_TIMEOUT)
+
+    tmp_dir = _state_dir() / "tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    xml_path = tmp_dir / f"{uuid.uuid4().hex}.xml"
+    try:
+        _run_cmd(command, cwd, timeout, extra_args=[f"--junitxml={xml_path}"])
+        if not xml_path.exists():
+            return ["junit_gate: no junit xml produced"]
+        totals = _parse_junit(xml_path)
+    finally:
+        xml_path.unlink(missing_ok=True)
+
+    reasons = []
+    if totals["tests"] < min_tests:
+        reasons.append(f"junit_gate: {totals['tests']} tests ran, need >= {min_tests}")
+    if totals["failures"] or totals["errors"]:
+        reasons.append(
+            f"junit_gate: {totals['failures']} failures, {totals['errors']} errors"
+        )
+    if max_skipped is not None and totals["skipped"] > max_skipped:
+        reasons.append(f"junit_gate: {totals['skipped']} skipped, max {max_skipped}")
+    return reasons
+
+
+# ---------------------------------------------------------------------------
+# baseline manifest + checks (decision 14)
+# ---------------------------------------------------------------------------
+
+
+def _is_ignored(rel_path: str) -> bool:
+    parts = rel_path.split("/")
+    if any(part in _IGNORE_DIR_NAMES for part in parts):
+        return True
+    return rel_path.endswith(".pyc")
+
+
+def _hash_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def build_manifest(project: Path, globs: list[str]) -> dict[str, str]:
+    """Hash every file under `project` matching any pattern in `globs`
+    (decision-14 ignore set applied; symlinks not followed). Returns
+    {relative_posix_path: sha256_hex}."""
+    project = Path(project).resolve()
+    manifest: dict[str, str] = {}
+    for pattern in globs:
+        for match in glob_mod.glob(str(project / pattern), recursive=True):
+            p = Path(match)
+            if p.is_symlink() or not p.is_file():
+                continue
+            rel = p.resolve().relative_to(project).as_posix()
+            if _is_ignored(rel):
+                continue
+            manifest[rel] = _hash_file(p)
+    return manifest
+
+
+def _load_manifest(path: Any) -> dict[str, str]:
+    if not path:
+        return {}
+    p = Path(path)
+    if not p.exists():
+        return {}
+    return json.loads(p.read_text())
+
+
+def _covered_by_globs(rel_path: str, globs: list[str]) -> bool:
+    return any(fnmatch.fnmatchcase(rel_path, g) for g in globs)
+
+
+_WILDCARD_CHARS = "*?["
+
+
+def _glob_prefix(pattern: str) -> str:
+    idx = len(pattern)
+    for ch in _WILDCARD_CHARS:
+        pos = pattern.find(ch)
+        if pos != -1:
+            idx = min(idx, pos)
+    return pattern[:idx]
+
+
+def _path_covered(declared_path: str, baseline_globs: list[str]) -> bool:
+    for g in baseline_globs:
+        prefix = _glob_prefix(g)
+        if prefix and (declared_path.startswith(prefix) or prefix.startswith(declared_path)):
+            return True
+    return False
+
+
+def _check_fresh(check: dict, evidence: dict, ctx: dict) -> list[str]:
+    raw, err = _get_path(check, evidence)
+    if err:
+        return [f"fresh: {err}"]
+    project = ctx.get("_project")
+    resolved = _resolve_path(raw, project)
+    rel = resolved.relative_to(Path(project).resolve()).as_posix()
+    baseline_globs = ctx.get("_baseline_globs") or []
+    if not _covered_by_globs(rel, baseline_globs):
+        raise ValueError(f"fresh: path {rel!r} not covered by baseline_globs")
+    if not resolved.exists():
+        return [f"fresh: {raw} does not exist"]
+    start_manifest = _load_manifest(ctx.get("_baseline_start"))
+    old_hash = start_manifest.get(rel)
+    if old_hash is not None and old_hash == _hash_file(resolved):
+        return [f"fresh: {rel} unchanged since run start"]
+    return []
+
+
+def _check_unchanged(check: dict, evidence: dict, ctx: dict) -> list[str]:
+    glob_pat = check.get("glob")
+    if not glob_pat:
+        return ["unchanged requires 'glob'"]
+    since = check.get("since", "start")
+    project = ctx.get("_project")
+    baseline_globs = ctx.get("_baseline_globs") or []
+    manifest_path = ctx.get("_baseline_start") if since == "start" else ctx.get("_baseline_prev")
+    if not manifest_path:
+        raise ValueError(f"unchanged: no baseline manifest available for since={since!r}")
+
+    selected = _load_manifest(manifest_path)
+    matched_entries = {p: h for p, h in selected.items() if fnmatch.fnmatchcase(p, glob_pat)}
+    if not matched_entries and glob_pat not in baseline_globs:
+        raise ValueError(f"unchanged: glob {glob_pat!r} not covered by baseline_globs")
+
+    current = build_manifest(project, [glob_pat])
+    reasons = []
+    for rel in sorted(set(matched_entries) | set(current)):
+        if matched_entries.get(rel) != current.get(rel):
+            reasons.append(f"unchanged: {rel} changed")
+    return reasons
+
+
+def _check_changed_in(check: dict, evidence: dict, ctx: dict) -> list[str]:
+    paths = check.get("paths")
+    if not paths:
+        return ["changed_in requires 'paths'"]
+    since = check.get("since", "start")
+    project = ctx.get("_project")
+    baseline_globs = ctx.get("_baseline_globs") or []
+    for declared in paths:
+        if not _path_covered(declared, baseline_globs):
+            raise ValueError(f"changed_in: path {declared!r} not covered by baseline_globs")
+
+    manifest_path = ctx.get("_baseline_start") if since == "start" else ctx.get("_baseline_prev")
+    if not manifest_path:
+        raise ValueError(f"changed_in: no baseline manifest available for since={since!r}")
+
+    selected = _load_manifest(manifest_path)
+    current = build_manifest(project, baseline_globs)
+    changed = [
+        rel
+        for rel in set(selected) | set(current)
+        if any(rel.startswith(p) for p in paths) and selected.get(rel) != current.get(rel)
+    ]
+    if not changed:
+        return [f"changed_in: no changes detected under {paths}"]
+    return []
+
+
+def _check_diff_only(check: dict, evidence: dict, ctx: dict) -> list[str]:
+    paths = check.get("paths")
+    if not paths:
+        return ["diff_only requires 'paths'"]
+    project = ctx.get("_project")
+    baseline_globs = ctx.get("_baseline_globs") or []
+    for declared in paths:
+        if not _path_covered(declared, baseline_globs):
+            raise ValueError(f"diff_only: path {declared!r} not covered by baseline_globs")
+
+    prev_manifest_path = ctx.get("_baseline_prev")
+    if not prev_manifest_path:
+        raise ValueError("diff_only: no previous baseline available")
+
+    selected = _load_manifest(prev_manifest_path)
+    current = build_manifest(project, baseline_globs)
+    reasons = []
+    for rel in sorted(set(selected) | set(current)):
+        if selected.get(rel) != current.get(rel) and not any(rel.startswith(p) for p in paths):
+            reasons.append(f"diff_only: unexpected change outside {paths}: {rel}")
+    return reasons
+
+
+# ---------------------------------------------------------------------------
+# registry + run_checks
+# ---------------------------------------------------------------------------
+
+CHECKS: dict[str, Callable[[dict, dict, dict], list[str]]] = {
+    "file_exists": _check_file_exists,
+    "file_nonempty": _check_file_nonempty,
+    "md_has_sections": _check_md_has_sections,
+    "file_matches": _check_file_matches,
+    "cmd_ok": _check_cmd_ok,
+    "git_clean": _check_git_clean,
+    "junit_gate": _check_junit_gate,
+    "fresh": _check_fresh,
+    "unchanged": _check_unchanged,
+    "changed_in": _check_changed_in,
+    "diff_only": _check_diff_only,
+}
+
+
+def run_checks(state: dict[str, Any], execute: bool = False) -> dict[str, Any]:
+    if not execute:
+        # In-graph republish path: never executes checks itself (decision
+        # 16). No embedded verdict -> error (anti-forgery).
+        evidence = state.get("evidence") or {}
+        status = evidence.get("_verdict_status")
+        if status is None:
+            return {"verdict_status": "error", "verdict_reasons": ["no verdict embedded in evidence"]}
+        reasons = evidence.get("_verdict_reasons") or []
+        return {"verdict_status": status, "verdict_reasons": list(reasons)}
+
+    brief = state.get("brief") or {}
+    checks = brief.get("checks") or []
     evidence = state.get("evidence") or {}
-    status = evidence.get("_verdict_status", "fail")
-    return {"verdict_status": status, "verdict_reasons": []}
+    ctx = {
+        "_project": state.get("_project"),
+        "_baseline_start": state.get("_baseline_start"),
+        "_baseline_prev": state.get("_baseline_prev"),
+        "_baseline_globs": state.get("_baseline_globs") or [],
+    }
+
+    if not checks:
+        return {"verdict_status": "fail", "verdict_reasons": ["no checks configured"]}
+
+    reasons: list[str] = []
+    deferred: list[dict] = []
+    try:
+        for check in checks:
+            ctype = check.get("type")
+            if ctype == "unchanged":
+                # TOCTOU guard: unchanged re-hashes AFTER every command in
+                # this pass, regardless of its position in the list.
+                deferred.append(check)
+                continue
+            fn = CHECKS.get(ctype)
+            if fn is None:
+                reasons.append(f"unknown check type: {ctype!r}")
+                continue
+            reasons.extend(fn(check, evidence, ctx))
+        for check in deferred:
+            reasons.extend(_check_unchanged(check, evidence, ctx))
+    except Exception as e:  # noqa: BLE001 - deliberate: any raise -> error verdict (decision 16)
+        return {"verdict_status": "error", "verdict_reasons": [str(e)]}
+
+    if reasons:
+        return {"verdict_status": "fail", "verdict_reasons": reasons}
+    return {"verdict_status": "pass", "verdict_reasons": []}
