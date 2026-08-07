@@ -61,6 +61,7 @@ import yaml
 
 from lockstep_mcp import evidence as evidence_mod
 from lockstep_mcp import profile_check
+from lockstep_mcp import runners
 from lockstep_mcp import validators
 from lockstep_mcp import yamlgraph_api as yg
 from lockstep_mcp.runs import TERMINAL_STATUSES, RunIndex, RunRecord
@@ -314,6 +315,10 @@ class Engine:
     # ------------------------------------------------------------------
 
     def start(self, recipe: str, vars: dict, project: str) -> dict:  # noqa: A002 - frozen name
+        # The state dir (runners.yaml, runs.json) is the trust anchor and
+        # LOCKSTEP_STATE_DIR arrives unvalidated from the environment —
+        # refuse one placed inside the agent-writable project tree.
+        runners.assert_state_dir_sane(self._state_dir, Path(project))
         vars = vars or {}
         hostile = sorted(k for k in vars if k.startswith("_") or k in _RESERVED_VAR_KEYS)
         if hostile:
