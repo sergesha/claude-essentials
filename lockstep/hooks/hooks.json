@@ -1,13 +1,12 @@
 {
-  "// x-release-please-start-version": "pin block — do not remove. release-please's generic-updater bumps every semver-looking string between this marker and the matching \"// x-release-please-end\" marker below, keeping the uvx pins on the hook-*, commands in sync with the published lockstep-mcp version. Keys are '//'-prefixed so they read as inert comments; they carry no functional meaning to Claude Code.",
-  "description": "lockstep hook wrappers (Stop / SessionStart / PreToolUse) — inert until lockstep-mcp is published to PyPI (uvx resolves git-URL interim installs to nothing runnable; see README).",
+  "description": "lockstep hook wrappers (Stop / SessionStart / PreToolUse) — run the plugin's own cloned engine via uv, no PyPI dependency.",
   "hooks": {
     "Stop": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "uvx lockstep-mcp==0.1.0 hook-stop",
+            "command": "uv run --project ${CLAUDE_PLUGIN_ROOT}/engine lockstep-mcp hook-stop",
             "timeout": 10
           }
         ]
@@ -18,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uvx lockstep-mcp==0.1.0 hook-session-start",
+            "command": "uv run --project ${CLAUDE_PLUGIN_ROOT}/engine lockstep-mcp hook-session-start",
             "timeout": 10
           }
         ]
@@ -30,12 +29,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uvx lockstep-mcp==0.1.0 hook-pretool",
+            "command": "uv run --project ${CLAUDE_PLUGIN_ROOT}/engine lockstep-mcp hook-pretool",
             "timeout": 10
           }
         ]
       }
     ]
-  },
-  "// x-release-please-end": "end of pin block"
+  }
 }

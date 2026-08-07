@@ -26,8 +26,11 @@ Build **lockstep**: a self-sufficient flow-enforcement plugin.
   only through engine-validated evidence.
 - **Checkpoints**: SqliteSaver (native LangGraph), one `.db` per run.
   MemorySaver in unit tests only. No Redis, no external services.
-- **Distribution**: PyPI package `lockstep-mcp` (name verified free
-  2026-08-07), launched via `uvx lockstep-mcp==X.Y.Z`. No Docker required
+- **Distribution**: `${CLAUDE_PLUGIN_ROOT}` — the plugin's own cloned files ARE the
+  distribution; `mcpServers`/`hooks.json` invoke `uv run --project
+  ${CLAUDE_PLUGIN_ROOT}/engine lockstep-mcp <verb>`, no PyPI dependency. A PyPI
+  package `lockstep-mcp` (name verified free 2026-08-07), installable via `uvx
+  lockstep-mcp==X.Y.Z`, is optional future distribution. No Docker required
   (optional image later if wanted). Releases via release-please, tag
   `lockstep-vX.Y.Z`.
 - **Standalone**: zero knowledge of ours-fleet or any other consumer. Vocabulary
@@ -328,7 +331,7 @@ side-effect of v1.
 | 3. SessionStart-hook | after restart/compaction: "active run X, step N, criterion Y" | amnesia after restarts |
 | 4. Consumer permissions | deny writes to state dir / recipes / settings / hook scripts (README guidance, consumer-side) | gate self-modification; .db + recipe tampering via Bash |
 | 5. PreToolUse no-run gate (opt-in per project) | owner marks a project via `lockstep-mcp policy require --recipe <X>` (policy file in the agent-unwritable state dir); Write/Edit/NotebookEdit/Bash/Task are DENIED unless an active run of THE POLICY'S RECIPE exists in THIS project (any-recipe unlock would let the cheapest lying-around recipe open the gate); no Bash parsing, so heredoc bypasses are moot (Read/Grep stay open) | "agent never starts a run / works outside the mechanism" — in policy-marked projects, the path of least resistance IS `scenario_start` of the required recipe |
-| 6. Observability + liveness | `list_runs` shows stalled runs; every hook fire appends to `heartbeat.jsonl` (rotated); `lockstep-mcp doctor` checks dirs, pin, heartbeat age (v1 — deeper handler self-exec is v2); consumer CI can prove hooks fire deterministically (`claude -p "ok"` → assert heartbeat grew). Known caveat: write-capable MCP tools from OTHER servers are outside the PreToolUse matcher — README lists it | silent ignoring; silent hook death |
+| 6. Observability + liveness | `list_runs` shows stalled runs; every hook fire appends to `heartbeat.jsonl` (rotated); `lockstep-mcp doctor` checks dirs, heartbeat age, installed version (v1 — deeper handler self-exec is v2); consumer CI can prove hooks fire deterministically (`claude -p "ok"` → assert heartbeat grew). Known caveat: write-capable MCP tools from OTHER servers are outside the PreToolUse matcher — README lists it | silent ignoring; silent hook death |
 
 Hook handler discipline: only PreToolUse is internally fail-closed (it is
 the one hook that can actually block an action — any internal exception

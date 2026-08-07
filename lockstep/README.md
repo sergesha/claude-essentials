@@ -39,7 +39,13 @@ status signal", not "process compliance".
 
 ## Install
 
-Requires `uv` on the machine that runs the MCP server (the plugin launches it via `uvx`).
+Requires `uv` on the machine that runs the MCP server. Distribution is the plugin's own cloned
+files: `mcpServers`/`hooks.json` invoke `uv run --project ${CLAUDE_PLUGIN_ROOT}/engine
+lockstep-mcp <verb>` — no PyPI package required. `${CLAUDE_PLUGIN_ROOT}` is set by Claude Code to
+the plugin's install directory. Hooks and the MCP server work immediately after install; the
+first invocation resolves dependencies into `uv`'s cache (a one-time delay), subsequent runs are
+fast. A PyPI release of `lockstep-mcp` (installable via `uvx`) is an optional future distribution
+path, not required for the plugin to work.
 
 ```
 /plugin marketplace add sergesha/claude-essentials
@@ -130,13 +136,12 @@ project → always allowed (opt-in only); policy file present but state unreadab
 (internally fail-closed — the only hook that can, since it's the only one that actually blocks
 an action).
 
-**`lockstep-mcp doctor [--hooks-json <path>]`**: v1-trimmed diagnostic — state/recipes dirs
-exist, `hooks.json`'s version pin matches the installed `lockstep-mcp` version, `heartbeat.jsonl`
-recency against `LOCKSTEP_STALE_HOURS` (default 24h — an older heartbeat is `[FAIL]`), and a
-`uvx lockstep-mcp==<version> --version` pre-warm one-liner to print. Exits `1` if any check
-failed, `0` if all green — a CI/operator script can gate on the process exit code, not just
-scrape the report text. Not implemented in v1 (planned v2): effective-settings inspection,
-handler self-exec.
+**`lockstep-mcp doctor`**: v1-trimmed diagnostic — state/recipes dirs exist, `heartbeat.jsonl`
+recency against `LOCKSTEP_STALE_HOURS` (default 24h — an older heartbeat is `[FAIL]`), and the
+installed version (self-reported, informational — there's no external pin to check it against;
+distribution is the plugin's own cloned files). Exits `1` if any check failed, `0` if all green —
+a CI/operator script can gate on the process exit code, not just scrape the report text. Not
+implemented in v1 (planned v2): effective-settings inspection, handler self-exec.
 
 **CI liveness assert**: "the rule is in the file" is not "the rule works" — every hook handler
 appends one best-effort JSONL line to `heartbeat.jsonl` unconditionally, before any early-exit
@@ -169,13 +174,6 @@ its `.mcp.json` entry, and `Path.cwd()` at server-start time is exactly that pro
   valid, machine-checked evidence is simply rejected regardless of whether the Stop hook fired
   at all. Don't rely on the hook to make an agent honest; rely on it only to reduce the chance
   an active run goes unreported by accident.
-- **Hooks are inert on interim git-URL installs.** Until `lockstep-mcp` is published to PyPI,
-  `hooks.json`'s pinned `uvx lockstep-mcp==0.1.0 hook-*` commands resolve to nothing installable
-  — `uvx` can't fetch a PyPI package that doesn't exist yet. Use the interim invocation for a
-  manual/local MCP server entry in the meantime: `uvx --from
-  git+https://github.com/sergesha/claude-essentials#subdirectory=lockstep/engine lockstep-mcp`
-  (or, for local development, `uv run --project <clone>/lockstep/engine lockstep-mcp <verb>`, as
-  used in the live verification above).
 - **Write-capable MCP tools from other servers are outside the PreToolUse matcher.** The
   policy gate matches on tool names `Write|Edit|NotebookEdit|Bash|Task` only; a different MCP
   server's own write-capable tool (a filesystem-write tool from an unrelated plugin, say) isn't
