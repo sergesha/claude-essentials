@@ -142,6 +142,24 @@ def test_scenario_dryrun_reports_shape_failure(tmp_path, monkeypatch):
     assert server.list_runs() == []
 
 
+def test_scenario_dryrun_reports_clean_error_on_recipe_pinned_path_escape(tmp_path, monkeypatch):
+    """item 13: a shape check's `path:` is recipe-PINNED (not evidence-
+    sourced), so `_containment_errors` — which only resolves/contains
+    evidence keys annotated `format: project-path` — never sees it. The
+    literal `../outside.md` in `dryrun-path-escape.yaml` reaches
+    `validators._resolve_path` raw and raises ValueError; `scenario_dryrun`
+    must turn that into a clean per-check error result, not an uncaught
+    crash."""
+    _configure(monkeypatch, tmp_path)
+
+    result = server.scenario_dryrun("dryrun-path-escape", "one", {"note": "x"})
+
+    assert result["accepted"] is True
+    entry = next(r for r in result["results"] if r["type"] == "file_exists")
+    assert entry["verdict"] == "error"
+    assert any("escape" in reason.lower() for reason in entry["reasons"])
+
+
 def test_scenario_dryrun_rejects_forged_verdict(tmp_path, monkeypatch):
     _configure(monkeypatch, tmp_path)
 

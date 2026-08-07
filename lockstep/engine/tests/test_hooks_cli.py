@@ -195,6 +195,9 @@ def test_pretool_policy_no_run_denies(tmp_path):
     data = json.loads(out)
     assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert "feature-dev" in data["hookSpecificOutput"]["permissionDecisionReason"]
+    # M4: mirrors the SessionStart wrapper's convention of naming the
+    # hook event inside hookSpecificOutput.
+    assert data["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
 
 
 def test_pretool_recipe_mismatch_stays_denied(tmp_path):
@@ -320,6 +323,40 @@ def test_doctor_flags_missing_dirs(tmp_path):
 
     assert ok is False
     assert "issues found" in report
+
+
+def test_doctor_flags_stale_heartbeat_past_default_threshold(tmp_path):
+    state_dir = tmp_path / "state"
+    recipes_dir = tmp_path / "recipes"
+    state_dir.mkdir()
+    recipes_dir.mkdir()
+    heartbeat = state_dir / "heartbeat.jsonl"
+    old_ts = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
+    heartbeat.write_text(json.dumps({"event": "Stop", "ts": old_ts}) + "\n")
+
+    ok, report = cli.doctor(state_dir, recipes_dir)
+
+    assert ok is False
+    assert "issues found" in report
+    assert "stale" in report.lower()
+
+
+def test_doctor_stale_threshold_configurable_via_env(tmp_path, monkeypatch):
+    state_dir = tmp_path / "state"
+    recipes_dir = tmp_path / "recipes"
+    state_dir.mkdir()
+    recipes_dir.mkdir()
+    heartbeat = state_dir / "heartbeat.jsonl"
+    ts = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    heartbeat.write_text(json.dumps({"event": "Stop", "ts": ts}) + "\n")
+
+    monkeypatch.setenv("LOCKSTEP_STALE_HOURS", "1")
+    ok, report = cli.doctor(state_dir, recipes_dir)
+    assert ok is False
+
+    monkeypatch.setenv("LOCKSTEP_STALE_HOURS", "24")
+    ok, report = cli.doctor(state_dir, recipes_dir)
+    assert ok is True
 
 
 # ---------------------------------------------------------------------------

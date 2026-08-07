@@ -352,6 +352,28 @@ def test_midrun_recipe_edit_is_inert(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# item 11: fail reasons survive a restart
+# ---------------------------------------------------------------------------
+
+
+def test_fail_reasons_persisted_across_restart(tmp_path):
+    state_dir = tmp_path / "state"
+    project = _project(tmp_path)
+
+    eng1 = Engine(state_dir, GOOD)
+    res = eng1.start("minimal", {}, str(project))
+    run_id = res["run_id"]
+
+    result = eng1.done(run_id, "one", {"path": "missing.md"})
+    assert result["passed"] is False
+
+    eng2 = Engine(state_dir, GOOD)
+    status = eng2.status(run_id)
+    assert status["last_fail_reasons"]
+    assert any("missing.md" in r for r in status["last_fail_reasons"])
+
+
+# ---------------------------------------------------------------------------
 # index repair (decision 13)
 # ---------------------------------------------------------------------------
 

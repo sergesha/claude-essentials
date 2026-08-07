@@ -213,7 +213,13 @@ def _is_stale(updated_iso: str, hours: float) -> bool:
 
 def _deny(reason: str) -> tuple[int, str]:
     return 0, json.dumps(
-        {"hookSpecificOutput": {"permissionDecision": "deny", "permissionDecisionReason": reason}}
+        {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
+            }
+        }
     )
 
 
@@ -340,7 +346,12 @@ def doctor(state_dir: Path, recipes_dir: Path, hooks_json: Path | str | None = N
                 if ts.tzinfo is None:
                     ts = ts.replace(tzinfo=timezone.utc)
                 age = datetime.now(timezone.utc) - ts
-                check("heartbeat recent", True, f"last event {age.total_seconds():.0f}s ago")
+                stale_hours = float(os.environ.get("LOCKSTEP_STALE_HOURS", "24"))
+                is_stale = age > timedelta(hours=stale_hours)
+                detail = f"last event {age.total_seconds():.0f}s ago"
+                if is_stale:
+                    detail += f" — stale (over {stale_hours}h)"
+                check("heartbeat recent", not is_stale, detail)
         except Exception as exc:  # noqa: BLE001 - report, don't crash doctor
             check("heartbeat readable", False, str(exc))
 
@@ -413,12 +424,14 @@ def _cmd_policy(args: argparse.Namespace) -> int:
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
-    _ok, report = doctor(_state_dir(), _recipes_dir(), hooks_json=getattr(args, "hooks_json", None))
+    ok, report = doctor(_state_dir(), _recipes_dir(), hooks_json=getattr(args, "hooks_json", None))
     print(report)
-    # doctor is a diagnostic report, never a failing process (consistent
-    # with every other hook/verb here: it must never look like a crash to
-    # whatever invoked it) — health is conveyed in the report text.
-    return 0
+    # m8: exit 1 on issues found — a CI/operator invocation must be able to
+    # gate on this without scraping the report text. Distinct from the
+    # hook verbs (which must never look like a crash): doctor is a
+    # deliberate diagnostic command, run on purpose, not a hook the
+    # platform's fail-open/closed contract applies to.
+    return 0 if ok else 1
 
 
 _HANDLERS = {
@@ -433,6 +446,7 @@ _HANDLERS = {
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="lockstep-mcp")
+    parser.add_argument("--version", action="store_true", help="print the installed version and exit")
     sub = parser.add_subparsers(dest="verb")
     for verb in _HANDLERS:
         if verb == "policy":
@@ -454,6 +468,9 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args, _unknown = parser.parse_known_args(argv)
+    if getattr(args, "version", False):
+        print(__version__)
+        return 0
     verb = args.verb or "serve"
     return _HANDLERS[verb](args)
 

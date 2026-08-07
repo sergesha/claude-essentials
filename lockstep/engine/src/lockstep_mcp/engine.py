@@ -137,9 +137,26 @@ class Engine:
         """Route-log fallback (Task 1 probe, spike M7): yamlgraph exposes no
         per-run route-log hook, so the engine witnesses its own completed
         `done()` transitions here — best-effort, JSONL, failures ignored.
+
+        M1: `event` must be `"route"` with `node`/`target`/`thread_id` —
+        yamlgraph's own `parse_route_lines` (consumed by `render_flow`'s
+        `--overlay`, see `yamlgraph_api.cli_mermaid`) only picks up objects
+        matching its own frozen grammar (`yamlgraph.utils.route_log`
+        module docstring): `{"event":"route","node":...,"value":...,
+        "target":...,"thread_id":...}`. `render_overlay` doesn't require
+        `node`/`target` to name actual authored graph nodes — an edge it
+        doesn't recognize is added as a synthetic, ordinal-marked one — so
+        our step-level names (not yamlgraph's internal node ids) still
+        render real overlay evidence. Extra fields below are additive and
+        harmless to that parser (it reads only the four route keys).
         """
         entry = {
-            "event": "transition",
+            "event": "route",
+            "node": from_step,
+            "value": verdict,
+            "target": to_step if to_step is not None else "END",
+            "thread_id": run_id,
+            # kept for our own diagnostics; not part of yamlgraph's grammar
             "run": run_id,
             "from": from_step,
             "verdict": verdict,
@@ -361,6 +378,7 @@ class Engine:
             "task": brief.get("task"),
             "exit_criterion": brief.get("exit_criterion"),
             "evidence_schema": brief.get("evidence_schema"),
+            "last_fail_reasons": brief.get("last_fail_reasons"),
         }
 
     def done(self, run_id: str, step: str, evidence: dict) -> dict:
@@ -439,9 +457,13 @@ class Engine:
 
             vars_ = self._read_vars(run_id)
             substituted = self._substitute_brief(adv.brief, vars_)
-            self._runs.update(
-                run_id, step=substituted.step, brief=self._brief_to_dict(substituted)
-            )
+            # item 11: persist the fail reasons into the parked brief so a
+            # restart (fresh Engine, `status()` reading only runs.json)
+            # still surfaces WHY the last attempt failed, not just that a
+            # step is awaiting retry.
+            repeated_brief = self._brief_to_dict(substituted)
+            repeated_brief["last_fail_reasons"] = reasons
+            self._runs.update(run_id, step=substituted.step, brief=repeated_brief)
             self._log_transition(run_id, step, "fail", substituted.step)
             return {"accepted": True, "passed": False, "reasons": reasons, "step": step}
 

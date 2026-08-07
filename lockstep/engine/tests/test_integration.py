@@ -62,6 +62,12 @@ def test_full_cycle_restart_durability_terminal_escalation_abort(tmp_path, monke
     assert trace != ""
     assert "plan" in trace
 
+    # --- M1: the route log is in yamlgraph's OWN `event: "route"` shape,
+    # so render_flow's overlay actually picks it up (not just a private
+    # "transition" event only our own code could ever read back) ---------
+    overlay = server.render_flow("feature-dev", run_id)
+    assert "#1" in overlay  # yamlgraph's ordinal decision marker
+
     # --- simulate a full server restart: fresh Engine, same state dir --
     server._reset_engine()
 

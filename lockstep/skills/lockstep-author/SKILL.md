@@ -153,6 +153,13 @@ is rejected.
 the recipe (`command: "pytest -q"`), never taken from evidence — an evidence-sourced command
 is arbitrary code execution by construction.
 
+**`command` runs via `shlex.split()`, with no shell — no pipes, `&&`, `||`, `>`, `$(...)`, or
+env-var expansion.** The engine runs `subprocess.run(shlex.split(command), ...)` directly, never
+through `/bin/sh -c`. A command like `"pytest -q | tee out.log"` does NOT pipe — it runs `pytest`
+with literal arguments `-q`, `|`, `tee`, `out.log`, which `pytest` rejects as bad CLI args (an
+ordinary `fail`, not a crash, but not what it looks like either). Write single commands (or a
+wrapper script checked into the project and invoked by path) instead of shell pipelines.
+
 **Placeholders (`{var}`) are WHITELISTED to `task`/`exit_criterion` only.** `scenario_start`'s
 `vars` substitute into those two fields; `checks` and `evidence_schema` are used **verbatim**
 from the recipe snapshot, on purpose — a `vars: {module: "x || true"}` against a pinned

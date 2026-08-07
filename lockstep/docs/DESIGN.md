@@ -88,26 +88,48 @@ A step is a triple: `interrupt → validator → conditional edges
 (pass/retry/escalate)`:
 
 Abridged example (only the `plan` step shown; further steps follow the same
-triple pattern). Conventions — ONE dialect, this one: reused state keys
+triple pattern, chained the way `validate_plan`'s pass edge below would
+target `step_implement` instead of `END`). This is copied verbatim in shape
+from the spike-frozen fixture (`lockstep/engine/tests/fixtures/recipes/good/
+two-steps.yaml`) — not an abridged sketch of a different, easier dialect.
+Conventions — ONE dialect, this one: reused state keys
 `brief`/`evidence`/`verdict_status`/`verdict_reasons` across all steps
 (sequential graphs make reuse safe; one generic validator serves every
 step); ALL lockstep extensions (`evidence_schema`, `checks`) live INSIDE
 the interrupt `message` dict (a free-form payload — no conflict with
-yamlgraph's YAML schema). The
-checkpointer is NOT declared in recipes: the server injects
-`{type: sqlite, path: $LOCKSTEP_STATE_DIR/runs/<run-id>.db}` itself.
+yamlgraph's YAML schema); every interrupt (work step AND `escalate`) needs
+`idempotent: false` or it can inherit a stale sibling's payload (both share
+`state_key: brief`); conditional edges are `{from, to, condition}` triples,
+one condition per edge — there is no `type: conditional` + `conditions:`
+list shape in this dialect; `loop_limits`/`loop_exits` key on the
+REPEATING node (the python validator), never the interrupt, and
+`loop_exits` must target a plain `passthrough` gate — never the `escalate`
+interrupt directly, or its `prepare_fn` never runs and the parked brief is
+stale instead of the `{step: escalate}` marker (see `yamlgraph_api.py`'s
+module docstring for why). The checkpointer is NOT declared in recipes:
+the server injects `{type: sqlite, path:
+$LOCKSTEP_STATE_DIR/runs/<run-id>.db}` itself.
 
 ```yaml
-name: feature-dev
 state:
-  task:            str    # var at scenario_start; substituted into task/exit_criterion ONLY
   brief:           dict
   evidence:        dict
   verdict_status:  str
   verdict_reasons: list
+  task:            str    # var at scenario_start; substituted into task/exit_criterion ONLY
+
+tools:
+  run_checks:
+    type: python
+    module: lockstep_mcp.validators
+    function: run_checks
+
 nodes:
   step_plan:
     type: interrupt
+    state_key: brief
+    resume_key: evidence
+    idempotent: false
     message:
       step: plan
       task: "Составь план работ по {task}"
@@ -117,28 +139,44 @@ nodes:
         properties:
           plan_path: {type: string, format: project-path}   # relative, resolved+contained by server
       checks:
-        - {type: md_has_sections, path_from: plan_path, sections: [Files, Steps, Checks]}
-    state_key: brief
-    resume_key: evidence
+        - type: md_has_sections
+          path_from: plan_path
+          sections: [Files, Steps, Checks]
+
   validate_plan:
     type: python
     tool: run_checks    # republishes the engine-embedded verdict to state (engine ran the checks)
+
+  escalate_gate:
+    type: passthrough
+    output: {}
+
   escalate:
     type: interrupt
-    message: {step: escalate}     # marker: engine flips run to terminal 'escalated' here
-tools:
-  run_checks: {type: python, module: lockstep_mcp.validators, function: run_checks}
+    state_key: brief
+    resume_key: evidence
+    idempotent: false
+    message:
+      step: escalate     # marker: engine flips run to terminal 'escalated' here
+
 edges:
-  - {from: START, to: step_plan}
-  - {from: step_plan, to: validate_plan}
+  - from: START
+    to: step_plan
+  - from: step_plan
+    to: validate_plan
   - from: validate_plan
-    to: [step_implement, step_plan]
-    type: conditional
-    conditions:
-      - {condition: "verdict_status == 'pass'", to: step_implement}
-      - {condition: "verdict_status == 'fail'", to: step_plan}
-loop_limits: {step_plan: 3}
-loop_exits:  {step_plan: escalate}
+    to: END               # next step's interrupt in a real multi-step recipe
+    condition: "verdict_status == 'pass'"
+  - from: validate_plan
+    to: step_plan
+    condition: "verdict_status == 'fail'"
+  - from: escalate_gate
+    to: escalate
+
+loop_limits:
+  validate_plan: 2    # "2 allowed executions" — every fixture uses 2
+loop_exits:
+  validate_plan: escalate_gate
 ```
 
 (Verdict shape is frozen FLAT — `verdict_status` / `verdict_reasons` state
@@ -292,10 +330,15 @@ side-effect of v1.
 | 5. PreToolUse no-run gate (opt-in per project) | owner marks a project via `lockstep-mcp policy require --recipe <X>` (policy file in the agent-unwritable state dir); Write/Edit/NotebookEdit/Bash/Task are DENIED unless an active run of THE POLICY'S RECIPE exists in THIS project (any-recipe unlock would let the cheapest lying-around recipe open the gate); no Bash parsing, so heredoc bypasses are moot (Read/Grep stay open) | "agent never starts a run / works outside the mechanism" — in policy-marked projects, the path of least resistance IS `scenario_start` of the required recipe |
 | 6. Observability + liveness | `list_runs` shows stalled runs; every hook fire appends to `heartbeat.jsonl` (rotated); `lockstep-mcp doctor` checks dirs, pin, heartbeat age (v1 — deeper handler self-exec is v2); consumer CI can prove hooks fire deterministically (`claude -p "ok"` → assert heartbeat grew). Known caveat: write-capable MCP tools from OTHER servers are outside the PreToolUse matcher — README lists it | silent ignoring; silent hook death |
 
-Hook handler discipline: all handlers are internally fail-closed (any
-exception → explicit deny/exit-2, never an unhandled exit the harness
-treats as fail-open); but "no policy file → allow", so a broken install
-bricks only opted-in projects, where bricking closed is the point.
+Hook handler discipline: only PreToolUse is internally fail-closed (it is
+the one hook that can actually block an action — any internal exception
+still yields an explicit `deny`, never an unhandled exit the harness would
+treat as fail-open); "no policy file → allow", so a broken install bricks
+only opted-in projects, where bricking closed is the point. Stop and
+SessionStart are fail-OPEN by design: they can only delay/annotate a turn,
+never truly enforce, and this advisory layer must not brick a project on
+its own internal error — an exception in either yields the same "nothing
+to report" result as having nothing configured.
 
 Residual risks (documented in README): subagent hook bypass is irrelevant
 (enforcement is engine-side); hooks kept trivial + tested because silent hook
