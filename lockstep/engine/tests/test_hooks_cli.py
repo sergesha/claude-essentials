@@ -1,5 +1,5 @@
 """Task 7: hook handlers in cli.py — Stop / SessionStart / PreToolUse, plus
-the `policy` and `doctor` CLI verbs and the heartbeat mechanism.
+the `policy` and `doctor` CLI verbs.
 
 All path matching (decision 11 / review M8) is `Path.resolve()`
 equality-or-parent-prefix: a run whose `project` is an ancestor of (or equal
@@ -482,10 +482,6 @@ def test_doctor_all_green(tmp_path):
     recipes_dir = tmp_path / "recipes"
     state_dir.mkdir()
     recipes_dir.mkdir()
-    heartbeat = state_dir / "heartbeat.jsonl"
-    heartbeat.write_text(
-        json.dumps({"event": "SessionStart", "ts": datetime.now(timezone.utc).isoformat()}) + "\n"
-    )
 
     ok, report = cli.doctor(state_dir, recipes_dir)
 
@@ -501,90 +497,16 @@ def test_doctor_flags_missing_dirs(tmp_path):
     assert "issues found" in report
 
 
-def test_doctor_flags_stale_heartbeat_past_default_threshold(tmp_path):
-    state_dir = tmp_path / "state"
-    recipes_dir = tmp_path / "recipes"
-    state_dir.mkdir()
-    recipes_dir.mkdir()
-    heartbeat = state_dir / "heartbeat.jsonl"
-    old_ts = (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat()
-    heartbeat.write_text(json.dumps({"event": "Stop", "ts": old_ts}) + "\n")
-
-    ok, report = cli.doctor(state_dir, recipes_dir)
-
-    assert ok is False
-    assert "issues found" in report
-    assert "stale" in report.lower()
-
-
-def test_doctor_stale_threshold_configurable_via_env(tmp_path, monkeypatch):
-    state_dir = tmp_path / "state"
-    recipes_dir = tmp_path / "recipes"
-    state_dir.mkdir()
-    recipes_dir.mkdir()
-    heartbeat = state_dir / "heartbeat.jsonl"
-    ts = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
-    heartbeat.write_text(json.dumps({"event": "Stop", "ts": ts}) + "\n")
-
-    monkeypatch.setenv("LOCKSTEP_STALE_HOURS", "1")
-    ok, report = cli.doctor(state_dir, recipes_dir)
-    assert ok is False
-
-    monkeypatch.setenv("LOCKSTEP_STALE_HOURS", "24")
-    ok, report = cli.doctor(state_dir, recipes_dir)
-    assert ok is True
-
-
-# ---------------------------------------------------------------------------
-# heartbeat
-# ---------------------------------------------------------------------------
-
-
-def test_heartbeat_write(tmp_path):
+def test_hooks_write_nothing_to_the_state_dir(tmp_path):
+    # Hooks are read-only on the state dir by contract — no heartbeat, no
+    # side files. A hook fire against an empty state dir leaves it absent.
     state_dir = tmp_path / "state"
 
-    cli._heartbeat(state_dir, "Stop")
+    cli.hook_stop({"stop_hook_active": False}, state_dir, str(tmp_path))
+    cli.hook_session_start(state_dir, str(tmp_path))
+    cli.hook_pretool({"cwd": str(tmp_path)}, state_dir)
 
-    path = state_dir / "heartbeat.jsonl"
-    lines = path.read_text().splitlines()
-    assert len(lines) == 1
-    entry = json.loads(lines[0])
-    assert entry["event"] == "Stop"
-    assert "ts" in entry
-
-
-def test_heartbeat_rotation(tmp_path):
-    state_dir = tmp_path / "state"
-    state_dir.mkdir()
-    path = state_dir / "heartbeat.jsonl"
-    with open(path, "w") as f:
-        for i in range(1005):
-            f.write(json.dumps({"event": "x", "ts": str(i)}) + "\n")
-
-    cli._heartbeat(state_dir, "Stop")
-
-    lines = path.read_text().splitlines()
-    assert len(lines) == 200
-    assert json.loads(lines[-1])["event"] == "Stop"
-
-
-def test_heartbeat_never_raises(tmp_path, monkeypatch):
-    # a file where a directory is expected -> mkdir fails; must be swallowed.
-    blocker = tmp_path / "blocker"
-    blocker.write_text("x")
-    cli._heartbeat(blocker / "state", "Stop")  # must not raise
-
-
-def test_hook_stop_writes_heartbeat_on_fast_path(tmp_path):
-    state_dir = tmp_path / "state"
-
-    exit_code, out = cli.hook_stop({"stop_hook_active": False}, state_dir, str(tmp_path))
-
-    assert exit_code == 0 and out == ""
-    heartbeat = state_dir / "heartbeat.jsonl"
-    assert heartbeat.exists()
-    entry = json.loads(heartbeat.read_text().splitlines()[0])
-    assert entry["event"] == "Stop"
+    assert not state_dir.exists()
 
 
 # ---------------------------------------------------------------------------

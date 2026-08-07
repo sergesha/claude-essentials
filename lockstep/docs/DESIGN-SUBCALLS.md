@@ -380,8 +380,7 @@ suite must be green on both with zero platform skips in the core paths.
   / any POSIX-only or Windows-only call; a thin `locking.py` helper
   centralizes it. Poll reads child terminal status from the LOCKED index
   only, never the child's checkpoint db (avoids cross-process SQLite
-  contention). Heartbeat rotation uses the same sidecar lock
-  (multi-writer now normal).
+  contention).
 - `profile_check.py`: subcall marker is a THIRD interrupt class (review
   m1) with its own exemption set spelled out: `{step: _subcall, node,
   runner?}` briefs are exempt from task/exit_criterion/≥1-check and

@@ -10,9 +10,9 @@ Task 7 fills the hook/policy/doctor handlers:
   calls them directly) — the CLI wrappers are thin stdin/stdout plumbing.
 - `policy require|clear` writes/removes an owner-authored `policy.d/<slug>.yaml`
   file (decision 15) — the PreToolUse no-run gate reads these.
-- `doctor` is a v1-trimmed diagnostic report (dirs exist, heartbeat age,
-  installed version self-report — distribution is the plugin's own cloned
-  files run via `uv run`, so there is no version pin to check against).
+- `doctor` is a v1-trimmed diagnostic report (dirs exist, installed version
+  self-report — distribution is the plugin's own cloned files run via
+  `uv run`, so there is no version pin to check against).
 
 Fail-open vs fail-closed (Global Constraints): PreToolUse is the only gate
 that can actually stop an action, so `hook_pretool` is internally
@@ -23,11 +23,10 @@ block a determined stop (README honesty line, Task 9) — they fail OPEN
 (allow / no context) on internal error, matching the pre-Task-7 stub
 contract ("never look like a failure to whatever invoked it").
 
-Every hook handler appends one best-effort JSONL heartbeat line, including
-on the fast path — the heartbeat is the CI liveness signal that the hook
-wiring itself fired, independent of whether any lockstep run is active, so
-it happens BEFORE the "nothing configured, bail early" check skips
-everything else.
+Hooks are read-only on the state dir: they read `runs.json`/`policy.d/`
+and write nothing. Hook death is silent — nothing here observes it; the
+engine's evidence gate is the load-bearing layer and does not depend on
+hooks firing.
 """
 
 from __future__ import annotations
@@ -43,7 +42,6 @@ from pathlib import Path
 import yaml
 
 from lockstep_mcp import __version__
-from lockstep_mcp.locking import file_lock
 from lockstep_mcp.runs import ACTIVE_STATUS, RunIndex
 
 # ---------------------------------------------------------------------------
@@ -67,10 +65,6 @@ def _runs_json_path(state_dir: Path) -> Path:
     return Path(state_dir) / "runs.json"
 
 
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
 def _project_matches(run_project: str, cwd: str) -> bool:
     """decision 11 / review M8: resolved equality OR run_project is a
     parent of cwd (cwd may be a subdirectory of the run's project)."""
@@ -83,46 +77,8 @@ def _project_matches(run_project: str, cwd: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# heartbeat (best-effort, no locking — decision per Task 7 plan text)
-# ---------------------------------------------------------------------------
-
-_HEARTBEAT_ROTATE_ABOVE = 1000
-_HEARTBEAT_KEEP = 200
-
-
-def _heartbeat(state_dir: Path, event: str) -> None:
-    try:
-        state_dir = Path(state_dir)
-        state_dir.mkdir(parents=True, exist_ok=True)
-        path = state_dir / "heartbeat.jsonl"
-        with open(path, "a") as f:
-            f.write(json.dumps({"event": event, "ts": _now_iso()}) + "\n")
-        _rotate_heartbeat(path)
-    except Exception:  # noqa: BLE001 - heartbeat is best-effort, failures ignored
-        pass
-
-
-def _rotate_heartbeat(path: Path) -> None:
-    # Task 8: concurrent child servers are normal now — the read→trim→replace
-    # runs under the sidecar lock so two rotators can't splice each other's
-    # os.replace. A LockTimeout lands in the blanket except: rotation simply
-    # skips that tick. Appends stay lock-free append-only, as in v1.
-    try:
-        with file_lock(path, timeout=1.0):
-            lines = path.read_text().splitlines(keepends=True)
-            if len(lines) > _HEARTBEAT_ROTATE_ABOVE:
-                keep = lines[-_HEARTBEAT_KEEP:]
-                tmp = path.parent / (path.name + ".tmp")
-                tmp.write_text("".join(keep))
-                os.replace(tmp, path)
-    except Exception:  # noqa: BLE001 - concurrent-append loss during rotation is accepted
-        pass
-
-
-# ---------------------------------------------------------------------------
 # fast path (review-2 minor): both runs.json and policy.d/ empty/absent ->
-# skip all further work. Heartbeat is written by the caller BEFORE this
-# check, not after — it is the one thing that must fire unconditionally.
+# skip all further work.
 # ---------------------------------------------------------------------------
 
 
@@ -146,8 +102,6 @@ def _fast_path_empty(state_dir: Path) -> bool:
 
 def hook_stop(stdin_json: dict, state_dir: Path, cwd: str) -> tuple[int, str]:
     state_dir = Path(state_dir)
-    _heartbeat(state_dir, "Stop")
-
     if _fast_path_empty(state_dir):
         return 0, ""
 
@@ -191,8 +145,6 @@ def hook_stop(stdin_json: dict, state_dir: Path, cwd: str) -> tuple[int, str]:
 
 def hook_session_start(state_dir: Path, cwd: str) -> str:
     state_dir = Path(state_dir)
-    _heartbeat(state_dir, "SessionStart")
-
     if _fast_path_empty(state_dir):
         return ""
 
@@ -290,8 +242,6 @@ def _child_chain_unlocked(idx: RunIndex, child_run: str, recipe: str, cwd: str,
 
 def hook_pretool(stdin_json: dict, state_dir: Path) -> tuple[int, str]:
     state_dir = Path(state_dir)
-    _heartbeat(state_dir, "PreToolUse")
-
     try:
         cwd = stdin_json.get("cwd") or os.getcwd()
         policy_dir = _policy_dir(state_dir)
@@ -386,11 +336,11 @@ def policy_clear(state_dir: Path, project: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# doctor (v1 trimmed — dirs exist, heartbeat age, installed version
-# self-report. No version-pin check: distribution is the plugin's own
-# cloned files run via `uv run --project ${CLAUDE_PLUGIN_ROOT}/engine`, so
-# there is nothing external to fall out of sync with. NOT implemented:
-# effective-settings inspection, handler self-exec — those are v2.)
+# doctor (v1 trimmed — dirs exist, installed version self-report. No
+# version-pin check: distribution is the plugin's own cloned files run via
+# `uv run --project ${CLAUDE_PLUGIN_ROOT}/engine`, so there is nothing
+# external to fall out of sync with. NOT implemented: effective-settings
+# inspection, handler self-exec — those are v2.)
 # ---------------------------------------------------------------------------
 
 
@@ -409,35 +359,7 @@ def doctor(state_dir: Path, recipes_dir: Path) -> tuple[bool, str]:
     check("state dir exists", state_dir.exists(), str(state_dir))
     check("recipes dir exists", recipes_dir.exists(), str(recipes_dir))
 
-    installed = __version__
-
-    heartbeat_path = state_dir / "heartbeat.jsonl"
-    if not heartbeat_path.exists():
-        lines.append("[SKIP] heartbeat — no heartbeat.jsonl yet")
-    else:
-        try:
-            last = None
-            for line in heartbeat_path.read_text().splitlines():
-                if line.strip():
-                    last = line
-            if last is None:
-                check("heartbeat present", False, "heartbeat.jsonl is empty")
-            else:
-                entry = json.loads(last)
-                ts = datetime.fromisoformat(entry["ts"])
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=timezone.utc)
-                age = datetime.now(timezone.utc) - ts
-                stale_hours = float(os.environ.get("LOCKSTEP_STALE_HOURS", "24"))
-                is_stale = age > timedelta(hours=stale_hours)
-                detail = f"last event {age.total_seconds():.0f}s ago"
-                if is_stale:
-                    detail += f" — stale (over {stale_hours}h)"
-                check("heartbeat recent", not is_stale, detail)
-        except Exception as exc:  # noqa: BLE001 - report, don't crash doctor
-            check("heartbeat readable", False, str(exc))
-
-    lines.append(f"installed version: {installed}")
+    lines.append(f"installed version: {__version__}")
 
     header = "lockstep doctor: " + ("all green" if ok else "issues found")
     return ok, header + "\n" + "\n".join(lines)

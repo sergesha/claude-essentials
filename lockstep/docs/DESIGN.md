@@ -331,7 +331,7 @@ side-effect of v1.
 | 3. SessionStart-hook | after restart/compaction: "active run X, step N, criterion Y" | amnesia after restarts |
 | 4. Consumer permissions | deny writes to state dir / recipes / settings / hook scripts (README guidance, consumer-side) | gate self-modification; .db + recipe tampering via Bash |
 | 5. PreToolUse no-run gate (opt-in per project) | owner marks a project via `lockstep-mcp policy require --recipe <X>` (policy file in the agent-unwritable state dir); Write/Edit/NotebookEdit/Bash/Task are DENIED unless an active run of THE POLICY'S RECIPE exists in THIS project (any-recipe unlock would let the cheapest lying-around recipe open the gate); no Bash parsing, so heredoc bypasses are moot (Read/Grep stay open) | "agent never starts a run / works outside the mechanism" — in policy-marked projects, the path of least resistance IS `scenario_start` of the required recipe |
-| 6. Observability + liveness | `list_runs` shows stalled runs; every hook fire appends to `heartbeat.jsonl` (rotated); `lockstep-mcp doctor` checks dirs, heartbeat age, installed version (v1 — deeper handler self-exec is v2); consumer CI can prove hooks fire deterministically (`claude -p "ok"` → assert heartbeat grew). Known caveat: write-capable MCP tools from OTHER servers are outside the PreToolUse matcher — README lists it | silent ignoring; silent hook death |
+| 6. Observability | `list_runs` shows stalled runs; `lockstep-mcp doctor` checks dirs + installed version (v1 — deeper handler self-exec is v2). Hook death is silent — nothing observes hook liveness; the engine's evidence gate is the load-bearing layer and does not depend on hooks. Known caveat: write-capable MCP tools from OTHER servers are outside the PreToolUse matcher — README lists it | silent ignoring |
 
 Hook handler discipline: only PreToolUse is internally fail-closed (it is
 the one hook that can actually block an action — any internal exception
@@ -359,8 +359,9 @@ tree the pinned command ran against is byte-identical to baseline
 paths (`diff_only`). In policy-marked projects the PreToolUse gate adds:
 no writes at all outside an active run, while hooks fire. What is NOT
 guaranteed: work *quality* (shape checks are tripwires), and anything
-hook-borne if hooks die silently — which `doctor` + heartbeat make
-observable, not impossible. Guarantee strength is "integrity of the
+hook-borne — a hook that dies, dies silently; nothing observes hook
+liveness, and the load-bearing evidence gate lives in the engine, not
+the hooks. Guarantee strength is "integrity of the
 status signal", not "process compliance".
 
 ## Packaging & config
@@ -399,10 +400,7 @@ status signal", not "process compliance".
   `seed_from=<run>` restart sugar gated by the same file.
 - v2 hardening backlog (designs sketched in plan follow-ups): per-step
   PreToolUse path allowlists (3b); cross-step consistency via
-  `from_state:` check args (1d); local venv for sub-50ms hook fires;
-  engine refusing `scenario_done` when policy demands hooks but the
-  session has no heartbeat (converts silent hook death into loud engine
-  failure).
+  `from_state:` check args (1d); local venv for sub-50ms hook fires.
 - Any fleet integration. Consumer work for the ours-fleet hosts (lockstep
   profile: permissions allow/deny sets, skill wiring, molecule coverage)
   is a separate effort in the VPS/Hetzner repo after the plugin exists.

@@ -1,14 +1,14 @@
 """Task 6 base: cli.py verb routing. `serve` is the default verb and runs
 the FastMCP app; `hook-stop`/`hook-session-start`/`hook-pretool`/`policy`
 are no-ops with nothing configured. `doctor`'s exit code now reflects
-health (m8: dirs/heartbeat issues -> 1). This test asserts
+health (m8: missing dirs -> 1). This test asserts
 DISPATCH — the right handler is called for each verb — not a closed verb
 set.
 
 m6: every verb here that touches `_state_dir()` MUST monkeypatch
-`LOCKSTEP_STATE_DIR` to a tmp path — without it, `doctor`/the hook verbs
-write straight into the developer's real `~/.lockstep` (heartbeat.jsonl at
-minimum). `LOCKSTEP_RECIPES` likewise, for `doctor`."""
+`LOCKSTEP_STATE_DIR` to a tmp path — without it, verbs resolve against the
+developer's real `~/.lockstep`. `LOCKSTEP_RECIPES` likewise, for
+`doctor`."""
 
 from __future__ import annotations
 

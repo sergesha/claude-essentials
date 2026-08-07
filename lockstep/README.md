@@ -33,8 +33,9 @@ tree the pinned command ran against is byte-identical to baseline
 paths (`diff_only`). In policy-marked projects the PreToolUse gate adds:
 no writes at all outside an active run, while hooks fire. What is NOT
 guaranteed: work *quality* (shape checks are tripwires), and anything
-hook-borne if hooks die silently — which `doctor` + heartbeat make
-observable, not impossible. Guarantee strength is "integrity of the
+hook-borne — a hook that dies, dies silently; nothing observes hook
+liveness. The load-bearing layer is the engine's evidence gate, which
+does not depend on hooks firing. Guarantee strength is "integrity of the
 status signal", not "process compliance".
 
 ## Install
@@ -86,14 +87,13 @@ Two environment variables, read by the MCP server process:
 
 | Var | Default | Purpose |
 |---|---|---|
-| `LOCKSTEP_STATE_DIR` | `~/.lockstep` | Durable run state: SQLite checkpoints, `runs.json`, recipe snapshots, baseline manifests, `policy.d/`, `heartbeat.jsonl`. Deliberately outside the project — not in git, easy to deny writes to. |
+| `LOCKSTEP_STATE_DIR` | `~/.lockstep` | Durable run state: SQLite checkpoints, `runs.json`, recipe snapshots, baseline manifests, `policy.d/`. Deliberately outside the project — not in git, easy to deny writes to. |
 | `LOCKSTEP_RECIPES` | `<cwd>/.lockstep/recipes` | Where `list_recipes`/`scenario_start` resolve recipe names from. |
 
-`LOCKSTEP_STALE_HOURS` (default `24`) is read in two places: `lockstep-mcp hook-session-start`
-uses it for a cosmetic staleness hint on the SessionStart context line for a run that hasn't been
-touched in that long (never affects engine behavior); `lockstep-mcp doctor` uses the same default
-to actually gate `heartbeat.jsonl` recency — a heartbeat older than the threshold is a `[FAIL]`
-line and flips `doctor`'s process exit code to `1`.
+`LOCKSTEP_STALE_HOURS` (default `24`) is the run-expiry threshold, read in two places:
+`lockstep-mcp hook-pretool` treats an awaiting run older than this as expired for the policy
+gate (see below), and `lockstep-mcp hook-session-start` flags such a run on its context line.
+It never affects engine behavior — the engine itself has no expiry.
 
 The plugin's `mcpServers.lockstep.env` block passes both of the first two through as
 `${LOCKSTEP_STATE_DIR}` / `${LOCKSTEP_RECIPES}` — set them in your own shell/settings before
@@ -129,7 +129,7 @@ via your permission system (Claude Code's `permissions.deny` in project or user 
 **Without an owner-managed permission system, this boundary is filesystem-only** — plain OS
 file permissions on those paths, nothing lockstep-specific enforces it.
 
-## Policy gate + doctor + CI liveness assert
+## Policy gate + doctor
 
 **Policy gate** (opt-in per project): `lockstep-mcp policy require --project <path> --recipe
 <name>` writes a policy file under `$LOCKSTEP_STATE_DIR/policy.d/`, owner-authored only (the
@@ -154,18 +154,11 @@ project → always allowed (opt-in only); policy file present but state unreadab
 (internally fail-closed — the only hook that can, since it's the only one that actually blocks
 an action).
 
-**`lockstep-mcp doctor`**: v1-trimmed diagnostic — state/recipes dirs exist, `heartbeat.jsonl`
-recency against `LOCKSTEP_STALE_HOURS` (default 24h — an older heartbeat is `[FAIL]`), and the
+**`lockstep-mcp doctor`**: v1-trimmed diagnostic — state/recipes dirs exist, and the
 installed version (self-reported, informational — there's no external pin to check it against;
 distribution is the plugin's own cloned files). Exits `1` if any check failed, `0` if all green —
 a CI/operator script can gate on the process exit code, not just scrape the report text. Not
 implemented in v1 (planned v2): effective-settings inspection, handler self-exec.
-
-**CI liveness assert**: "the rule is in the file" is not "the rule works" — every hook handler
-appends one best-effort JSONL line to `heartbeat.jsonl` unconditionally, before any early-exit
-for "nothing configured". A consumer's CI can prove the hook wiring itself actually fires
-(independent of whether any lockstep run is active) by running `claude -p "ok"` in a repo with
-lockstep's hooks configured and asserting `heartbeat.jsonl` grew by at least one line.
 
 ## Subcalls (v2)
 
@@ -323,9 +316,9 @@ its `.mcp.json` entry, and `Path.cwd()` at server-start time is exactly that pro
 - **Hooks are kept deliberately trivial and tested, because silent hook death is real.** A
   crashing hook that exits non-0/non-2 is fail-OPEN on Stop/SessionStart per the platform's own
   hook contract (PreToolUse is the one hook internally fail-closed against its own exceptions,
-  because it's the only one that can actually block an action). `doctor` + `heartbeat.jsonl`
-  exist specifically to make hook death observable rather than silent — they don't make it
-  impossible.
+  because it's the only one that can actually block an action). Nothing observes hook liveness —
+  a dead hook stays dead silently. Rely on the engine's evidence gate, which every
+  `scenario_done` goes through regardless of whether any hook fired.
 
 ## Known issues (v1)
 
