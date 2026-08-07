@@ -109,3 +109,17 @@ def test_pass_at_loop_cap_escalates_never_spawns(tmp_path, monkeypatch):
     assert out.get("error") is not True                    # never the budget refusal
     assert out.get("escalated") is True and out["passed"] is True
     assert e.status(r["run_id"])["status"] == "escalated"
+
+
+def test_envelope_visible_via_peek_state(tmp_path, monkeypatch):
+    # This proves the envelope written by the poll node IS in graph state
+    # after completion. The engine->run_checks `_state` WIRING test lives in
+    # Task 7 (test_verify_step_hash_check_wired_through_engine) — it needs
+    # the fractal fixture (I6.2).
+    e, proj = make_engine(tmp_path, monkeypatch)
+    r = e.start("subcall-one-shot", vars={}, project=str(proj))
+    pass_plan(e, proj, r)
+    assert _wait_status(e, r["run_id"], "done")["status"] == "done"
+    env = e._peek_state(r["run_id"])["_subcall_envelope"]
+    assert env["session_id"] == "fake-session-1" and env["exit_code"] == 0
+    assert env["artifact_hashes"] == {}                    # one-shot: the envelope IS the artifact (I6.3)

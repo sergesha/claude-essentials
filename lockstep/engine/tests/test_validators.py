@@ -487,3 +487,46 @@ def test_republish_absent_verdict_is_error():
     state = {"evidence": {}}
     r = run_checks(state)
     assert r["verdict_status"] == "error"
+
+
+# ---------------------------------------------------------------------------
+# file_matches_hash (Task 6) — pin from the denied-side state, bytes from
+# the contained project path
+# ---------------------------------------------------------------------------
+
+import hashlib
+
+
+def _hash_state(art, digest):
+    return {"brief": {"checks": [{"type": "file_matches_hash", "path_from": "p",
+                                  "hash_from": "_subcall_envelope.artifact_hashes.review"}]},
+            "evidence": {"p": art.name}, "_project": str(art.parent),
+            "_state": {"_subcall_envelope": {"artifact_hashes": {"review": digest}}}}
+
+
+def test_file_matches_hash_pass_and_fail(tmp_path):
+    art = tmp_path / "review.md"; art.write_text("Verdict: PASS\n")
+    digest = hashlib.sha256(art.read_bytes()).hexdigest()
+    state = _hash_state(art, digest)
+    assert run_checks(state, execute=True)["verdict_status"] == "pass"
+    art.write_text("Verdict: FAIL\n")                      # tampered after the pin
+    out = run_checks(state, execute=True)
+    assert out["verdict_status"] == "fail"
+    assert any("hash" in r for r in out["verdict_reasons"])
+
+
+def test_file_matches_hash_errors_when_pin_absent(tmp_path):
+    art = tmp_path / "review.md"; art.write_text("x")
+    state = _hash_state(art, "unused"); state["_state"] = {}
+    out = run_checks(state, execute=True)
+    assert out["verdict_status"] == "error"
+    assert any("not present" in r for r in out["verdict_reasons"])
+
+
+def test_file_matches_hash_errors_when_pin_present_but_empty(tmp_path):
+    # m6.4: absent and present-but-falsy are DIFFERENT failures — both
+    # error (fail-closed), but the message must say which.
+    art = tmp_path / "review.md"; art.write_text("x")
+    out = run_checks(_hash_state(art, ""), execute=True)
+    assert out["verdict_status"] == "error"
+    assert any("not a" in r or "empty" in r for r in out["verdict_reasons"])
