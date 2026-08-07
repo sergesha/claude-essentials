@@ -230,15 +230,54 @@ def test_pretool_cross_project_run_stays_denied(tmp_path):
     assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
-def test_pretool_descendant_unlock_dies_with_terminal_ancestor(tmp_path):
-    # I7.4: descendant unlock is IMPLIED by the v1 predicate — a fractal
-    # child exists only while its parent chain ends in an AWAITING run of
-    # the policy recipe, and that run alone unlocks the project. This test
-    # pins the death half: once the ancestor is terminal, a still-awaiting
-    # descendant (as if the cascade had not caught it yet) must NOT hold
-    # the gate open. Catches the naive descendant-linkage variant that
-    # unlocks whenever any run's parent chain reaches a policy-recipe run,
-    # regardless of that ancestor's status.
+def test_pretool_child_session_unlock_narrowed_to_its_own_chain(tmp_path, monkeypatch):
+    # I2: a spawned child session (LOCKSTEP_CHILD_RUN in its env) is
+    # unlocked ONLY while its own ancestry chain terminates in an AWAITING
+    # run of the policy recipe. The v1 predicate unlocked the whole project
+    # for anyone whenever ANY awaiting policy run existed — so `other`
+    # below would keep this child unlocked after its own ancestor died.
+    # This test FAILS against the v1 hook code (which ignores the env).
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    state_dir = tmp_path / "state"
+    _write_policy(state_dir, str(proj), "feature-dev")
+    idx = RunIndex(state_dir)
+    parent = idx.create("feature-dev", str(proj.resolve()))
+    child = idx.create("child-review", str(proj.resolve()), parent_run=parent.run_id, nonce="n")
+    idx.create("feature-dev", str(proj.resolve()))         # unrelated awaiting policy run
+    monkeypatch.setenv("LOCKSTEP_CHILD_RUN", child.run_id)
+
+    exit_code, out = cli.hook_pretool({"cwd": str(proj)}, state_dir)
+    assert exit_code == 0 and out == ""        # own chain awaiting: unlocked
+
+    idx.update(parent.run_id, status="escalated")
+    exit_code, out = cli.hook_pretool({"cwd": str(proj)}, state_dir)
+    assert exit_code == 0
+    data = json.loads(out)
+    # denied although the unrelated awaiting policy run still exists —
+    # the child's own dead chain decides, not the project.
+    assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_pretool_child_env_with_unknown_run_fails_closed(tmp_path, monkeypatch):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    state_dir = tmp_path / "state"
+    _write_policy(state_dir, str(proj), "feature-dev")
+    idx = RunIndex(state_dir)
+    idx.create("feature-dev", str(proj.resolve()))         # would unlock a plain worker
+    monkeypatch.setenv("LOCKSTEP_CHILD_RUN", "no-such-run")
+
+    exit_code, out = cli.hook_pretool({"cwd": str(proj)}, state_dir)
+    assert exit_code == 0
+    assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+def test_pretool_without_child_env_keeps_v1_predicate(tmp_path, monkeypatch):
+    # The worker session (no LOCKSTEP_CHILD_RUN) keeps v1 behaviour: an
+    # awaiting run of the policy recipe unlocks the project; once it is
+    # terminal, a still-awaiting descendant of another recipe does not.
+    monkeypatch.delenv("LOCKSTEP_CHILD_RUN", raising=False)
     proj = tmp_path / "proj"
     proj.mkdir()
     state_dir = tmp_path / "state"
@@ -248,7 +287,7 @@ def test_pretool_descendant_unlock_dies_with_terminal_ancestor(tmp_path):
     idx.create("child-review", str(proj.resolve()), parent_run=parent.run_id, nonce="n")
 
     exit_code, out = cli.hook_pretool({"cwd": str(proj)}, state_dir)
-    assert exit_code == 0 and out == ""        # ancestor awaiting: unlocked
+    assert exit_code == 0 and out == ""
 
     idx.update(parent.run_id, status="escalated")
     exit_code, out = cli.hook_pretool({"cwd": str(proj)}, state_dir)
@@ -440,6 +479,24 @@ def test_stop_text_is_subcall_aware_per_run(tmp_path):
     working_line = next(l for l in payload.split("lockstep:") if working.run_id in l)
     assert "subcall in progress" in parked_line and "scenario_done" not in parked_line
     assert "scenario_done" in working_line
+
+
+def test_session_start_marks_the_sessions_own_child_run(tmp_path, monkeypatch):
+    # C3: a spawned child session inherits LOCKSTEP_CHILD_RUN; the listing
+    # must single out that run as the session's own, not leave the child to
+    # guess between its parent's line and its own.
+    idx = RunIndex(tmp_path)
+    parent = idx.create("feature-dev", "/proj")
+    idx.update(parent.run_id, step="_subcall",
+               brief={"step": "_subcall", "node": "review", "runner": "claude"})
+    child = idx.create("child-review", "/proj", parent_run=parent.run_id, nonce="n")
+    idx.update(child.run_id, step="review", brief={"step": "review"})
+    monkeypatch.setenv("LOCKSTEP_CHILD_RUN", child.run_id)
+    ctx = cli.hook_session_start(tmp_path, cwd="/proj")
+    child_line = next(l for l in ctx.splitlines() if child.run_id in l)
+    parent_line = next(l for l in ctx.splitlines() if parent.run_id in l)
+    assert "OWN child run" in child_line
+    assert "OWN child run" not in parent_line
 
 
 def test_session_start_names_the_subcall_not_the_raw_marker(tmp_path):
