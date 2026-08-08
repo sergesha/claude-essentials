@@ -1,0 +1,46 @@
+version: "1.0"
+name: subcall-start-spawn
+description: >
+  Bad fixture: a spawn entered straight from START. Such a spawn
+  bypasses done()-time policy prediction (budget/depth/runner checks) and
+  fires with an empty evidence channel, so the profile forbids it: a spawn
+  must always follow a validator.
+state:
+  brief: dict
+  evidence: dict
+  verdict_status: str
+  verdict_reasons: list
+  _subcall_status: str
+  _subcall_envelope: dict
+tools:
+  subcall_spawn: {type: python, module: lockstep_mcp.subcalls, function: spawn}
+  subcall_poll:  {type: python, module: lockstep_mcp.subcalls, function: poll}
+nodes:
+  review_spawn: {type: python, tool: subcall_spawn}
+  review_wait:
+    type: interrupt
+    idempotent: false
+    state_key: brief
+    resume_key: evidence
+    message:
+      step: _subcall
+      node: review
+      runner: claude
+      timeout_minutes: 30
+      prompt: "Review the plan and print a one-line verdict."
+  review_poll: {type: python, tool: subcall_poll}
+  escalate_gate: {type: passthrough, output: {}}
+  escalate:
+    type: interrupt
+    idempotent: false
+    state_key: brief
+    resume_key: evidence
+    message: {step: escalate}
+edges:
+  - {from: START, to: review_spawn}
+  - {from: review_spawn, to: review_wait}
+  - {from: review_wait, to: review_poll}
+  - {from: review_poll, to: review_wait, condition: "_subcall_status == 'running'"}
+  - {from: review_poll, to: END, condition: "_subcall_status == 'done'"}
+  - {from: review_poll, to: escalate_gate, condition: "_subcall_status == 'error'"}
+  - {from: escalate_gate, to: escalate}

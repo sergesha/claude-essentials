@@ -1,0 +1,16 @@
+version: "1.0"
+name: no-work-step
+description: >
+  Profile-valid and compiles, but the graph walks START -> END without
+  ever parking on an interrupt. `Engine.start` must refuse it AND leave no
+  trace in the run index: a registered-but-never-started run is `awaiting`
+  forever, which blocks the Stop hook and denies every write for the rest
+  of the project's life, with no run_id ever returned to abort it.
+state:
+  brief: dict
+  evidence: dict
+nodes:
+  noop: {type: passthrough, output: {}}
+edges:
+  - {from: START, to: noop}
+  - {from: noop, to: END}

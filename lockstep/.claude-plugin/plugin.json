@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin.json",
+  "name": "lockstep",
+  "description": "Flow-enforcement engine for coding agents: declarative yamlgraph recipes, durable runs, deterministic evidence gates — a run cannot report progress without validated, artifact-backed evidence.",
+  "version": "0.1.0",
+  "author": {
+    "name": "sergesha"
+  },
+  "homepage": "https://github.com/sergesha/claude-essentials",
+  "license": "MIT",
+  "hooks": "./hooks/hooks.json",
+  "mcpServers": {
+    "lockstep": {
+      "command": "uv",
+      "args": ["run", "--project", "${CLAUDE_PLUGIN_ROOT}/engine", "lockstep-mcp", "serve"],
+      "env": {
+        "LOCKSTEP_STATE_DIR": "${LOCKSTEP_STATE_DIR}",
+        "LOCKSTEP_RECIPES": "${LOCKSTEP_RECIPES}"
+      }
+    }
+  }
+}
