@@ -1,0 +1,51 @@
+version: "1.0"
+name: child-review
+description: >
+  The child recipe a fractal review subcall runs: one
+  review step whose artifact is covered by baseline_globs so the parent's
+  hash pin resolves. The reviewed sources (src/**) are pinned too: a
+  worker edit made WHILE the reviewer works fails this step (`unchanged`
+  since start), and the loop cap of 1 escalates that failure to a human
+  instead of looping — the reviewer cannot restore bytes it is forbidden
+  to touch. The verdict regex stays two-valued: this step validates that
+  a verdict was STATED; the parent's verify gate is what requires PASS.
+baseline_globs: [".lockstep/**", "src/**"]
+state:
+  brief: dict
+  evidence: dict
+  verdict_status: str
+  verdict_reasons: list
+tools:
+  run_checks: {type: python, module: lockstep_mcp.validators, function: run_checks}
+nodes:
+  step_review:
+    type: interrupt
+    idempotent: false
+    state_key: brief
+    resume_key: evidence
+    message:
+      step: review
+      task: "Review the plan; write the verdict file"
+      exit_criterion: "review.md exists and states a verdict"
+      evidence_schema:
+        required: [review_path]
+        properties: {review_path: {type: string, format: project-path}}
+      checks:
+        - {type: file_matches, path_from: review_path, regex: "Verdict:\\s*(PASS|FAIL)"}
+        - {type: unchanged, glob: "src/**", since: start}
+  validate_review: {type: python, tool: run_checks}
+  escalate_gate: {type: passthrough, output: {}}
+  escalate:
+    type: interrupt
+    idempotent: false
+    state_key: brief
+    resume_key: evidence
+    message: {step: escalate}
+edges:
+  - {from: START, to: step_review}
+  - {from: step_review, to: validate_review}
+  - {from: validate_review, to: END, condition: "verdict_status == 'pass'"}
+  - {from: validate_review, to: step_review, condition: "verdict_status == 'fail'"}
+  - {from: escalate_gate, to: escalate}
+loop_limits: {validate_review: 1}
+loop_exits:  {validate_review: escalate_gate}

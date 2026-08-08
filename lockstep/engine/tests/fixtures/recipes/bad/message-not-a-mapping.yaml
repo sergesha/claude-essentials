@@ -1,0 +1,37 @@
+version: "1.0"
+name: message-not-a-mapping
+description: >
+  yamlgraph types an interrupt's `message` as `str | dict`; a bare string
+  carries no brief. It must come back as a validation error — unguarded,
+  reading `.get` off it escapes `check_recipe` as an AttributeError and an
+  authoring mistake reads as an engine crash.
+state:
+  brief: dict
+  evidence: dict
+  verdict_status: str
+  verdict_reasons: list
+tools:
+  run_checks: {type: python, module: lockstep_mcp.validators, function: run_checks}
+nodes:
+  step_one:
+    type: interrupt
+    idempotent: false
+    state_key: brief
+    resume_key: evidence
+    message: "do the thing"
+  validate_one: {type: python, tool: run_checks}
+  escalate_gate: {type: passthrough, output: {}}
+  escalate:
+    type: interrupt
+    idempotent: false
+    state_key: brief
+    resume_key: evidence
+    message: {step: escalate}
+edges:
+  - {from: START, to: step_one}
+  - {from: step_one, to: validate_one}
+  - {from: validate_one, to: END, condition: "verdict_status == 'pass'"}
+  - {from: validate_one, to: step_one, condition: "verdict_status == 'fail'"}
+  - {from: escalate_gate, to: escalate}
+loop_limits: {validate_one: 2}
+loop_exits:  {validate_one: escalate_gate}
