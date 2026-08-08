@@ -522,3 +522,61 @@ def test_recipe_name_cannot_walk_out_of_the_recipes_dir(tmp_path):
     assert "invalid recipe name" in str(exc.value)
     assert RunIndex(tmp_path / "state").list() == []
     assert not list(outside.glob("*.recipe.yaml"))
+
+
+def test_a_second_report_while_one_is_in_flight_is_refused(tmp_path):
+    # done() is not one atomic step: the checks it runs can take seconds
+    # (they shell out), and the resume that follows advances the graph. Two
+    # concurrent reports both pass the status/step guards, and the second
+    # resume lands on the NEXT step's interrupt carrying a `pass` the
+    # republish-only validator trusts — that step passes with its checks
+    # never executed. The critical section is what makes that impossible.
+    from lockstep_mcp.locking import file_lock
+
+    eng = _engine(tmp_path)
+    project = _project(tmp_path)
+    run_id = eng.start("two-steps", {}, str(project))["run_id"]
+    artifacts = project / ".lockstep"
+    artifacts.mkdir()
+    (artifacts / "a.md").write_text("hello")
+
+    with file_lock(eng._gate_path(run_id)):            # stands in for the in-flight call
+        out = eng.done(run_id, "one", {"path": ".lockstep/a.md"})
+    assert out["accepted"] is False
+    assert "another call" in out["errors"][0]
+    assert eng.status(run_id)["step"] == "one"         # the graph did not move
+
+    assert eng.done(run_id, "one", {"path": ".lockstep/a.md"})["step"] == "two"
+
+
+def test_status_still_answers_while_the_run_is_busy(tmp_path):
+    # Busy is not an error to a reader: report the run as recorded, minus
+    # the reconcile/auto-poll the holder is already doing.
+    from lockstep_mcp.locking import file_lock
+
+    eng = _engine(tmp_path)
+    project = _project(tmp_path)
+    run_id = eng.start("minimal", {}, str(project))["run_id"]
+    with file_lock(eng._gate_path(run_id)):
+        assert eng.status(run_id)["step"] == "one"
+
+
+def test_a_lost_checkpoint_is_not_a_finished_run(tmp_path):
+    # LangGraph answers with an EMPTY snapshot for a thread it has never
+    # seen, so a lost or freshly-created sqlite file looks exactly like
+    # "reached END" — and reconcile would flip a run whose steps never ran
+    # to a terminal `done`, in the agent-favorable direction.
+    state_dir = tmp_path / "state"
+    eng = Engine(state_dir, GOOD)
+    project = _project(tmp_path)
+    run_id = eng.start("minimal", {}, str(project))["run_id"]
+
+    idx = RunIndex(state_dir)
+    for suffix in ("", "-wal", "-shm"):
+        p = Path(str(idx.db_path(run_id)) + suffix)
+        if p.exists():
+            p.unlink()
+
+    status = Engine(state_dir, GOOD).status(run_id)
+    assert status["status"] == "awaiting"
+    assert status["step"] == "one"

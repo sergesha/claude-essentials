@@ -192,19 +192,35 @@ def _check_loops(
     loop_limits: dict,
     loop_exits: dict,
     errors: list[str],
+    tools: dict | None = None,
 ) -> None:
     seen_sources: set[str] = set()
     for src, tgt in _find_back_edges(edges_by_from):
         tgt_node = nodes.get(tgt) or {}
-        if tgt_node.get("type") == "interrupt" and _is_subcall_marker(tgt_node.get("message") or {}):
-            continue  # poll loop: termination is the runner timeout, not loop_limits
+        src_node = nodes.get(src) or {}
+        is_marker = (tgt_node.get("type") == "interrupt"
+                     and _is_subcall_marker(tgt_node.get("message") or {}))
+        # Exempt on the SOURCE, not just the target: the poll loop's
+        # termination is the runner timeout, and only a POLL node has one.
+        # Keyed on the target alone, ANY cycle the DFS happens to enter at
+        # the marker — an ordinary passthrough wired back to it — escapes
+        # loop_limits/loop_exits entirely and runs forever.
+        if is_marker and subcall_node_kind(src_node, tools or {}) == "poll":
+            continue
         if src in seen_sources:
             continue
         seen_sources.add(src)
 
+        cap = loop_limits.get(src)
         if src not in loop_limits:
             errors.append(
                 f"loop_limits: node '{src}' loops back to '{tgt}' without a loop_limits cap"
+            )
+        elif not isinstance(cap, int) or isinstance(cap, bool) or cap < 1:
+            # Presence is not a cap: `null`, `0`, `-1` and `"lots"` all read
+            # as "declared" while capping nothing.
+            errors.append(
+                f"loop_limits: node '{src}' cap must be a positive integer, got {cap!r}"
             )
         if src not in loop_exits:
             errors.append(
@@ -582,6 +598,7 @@ def check_recipe_full(
         doc.get("loop_limits") or {},
         doc.get("loop_exits") or {},
         errors,
+        doc.get("tools") or {},
     )
 
     # Fractal children resolve beside the checked file by default; the

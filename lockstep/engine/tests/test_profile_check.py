@@ -159,3 +159,41 @@ def test_child_scenario_name_cannot_walk_out_of_the_recipes_dir(tmp_path):
     staged.write_text(yaml.safe_dump(doc))
     errors = check_recipe(staged, child_recipes_dir=GOOD)
     assert any("scenario name" in e for e in errors)
+
+
+def _fractal_doc():
+    return yaml.safe_load((GOOD / "subcall-one-shot.yaml").read_text())
+
+
+def test_uncapped_cycle_through_a_subcall_marker_is_refused(tmp_path):
+    # The poll-loop exemption belongs to the POLL node, whose termination
+    # is the runner timeout. Keyed on the marker alone, any cycle the walk
+    # happens to enter at the marker — here a plain passthrough wired back
+    # to it — escapes loop_limits/loop_exits and runs forever.
+    doc = _fractal_doc()
+    doc["nodes"]["fixup"] = {"type": "passthrough", "output": {}}
+    edges = [e for e in doc["edges"]
+             if not (e["from"] == "review_poll" and e.get("condition", "").endswith("'done'"))]
+    edges.append({"from": "review_poll", "to": "fixup",
+                  "condition": "_subcall_status == 'done'"})
+    edges.append({"from": "fixup", "to": "review_wait"})
+    doc["edges"] = edges
+    staged = tmp_path / "staged.yaml"
+    staged.write_text(yaml.safe_dump(doc))
+
+    errors = check_recipe(staged)
+    assert any("fixup" in e and "loop" in e for e in errors), errors
+
+
+@pytest.mark.parametrize("cap", [None, 0, -1, "lots"])
+def test_a_loop_limit_that_caps_nothing_is_refused(tmp_path, cap):
+    # Presence is not a cap: the rule reads "every retry loop must be
+    # capped", and `null`/`0`/`-1`/`"lots"` all declare a key that limits
+    # no execution at all.
+    doc = yaml.safe_load((GOOD / "minimal.yaml").read_text())
+    doc["loop_limits"] = {"validate_one": cap}
+    staged = tmp_path / "staged.yaml"
+    staged.write_text(yaml.safe_dump(doc))
+
+    errors = check_recipe(staged)
+    assert any("positive integer" in e for e in errors), errors

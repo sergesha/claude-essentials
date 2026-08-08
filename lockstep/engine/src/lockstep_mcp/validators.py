@@ -350,7 +350,11 @@ def _load_manifest(path: Any) -> dict[str, str]:
         return {}
     p = Path(path)
     if not p.exists():
-        return {}
+        # A manifest the engine NAMED but that is not there is a broken
+        # state dir, never an empty project: answering `{}` makes `fresh`
+        # pass on any path (nothing to compare against) and turns every
+        # baseline guarantee vacuous, silently and in the agent's favour.
+        raise ValueError(f"baseline manifest missing: {p}")
     return json.loads(p.read_text())
 
 
@@ -416,8 +420,15 @@ def _check_fresh(check: dict, evidence: dict, ctx: dict) -> list[str]:
     baseline_globs = ctx.get("_baseline_globs") or []
     if not _covered_by_globs(rel, baseline_globs):
         raise ValueError(f"fresh: path {rel!r} not covered by baseline_globs")
-    if not resolved.exists():
-        return [f"fresh: {raw} does not exist"]
+    # A DIRECTORY, or a path the manifest ignore set drops, is never in the
+    # baseline — `old_hash is None` would then short-circuit to a pass, and
+    # the step closes with no artifact produced at all. Both are the
+    # agent's path to fix, so they FAIL (budget burns, run resumes) rather
+    # than error.
+    if not resolved.is_file():
+        return [f"fresh: {rel} is not a file"]
+    if _is_ignored(rel):
+        return [f"fresh: {rel} is excluded from baseline manifests"]
     start_manifest = _load_manifest(ctx.get("_baseline_start"))
     old_hash = start_manifest.get(rel)
     if old_hash is not None and old_hash == _hash_file(resolved):
@@ -438,7 +449,11 @@ def _check_unchanged(check: dict, evidence: dict, ctx: dict) -> list[str]:
 
     selected = _load_manifest(manifest_path)
     matched_entries = {p: h for p, h in selected.items() if _glob_match(p, glob_pat)}
-    if not matched_entries and glob_pat not in baseline_globs:
+    if not matched_entries and not _path_covered(glob_pat, baseline_globs):
+        # Semantic, not byte-equality: a well-formed `src/vendor/**` under
+        # `baseline_globs: ["src/**"]` that happens to match nothing YET
+        # would otherwise raise on every done() — a permanent error verdict,
+        # which never resumes and never burns budget.
         raise ValueError(f"unchanged: glob {glob_pat!r} not covered by baseline_globs")
 
     current = build_manifest(project, [glob_pat])

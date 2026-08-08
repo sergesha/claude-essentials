@@ -20,6 +20,7 @@ supervisor itself lands its traceback in ``stderr.txt``.
 """
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -57,6 +58,21 @@ def _write_exit(workdir: str, payload: dict) -> None:
             pass
 
 
+def _signal_tree(proc, sig) -> None:
+    """Signal the runner's whole group where the platform has groups, the
+    leader alone where it does not. Capability-detected (`os.killpg` /
+    `os.getpgid`), never branched on a platform name; a group kill that
+    fails falls back to the ordinary terminate/kill on the handle."""
+    killpg, getpgid = getattr(os, "killpg", None), getattr(os, "getpgid", None)
+    if killpg and getpgid:
+        try:
+            killpg(getpgid(proc.pid), sig)
+            return
+        except OSError:
+            pass
+    (proc.kill if sig == getattr(signal, "SIGKILL", None) else proc.terminate)()
+
+
 def main() -> int:
     args = sys.argv[1:]
     sep = args.index("--")
@@ -75,7 +91,16 @@ def main() -> int:
     try:
         # cwd/env/stdout/stderr inherited from this supervisor as the
         # server set them; never PATH-resolved (exe is absolute).
-        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL)
+        # A real runner spawns children of its own (MCP servers, Bash), and
+        # signalling the leader alone leaves them editing the project after
+        # the subcall is recorded as timed out. Give it its own session so
+        # the whole tree can be signalled — asked for by CAPABILITY, never
+        # by platform name, and retried plainly where it is unsupported.
+        try:
+            proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL,
+                                    start_new_session=True)
+        except (ValueError, AttributeError, NotImplementedError, OSError):
+            proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL)
     except OSError as e:
         _write_exit(workdir, {"exit_code": None, "timed_out": False, "cancelled": False,
                               "error": f"exec failed: {e}"})
@@ -91,11 +116,11 @@ def main() -> int:
         cancelled = os.path.exists(cancel)
         timed_out = not cancelled and time.monotonic() > deadline
         if cancelled or timed_out:
-            proc.terminate()
+            _signal_tree(proc, signal.SIGTERM)
             try:
                 rc = proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                _signal_tree(proc, signal.SIGKILL)
                 try:
                     rc = proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:

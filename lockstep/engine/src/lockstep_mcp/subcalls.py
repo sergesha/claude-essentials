@@ -52,6 +52,10 @@ _ERR = "stderr.txt"
 _EXIT = "exit.json"
 _CANCEL = "cancel"
 _CLAIM = "claim"
+# How long a claim with no `proc.json` and no `exit.json` must sit before
+# it is read as "the claiming process died before it could record the
+# handle". Mtime age only, like every other staleness verdict here.
+_CLAIM_ORPHAN_SECONDS = 300.0
 _WRAPPER = Path(__file__).with_name("_subcall_wrapper.py")
 
 # Popen handles of supervisors WE spawned — kept only so finished
@@ -111,6 +115,22 @@ def start_process(argv: list[str], cwd: str, env: dict | None, workdir: Path,
     try:
         os.close(os.open(claim, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
     except FileExistsError:
+        # The claim is taken BEFORE the spawn, `proc.json` written after, so
+        # a machine death in that window leaves a claim naming a session
+        # that never started. Restart-truth is files-only: with neither
+        # `proc.json` nor `exit.json` past a window no legitimate spawn can
+        # occupy, the honest verdict is a terminal error for THIS subcall —
+        # not "already started" forever, and never a silent second session.
+        if (not (workdir / _PROC).exists() and not (workdir / _EXIT).exists()
+                and _claim_age_seconds(claim) > _CLAIM_ORPHAN_SECONDS):
+            _write_exit_excl(workdir, {
+                "exit_code": None, "timed_out": False, "cancelled": False,
+                "error": "runner never started: the process claiming this subcall "
+                         "died before recording its handle",
+            })
+            raise RunnerError(
+                f"subcall in {workdir} was claimed but never started"
+            ) from None
         raise RunnerError(f"subcall already started in {workdir}") from None
     try:
         # Obligation: re-verify IMMEDIATELY before the spawn and exec
@@ -143,6 +163,13 @@ def start_process(argv: list[str], cwd: str, env: dict | None, workdir: Path,
     os.replace(tmp, workdir / _PROC)  # atomic: probe never sees a torn record
     _HANDLES[str(workdir)] = proc
     return meta
+
+
+def _claim_age_seconds(path: Path) -> float:
+    try:
+        return time.time() - path.stat().st_mtime
+    except OSError:
+        return 0.0  # gone or unreadable: never old enough to act on
 
 
 def _read_exit(workdir: Path) -> dict | None:

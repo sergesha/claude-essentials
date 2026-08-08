@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -123,6 +124,14 @@ def _fast_path_empty(state_dir: Path) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _owned_by_another_live_session(state_dir: Path, run_id: str, session_id: str,
+                                   stale_minutes: float) -> bool:
+    binding = sessions.read_binding(state_dir, run_id)
+    if binding is None or binding.get("session_id") == session_id:
+        return False
+    return sessions.is_live(binding, stale_minutes)
+
+
 def hook_stop(stdin_json: dict, state_dir: Path, cwd: str) -> tuple[int, str]:
     state_dir = Path(state_dir)
     if _fast_path_empty(state_dir):
@@ -134,6 +143,20 @@ def hook_stop(stdin_json: dict, state_dir: Path, cwd: str) -> tuple[int, str]:
 
         idx = RunIndex(state_dir)
         matches = [r for r in idx.list(active_only=True) if _project_matches(r.project, cwd)]
+        # A run belongs to the session driving it, and the PreToolUse gate
+        # is already scrupulous about that. Blocking every session whose cwd
+        # matches means a second session in the same repo — routine — is
+        # held for work that is not its own, and told to `scenario_abort`
+        # someone else's live run to get out. A run with a LIVE foreign
+        # owner is therefore not this session's to report.
+        session_id = stdin_json.get("session_id")
+        stale_minutes = _session_stale_minutes()
+        if isinstance(session_id, str) and session_id:
+            matches = [
+                r for r in matches
+                if not _owned_by_another_live_session(state_dir, r.run_id, session_id,
+                                                      stale_minutes)
+            ]
         if not matches:
             return 0, ""
 
@@ -289,6 +312,25 @@ def hook_pretool(stdin_json: dict, state_dir: Path) -> tuple[int, str]:
             # chain is dead. Session bindings play no part here: the env
             # credential, held only by the spawned process, already binds
             # this session to its run more tightly than a sidecar could.
+            #
+            # That credential is the NONCE, and it is the half that must be
+            # checked. A run id is not a secret — SessionStart broadcasts
+            # every active run's id into every session in the project — so
+            # unlocking on LOCKSTEP_CHILD_RUN alone lets any ungated session
+            # re-export a known id and walk in. Same comparison the server's
+            # origin binding makes, including its order guard: an absent
+            # record nonce refuses unconditionally, because
+            # compare_digest("", "") MATCHES.
+            try:
+                record_nonce = idx.get(child_run).nonce
+            except (KeyError, TypeError, ValueError):
+                record_nonce = None
+            env_nonce = os.environ.get("LOCKSTEP_CHILD_NONCE") or ""
+            if not record_nonce or not hmac.compare_digest(str(record_nonce), env_nonce):
+                return _deny(
+                    f"lockstep policy: this session presents child run {child_run} "
+                    "without its spawn credential"
+                )
             if _child_chain_unlocked(idx, child_run, recipe, cwd):
                 return 0, ""
             return _deny(
@@ -436,12 +478,27 @@ def _find_marked_run_id(obj, depth: int = 0) -> str | None:
     return None
 
 
-def _posttool_run_id(tool_input, tool_response) -> str | None:
+def _posttool_run_id(tool_input, tool_response, tool_name: str = "") -> str | None:
+    """The run this call TOUCHED, never merely mentioned.
+
+    Three sources, in order of how strongly each proves a touch: the run_id
+    the caller itself named; the server's stamped marker; and — only for
+    `scenario_start`, the one run-owning call whose input cannot carry a
+    run_id — the id in its own response. Scraping any response would bind
+    this session to the first stranger's run in a `list_runs` listing, and
+    adopt it outright once that run's real driver is past the silence
+    window.
+    """
     if isinstance(tool_input, dict):
         v = tool_input.get("run_id")
         if isinstance(v, str) and v:
             return v
-    return _find_run_id(tool_response)
+    marked = _find_marked_run_id(tool_response)
+    if marked:
+        return marked
+    if tool_name.endswith("__scenario_start"):
+        return _find_run_id(tool_response)
+    return None
 
 
 def hook_posttool(stdin_json: dict, state_dir: Path) -> None:
@@ -451,10 +508,15 @@ def hook_posttool(stdin_json: dict, state_dir: Path) -> None:
         if not tool_name.startswith("mcp__"):
             return
         if _LOCKSTEP_TOOL_RE.fullmatch(tool_name):
-            # Known lockstep name shape: trusted by name, permissive
-            # extraction (input run_id, else any run_id in the response).
+            # Known lockstep name shape. The run id comes from what the
+            # CALLER named, or from the server's own stamped marker — never
+            # from scraping the response, which would bind this session to
+            # the first stranger's run in a `list_runs` listing (and adopt
+            # it outright once that run's real driver is past the silence
+            # window).
             run_id = _posttool_run_id(stdin_json.get("tool_input"),
-                                      stdin_json.get("tool_response"))
+                                      stdin_json.get("tool_response"),
+                                      tool_name)
         else:
             # Unknown MCP tool name (a custom-named install whose user
             # extended the platform matcher — or any foreign tool that
