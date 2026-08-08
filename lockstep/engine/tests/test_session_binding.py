@@ -33,6 +33,7 @@ from pathlib import Path
 import yaml
 
 import lockstep_mcp.cli as cli
+from lockstep_mcp import sessions
 from lockstep_mcp.runs import RunIndex
 
 S1 = "session-aaaa-1111"
@@ -503,6 +504,7 @@ def test_child_chain_with_ancient_updated_still_unlocks(tmp_path, monkeypatch):
     _set_updated(state, parent.run_id,
                  (datetime.now(timezone.utc) - timedelta(hours=25)).isoformat())
     monkeypatch.setenv("LOCKSTEP_CHILD_RUN", child.run_id)
+    monkeypatch.setenv("LOCKSTEP_CHILD_NONCE", "n")
 
     code, out = _pretool(state, proj, S2)
 
@@ -524,6 +526,7 @@ def test_child_env_path_ignores_bindings(tmp_path, monkeypatch):
     child = idx.create("child-review", str(proj.resolve()), parent_run=parent.run_id, nonce="n")
     _bind(state, parent.run_id, S1)
     monkeypatch.setenv("LOCKSTEP_CHILD_RUN", child.run_id)
+    monkeypatch.setenv("LOCKSTEP_CHILD_NONCE", "n")
 
     code, out = _pretool(state, proj, S2)
 
@@ -544,3 +547,33 @@ def test_no_policy_path_untouched_and_writes_no_sidecar(tmp_path):
 
     assert code == 0 and out == ""
     assert not (state / "bindings").exists()
+
+
+def test_listing_other_sessions_runs_binds_nothing(tmp_path):
+    # `list_runs` is introspection, not a touch: its response names every
+    # active run in the project. Binding to the first id in it would make a
+    # reader the owner of a stranger's run — and, past the silence window,
+    # adopt it out from under its live driver.
+    proj, state = _setup(tmp_path)
+    run_id = _mk_run(state, str(proj.resolve()))
+
+    _posttool(state, proj, S2, tool="mcp__lockstep__list_runs",
+              tool_input={"project": str(proj)},
+              tool_response=[{"run_id": run_id, "status": "awaiting"}])
+
+    assert sessions.read_binding(state, run_id) is None
+
+
+def test_stop_does_not_block_a_session_that_does_not_drive_the_run(tmp_path):
+    # Two sessions in one repo is routine. The run belongs to the one
+    # driving it — telling the other to report or `scenario_abort` it hands
+    # a stranger the verb that kills live work.
+    proj, state = _setup(tmp_path)
+    run_id = _mk_run(state, str(proj.resolve()))
+    _bind(state, run_id, S1)
+
+    code, out = cli.hook_stop({"session_id": S2}, state, str(proj))
+    assert (code, out) == (0, "")
+
+    code, out = cli.hook_stop({"session_id": S1}, state, str(proj))
+    assert json.loads(out)["decision"] == "block"

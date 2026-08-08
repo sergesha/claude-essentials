@@ -322,3 +322,18 @@ def test_depth2_child_inherits_the_adapter_runner_default(tmp_path):
     assert env["LOCKSTEP_RUNNER"] == "claude"
     spec = resolve(tmp_path, None, env)                    # marker names no runner
     assert spec.name == "claude"
+
+
+def test_misspelled_top_level_budget_key_is_refused(tmp_path):
+    # The looser default is what a silent fallback means here: an owner
+    # writing `max_fractal_deph: 0` to switch fractal children OFF would get
+    # depth 2 in force and nothing said.
+    exe = _fake_exe(tmp_path)
+    (tmp_path / "runners.yaml").write_text(
+        "runners:\n"
+        f"  claude: {{path: {exe}, models: [m]}}\n"
+        "budgets: {max_fractal_deph: 0}\n"
+    )
+    with pytest.raises(RunnerError) as exc:
+        load_runners(tmp_path)
+    assert "max_fractal_deph" in str(exc.value)

@@ -252,6 +252,7 @@ def test_pretool_child_session_unlock_narrowed_to_its_own_chain(tmp_path, monkey
     child = idx.create("child-review", str(proj.resolve()), parent_run=parent.run_id, nonce="n")
     idx.create("feature-dev", str(proj.resolve()))         # unrelated awaiting policy run
     monkeypatch.setenv("LOCKSTEP_CHILD_RUN", child.run_id)
+    monkeypatch.setenv("LOCKSTEP_CHILD_NONCE", "n")
 
     exit_code, out = cli.hook_pretool({"cwd": str(proj)}, state_dir)
     assert exit_code == 0 and out == ""        # own chain awaiting: unlocked
@@ -540,6 +541,7 @@ def test_session_start_marks_the_sessions_own_child_run(tmp_path, monkeypatch):
     child = idx.create("child-review", "/proj", parent_run=parent.run_id, nonce="n")
     idx.update(child.run_id, step="review", brief={"step": "review"})
     monkeypatch.setenv("LOCKSTEP_CHILD_RUN", child.run_id)
+    monkeypatch.setenv("LOCKSTEP_CHILD_NONCE", "n")
     ctx = cli.hook_session_start(tmp_path, cwd="/proj")
     child_line = next(l for l in ctx.splitlines() if child.run_id in l)
     parent_line = next(l for l in ctx.splitlines() if parent.run_id in l)
@@ -569,3 +571,33 @@ def test_empty_state_dir_env_reads_as_absent(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path / "..")
     assert cli._state_dir() == Path(tmp_path) / ".lockstep"
     assert validators._state_dir() == Path(tmp_path) / ".lockstep"
+
+
+def test_pretool_child_run_without_its_nonce_is_denied(tmp_path, monkeypatch):
+    # A run id is not a secret — SessionStart broadcasts every active run's
+    # id into every session in the project. The spawn credential is the
+    # NONCE, so an ungated session that re-exports a known child id gets
+    # nothing.
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    state_dir = tmp_path / "state"
+    _write_policy(state_dir, str(proj), "feature-dev")
+    idx = RunIndex(state_dir)
+    parent = idx.create("feature-dev", str(proj.resolve()))
+    child = idx.create("child-review", str(proj.resolve()),
+                       parent_run=parent.run_id, nonce="the-real-nonce")
+    monkeypatch.setenv("LOCKSTEP_CHILD_RUN", child.run_id)
+
+    for wrong in (None, "", "guessed"):
+        if wrong is None:
+            monkeypatch.delenv("LOCKSTEP_CHILD_NONCE", raising=False)
+        else:
+            monkeypatch.setenv("LOCKSTEP_CHILD_NONCE", wrong)
+        exit_code, out = cli.hook_pretool({"cwd": str(proj)}, state_dir)
+        assert exit_code == 0
+        data = json.loads(out)
+        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "credential" in data["hookSpecificOutput"]["permissionDecisionReason"]
+
+    monkeypatch.setenv("LOCKSTEP_CHILD_NONCE", "the-real-nonce")
+    assert cli.hook_pretool({"cwd": str(proj)}, state_dir) == (0, "")

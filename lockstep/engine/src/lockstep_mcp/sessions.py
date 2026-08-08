@@ -91,6 +91,9 @@ def is_live(binding: dict | None, stale_minutes: float) -> bool:
     return datetime.now(timezone.utc) - seen <= timedelta(minutes=stale_minutes)
 
 
+_REFRESH_LOCK_WAIT = 2.0
+
+
 def _write(path: Path, data: dict) -> None:
     tmp = path.parent / (path.name + ".tmp")
     tmp.write_text(json.dumps(data, indent=2, sort_keys=True))
@@ -104,7 +107,11 @@ def refresh_if_owner(state_dir: Path, run_id: str, session_id: str) -> bool:
     b = read_binding(state_dir, run_id)
     if b is None or b["session_id"] != session_id:
         return False                                   # cheap no-lock pre-check
-    with file_lock(path):
+    # Short, and far under the gate's hook budget: this refresh runs INSIDE
+    # the PreToolUse deny path, and a hook killed at its budget emits no
+    # deny at all — the gate fails open. A wedged sidecar lock must cost a
+    # moment, never the whole budget.
+    with file_lock(path, timeout=_REFRESH_LOCK_WAIT):
         b = read_binding(state_dir, run_id)
         if b is None or b["session_id"] != session_id:
             return False                               # re-verified under the lock

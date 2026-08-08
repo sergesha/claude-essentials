@@ -221,12 +221,21 @@ def resume(app, payload: dict, thread_id: str) -> Advance:
 def peek(app, thread_id: str) -> Advance:
     """Read-only counterpart to `start`/`resume` (see the module
     docstring): current checkpoint state for `thread_id` via `get_state`,
-    without resuming. `done=True` once `.next` is empty (graph reached END);
-    otherwise the parked step's brief, exactly like `start`/`resume`."""
+    without resuming. `done=True` once `.next` is empty AND the checkpoint
+    holds state; otherwise the parked step's brief, exactly like
+    `start`/`resume`.
+
+    The `values` half is load-bearing: LangGraph answers with an EMPTY
+    snapshot (`values={}`, `next=()`) for a thread_id it has never seen, so
+    "this run is absent from this checkpointer" — a lost or freshly-created
+    sqlite file, a restarted memory-only engine — is otherwise
+    indistinguishable from "reached END", and reconcile would flip a run
+    whose steps never ran to a terminal `done`. A graph that really
+    finished always left values behind."""
     config = {"configurable": {"thread_id": thread_id}}
     snapshot = app.get_state(config)
     values = dict(snapshot.values or {})
-    done = not snapshot.next
+    done = not snapshot.next and bool(values)
     raw_brief = None if done else values.get("brief")
     brief = _parse_brief(raw_brief) if raw_brief is not None else None
     return Advance(done=done, brief=brief, state=values)

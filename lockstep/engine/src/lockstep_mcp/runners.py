@@ -61,6 +61,12 @@ def load_runners(state_dir: Path) -> dict[str, RunnerSpec]:
         return {}
     cfg = yaml.safe_load(cfg_path.read_text()) or {}
     budgets = cfg.get("budgets") or {}
+    unknown_budgets = set(budgets) - set(_BUDGET_KEYS)
+    if unknown_budgets:
+        # Same reason as the runner-body guard below: an owner tightening a
+        # cap through a misspelled key gets a clean load and the LOOSER
+        # defaults silently in force.
+        raise RunnerError(f"budgets: unknown key(s) {sorted(unknown_budgets)}")
     out: dict[str, RunnerSpec] = {}
     for name, body in (cfg.get("runners") or {}).items():
         body = body or {}

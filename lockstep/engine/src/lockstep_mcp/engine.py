@@ -56,6 +56,7 @@ import secrets
 import shutil
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -68,6 +69,7 @@ from lockstep_mcp import runners
 from lockstep_mcp import subcalls
 from lockstep_mcp import validators
 from lockstep_mcp import yamlgraph_api as yg
+from lockstep_mcp.locking import LockTimeout, file_lock
 from lockstep_mcp.runs import TERMINAL_STATUSES, RunIndex, RunRecord
 
 _PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_]\w*)\}")
@@ -80,6 +82,33 @@ _PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_]\w*)\}")
 # including inside the project the agent can write — defeating both
 # `assert_state_dir_sane` and the pinned-snapshot guarantee.
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+# Per-run serialization. Every mutating entry point (done/escalate/abort,
+# and status, which auto-polls) runs inside it, because the checks and
+# the resume they guard are NOT one atomic step: two concurrent
+# `scenario_done` calls (the MCP server dispatches tools on a thread
+# pool) both pass the status/step guards, both spend seconds executing
+# checks, and both resume. The first advances the graph to the NEXT
+# step's interrupt; the second resume is then delivered to that
+# interrupt carrying `_verdict_status: "pass"`, and the republish-only
+# validator trusts it — a step passes with its checks never executed.
+# `_GATE_WAIT` is short: a caller that finds the run busy is TOLD so,
+# never queued. `_GATE_STALE` must exceed the longest legitimate hold
+# (a `done()` whose checks shell out to a full test run), per the
+# `locking` contract — a hold that outlives it is broken as a crash.
+_GATE_WAIT = 0.5
+_GATE_STALE = 3600.0
+
+# How long an unfilled child.json claim must sit before another caller may
+# heal it (mtime age, never content — the claim is empty by construction).
+_CHILD_CLAIM_STALE = 600.0
+
+
+def _claim_age(path: Path) -> float:
+    try:
+        return time.time() - path.stat().st_mtime
+    except OSError:
+        return 0.0  # gone or unreadable: not ours to heal
 
 # `start()`'s vars dict is passed straight into the initial LangGraph
 # state (`yg.start(self._app(run_id), dict(vars), run_id)`). Any key that
@@ -95,6 +124,10 @@ _RESERVED_VAR_KEYS = {"brief", "evidence", "verdict_status", "verdict_reasons"}
 class LockstepError(Exception):
     """Raised for terminal-run violations, wrong-step calls, and recipes
     that fail validation at `start()`."""
+
+
+class RunBusy(LockstepError):
+    """Another call is inside this run's critical section right now."""
 
 
 def _subst(text: str, vars_: dict) -> str:
@@ -121,7 +154,30 @@ class Engine:
     # ------------------------------------------------------------------
 
     def recipe_path(self, name: str) -> Path:
+        # Validated HERE, so every caller is covered — the name reaches this
+        # method straight from an agent-supplied tool argument.
+        if not _NAME_RE.fullmatch(name or ""):
+            raise LockstepError(
+                f"invalid recipe name {name!r}: a recipe name is a plain file name "
+                "(letters, digits, dot, dash, underscore; no path separators)"
+            )
         return self._recipes_dir / f"{name}.yaml"
+
+    def _gate_path(self, run_id: str) -> Path:
+        return self._runs_dir() / f"{run_id}.gate"
+
+    @contextmanager
+    def _gate(self, run_id: str):
+        """Hold this run's critical section, or refuse — never queue."""
+        try:
+            with file_lock(self._gate_path(run_id), timeout=_GATE_WAIT,
+                           stale_after=_GATE_STALE):
+                yield
+        except LockTimeout as exc:
+            raise RunBusy(
+                f"run {run_id}: another call is being processed right now — "
+                "retry once it returns"
+            ) from exc
 
     def _runs_dir(self) -> Path:
         d = self._state_dir / "runs"
@@ -493,7 +549,7 @@ class Engine:
             shutil.rmtree(child_staging, ignore_errors=True)
 
         run_id = record.run_id
-        self._vars_path(run_id).write_text(json.dumps(vars))
+        self._write_json(self._vars_path(run_id), vars)
 
         project_root = Path(project).resolve()
         globs = self._read_baseline_globs(self._snapshot_path(run_id))
@@ -528,7 +584,16 @@ class Engine:
         return record
 
     def status(self, run_id: str) -> dict:
-        record = self._reconcile_polling(run_id)
+        try:
+            with self._gate(run_id):
+                return self._status_view(self._reconcile_polling(run_id))
+        except RunBusy:
+            # Busy is not an error to the reader: report the run as
+            # RECORDED, skipping the reconcile/auto-poll the holder is
+            # already doing.
+            return self._status_view(self._runs.get(run_id))
+
+    def _status_view(self, record: RunRecord) -> dict:
         if self._is_subcall_parked(record):
             marker = record.brief or {}
             started = marker.get("started_at")
@@ -564,6 +629,13 @@ class Engine:
         }
 
     def done(self, run_id: str, step: str, evidence: dict) -> dict:
+        try:
+            with self._gate(run_id):
+                return self._done_locked(run_id, step, evidence)
+        except RunBusy as exc:
+            return {"accepted": False, "errors": [str(exc)]}
+
+    def _done_locked(self, run_id: str, step: str, evidence: dict) -> dict:
         # Auto-poll BEFORE the terminal raise, so a subcall that just
         # resolved reports its accurate terminal status.
         record = self._reconcile_polling(run_id)
@@ -787,6 +859,10 @@ class Engine:
                 "abort/escalate unavailable until it completes or times out")
 
     def escalate(self, run_id: str, reason: str) -> dict:
+        with self._gate(run_id):
+            return self._escalate_locked(run_id, reason)
+
+    def _escalate_locked(self, run_id: str, reason: str) -> dict:
         record = self._reconcile_polling(run_id)
         self._raise_if_subcall_parked(record)
         if record.status != "awaiting":
@@ -801,6 +877,10 @@ class Engine:
         return {"run_id": run_id, "status": "escalated", "reason": reason}
 
     def abort(self, run_id: str) -> dict:
+        with self._gate(run_id):
+            return self._abort_locked(run_id)
+
+    def _abort_locked(self, run_id: str) -> dict:
         record = self._reconcile_polling(run_id)
         self._raise_if_subcall_parked(record)
         if record.status != "awaiting":
@@ -948,7 +1028,14 @@ class Engine:
         workdir = Path(workdir)
         workdir.mkdir(parents=True, exist_ok=True)
         child_file = workdir / "child.json"
-        deadline = time.time() + 30.0
+        # Contract, same shape as `locking`: the claim is healed only after
+        # its MTIME is older than any legitimate fill. `_start_child` runs
+        # profile checks, two recipe compiles and a full baseline manifest,
+        # which on a large project takes far longer than a handful of
+        # seconds — heal too early and both racers mint a child, leaving
+        # `child.json` naming one while the spawned runner carries the
+        # other's nonce: a child nobody can drive, and an `awaiting` orphan.
+        deadline = time.time() + _CHILD_CLAIM_STALE
         while True:
             try:
                 fd = os.open(child_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -965,12 +1052,12 @@ class Engine:
                 # never win against an EXISTING empty file, so self-healing
                 # needs the stale claim removed first — only after a wait
                 # long past any legitimate fill.
-                if time.time() > deadline:
+                if time.time() > deadline and _claim_age(child_file) > _CHILD_CLAIM_STALE:
                     try:
                         os.unlink(child_file)
                     except OSError:
                         pass
-                    deadline = time.time() + 30.0
+                    deadline = time.time() + _CHILD_CLAIM_STALE
                 else:
                     time.sleep(0.01)
                 continue

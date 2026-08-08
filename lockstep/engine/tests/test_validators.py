@@ -592,3 +592,57 @@ def test_a_directory_is_not_an_artifact(tmp_path):
         )
         assert out["verdict_status"] == "fail", ctype
         assert any("not a file" in r for r in out["verdict_reasons"]), ctype
+
+
+def test_fresh_refuses_a_directory_and_an_ignored_path(tmp_path):
+    # build_manifest hashes FILES and drops the ignore set, so a directory
+    # or a `.pyc` is simply absent from the baseline — and "absent" would
+    # read as "changed since start", passing a step that produced nothing.
+    proj = tmp_path / "proj"
+    (proj / "docs" / "__pycache__").mkdir(parents=True)
+    (proj / "docs" / "__pycache__" / "x.pyc").write_text("junk")
+    start = tmp_path / "start.json"
+    start.write_text(json.dumps(build_manifest(proj, ["docs/**"])))
+
+    for path in ("docs", "docs/__pycache__/x.pyc"):
+        out = run_checks(
+            _state([{"type": "fresh", "path_from": "p"}], {"p": path},
+                   _project=str(proj), _baseline_start=str(start),
+                   _baseline_globs=["docs/**"]),
+            execute=True,
+        )
+        assert out["verdict_status"] == "fail", path
+
+
+def test_unchanged_accepts_a_glob_covered_semantically(tmp_path):
+    # `src/vendor/**` under `baseline_globs: ["src/**"]` is well formed. It
+    # matches nothing yet, and a byte-equality coverage test would raise on
+    # every done() — a permanent error verdict, which never resumes and
+    # never burns budget.
+    proj = tmp_path / "proj"; (proj / "src").mkdir(parents=True)
+    (proj / "src" / "a.py").write_text("a")
+    start = tmp_path / "start.json"
+    start.write_text(json.dumps(build_manifest(proj, ["src/**"])))
+
+    out = run_checks(
+        _state([{"type": "unchanged", "glob": "src/vendor/**", "since": "start"}], {},
+               _project=str(proj), _baseline_start=str(start), _baseline_globs=["src/**"]),
+        execute=True,
+    )
+    assert out["verdict_status"] == "pass"
+
+
+def test_a_missing_baseline_manifest_is_an_error_not_an_empty_one(tmp_path):
+    # A named-but-absent manifest is a broken state dir. Read as empty, it
+    # makes `fresh` pass on anything — the baseline guarantee silently
+    # becomes vacuous, in the agent's favour.
+    proj = tmp_path / "proj"; proj.mkdir()
+    (proj / "a.md").write_text("x")
+    out = run_checks(
+        _state([{"type": "fresh", "path_from": "p"}], {"p": "a.md"},
+               _project=str(proj), _baseline_start=str(tmp_path / "gone.json"),
+               _baseline_globs=["*.md"]),
+        execute=True,
+    )
+    assert out["verdict_status"] == "error"
+    assert any("manifest missing" in r for r in out["verdict_reasons"])
