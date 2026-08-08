@@ -58,11 +58,13 @@ from lockstep_mcp.runs import ACTIVE_STATUS, RunIndex
 
 
 def _state_dir() -> Path:
-    return Path(os.environ.get("LOCKSTEP_STATE_DIR", str(Path.home() / ".lockstep")))
+    # `or`, never a get() default — an unset variable the plugin manifest
+    # forwards arrives present and EMPTY, and `Path("")` is the cwd.
+    return Path(os.environ.get("LOCKSTEP_STATE_DIR") or str(Path.home() / ".lockstep"))
 
 
 def _recipes_dir() -> Path:
-    return Path(os.environ.get("LOCKSTEP_RECIPES", str(Path.cwd() / ".lockstep" / "recipes")))
+    return Path(os.environ.get("LOCKSTEP_RECIPES") or str(Path.cwd() / ".lockstep" / "recipes"))
 
 
 def _policy_dir(state_dir: Path) -> Path:

@@ -121,8 +121,11 @@ def _check_file_exists(check: dict, evidence: dict, ctx: dict) -> list[str]:
     if err:
         return [f"file_exists: {err}"]
     resolved = _resolve_path(raw, ctx.get("_project"))
-    if not resolved.exists():
-        return [f"file_exists: {raw} does not exist"]
+    # is_file(), never exists(): a DIRECTORY exists and has a non-zero
+    # st_size, so `.` — the project root itself, which path containment
+    # admits — would satisfy both file checks with no artifact at all.
+    if not resolved.is_file():
+        return [f"file_exists: {raw} is not a file"]
     return []
 
 
@@ -131,8 +134,8 @@ def _check_file_nonempty(check: dict, evidence: dict, ctx: dict) -> list[str]:
     if err:
         return [f"file_nonempty: {err}"]
     resolved = _resolve_path(raw, ctx.get("_project"))
-    if not resolved.exists():
-        return [f"file_nonempty: {raw} does not exist"]
+    if not resolved.is_file():
+        return [f"file_nonempty: {raw} is not a file"]
     if resolved.stat().st_size == 0:
         return [f"file_nonempty: {raw} is empty"]
     return []
@@ -242,7 +245,11 @@ def _check_git_clean(check: dict, evidence: dict, ctx: dict) -> list[str]:
 
 
 def _state_dir() -> Path:
-    return Path(os.environ.get("LOCKSTEP_STATE_DIR", str(Path.home() / ".lockstep")))
+    # `or`, never a get() default: the plugin manifest passes
+    # LOCKSTEP_STATE_DIR through unconditionally, so an unset variable
+    # arrives PRESENT AND EMPTY — and `Path("")` is the cwd, i.e. the
+    # project tree.
+    return Path(os.environ.get("LOCKSTEP_STATE_DIR") or str(Path.home() / ".lockstep"))
 
 
 def _parse_junit(xml_path: Path) -> dict[str, int]:
@@ -347,26 +354,54 @@ def _load_manifest(path: Any) -> dict[str, str]:
     return json.loads(p.read_text())
 
 
+def _seg_match(path_segs: list[str], glob_segs: list[str]) -> bool:
+    if not glob_segs:
+        return not path_segs
+    if glob_segs[0] == "**":
+        rest = glob_segs[1:]
+        return any(_seg_match(path_segs[i:], rest) for i in range(len(path_segs) + 1))
+    if not path_segs:
+        return False
+    if not fnmatch.fnmatchcase(path_segs[0], glob_segs[0]):
+        return False
+    return _seg_match(path_segs[1:], glob_segs[1:])
+
+
+def _glob_match(rel_path: str, pattern: str) -> bool:
+    """Match the way `glob.glob(recursive=True)` does — `*` never crosses a
+    `/`, only `**` does. `fnmatch` alone treats the whole path as one string,
+    so `src/*` there matches `src/a/b.py`, which `build_manifest` would never
+    have hashed: selection from a manifest and the manifest itself would
+    disagree, and untouched nested files get reported as changed."""
+    return _seg_match(
+        [s for s in rel_path.split("/") if s],
+        [s for s in pattern.split("/") if s],
+    )
+
+
 def _covered_by_globs(rel_path: str, globs: list[str]) -> bool:
-    return any(fnmatch.fnmatchcase(rel_path, g) for g in globs)
-
-
-_WILDCARD_CHARS = "*?["
-
-
-def _glob_prefix(pattern: str) -> str:
-    idx = len(pattern)
-    for ch in _WILDCARD_CHARS:
-        pos = pattern.find(ch)
-        if pos != -1:
-            idx = min(idx, pos)
-    return pattern[:idx]
+    return any(_glob_match(rel_path, g) for g in globs)
 
 
 def _path_covered(declared_path: str, baseline_globs: list[str]) -> bool:
+    """True when SOME path at or under `declared_path` can match a baseline
+    glob. Segment-wise, so a leading-wildcard glob (`**/*.py`, `*.md`) is
+    covering rather than skipped — a literal-prefix test reads those as
+    "prefix is empty, cover nothing" and wedges every `changed_in`/
+    `diff_only` in the recipe on a permanent error verdict."""
+    dsegs = [s for s in declared_path.split("/") if s]
     for g in baseline_globs:
-        prefix = _glob_prefix(g)
-        if prefix and (declared_path.startswith(prefix) or prefix.startswith(declared_path)):
+        gsegs = [s for s in g.split("/") if s]
+        i = 0
+        ok = True
+        while i < len(dsegs) and i < len(gsegs):
+            if gsegs[i] == "**":
+                break
+            if not fnmatch.fnmatchcase(dsegs[i], gsegs[i]):
+                ok = False
+                break
+            i += 1
+        if ok:
             return True
     return False
 
@@ -402,7 +437,7 @@ def _check_unchanged(check: dict, evidence: dict, ctx: dict) -> list[str]:
         raise ValueError(f"unchanged: no baseline manifest available for since={since!r}")
 
     selected = _load_manifest(manifest_path)
-    matched_entries = {p: h for p, h in selected.items() if fnmatch.fnmatchcase(p, glob_pat)}
+    matched_entries = {p: h for p, h in selected.items() if _glob_match(p, glob_pat)}
     if not matched_entries and glob_pat not in baseline_globs:
         raise ValueError(f"unchanged: glob {glob_pat!r} not covered by baseline_globs")
 

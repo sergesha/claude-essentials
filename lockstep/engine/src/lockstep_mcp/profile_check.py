@@ -100,7 +100,10 @@ PLACEHOLDER_RE = re.compile(r"\{[A-Za-z_]\w*\}")
 
 # the subcall triple (spawn -> _subcall marker -> poll).
 _RUNNER_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
-_ARTIFACT_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]*$")  # no dots: dotted-path resolution
+_ARTIFACT_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
+# a scenario names a FILE in the recipes dir and the child run_id prefix:
+# no separators, no leading dot (mirrors the engine's own guard).
+_SCENARIO_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")  # no dots: dotted-path resolution
 _SPAWN_EDGE_COND_RE = re.compile(r"^verdict_status == '(pass|fail)'$")
 _POLL_EDGE_COND_RE = re.compile(r"^_subcall_status == '(running|done|error)'$")
 _HASH_FROM_RE = re.compile(r"^_subcall_envelope\.artifact_hashes\.([a-z][a-z0-9_-]*)$")
@@ -258,6 +261,13 @@ def _check_interrupt_node(
     errors: list[str],
 ) -> None:
     message = node.get("message") or {}
+    if not isinstance(message, dict):
+        # yamlgraph types `message` as `str | dict`; a bare string is legal
+        # there and meaningless here. Report it as the recipe error it is —
+        # unguarded, it escapes `check_recipe` as an AttributeError and an
+        # authoring mistake reads as an engine crash.
+        errors.append(f"interrupt '{name}': message must be a mapping (a brief), not a string")
+        return
     checks = message.get("checks") or []
     schema = message.get("evidence_schema")
 
@@ -369,7 +379,9 @@ def _check_subcall_rules(doc: dict, nodes: dict, edges_by_from: dict,
     hash_names: set[str] = set()
     for cfg in nodes.values():
         msg = cfg.get("message") if isinstance(cfg, dict) else None
-        for check in ((msg or {}).get("checks") or []):
+        if not isinstance(msg, dict):
+            continue  # a bare-string message is reported by the interrupt rules
+        for check in (msg.get("checks") or []):
             hf = check.get("hash_from") if isinstance(check, dict) else None
             if hf is None:
                 continue
@@ -439,7 +451,12 @@ def _check_subcall_rules(doc: dict, nodes: dict, edges_by_from: dict,
             if artifacts is not None and not scenario:
                 errors.append(f"subcall marker '{mname}': artifacts requires scenario "
                               "(one-shot subcalls pin no project artifacts — the envelope is the artifact)")
-            if scenario is not None:
+            if scenario is not None and not (
+                isinstance(scenario, str) and _SCENARIO_NAME_RE.fullmatch(scenario)
+            ):
+                errors.append(f"subcall marker '{mname}': scenario name {scenario!r} must be a "
+                              "plain file name (letters, digits, dot, dash, underscore)")
+            elif scenario is not None:
                 child_path = child_dir / f"{scenario}.yaml"
                 if not child_path.exists():
                     errors.append(f"fractal child recipe '{scenario}' not found in {child_dir}")
@@ -539,6 +556,8 @@ def check_recipe_full(
         if not isinstance(node, dict) or node.get("type") != "interrupt":
             continue
         msg = node.get("message") or {}
+        if not isinstance(msg, dict):
+            continue  # reported by the interrupt rules
         if _is_escalate_marker(msg) or _is_subcall_marker(msg):
             continue
         step = msg.get("step")

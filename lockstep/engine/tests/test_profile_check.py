@@ -55,6 +55,9 @@ MARKERS = {
     # a schema jsonschema itself rejects fails here, not from inside every
     # later scenario_done.
     "invalid-evidence-schema.yaml": "invalid evidence_schema",
+    # yamlgraph types `message` as `str | dict`; a bare string is a recipe
+    # error, never an AttributeError out of the checker.
+    "message-not-a-mapping.yaml": "message must be a mapping",
 }
 
 
@@ -64,7 +67,7 @@ def test_good_recipes_pass():
 
 
 def test_each_bad_fixture_yields_its_violation():
-    assert len(MARKERS) == 24
+    assert len(MARKERS) == 25
     for fixture, marker in MARKERS.items():
         errors = check_recipe(BAD / fixture)
         assert errors, f"{fixture}: expected errors, got none"
@@ -141,3 +144,18 @@ def test_invalid_evidence_schema_is_a_recipe_error():
     # scenario_done on that step, so the recipe must not validate ok.
     errors = check_recipe(BAD / "invalid-evidence-schema.yaml")
     assert any("invalid evidence_schema" in e for e in errors)
+
+
+def test_child_scenario_name_cannot_walk_out_of_the_recipes_dir(tmp_path):
+    # The scenario names the child's pinned snapshot file and its run_id
+    # prefix, so a separator in it places child run state outside the state
+    # dir. Refused where a recipe error belongs.
+    staged = tmp_path / "staged.yaml"
+    doc = yaml.safe_load((GOOD / "subcall-fractal.yaml").read_text())
+    for node in doc["nodes"].values():
+        msg = node.get("message")
+        if isinstance(msg, dict) and msg.get("scenario"):
+            msg["scenario"] = "../outside/evil"
+    staged.write_text(yaml.safe_dump(doc))
+    errors = check_recipe(staged, child_recipes_dir=GOOD)
+    assert any("scenario name" in e for e in errors)
