@@ -71,9 +71,12 @@ SHAPE_CHECK_TYPES = {"file_exists", "file_nonempty", "md_has_sections", "file_ma
 def _eng() -> Engine:
     global _engine
     if _engine is None:
-        state_dir = Path(os.environ.get("LOCKSTEP_STATE_DIR", str(Path.home() / ".lockstep")))
+        # `or`, never a get() default — an unset variable the plugin
+        # manifest forwards arrives present and EMPTY, and `Path("")` is
+        # the cwd, which would put run state inside the project tree.
+        state_dir = Path(os.environ.get("LOCKSTEP_STATE_DIR") or str(Path.home() / ".lockstep"))
         recipes_dir = Path(
-            os.environ.get("LOCKSTEP_RECIPES", str(Path.cwd() / ".lockstep" / "recipes"))
+            os.environ.get("LOCKSTEP_RECIPES") or str(Path.cwd() / ".lockstep" / "recipes")
         )
         _engine = Engine(state_dir, recipes_dir)
     return _engine

@@ -6,7 +6,7 @@ r["verdict_status"] / r["verdict_reasons"], never nested.
 import json
 import subprocess
 
-from lockstep_mcp.validators import build_manifest, run_checks
+from lockstep_mcp.validators import _path_covered, build_manifest, run_checks
 
 
 def _state(checks, evidence, **ctx):
@@ -547,3 +547,48 @@ def test_manifest_skips_files_reached_through_a_symlinked_directory(tmp_path):
     manifest = build_manifest(project, ["src/**"])
     assert "src/a.py" in manifest
     assert not any(k.startswith("src/linked") for k in manifest)
+
+
+def test_unchanged_glob_selects_the_same_files_the_manifest_holds(tmp_path):
+    # Selection from the baseline and the rescan must agree on what `*`
+    # means: `fnmatch` alone lets `*` cross `/`, so a non-`**` glob pulls
+    # nested entries out of the manifest that the rescan never produces and
+    # reports them as changed — a spurious fail that burns retry budget.
+    proj = tmp_path / "proj"; (proj / "src" / "pkg").mkdir(parents=True)
+    (proj / "src" / "a.py").write_text("a")
+    (proj / "src" / "pkg" / "b.py").write_text("b")
+    start = tmp_path / "start.json"
+    start.write_text(json.dumps(build_manifest(proj, ["src/**"])))
+
+    state = _state(
+        [{"type": "unchanged", "glob": "src/*", "since": "start"}],
+        {},
+        _project=str(proj),
+        _baseline_start=str(start),
+        _baseline_globs=["src/**"],
+    )
+    assert run_checks(state, execute=True)["verdict_status"] == "pass"
+
+
+def test_leading_wildcard_globs_cover_paths():
+    # A literal-prefix test reads `**/*.py` as "prefix empty, covers
+    # nothing", which turns every changed_in/diff_only in such a recipe
+    # into a permanent error verdict — one that never resumes and never
+    # burns budget, i.e. a wedged run.
+    assert _path_covered("src", ["**/*.py"]) is True
+    assert _path_covered("docs/notes.md", ["*.md", "docs/**"]) is True
+    assert _path_covered("src-evil", ["src/**"]) is False
+
+
+def test_a_directory_is_not_an_artifact(tmp_path):
+    # `.` — the project root, which path containment admits — exists and
+    # reports a non-zero st_size, so an exists()/size test would let a step
+    # whose only checks are file_exists/file_nonempty close with nothing.
+    proj = tmp_path / "proj"; proj.mkdir()
+    for ctype in ("file_exists", "file_nonempty"):
+        out = run_checks(
+            _state([{"type": ctype, "path_from": "path"}], {"path": "."}, _project=str(proj)),
+            execute=True,
+        )
+        assert out["verdict_status"] == "fail", ctype
+        assert any("not a file" in r for r in out["verdict_reasons"]), ctype

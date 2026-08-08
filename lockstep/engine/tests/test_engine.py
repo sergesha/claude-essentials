@@ -487,3 +487,38 @@ def test_atomic_write_leaves_the_previous_file_intact(tmp_path, monkeypatch):
     with pytest.raises(OSError):
         eng._write_json(target, {"b": 2})
     assert json.loads(target.read_text()) == {"a": 1}
+
+
+def test_fail_that_ends_the_graph_is_terminal_not_a_crash(tmp_path):
+    # The fail branch has to carry the same `adv.done` guard as the pass
+    # branch: a recipe whose fail edge lands on END leaves no brief to
+    # substitute, and reading one raises out of scenario_done while the
+    # index still says `awaiting` on a finished graph.
+    eng = _engine(tmp_path)
+    project = _project(tmp_path)
+    run_id = eng.start("fail-ends", {}, str(project))["run_id"]
+
+    result = eng.done(run_id, "one", {"path": "missing.md"})
+    assert result["accepted"] is True
+    assert result["passed"] is False
+    assert result["done"] is True
+    assert result["step"] is None
+    assert eng.status(run_id)["status"] == "done"
+
+
+def test_recipe_name_cannot_walk_out_of_the_recipes_dir(tmp_path):
+    # The name is agent-supplied AND is the run_id prefix every run-state
+    # path is built from, so a separator in it would place the snapshot,
+    # vars, baselines and checkpoint db anywhere — including inside the
+    # project the agent can write.
+    eng = _engine(tmp_path)
+    project = _project(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "evil.yaml").write_bytes((GOOD / "minimal.yaml").read_bytes())
+
+    with pytest.raises(LockstepError) as exc:
+        eng.start("../outside/evil", {}, str(project))
+    assert "invalid recipe name" in str(exc.value)
+    assert RunIndex(tmp_path / "state").list() == []
+    assert not list(outside.glob("*.recipe.yaml"))

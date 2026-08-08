@@ -72,6 +72,15 @@ from lockstep_mcp.runs import TERMINAL_STATUSES, RunIndex, RunRecord
 
 _PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_]\w*)\}")
 
+# A recipe/scenario name is a FILE NAME inside the recipes dir, and it is
+# also the run_id prefix — which every run-state path is built from
+# (snapshot, vars, baselines, checkpoint db, route log). The name arrives
+# from the agent (`scenario_start`) or from a recipe marker, so a
+# separator or a leading dot in it would place run state anywhere on disk,
+# including inside the project the agent can write — defeating both
+# `assert_state_dir_sane` and the pinned-snapshot guarantee.
+_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
 # `start()`'s vars dict is passed straight into the initial LangGraph
 # state (`yg.start(self._app(run_id), dict(vars), run_id)`). Any key that
 # collides with a graph-internal state key (`brief`/`evidence`/
@@ -379,6 +388,11 @@ class Engine:
         resolution — `_start_child` passes the parent's PINNED child copy so
         the child never launches from the live recipes dir."""
         vars = vars or {}  # noqa: A001 - mirrors start()
+        if not _NAME_RE.fullmatch(recipe or ""):
+            raise LockstepError(
+                f"invalid recipe name {recipe!r}: a recipe name is a plain file name "
+                "(letters, digits, dot, dash, underscore; no path separators)"
+            )
         src = src if src is not None else self.recipe_path(recipe)
         if not src.exists():
             raise LockstepError(f"recipe not found: {recipe}")
@@ -395,6 +409,14 @@ class Engine:
         doc = yaml.safe_load(raw_bytes) or {}
         scenarios = sorted({m["scenario"] for m in self._marker_messages(doc)
                             if isinstance(m.get("scenario"), str) and m["scenario"]})
+        for scenario in scenarios:
+            # same reasoning as the recipe name: the scenario names the
+            # child's pinned snapshot file and its run_id prefix.
+            if not _NAME_RE.fullmatch(scenario):
+                raise LockstepError(
+                    f"recipe {recipe!r}: invalid child scenario name {scenario!r} "
+                    "(letters, digits, dot, dash, underscore; no path separators)"
+                )
         child_staging = runs_dir / f".staging-children-{uuid.uuid4().hex}"
         try:
             child_staging.mkdir()
@@ -665,6 +687,21 @@ class Engine:
             parked = self._maybe_park_subcall(run_id, step, "fail", adv)
             if parked is not None:
                 return parked
+
+            if adv.done:
+                # the recipe routes this fail straight to END: the graph is
+                # finished, so the run is terminal. Reported honestly as
+                # `passed: False` — there is no next step to hand back.
+                self._runs.update(run_id, status="done", step=step, brief=None)
+                self._cascade_terminate(run_id)
+                self._log_transition(run_id, step, "fail", None)
+                return {"accepted": True, "passed": False, "reasons": reasons,
+                        "step": None, "done": True}
+            if adv.brief is None:
+                raise LockstepError(
+                    f"run {run_id}: the graph parked with no brief after a fail verdict "
+                    f"on step {step!r} — the recipe cannot be driven further"
+                )
 
             vars_ = self._read_vars(run_id)
             substituted = self._substitute_brief(adv.brief, vars_)

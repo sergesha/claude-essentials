@@ -20,7 +20,7 @@ from pathlib import Path
 import yaml
 
 import lockstep_mcp.cli as cli
-from lockstep_mcp import sessions
+from lockstep_mcp import sessions, validators
 from lockstep_mcp.engine import Engine
 from lockstep_mcp.runs import RunIndex
 
@@ -557,3 +557,15 @@ def test_session_start_names_the_subcall_not_the_raw_marker(tmp_path):
     # exact token must be gone. Asserted on the token itself: a
     # replace()-based assertion here is tautological.
     assert "subcall in progress" in ctx and "'_subcall'" not in ctx
+
+
+def test_empty_state_dir_env_reads_as_absent(monkeypatch, tmp_path):
+    # The plugin manifest forwards LOCKSTEP_STATE_DIR unconditionally, so an
+    # unset variable arrives PRESENT AND EMPTY — and `Path("")` is the cwd,
+    # which would put policy files, bindings and run state inside the very
+    # project tree the gate is guarding.
+    monkeypatch.setenv("LOCKSTEP_STATE_DIR", "")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path / "..")
+    assert cli._state_dir() == Path(tmp_path) / ".lockstep"
+    assert validators._state_dir() == Path(tmp_path) / ".lockstep"
