@@ -12,7 +12,13 @@
   "mcpServers": {
     "lockstep": {
       "command": "uv",
-      "args": ["run", "--project", "${CLAUDE_PLUGIN_ROOT}/engine", "lockstep-mcp", "serve"],
+      "args": [
+        "run",
+        "--project",
+        "${CLAUDE_PLUGIN_ROOT}/engine",
+        "lockstep-mcp",
+        "serve"
+      ],
       "env": {
         "LOCKSTEP_STATE_DIR": "${LOCKSTEP_STATE_DIR}",
         "LOCKSTEP_RECIPES": "${LOCKSTEP_RECIPES}"
