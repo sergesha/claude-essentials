@@ -1,0 +1,24 @@
+{
+  "session_id": "codex-session-a",
+  "turn_id": "codex-turn-a",
+  "transcript_path": "/tmp/codex-home/sessions/2026/08/19/rollout.jsonl",
+  "cwd": "/tmp/project",
+  "hook_event_name": "PostToolUse",
+  "model": "gpt-5.6-sol",
+  "permission_mode": "default",
+  "tool_name": "mcp__lockstep__scenario_start",
+  "tool_input": {
+    "recipe": "minimal",
+    "vars": {}
+  },
+  "tool_response": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\n  \"run_id\": \"minimal-codex000\",\n  \"step\": \"one\",\n  \"task\": \"Do the {task_name} thing\",\n  \"exit_criterion\": \"It is done\",\n  \"evidence_schema\": {\n    \"required\": [\n      \"path\"\n    ],\n    \"properties\": {\n      \"path\": {\n        \"type\": \"string\",\n        \"format\": \"project-path\"\n      }\n    }\n  },\n  \"lockstep_protocol\": 1\n}"
+      }
+    ],
+    "isError": false
+  },
+  "tool_use_id": "exec-codex-tool-use"
+}

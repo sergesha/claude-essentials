@@ -1,12 +1,12 @@
 {
-  "description": "lockstep hook wrappers (Stop / SessionStart / PreToolUse / PostToolUse) \u2014 run the plugin's own cloned engine via uv, no PyPI dependency. Timeouts are generous ON PURPOSE: a hook killed at its budget emits no output, and a timed-out PreToolUse hook is treated as non-blocking \u2014 the gate would fail OPEN. The first fire in a cold environment resolves and builds the engine's dependencies; run `lockstep-mcp doctor` once after install to pay that cost outside the gate.",
+  "description": "lockstep hook wrappers (Stop / SessionStart / PreToolUse / PostToolUse) \u2014 run the plugin's own cloned engine through its shared launcher, no PyPI dependency. Timeouts are generous ON PURPOSE: a hook killed at its budget emits no output, and a timed-out PreToolUse hook is treated as non-blocking \u2014 the gate would fail OPEN. The first fire in a cold environment resolves and builds the engine's dependencies; run `lockstep-mcp doctor` once after install to pay that cost outside the gate.",
   "hooks": {
     "Stop": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --project ${CLAUDE_PLUGIN_ROOT}/engine lockstep-mcp hook-stop",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/lockstep-plugin hook-stop",
             "timeout": 30
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --project ${CLAUDE_PLUGIN_ROOT}/engine lockstep-mcp hook-session-start",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/lockstep-plugin hook-session-start",
             "timeout": 30
           }
         ]
@@ -25,11 +25,11 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Write|Edit|NotebookEdit|Bash|Task",
+        "matcher": "Write|Edit|NotebookEdit|apply_patch|Bash|Task|Agent",
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --project ${CLAUDE_PLUGIN_ROOT}/engine lockstep-mcp hook-pretool",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/lockstep-plugin hook-pretool",
             "timeout": 300
           }
         ]
@@ -41,7 +41,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "uv run --project ${CLAUDE_PLUGIN_ROOT}/engine lockstep-mcp hook-posttool",
+            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/lockstep-plugin hook-posttool",
             "timeout": 60
           }
         ]

@@ -231,6 +231,9 @@ The existing output contracts are retained:
 The shared handlers continue to consume only fields common to both hosts:
 `session_id`, `cwd`, `tool_name`, `tool_input`, and `tool_response`. Codex-only
 fields such as `turn_id`, `model`, and `permission_mode` are ignored.
+The recorded Codex response uses an object containing a `content` array whose
+text block holds the JSON tool result; the existing response walker accepts
+this alongside Claude's recorded bare content-block array.
 
 The PostToolUse matcher keeps both known tool-name families:
 
