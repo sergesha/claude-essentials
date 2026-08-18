@@ -17,8 +17,8 @@ DESIGN.md.
   unconditionally, and no PATH-shim mechanism exists. Deferred (README
   "Explicit deferrals").
 - **Runner sessions are never resumed.** The envelope's `session_id` is
-  informational; `safe_argv`'s resume gate exists only for a future
-  continuation path.
+  informational. Claude argv retains validated resume support for legacy
+  callers; the Codex driver rejects resume loudly.
 - **Model selection**: the engine always launches with `models[0]` from
   the runner spec; nothing in the recipe dialect selects a model. Later
   entries are reserved.
@@ -63,7 +63,7 @@ DESIGN.md.
 Two capabilities through ONE mechanism:
 
 - **(B) Independence**: a recipe node whose work is done by an
-  ENGINE-spawned CLI agent (`claude -p`) in a separate session — a channel
+  ENGINE-spawned CLI agent (Claude or Codex) in a separate session — a channel
   the main (worker) agent cannot read or influence. First customer: a
   genuinely independent review gate (v1's reviewer-nonce was rejected as
   theater precisely because the worker spawned its own reviewer).
@@ -191,10 +191,11 @@ evidence rules is unchanged.
 
 ## Runner model
 
-- **Registry in the engine**: contract = spawn / poll / collect →
-  envelope. v2 registers ONE implementation: `claude`
-  (`claude -p --output-format json`, model param, optional
-  `--resume <session_id>` continuation).
+- **Registry in the engine**: runner names are owner-defined; an explicit
+  `driver` selects one of two command grammars. Claude uses
+  `<path> -p --output-format json --model <model> [--resume <id>] -- <prompt>`.
+  Codex uses `<path> exec --json --sandbox workspace-write --model <model> -- <prompt>`.
+  Codex never receives approval, sandbox, rule, or hook-trust bypass flags.
 - **Absolute paths only**: `runners.yaml` pins the
   executable's ABSOLUTE path per runner; `subcall_spawn` execs that path
   and NEVER PATH-resolves — on no-sudo deployments `~/.local/bin` is
@@ -206,13 +207,16 @@ evidence rules is unchanged.
   the OWNER into an agent-unwritable directory (README consumer
   guidance names it beside the state-dir deny).
 - **Resolution**: node's optional `runner: <name>` → default from the
-  ADAPTER (`LOCKSTEP_RUNNER` env in plugin.json — "same as the main
-  harness" by construction, no detection heuristics; codex adapter would
-  set `codex`) → **owner allowlist** `$LOCKSTEP_STATE_DIR/runners.yaml`
+  ADAPTER (`LOCKSTEP_RUNNER` env in the host manifest — "same as the main
+  harness" by construction, no detection heuristics; the Claude adapter sets
+  `claude` and the Codex adapter sets `codex`) → **owner allowlist**
+  `$LOCKSTEP_STATE_DIR/runners.yaml`
   (policy.d trust pattern: agent-unwritable).
-- **Cross-runner future** (codex from claude and vice versa): recipes
-  already may say `runner: codex`; enabling it later = new registry impl
-  (plugin release) + one owner line in runners.yaml. Recipes unchanged.
+- **Cross-runner calls are supported**: an omitted marker runner uses the
+  adapter's `LOCKSTEP_RUNNER`; an explicit name selects that allowlist entry,
+  independently of its `claude` or `codex` driver.
+- **Output normalization** scans Claude JSON for `session_id` and Codex JSONL
+  for the `thread.started.thread_id`; malformed lines are ignored.
 - **No silent substitution**: unavailable runner → loud start-time
   refusal (cross-vendor review is intentional; silent swap breaks intent).
 - **Profile rules**: `runner:` must match `^[a-z][a-z0-9-]*$` (name only,
@@ -416,7 +420,7 @@ suite must be green on both with zero platform skips in the core paths.
 
 ## Out of scope (v2)
 
-- codex/gemini runner implementations (registry slot reserved).
+- Gemini and other runner drivers.
 - Parallel subcalls via `map` (inherits subgraph caution; sequential
   first).
 - A2A as invocation channel (heavier than process spawn; only if
@@ -427,16 +431,15 @@ suite must be green on both with zero platform skips in the core paths.
 
 ## Testing
 
-- Unit: fake runner executable (shell script writing canned
-  claude-p-shaped JSON) — spawn/poll/timeout/budget/reattach without
+- Unit: fake runner executable validating exact Claude and Codex argv and
+  writing their JSON/JSONL shapes — spawn/poll/timeout/budget/reattach without
   burning tokens; registry resolution matrix (node → env default →
   allowlist → refusal).
 - Integration: subcall triple end-to-end with the fake runner incl.
   server restart mid-subcall (reattach) and child-run fractal with gate
   linkage.
-- One optional LIVE smoke: real `claude -p
-  --model haiku` one-shot through the claude runner — run manually,
-  documented, not in CI.
+- Optional LIVE smoke: a real Claude or Codex one-shot/fractal run through
+  its configured driver — run manually, documented, not in CI.
 
 ## Honest guarantee delta (precise verbs)
 

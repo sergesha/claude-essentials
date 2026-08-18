@@ -1,6 +1,6 @@
 # lockstep — design spec
 
-Date: 2026-08-07. Status: approved in brainstorming, pending user review of this doc.
+Date: 2026-08-07. Status: implemented; Claude/Codex parity updated 2026-08-19.
 Final home: `sergesha/claude-essentials` (this file moves there with the implementation).
 
 ## Problem
@@ -26,9 +26,10 @@ Build **lockstep**: a self-sufficient flow-enforcement plugin.
   only through engine-validated evidence.
 - **Checkpoints**: SqliteSaver (native LangGraph), one `.db` per run.
   MemorySaver in unit tests only. No Redis, no external services.
-- **Distribution**: `${CLAUDE_PLUGIN_ROOT}` — the plugin's own cloned files ARE the
-  distribution; `mcpServers`/`hooks.json` invoke `uv run --project
-  ${CLAUDE_PLUGIN_ROOT}/engine lockstep-mcp <verb>`, no PyPI dependency. A PyPI
+- **Distribution**: the installed plugin files ARE the distribution. Claude
+  and Codex manifests both route MCP and hook verbs through the shared
+  `scripts/lockstep-plugin` launcher, which resolves the adjacent engine; no
+  PyPI dependency. A PyPI
   package `lockstep-mcp` (name verified free 2026-08-07), installable via `uvx
   lockstep-mcp==X.Y.Z`, is optional future distribution. No Docker required
   (optional image later if wanted). Releases via release-please, tag
@@ -39,21 +40,25 @@ Build **lockstep**: a self-sufficient flow-enforcement plugin.
 ## Architecture
 
 ```
+Claude manifest ─┐
+                 ├─ shared launcher ─ shared Python engine/state/evidence
+Codex manifest ──┘
+
 lockstep/
-├── engine/                    # python package → PyPI "lockstep-mcp"
-│   ├── server.py              # MCP wrapper over yamlgraph Python API
-│   ├── validators.py          # lockstep_mcp.validators — check registry + run_checks
-│   ├── profile_check.py       # lockstep profile on top of `graph lint`
-│   └── runs.py                # run index (list_runs) beside checkpoints
-├── recipes/examples/          # repo-level example recipes (docs + tests; not packaged)
-└── adapters/
-    ├── claude/                # v1: plugin.json, hooks.json, skills: lockstep + lockstep-author
-    ├── codex/                 # later: config snippet + hook adapter
-    └── gemini/                # later: extension manifest + context.md
+├── .claude-plugin/plugin.json
+├── .codex-plugin/plugin.json
+├── .mcp.json
+├── scripts/lockstep-plugin
+├── hooks/hooks.json
+├── skills/
+├── engine/
+└── recipes/examples/
 ```
 
-The engine is harness-agnostic (MCP + env only). Adapters are thin. Hooks are
-per-harness belt-and-suspenders; the load-bearing enforcement is the engine,
+The engine is harness-neutral. Claude supplies project provenance through
+process cwd; Codex supplies it in tool-call workspace metadata because bundled
+commands run from the installed plugin root. Adapters are thin and hooks are
+shared belt-and-suspenders; the load-bearing enforcement is the engine,
 so lockstep degrades gracefully where hooks are unavailable.
 
 MCP server is not a daemon: every tool call loads the run checkpoint,
@@ -389,7 +394,7 @@ status signal", not "process compliance".
 - **Dogfooded authoring scenario**: packaged `author.yaml` + builtin recipe
   search path in the wheel + owner-approval channel (e.g.
   `lockstep-mcp approve <run>` nonce) — v2, designed together.
-- codex/gemini adapters (structure reserved, thin follow-ups).
+- Gemini and other runner/plugin adapters.
 - Time-travel/fork, streaming.
 - Resumable escalation: in v1 `escalated` is TERMINAL. v2 design SETTLED
   (2026-08-07): `lockstep-mcp approve <run>` run by the owner writes a
