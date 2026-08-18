@@ -294,13 +294,20 @@ def _envelope(src: dict, **extra: Any) -> dict:
     return env
 
 
-def _session_id(output: str) -> str | None:
-    try:
-        payload = json.loads(output.strip().splitlines()[-1])
-        sid = payload.get("session_id")
-        return str(sid) if sid else None
-    except (ValueError, IndexError, AttributeError):
-        return None
+def extract_session_id(output: str) -> str | None:
+    for line in output.splitlines():
+        try:
+            payload = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        session_id = payload.get("session_id")
+        if session_id:
+            return str(session_id)
+        if payload.get("type") == "thread.started" and payload.get("thread_id"):
+            return str(payload["thread_id"])
+    return None
 
 
 def _workdir(src: dict) -> Path | None:
@@ -453,5 +460,5 @@ def poll(state: dict) -> dict:
         if prior and list(prior) != reasons:
             reasons = list(prior)      # preserve the spawn-time reason over the generic probe miss
     env = _envelope(src, output=res.get("output", ""), exit_code=res.get("exit_code"),
-                    session_id=_session_id(res.get("output", "")), reasons=reasons)
+                    session_id=extract_session_id(res.get("output", "")), reasons=reasons)
     return {"_subcall_status": status, "_subcall_envelope": env}

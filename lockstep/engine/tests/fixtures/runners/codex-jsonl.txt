@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"019c42aa-example-thread"}
+{"type":"turn.started"}
+not-json
+{"type":"item.completed","item":{"type":"agent_message","text":"review complete"}}
+{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":4}}

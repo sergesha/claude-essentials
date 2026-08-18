@@ -318,6 +318,34 @@ def test_direct_runner_spec_defaults_to_claude_driver():
     assert _spec().driver == "claude"
 
 
+def test_extract_session_id_from_claude_json():
+    assert subcalls.extract_session_id('{"session_id":"claude-session"}\n') == "claude-session"
+
+
+def test_extract_session_id_from_codex_jsonl_fixture():
+    output = (Path(__file__).parent / "fixtures/runners/codex-jsonl.txt").read_text()
+    assert subcalls.extract_session_id(output) == "019c42aa-example-thread"
+
+
+@pytest.mark.parametrize("output", [
+    "",
+    "not-json\n",
+    '{"type":"thread.started"}\n',
+    '{"type":"thread.started","thread_id":""}\n',
+    '[]\n{"result":"ok"}\n',
+])
+def test_extract_session_id_ignores_malformed_or_incomplete_lines(output):
+    assert subcalls.extract_session_id(output) is None
+
+
+def test_extract_session_id_scans_all_lines_not_only_the_last():
+    output = (
+        '{"type":"thread.started","thread_id":"thread-1"}\n'
+        '{"type":"turn.completed"}\n'
+    )
+    assert subcalls.extract_session_id(output) == "thread-1"
+
+
 def test_safe_argv_accepts_sane_resume_and_keeps_prompt_terminated():
     argv = subcalls.safe_argv(_spec(), "--hostile prompt", None, "sess.1-A_b")
     i = argv.index("--resume")
