@@ -31,7 +31,7 @@ _RUNNER_KEYS = {"driver", "path", "models", *_BUDGET_KEYS}
 _ENV_ALLOWLIST = (
     "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR", "TEMP", "TMP",
     "SystemRoot", "COMSPEC", "PATHEXT", "USERPROFILE",
-    "LOCKSTEP_RECIPES", "LOCKSTEP_RUNNER",
+    "CODEX_HOME", "LOCKSTEP_RECIPES", "LOCKSTEP_RUNNER",
 )
 
 
@@ -186,9 +186,26 @@ def build_argv(spec: RunnerSpec, prompt: str, model: str | None, resume_session:
     # The prompt is assembled from a brief carrying WORKER-SUPPLIED vars: it
     # goes LAST, behind an explicit `--` terminator, so a prompt starting
     # with `-`/`--` can never parse as a flag. `--model` is ALWAYS emitted.
-    argv = [spec.path, "-p", "--output-format", "json", "--model", model]
-    if resume_session:
-        argv += ["--resume", resume_session]
+    if spec.driver == "claude":
+        argv = [spec.path, "-p", "--output-format", "json", "--model", model]
+        if resume_session:
+            argv += ["--resume", resume_session]
+    elif spec.driver == "codex":
+        if resume_session:
+            raise RunnerError(
+                f"runner '{spec.name}': resume_session is not supported by the codex driver"
+            )
+        argv = [
+            spec.path,
+            "exec",
+            "--json",
+            "--sandbox",
+            "workspace-write",
+            "--model",
+            model,
+        ]
+    else:
+        raise RunnerError(f"runner '{spec.name}': unsupported driver {spec.driver!r}")
     argv += ["--", prompt]
     return argv
 

@@ -208,6 +208,37 @@ def test_argv_exact_with_resume(tmp_path):
                     "--model", "claude-haiku-4-5", "--resume", "sess-1", "--", "do it"]
 
 
+def test_codex_argv_exact_hostile_prompt_stays_behind_terminator(tmp_path):
+    exe = _fake_exe(tmp_path)
+    (tmp_path / "runners.yaml").write_text(textwrap.dedent(f"""
+        runners:
+          reviewer:
+            driver: codex
+            path: {exe}
+            models: [gpt-5.6-luna]
+    """))
+    spec = resolve(tmp_path, "reviewer", {})
+    hostile = "--danger-full-access"
+    assert build_argv(spec, hostile, "gpt-5.6-luna", None) == [
+        str(exe), "exec", "--json", "--sandbox", "workspace-write",
+        "--model", "gpt-5.6-luna", "--", hostile,
+    ]
+
+
+def test_codex_resume_is_rejected_loudly(tmp_path):
+    exe = _fake_exe(tmp_path)
+    (tmp_path / "runners.yaml").write_text(textwrap.dedent(f"""
+        runners:
+          reviewer:
+            driver: codex
+            path: {exe}
+            models: [gpt-5.6-luna]
+    """))
+    spec = resolve(tmp_path, "reviewer", {})
+    with pytest.raises(RunnerError, match="resume"):
+        build_argv(spec, "review", None, "thread-1")
+
+
 # ---------------------------------------------------------------------------
 # model gate never fails open
 # ---------------------------------------------------------------------------
@@ -329,6 +360,8 @@ def test_engine_start_refuses_state_dir_inside_project(tmp_path):
 def test_child_env_exact_allowlist(tmp_path):
     base = {
         "PATH": "/bin", "HOME": "/home/u", "SystemRoot": "C:\\Windows",
+        "CODEX_HOME": "/owner/codex",
+        "CODEX_API_KEY": "drop-me", "OPENAI_API_KEY": "drop-me-too",
         "SHELL": "/bin/zsh",                       # dropped: a -p child needs no shell
         "SECRET_TOKEN": "leak", "ANTHROPIC_API_KEY": "leak2",
         "LOCKSTEP_RECIPES": "/recipes",            # passthrough: fractal child, same recipes
@@ -337,6 +370,7 @@ def test_child_env_exact_allowlist(tmp_path):
     env = child_env(base, tmp_path, "run-1", "n1")
     assert env == {
         "PATH": "/bin", "HOME": "/home/u", "SystemRoot": "C:\\Windows",
+        "CODEX_HOME": "/owner/codex",
         "LOCKSTEP_RECIPES": "/recipes",
         "LOCKSTEP_STATE_DIR": str(tmp_path),       # preserved-and-pinned: shared index
         "LOCKSTEP_CHILD_RUN": "run-1", "LOCKSTEP_CHILD_NONCE": "n1",
