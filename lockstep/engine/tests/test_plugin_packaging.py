@@ -41,18 +41,18 @@ def test_host_manifests_share_identity_version_and_components():
     }
 
 
-def test_codex_mcp_contract_is_pinned_and_has_no_cwd_override():
+def test_codex_mcp_contract_is_pinned_to_plugin_root():
     server = _json(".mcp.json")["mcpServers"]["lockstep"]
     assert server == {
         "command": "./scripts/lockstep-plugin",
         "args": ["serve"],
         "env": {"LOCKSTEP_RUNNER": "codex"},
+        "cwd": "./",
         "required": True,
         "default_tools_approval_mode": "approve",
         "startup_timeout_sec": 300,
         "tool_timeout_sec": 900,
     }
-    assert "cwd" not in server
 
 
 def test_claude_mcp_uses_launcher_and_literal_runner_default():

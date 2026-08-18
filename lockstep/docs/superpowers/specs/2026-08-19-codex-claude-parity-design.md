@@ -61,7 +61,7 @@ the Codex `.mcp.json`. Both hosts load the same `hooks/hooks.json`.
 There will be no copied `adapters/claude` and `adapters/codex` trees. The two
 small manifests are the adapters; all behavioral code stays shared.
 
-### A shared launcher preserves project provenance
+### A shared launcher and host context preserve project provenance
 
 Add an executable `scripts/lockstep-plugin` launcher. It resolves the plugin
 root from its own file location and executes:
@@ -76,19 +76,24 @@ engine directory to an absolute path, and replaces itself with `uv` via
 `exec`. Core Python portability is unchanged; native Windows plugin packaging
 is not newly claimed by this parity change.
 
-The launcher must not call `chdir`. Its child inherits the coding session's
-working directory. This preserves the existing security-relevant invariant:
-`scenario_start` records `run.project` from the MCP server process working
-directory, not from an agent-controlled tool argument.
+The launcher must not call `chdir`. Claude therefore retains the coding
+session's working directory. Codex requires bundled `./` commands to start
+with `cwd: "./"`, resolved against the installed plugin root; each Codex tool
+call supplies the active workspace in
+`_meta.x-codex-turn-metadata.workspaces`. The shared server resolves project
+context from that host metadata and falls back to process cwd for Claude and
+other clients. The project remains host-supplied and is never an
+agent-controlled tool argument.
 
 Both MCP manifests and every hook command use this launcher. This removes
 direct `${CLAUDE_PLUGIN_ROOT}/engine` duplication while continuing to ship the
 engine from the installed plugin checkout rather than PyPI.
 
-The Codex `.mcp.json` must not set `cwd`. A live acceptance test must prove
-that an MCP server launched from a project subdirectory records the intended
-project root in `runs.json`. A mismatch is a release blocker, not something to
-paper over by adding a `project` argument to `scenario_start`.
+The Codex `.mcp.json` must set `cwd: "./"` so its bundled launcher is
+executable. A live acceptance test must prove that an MCP server launched from
+the installed plugin root still records the intended workspace in `runs.json`.
+A mismatch is a release blocker, not something to paper over by adding a
+`project` argument to `scenario_start`.
 
 ### Host-specific default runner, recipe-specific override
 
@@ -178,6 +183,7 @@ Create `.mcp.json` with this server contract:
       "command": "./scripts/lockstep-plugin",
       "args": ["serve"],
       "env": {"LOCKSTEP_RUNNER": "codex"},
+      "cwd": "./",
       "required": true,
       "default_tools_approval_mode": "approve",
       "startup_timeout_sec": 300,
@@ -187,8 +193,9 @@ Create `.mcp.json` with this server contract:
 }
 ```
 
-The relative executable is resolved from the installed plugin root, but no
-`cwd` override is supplied. Scenario tools are approved by default because a
+The relative executable and `cwd` are resolved from the installed plugin
+root; the server recovers the active project from Codex tool-call metadata.
+Scenario tools are approved by default because a
 non-interactive fractal child cannot complete if every lockstep MCP call waits
 for a human approval prompt. The 300-second startup budget covers the first
 `uv` dependency resolution; the 900-second tool budget exceeds the engine's
@@ -342,7 +349,7 @@ evidence schemas.
 | Codex authentication unavailable | CLI exits non-zero; subcall reports runner error without forging progress. |
 | Codex emits malformed JSONL | Preserve output and exit status; `session_id` is `None`. |
 | Codex hooks are not trusted | Hooks are skipped by the host; `doctor` detects an active run without a binding and explains the trust/matcher remedy. |
-| MCP launcher changes cwd | Live provenance smoke fails; release is blocked. |
+| Codex plugin cwd leaks into run provenance | Live provenance smoke fails; release is blocked. |
 | Child attempts to mutate another child run | Existing nonce origin binding rejects the MCP mutation. |
 | Runner config changes during a live run | Every spawn resolves and verifies the current owner-controlled entry; already spawned processes retain their recorded argv and timeout. |
 | Subcall times out | Existing supervisor records timeout, terminates the process tree, and returns an error envelope. |
@@ -373,7 +380,7 @@ the owner protecting state, recipes, and installed engine files.
 - `.codex-plugin/plugin.json` — Codex package metadata and shared component
   references.
 - `.mcp.json` — Codex bundled MCP server configuration.
-- `scripts/lockstep-plugin` — cwd-preserving launcher for MCP and hook verbs.
+- `scripts/lockstep-plugin` — plugin-root-resolving launcher for MCP and hook verbs.
 - `engine/tests/fixtures/hooks/posttool_scenario_start_codex.json` — payload
   recorded from a real Codex PostToolUse invocation.
 - `engine/tests/fixtures/runners/codex-jsonl.txt` — representative Codex JSONL

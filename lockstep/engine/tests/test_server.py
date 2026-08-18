@@ -13,6 +13,7 @@ Tool registration is introspected via `app._tool_manager.list_tools()`
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -58,6 +59,42 @@ def _configure(monkeypatch, tmp_path, recipes_dir=GOOD):
 def test_tools_registered():
     names = {t.name for t in server.app._tool_manager.list_tools()}
     assert names == EXPECTED_TOOLS
+
+
+def test_codex_workspace_metadata_supplies_project_and_default_recipes(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    recipes = project / ".lockstep" / "recipes"
+    recipes.mkdir(parents=True)
+    (recipes / "minimal.yaml").write_text((GOOD / "minimal.yaml").read_text())
+    plugin_root = tmp_path / "installed-plugin"
+    plugin_root.mkdir()
+    monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.delenv("LOCKSTEP_RECIPES", raising=False)
+    monkeypatch.chdir(plugin_root)
+    server._reset_engine()
+    ctx = SimpleNamespace(
+        request_context=SimpleNamespace(
+            meta={
+                "x-codex-turn-metadata": {
+                    "workspaces": {str(project): {"has_changes": False}}
+                }
+            }
+        )
+    )
+
+    result = server.scenario_start("minimal", {}, ctx=ctx)
+
+    record = server._eng(project)._runs.get(result["run_id"])  # noqa: SLF001
+    assert record.project == str(project.resolve())
+
+
+def test_project_context_falls_back_to_process_cwd(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    assert server._project_for_context(None) == tmp_path.resolve()
+    assert server._project_for_context(
+        SimpleNamespace(request_context=SimpleNamespace(meta={}))
+    ) == tmp_path.resolve()
 
 
 # ---------------------------------------------------------------------------

@@ -8,6 +8,7 @@
       "env": {
         "LOCKSTEP_RUNNER": "codex"
       },
+      "cwd": "./",
       "required": true,
       "default_tools_approval_mode": "approve",
       "startup_timeout_sec": 300,
