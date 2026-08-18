@@ -99,3 +99,23 @@ def test_launcher_resolves_engine_but_preserves_caller_cwd(tmp_path):
     assert lines[1:] == [
         "run", "--project", str(ROOT / "engine"), "lockstep-mcp", "doctor",
     ]
+
+
+def test_distributed_default_recipe_does_not_pin_a_host_runner():
+    recipe = (ROOT / "recipes/examples/feature-dev-reviewed.yaml").read_text()
+    assert "runner: claude" not in recipe
+    assert "runner: codex" not in recipe
+
+
+def test_runtime_skill_uses_host_neutral_worker_language():
+    skill = (ROOT / "skills/lockstep/SKILL.md").read_text()
+    assert "your own `Agent` tool" not in skill
+    assert "host's subagent capability" in skill
+
+
+def test_author_skill_documents_both_runner_drivers_and_defaulting():
+    skill = (ROOT / "skills/lockstep-author/SKILL.md").read_text()
+    assert "driver: claude" in skill
+    assert "driver: codex" in skill
+    assert "LOCKSTEP_RUNNER" in skill
+    assert "Runner names" in skill and "driver" in skill

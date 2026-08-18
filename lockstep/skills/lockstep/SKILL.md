@@ -60,12 +60,11 @@ below exactly; do not freelance around it.
 
 ## Subagent pattern
 
-For steps whose evidence is a review/analysis artifact (e.g. a code-review markdown file),
-dispatch the work via your own `Agent` tool rather than writing it inline yourself — a second
-independent pass is worth more than a self-review. The dispatched agent's output file, saved to
-a project-relative path, IS the evidence: point `scenario_done` at that file. The lockstep
-server does not know or care that a subagent produced it — it checks the artifact exactly like
-any other.
+When a step benefits from an isolated worker, dispatch it through the host's subagent capability
+(for example Claude Code's `Agent`/`Task` path or Codex's corresponding agent path) rather than
+assuming one literal tool name. The worker must return an artifact path; point `scenario_done`
+at that project-relative path. Lockstep validates the artifact exactly as if the main session
+produced it.
 
 ## Subcalls (v2) — when a step parks on an independent session
 

@@ -22,9 +22,9 @@ description: >
   review-gate.yaml into <project>/.lockstep/recipes/ to use.
 
   Requires runners.yaml (owner-controlled, in $LOCKSTEP_STATE_DIR — never
-  the project tree) to name a `claude` runner with an absolute executable
-  path and a non-empty models allowlist before scenario_start will let the
-  spawn node run — see README.md "Subcalls (v2)".
+  the project tree) to configure the adapter's default runner with an
+  absolute executable path and a non-empty models allowlist before
+  scenario_start will let the spawn node run — see README.md "Subcalls (v2)".
 
 baseline_globs: [".lockstep/**", "src/**"]
 
@@ -86,7 +86,6 @@ nodes:
     message:
       step: _subcall
       node: review
-      runner: claude
       timeout_minutes: 30
       scenario: review-gate
       artifacts:
