@@ -1,7 +1,7 @@
 # Codex and Claude Code Parity Design
 
 Date: 2026-08-19
-Status: pending user review
+Status: approved and implemented
 
 ## Goal
 

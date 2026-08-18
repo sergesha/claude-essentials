@@ -103,7 +103,7 @@ Two environment variables, read by the MCP server process:
 | Var | Default | Purpose |
 |---|---|---|
 | `LOCKSTEP_STATE_DIR` | `~/.lockstep` | Durable run state: SQLite checkpoints, `runs.json`, recipe snapshots, baseline manifests, `policy.d/`, `bindings/`. Deliberately outside the project — not in git, easy to deny writes to. |
-| `LOCKSTEP_RECIPES` | `<cwd>/.lockstep/recipes` | Where `list_recipes`/`scenario_start` resolve recipe names from. |
+| `LOCKSTEP_RECIPES` | `<resolved host project>/.lockstep/recipes` | Where `list_recipes`/`scenario_start` resolve recipe names from. Claude resolves the host project from process cwd; Codex uses its workspace metadata. |
 
 `LOCKSTEP_SESSION_STALE_MINUTES` (default `30`) is the session-liveness window for the policy
 gate's session binding (see below): a run's driving session counts as live while its binding's
@@ -113,8 +113,11 @@ has been silent longer. Read only by the hooks — the engine neither reads nor 
 The shipped manifests intentionally do not emit unresolved optional
 placeholders for the first two variables, so absent values reach the engine's
 built-in defaults. Each adapter sets only its literal `LOCKSTEP_RUNNER` host
-default. Configure non-default state/recipe paths in the host's MCP environment
-or a local manifest override.
+default. To configure non-default state/recipe paths, export the variables in
+the parent environment before starting Claude Code or Codex so both MCP and
+separately launched hook processes inherit identical values. An MCP-entry-only
+`env` override is unsafe for `LOCKSTEP_STATE_DIR`: hooks would inspect a
+different default state directory and policy binding could fail closed.
 
 ## Protecting the state dir, recipes, and the engine itself
 

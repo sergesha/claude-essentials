@@ -15,14 +15,13 @@ introspection — the SDK's real tool registry).
 
 Lazy singleton (`_eng()` / `_reset_engine()`): the `Engine` is built once,
 from `LOCKSTEP_STATE_DIR`/`LOCKSTEP_RECIPES` env vars (Global Constraints
-defaults: `~/.lockstep`, `<cwd>/.lockstep/recipes`), on first tool call —
-never at import time, so tests can set the env vars and call
+defaults: `~/.lockstep`, `<resolved host project>/.lockstep/recipes`), on first
+tool call — never at import time, so tests can set the env vars and call
 `_reset_engine()` before exercising any tool.
 
-`run.project` provenance: `scenario_start` captures the
-server process cwd (`Path.cwd().resolve()`) as `project` — it is never a
-tool argument. `scenario_dryrun` (which has no run/project of its own)
-uses the same server-cwd convention for its containment check.
+`run.project` provenance is never a tool argument: Claude supplies the server
+process cwd; Codex supplies the active workspace in MCP request metadata.
+`scenario_dryrun` uses the same resolved host project for containment checks.
 
 Two small helpers duplicate logic that already lives in `Engine`
 (`_check_path_containment`) and `RunIndex`/`recipes_dir` access
