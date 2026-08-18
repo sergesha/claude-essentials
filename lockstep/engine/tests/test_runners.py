@@ -3,6 +3,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
+import yaml
 
 from lockstep_mcp.runners import (
     DEFAULTS,
@@ -83,6 +84,53 @@ def test_budgets_default_when_absent(tmp_path):
     assert spec.max_fractal_depth == DEFAULTS["max_fractal_depth"]
     assert spec.max_subcalls_per_run == DEFAULTS["max_subcalls_per_run"]
     assert spec.timeout_minutes == DEFAULTS["timeout_minutes"]
+
+
+def test_legacy_runner_defaults_to_claude_driver(tmp_path):
+    exe = _fake_exe(tmp_path)
+    _write_runners(tmp_path, exe)
+    assert resolve(tmp_path, "claude", {}).driver == "claude"
+
+
+def test_explicit_codex_driver_loads_without_guessing_from_name(tmp_path):
+    exe = _fake_exe(tmp_path)
+    (tmp_path / "runners.yaml").write_text(textwrap.dedent(f"""
+        runners:
+          reviewer:
+            driver: codex
+            path: {exe}
+            models: [gpt-5.6-luna]
+    """))
+    spec = resolve(tmp_path, "reviewer", {})
+    assert spec.name == "reviewer"
+    assert spec.driver == "codex"
+
+
+@pytest.mark.parametrize("driver", ["", "Codex", "openai", "claude-code"])
+def test_unknown_or_empty_driver_is_rejected(tmp_path, driver):
+    exe = _fake_exe(tmp_path)
+    (tmp_path / "runners.yaml").write_text(textwrap.dedent(f"""
+        runners:
+          reviewer:
+            driver: {driver!r}
+            path: {exe}
+            models: [m]
+    """))
+    with pytest.raises(RunnerError, match="driver"):
+        load_runners(tmp_path)
+
+
+@pytest.mark.parametrize("driver", [None, [], {}, 1, True])
+def test_non_string_driver_is_a_runner_error(tmp_path, driver):
+    exe = _fake_exe(tmp_path)
+    config = {
+        "runners": {
+            "reviewer": {"driver": driver, "path": str(exe), "models": ["m"]}
+        }
+    }
+    (tmp_path / "runners.yaml").write_text(yaml.safe_dump(config))
+    with pytest.raises(RunnerError, match="driver"):
+        load_runners(tmp_path)
 
 
 # ---------------------------------------------------------------------------

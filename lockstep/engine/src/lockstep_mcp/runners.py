@@ -19,7 +19,8 @@ import yaml
 
 DEFAULTS = {"timeout_minutes": 30, "max_subcalls_per_run": 8, "max_fractal_depth": 2}
 _BUDGET_KEYS = tuple(DEFAULTS)
-_RUNNER_KEYS = {"path", "models", *_BUDGET_KEYS}
+_DRIVERS = frozenset({"claude", "codex"})
+_RUNNER_KEYS = {"driver", "path", "models", *_BUDGET_KEYS}
 # Process essentials only (POSIX + Windows). No SHELL — a `-p` child spawns
 # no interactive shell. LOCKSTEP_RECIPES passes through so a fractal child
 # resolves recipes where its parent did, not against its own cwd.
@@ -46,6 +47,7 @@ class RunnerSpec:
     timeout_minutes: int
     max_subcalls_per_run: int
     max_fractal_depth: int
+    driver: str = "claude"
 
 
 def _as_int(name: str, key: str, value: Any) -> int:
@@ -79,10 +81,16 @@ def load_runners(state_dir: Path) -> dict[str, RunnerSpec]:
         limits = {
             k: _as_int(name, k, body.get(k, budgets.get(k, DEFAULTS[k]))) for k in _BUDGET_KEYS
         }
+        driver = body.get("driver", "claude")
+        if not isinstance(driver, str) or driver not in _DRIVERS:
+            raise RunnerError(
+                f"runner '{name}': driver must be one of {sorted(_DRIVERS)}, got {driver!r}"
+            )
         out[name] = RunnerSpec(
             name=name,
             path=str(body.get("path", "")),
             models=list(body.get("models") or []),
+            driver=driver,
             **limits,
         )
     return out

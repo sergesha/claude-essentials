@@ -314,6 +314,10 @@ def _spec():
                       timeout_minutes=5, max_subcalls_per_run=8, max_fractal_depth=2)
 
 
+def test_direct_runner_spec_defaults_to_claude_driver():
+    assert _spec().driver == "claude"
+
+
 def test_safe_argv_accepts_sane_resume_and_keeps_prompt_terminated():
     argv = subcalls.safe_argv(_spec(), "--hostile prompt", None, "sess.1-A_b")
     i = argv.index("--resume")
