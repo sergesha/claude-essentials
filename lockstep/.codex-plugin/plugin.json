@@ -1,0 +1,29 @@
+{
+  "name": "lockstep",
+  "description": "Flow-enforcement engine for coding agents: declarative yamlgraph recipes, durable runs, deterministic evidence gates — a run cannot report progress without validated, artifact-backed evidence.",
+  "version": "0.1.0",
+  "author": {
+    "name": "sergesha"
+  },
+  "homepage": "https://github.com/sergesha/claude-essentials",
+  "repository": "https://github.com/sergesha/claude-essentials",
+  "license": "MIT",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Lockstep",
+    "shortDescription": "Evidence-gated workflows for coding agents",
+    "longDescription": "Run declarative engineering workflows with durable state, policy hooks, and deterministic artifact-backed evidence gates.",
+    "developerName": "sergesha",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Skills",
+      "MCP server",
+      "Policy hooks",
+      "Runner subcalls"
+    ],
+    "defaultPrompt": [
+      "Use lockstep to run the requested workflow and validate its evidence."
+    ]
+  }
+}
