@@ -13,7 +13,18 @@ FAKE = Path(__file__).parent / "fixtures" / "fake_runner.py"
 
 
 def _argv(*extra):
-    return [sys.executable, str(FAKE), *extra]
+    return [
+        sys.executable,
+        str(FAKE),
+        *extra,
+        "-p",
+        "--output-format",
+        "json",
+        "--model",
+        "claude-sonnet-4-5",
+        "--",
+        "test prompt",
+    ]
 
 
 def _wait_terminal(wd, tries=140):

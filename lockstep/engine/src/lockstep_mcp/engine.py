@@ -756,7 +756,9 @@ class Engine:
                     "escalated": True,
                 }
 
-            parked = self._maybe_park_subcall(run_id, step, "fail", adv)
+            parked = self._maybe_park_subcall(
+                run_id, step, "fail", adv, ctx.get("_subcall_runner")
+            )
             if parked is not None:
                 return parked
 
@@ -819,7 +821,9 @@ class Engine:
 
         self._advance_baseline(run_id, record.project, globs, manifest=pending_baseline)
 
-        parked = self._maybe_park_subcall(run_id, step, "pass", adv)
+        parked = self._maybe_park_subcall(
+            run_id, step, "pass", adv, ctx.get("_subcall_runner")
+        )
         if parked is not None:
             return parked
 
@@ -903,7 +907,14 @@ class Engine:
     def _is_subcall_parked(self, record: RunRecord) -> bool:
         return record.status == "awaiting" and (record.brief or {}).get("step") == "_subcall"
 
-    def _maybe_park_subcall(self, run_id: str, step: str, vstatus: str, adv: yg.Advance) -> dict | None:
+    def _maybe_park_subcall(
+        self,
+        run_id: str,
+        step: str,
+        vstatus: str,
+        adv: yg.Advance,
+        resolved_runner: str | None = None,
+    ) -> dict | None:
         """Park persistence: when a resume routed into the subcall triple and
         parked on the `_subcall` marker, persist the FULL marker (plus
         `started_at`) as the index brief and tell the worker a subcall
@@ -911,6 +922,8 @@ class Engine:
         if adv.done or adv.brief is None or adv.brief.step != "_subcall":
             return None
         marker = dict(adv.brief.raw)                   # FULL marker: node/runner/prompt/...
+        if resolved_runner:
+            marker["runner"] = resolved_runner
         marker["started_at"] = time.time()
         self._runs.update(run_id, step="_subcall", brief=marker)
         self._log_transition(run_id, step, vstatus, "_subcall")

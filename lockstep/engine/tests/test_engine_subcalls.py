@@ -145,6 +145,60 @@ def test_envelope_visible_via_peek_state(tmp_path, monkeypatch):
     assert env["artifact_hashes"] == {}                    # one-shot: the envelope IS the artifact
 
 
+def test_codex_default_runner_completes_one_shot_and_records_thread(tmp_path, monkeypatch):
+    e, proj = make_engine(
+        tmp_path,
+        monkeypatch,
+        runner="codex",
+        driver="codex",
+        model="gpt-5.6-luna",
+    )
+    run = e.start("subcall-one-shot-default", vars={}, project=str(proj))
+    pass_plan(e, proj, run)
+
+    assert _wait_status(e, run["run_id"], "done")["status"] == "done"
+    envelope = e._peek_state(run["run_id"])["_subcall_envelope"]
+    assert envelope["runner"] == "codex"
+    assert envelope["session_id"] == "fake-thread-1"
+
+
+def test_explicit_claude_runner_overrides_codex_adapter_default(tmp_path, monkeypatch):
+    e, proj = make_engine(
+        tmp_path,
+        monkeypatch,
+        runner="claude",
+        driver="claude",
+        model="claude-haiku-4-5",
+        extra_runners=[("codex", "codex", "gpt-5.6-luna")],
+    )
+    monkeypatch.setenv("LOCKSTEP_RUNNER", "codex")
+    run = e.start("subcall-one-shot", vars={}, project=str(proj))
+    pass_plan(e, proj, run)
+
+    assert _wait_status(e, run["run_id"], "done")["status"] == "done"
+    envelope = e._peek_state(run["run_id"])["_subcall_envelope"]
+    assert envelope["runner"] == "claude"
+    assert envelope["session_id"] == "fake-session-1"
+
+
+def test_explicit_codex_runner_overrides_claude_adapter_default(tmp_path, monkeypatch):
+    e, proj = make_engine(
+        tmp_path,
+        monkeypatch,
+        runner="claude",
+        driver="claude",
+        model="claude-haiku-4-5",
+        extra_runners=[("codex", "codex", "gpt-5.6-luna")],
+    )
+    run = e.start("subcall-one-shot-codex", vars={}, project=str(proj))
+    pass_plan(e, proj, run)
+
+    assert _wait_status(e, run["run_id"], "done")["status"] == "done"
+    envelope = e._peek_state(run["run_id"])["_subcall_envelope"]
+    assert envelope["runner"] == "codex"
+    assert envelope["session_id"] == "fake-thread-1"
+
+
 # --- fractal child runs ----------------------------------------------
 
 
