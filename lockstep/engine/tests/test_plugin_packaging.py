@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import stat
 import subprocess
 import tomllib
@@ -99,6 +100,40 @@ def test_launcher_resolves_engine_but_preserves_caller_cwd(tmp_path):
     assert lines[1:] == [
         "run", "--project", str(ROOT / "engine"), "lockstep-mcp", "doctor",
     ]
+
+
+def test_launcher_derives_codex_home_from_installed_plugin_path(tmp_path):
+    codex_home = tmp_path / "codex-home"
+    plugin_root = (
+        codex_home / "plugins/cache/claude-essentials/lockstep/0.1.0"
+    )
+    scripts_dir = plugin_root / "scripts"
+    scripts_dir.mkdir(parents=True)
+    (plugin_root / "engine").mkdir()
+    launcher = scripts_dir / "lockstep-plugin"
+    shutil.copy2(ROOT / "scripts/lockstep-plugin", launcher)
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_uv = fake_bin / "uv"
+    fake_uv.write_text("#!/bin/sh\nprintf '%s\\n' \"${CODEX_HOME-unset}\"\n")
+    fake_uv.chmod(fake_uv.stat().st_mode | stat.S_IXUSR)
+    env = {
+        **os.environ,
+        "LOCKSTEP_RUNNER": "codex",
+        "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+    }
+    env.pop("CODEX_HOME", None)
+
+    result = subprocess.run(
+        [str(launcher), "doctor"],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+
+    assert result.stdout.strip() == str(codex_home)
 
 
 def test_distributed_default_recipe_does_not_pin_a_host_runner():
