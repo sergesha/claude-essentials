@@ -427,10 +427,17 @@ class _Parser:
             return {"pass": "next", "fail": "escalate", "error": "escalate"}
         on = self.mapping(value, pointer, "include_graph on")
         self.keys(on, pointer, {"pass", "fail", "error"}, {"pass"})
-        result = {"pass": self.string(on["pass"], f"{pointer}/pass", "include pass handler"), "fail": self.handler(on.get("fail", "escalate"), f"{pointer}/fail"), "error": self.handler(on.get("error", "escalate"), f"{pointer}/error")}
+        for outcome in ("fail", "error"):
+            if outcome in on and on[outcome] is None:
+                self.fail("LSW108", f"include_graph on.{outcome} must be escalate", f"{pointer}/{outcome}", "use escalate or omit the key")
+        result = {
+            "pass": self.string(on["pass"], f"{pointer}/pass", "include pass handler"),
+            "fail": self.handler(on["fail"], f"{pointer}/fail") if "fail" in on else "escalate",
+            "error": self.handler(on["error"], f"{pointer}/error") if "error" in on else "escalate",
+        }
         if result["pass"] != "next":
             self.fail("LSW108", "include_graph on.pass must be next", f"{pointer}/pass", "use pass: next")
-        return {key: value or "escalate" for key, value in result.items()}
+        return result
 
     def optional_mapping(self, item: dict[str, Any], key: str, pointer: str) -> dict[str, Any] | None:
         return self.mapping(item[key], f"{pointer}/{key}", key) if key in item else None

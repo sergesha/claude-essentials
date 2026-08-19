@@ -158,6 +158,24 @@ def test_include_graph_defaults_omitted_failure_routing_to_escalate(workflow_fil
     }
 
 
+@pytest.mark.parametrize("outcome", ["fail", "error"])
+def test_include_graph_rejects_explicit_null_failure_routing(
+    workflow_file: Path, outcome: str
+) -> None:
+    workflow_file.write_text(
+        BASE
+        + f'''\
+flow:
+- include_graph:
+    id: approval-fragment
+    path: .lockstep/fragments/release-approval.graph.yaml
+    on: {{pass: next, {outcome}: null}}
+'''
+    )
+
+    assert raises_diagnostic("LSW108", workflow_file).pointer == f"/flow/0/include_graph/on/{outcome}"
+
+
 def test_ir_recursively_freezes_mapping_fields_and_retains_defaults(workflow_file: Path) -> None:
     workflow_file.write_text(
         BASE
