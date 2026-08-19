@@ -110,6 +110,7 @@ _GATE_STALE = 3600.0
 # How long an unfilled child.json claim must sit before another caller may
 # heal it (mtime age, never content — the claim is empty by construction).
 _CHILD_CLAIM_STALE = 600.0
+_EFFECT_PENDING_INTEGRITY_REASON = "effect transition integrity failure"
 
 
 def _claim_age(path: Path) -> float:
@@ -368,6 +369,26 @@ class Engine:
         self._effect_pending_path(run_id).unlink(missing_ok=True)
         self._effect_snapshot_path(run_id).unlink(missing_ok=True)
 
+    def _fail_closed_effect_pending(self, run_id: str, record: RunRecord) -> RunRecord:
+        """Terminalize a corrupt effect transition journal without touching it.
+
+        The pending file is forensic evidence for a transition whose graph
+        checkpoint may already be durable.  Do not repair, replace, or
+        unlink it here; terminalizing the index prevents another owner from
+        using an unverified boundary, while retaining the original bytes for
+        diagnosis outside the agent-facing API.
+        """
+        if record.status in TERMINAL_STATUSES:
+            return record
+        terminal = self._runs.update(
+            run_id,
+            status="escalated",
+            step="escalate",
+            brief={"step": "escalate", "reason": _EFFECT_PENDING_INTEGRITY_REASON},
+        )
+        self._cascade_terminate(run_id)
+        return terminal
+
     def _workflow_has_effect_contracts(self, run_id: str) -> bool:
         doc = self._snapshot_doc(run_id)
         return any(
@@ -441,6 +462,19 @@ class Engine:
         self._write_json(self._effect_snapshot_path(run_id), snapshot_to_data(snapshot))
         return True
 
+    def _consume_effect_pending(
+        self, run_id: str, from_step: str, advanced_state: dict
+    ) -> bool:
+        """Verify a pending journal before a legacy/terminal cleanup path.
+
+        A non-owned destination has no next effect contract to promote, but
+        it still must not silently unlink bytes that fail the transition
+        journal's schema or identity checks.
+        """
+        if not self._effect_pending_path(run_id).is_file():
+            return False
+        return self._promote_effect_pending(run_id, from_step, {}, advanced_state)
+
     def _effect_context(self, run_id: str, project: str, brief: dict) -> dict[str, Any]:
         paths = self._effect_paths(brief, project)
         if paths is None:
@@ -486,6 +520,10 @@ class Engine:
 
         if adv.done:
             if record.status != "done":
+                try:
+                    self._consume_effect_pending(run_id, record.step or "", adv.state)
+                except PathContractError:
+                    return self._fail_closed_effect_pending(run_id, record)
                 record = self._runs.update(run_id, status="done", brief=None)
                 self._clear_effect_state(run_id)
                 self._cascade_terminate(run_id)
@@ -496,6 +534,10 @@ class Engine:
 
         if adv.brief.step == "escalate":
             if record.status != "escalated":
+                try:
+                    self._consume_effect_pending(run_id, record.step or "", adv.state)
+                except PathContractError:
+                    return self._fail_closed_effect_pending(run_id, record)
                 record = self._runs.update(
                     run_id,
                     status="escalated",
@@ -511,8 +553,13 @@ class Engine:
             # index isn't already parked on it (preserve an existing
             # `started_at`). A repair that never saw the park writes the
             # marker without `started_at` — the "?m" path.
-            if record.status != "awaiting" or (record.brief or {}).get("step") != "_subcall":
+            try:
+                consumed = self._consume_effect_pending(run_id, record.step or "", adv.state)
+            except PathContractError:
+                return self._fail_closed_effect_pending(run_id, record)
+            if consumed:
                 self._effect_pending_path(run_id).unlink(missing_ok=True)
+            if record.status != "awaiting" or (record.brief or {}).get("step") != "_subcall":
                 record = self._runs.update(
                     run_id, status="awaiting", step="_subcall", brief=dict(adv.brief.raw)
                 )
@@ -527,7 +574,10 @@ class Engine:
             # A checkpoint may have committed while the process died before
             # its index write.  Promotion consumes only the pre-resume
             # pending snapshot, never a fresh post-crash filesystem view.
-            promoted = self._promote_effect_pending(run_id, record.step, next_brief, adv.state)
+            try:
+                promoted = self._promote_effect_pending(run_id, record.step, next_brief, adv.state)
+            except PathContractError:
+                return self._fail_closed_effect_pending(run_id, record)
             if needs_index_repair:
                 record = self._runs.update(
                     run_id,
@@ -733,7 +783,10 @@ class Engine:
         what a still-parked run means (refuse / raise / report)."""
         record = self._reconcile(run_id)
         if self._is_subcall_parked(record):
-            record = self._auto_poll(run_id)
+            try:
+                record = self._auto_poll(run_id)
+            except PathContractError:
+                record = self._fail_closed_effect_pending(run_id, record)
         return record
 
     def status(self, run_id: str) -> dict:
@@ -768,7 +821,10 @@ class Engine:
                 },
             }
         if record.status != "awaiting":
-            return {"status": record.status, "recipe": record.recipe, "step": record.step}
+            view = {"status": record.status, "recipe": record.recipe, "step": record.step}
+            if (record.brief or {}).get("reason") == _EFFECT_PENDING_INTEGRITY_REASON:
+                view["integrity_error"] = _EFFECT_PENDING_INTEGRITY_REASON
+            return view
         brief = record.brief or {}
         return {
             "status": record.status,
@@ -980,6 +1036,15 @@ class Engine:
         # must NOT advance (this was not a real accepted step).
         if not adv.done and adv.brief is not None and adv.brief.step == "escalate":
             note = "loop cap reached; work validated but the run requires human review"
+            try:
+                self._consume_effect_pending(run_id, step, adv.state)
+            except PathContractError:
+                self._fail_closed_effect_pending(run_id, record)
+                return {
+                    "accepted": True, "passed": False, "error": True, "escalated": True,
+                    "reasons": [f"integrity: {_EFFECT_PENDING_INTEGRITY_REASON}"],
+                    "step": "escalate",
+                }
             self._runs.update(
                 run_id,
                 status="escalated",
@@ -1008,6 +1073,16 @@ class Engine:
             }
         self._advance_baseline(run_id, record.project, globs, manifest=pending_baseline)
 
+        if not adv.done and adv.brief is not None and adv.brief.step == "_subcall":
+            try:
+                self._consume_effect_pending(run_id, step, adv.state)
+            except PathContractError:
+                self._fail_closed_effect_pending(run_id, record)
+                return {
+                    "accepted": True, "passed": False, "error": True, "escalated": True,
+                    "reasons": [f"integrity: {_EFFECT_PENDING_INTEGRITY_REASON}"],
+                    "step": "escalate",
+                }
         parked = self._maybe_park_subcall(
             run_id, step, "pass", adv, ctx.get("_subcall_runner")
         )
@@ -1015,6 +1090,15 @@ class Engine:
             return parked
 
         if adv.done:
+            try:
+                self._consume_effect_pending(run_id, step, adv.state)
+            except PathContractError:
+                self._fail_closed_effect_pending(run_id, record)
+                return {
+                    "accepted": True, "passed": False, "error": True, "escalated": True,
+                    "reasons": [f"integrity: {_EFFECT_PENDING_INTEGRITY_REASON}"],
+                    "step": "escalate",
+                }
             self._runs.update(run_id, status="done", step=step, brief=None)
             self._clear_effect_state(run_id)
             self._cascade_terminate(run_id)
@@ -1033,13 +1117,15 @@ class Engine:
         next_brief = self._brief_to_dict(substituted)
         try:
             self._promote_effect_pending(run_id, step, next_brief, adv.state)
-        except PathContractError as exc:
+        except PathContractError:
+            self._fail_closed_effect_pending(run_id, record)
             return {
                 "accepted": True,
                 "passed": False,
                 "error": True,
-                "reasons": [f"integrity: {exc}"],
-                "step": step,
+                "escalated": True,
+                "reasons": [f"integrity: {_EFFECT_PENDING_INTEGRITY_REASON}"],
+                "step": "escalate",
             }
         self._runs.update(run_id, step=substituted.step, brief=next_brief)
         self._effect_pending_path(run_id).unlink(missing_ok=True)
@@ -1462,12 +1548,20 @@ class Engine:
             # "_subcall" is the marker's own message.step, never a real
             # recipe step; the parked brief's `node` names the subcall that
             # actually just finished.
+            try:
+                self._consume_effect_pending(run_id, "_subcall", adv.state)
+            except PathContractError:
+                return self._fail_closed_effect_pending(run_id, record)
             marker = record.brief or {}
             self._runs.update(run_id, status="done", step=marker.get("node", "_subcall"), brief=None)
             self._clear_effect_state(run_id)
             self._cascade_terminate(run_id)
             self._log_transition(run_id, "_subcall", "done", None)
         elif adv.brief is not None and adv.brief.step == "escalate":
+            try:
+                self._consume_effect_pending(run_id, "_subcall", adv.state)
+            except PathContractError:
+                return self._fail_closed_effect_pending(run_id, record)
             env = self._peek_state(run_id).get("_subcall_envelope") or {}
             reason = "; ".join(str(r) for r in (env.get("reasons") or [])) or "subcall failed"
             self._runs.update(run_id, status="escalated", step="escalate",
@@ -1476,13 +1570,20 @@ class Engine:
             self._cascade_terminate(run_id)
             self._log_transition(run_id, "_subcall", "error", "escalate")
         elif adv.brief is not None and adv.brief.step == "_subcall":
+            try:
+                self._consume_effect_pending(run_id, "_subcall", adv.state)
+            except PathContractError:
+                return self._fail_closed_effect_pending(run_id, record)
             self._effect_pending_path(run_id).unlink(missing_ok=True)
             pass                                           # still parked; index brief already true
         elif adv.brief is not None:
             vars_ = self._read_vars(run_id)
             substituted = self._substitute_brief(adv.brief, vars_)
             next_brief = self._brief_to_dict(substituted)
-            self._promote_effect_pending(run_id, "_subcall", next_brief, adv.state)
+            try:
+                self._promote_effect_pending(run_id, "_subcall", next_brief, adv.state)
+            except PathContractError:
+                return self._fail_closed_effect_pending(run_id, record)
             self._runs.update(run_id, step=substituted.step,
                               brief=next_brief)
             self._effect_pending_path(run_id).unlink(missing_ok=True)

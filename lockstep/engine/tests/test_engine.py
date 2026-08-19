@@ -321,6 +321,139 @@ def test_auto_poll_prepares_and_promotes_effect_boundary_to_user_step(tmp_path, 
     assert not eng._effect_pending_path(started["run_id"]).exists()
 
 
+def _checkpoint_effect_transition_with_pending(eng, started, project, monkeypatch):
+    """Leave the real graph checkpoint advanced but its effect journal unpromoted."""
+    (project / "one.txt").write_text("one")
+    original_promote = eng._promote_effect_pending
+    monkeypatch.setattr(
+        eng,
+        "_promote_effect_pending",
+        lambda *args: (_ for _ in ()).throw(RuntimeError("crash after checkpoint")),
+    )
+    with pytest.raises(RuntimeError, match="crash after checkpoint"):
+        eng.done(started["run_id"], "one", {})
+    monkeypatch.setattr(eng, "_promote_effect_pending", original_promote)
+
+
+@pytest.mark.parametrize(
+    "corrupt",
+    ["{\"forensic_secret\":", "", json.dumps({"forensic_secret": "do-not-publish"})],
+    ids=["malformed", "truncated", "wrong-schema"],
+)
+def test_status_restart_escalates_without_exposing_corrupt_effect_pending(tmp_path, monkeypatch, corrupt):
+    """A corrupt durable transition journal must not wedge a status reader."""
+    recipes = _effect_two_step_recipe(tmp_path)
+    eng = _engine(tmp_path, recipes)
+    project = _project(tmp_path)
+    started = eng.start("effect-two", {}, str(project))
+    _checkpoint_effect_transition_with_pending(eng, started, project, monkeypatch)
+    pending = eng._effect_pending_path(started["run_id"])
+    pending.write_text(corrupt)
+
+    status = Engine(tmp_path / "state", recipes).status(started["run_id"])
+
+    assert status["status"] == "escalated"
+    assert status["step"] == "escalate"
+    assert "forensic_secret" not in json.dumps(status)
+    assert pending.read_text() == corrupt
+
+
+def test_done_escalates_when_post_resume_effect_pending_is_corrupt(tmp_path, monkeypatch):
+    """Post-checkpoint journal corruption becomes a controlled terminal result."""
+    eng = _engine(tmp_path, _effect_two_step_recipe(tmp_path))
+    project = _project(tmp_path)
+    started = eng.start("effect-two", {}, str(project))
+    (project / "one.txt").write_text("one")
+    original_promote = eng._promote_effect_pending
+
+    def corrupt_before_promote(*args):
+        eng._effect_pending_path(started["run_id"]).write_text("{\"forensic_secret\":")
+        return original_promote(*args)
+
+    monkeypatch.setattr(eng, "_promote_effect_pending", corrupt_before_promote)
+    result = eng.done(started["run_id"], "one", {})
+
+    assert result["accepted"] is True
+    assert result["error"] is True
+    assert result["escalated"] is True
+    assert "forensic_secret" not in json.dumps(result)
+    assert eng.status(started["run_id"])["status"] == "escalated"
+    assert eng._effect_pending_path(started["run_id"]).read_text() == "{\"forensic_secret\":"
+
+
+def test_abort_after_corrupt_effect_pending_reports_terminal_not_parse_error(tmp_path, monkeypatch):
+    """Abort reconciles an integrity terminal state rather than leaking JSON parsing."""
+    eng = _engine(tmp_path, _effect_two_step_recipe(tmp_path))
+    project = _project(tmp_path)
+    started = eng.start("effect-two", {}, str(project))
+    _checkpoint_effect_transition_with_pending(eng, started, project, monkeypatch)
+    pending = eng._effect_pending_path(started["run_id"])
+    pending.write_text(json.dumps({"from_step": "one"}))
+
+    with pytest.raises(LockstepError, match="escalated") as exc:
+        eng.abort(started["run_id"])
+
+    assert "pending effect boundary" not in str(exc.value)
+    assert pending.read_text() == json.dumps({"from_step": "one"})
+
+
+def test_auto_poll_escalates_when_post_resume_effect_pending_is_corrupt(tmp_path, monkeypatch):
+    """The asynchronous transition uses the same fail-closed journal policy."""
+    eng = _engine(tmp_path, _effect_two_step_recipe(tmp_path))
+    project = _project(tmp_path)
+    started = eng.start("effect-two", {}, str(project))
+    eng._runs.update(started["run_id"], step="_subcall", brief={"step": "_subcall", "node": "review"})
+    monkeypatch.setattr(eng, "_poll_ctx", lambda *_: {"poll": True})
+    next_brief = yg.StepBrief(
+        step="two", task="next", exit_criterion="done", checks=[],
+        raw={"allowed_writes": ["two.txt"]},
+    )
+    monkeypatch.setattr(
+        engine_mod.yg,
+        "resume",
+        lambda *_args, **_kwargs: yg.Advance(done=False, brief=next_brief, state={"poll": "advanced"}),
+    )
+    original_promote = eng._promote_effect_pending
+
+    def corrupt_before_promote(*args):
+        eng._effect_pending_path(started["run_id"]).write_text("")
+        return original_promote(*args)
+
+    monkeypatch.setattr(eng, "_promote_effect_pending", corrupt_before_promote)
+    record = eng._auto_poll(started["run_id"])
+
+    assert record.status == "escalated"
+    assert eng._effect_pending_path(started["run_id"]).read_text() == ""
+
+
+def test_terminal_resume_preserves_corrupt_effect_pending_for_forensics(tmp_path, monkeypatch):
+    """A terminal route must not clean up a journal it cannot verify."""
+    eng = _engine(
+        tmp_path,
+        _effect_recipe(
+            tmp_path,
+            checks=[{"type": "file_exists", "path": "out.txt"}],
+            allowed_writes=["out.txt"],
+        ),
+    )
+    project = _project(tmp_path)
+    started = eng.start("effect", {}, str(project))
+    (project / "out.txt").write_text("out")
+    real_resume = engine_mod.yg.resume
+
+    def corrupt_after_resume(*args, **kwargs):
+        advance = real_resume(*args, **kwargs)
+        eng._effect_pending_path(started["run_id"]).write_text("{\"forensic_secret\":")
+        return advance
+
+    monkeypatch.setattr(engine_mod.yg, "resume", corrupt_after_resume)
+    result = eng.done(started["run_id"], "one", {})
+
+    assert result["error"] is True
+    assert result["escalated"] is True
+    assert eng._effect_pending_path(started["run_id"]).read_text() == "{\"forensic_secret\":"
+
+
 # ---------------------------------------------------------------------------
 # terminal / escalation / abort
 # ---------------------------------------------------------------------------
