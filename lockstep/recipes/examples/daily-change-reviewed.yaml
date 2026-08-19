@@ -8,13 +8,7 @@ description: >
   implementation step. Copy this recipe and daily-review-gate.yaml into
   the project's .lockstep/recipes directory.
 
-baseline_globs:
-  - .lockstep/**
-  - src/**
-  - tests/**
-  - conftest.py
-  - pytest.ini
-  - pyproject.toml
+baseline_globs: ["**"]
 
 state:
   brief: dict
@@ -51,13 +45,15 @@ nodes:
       evidence_schema:
         required: [plan_path]
         properties:
-          plan_path: {type: string, format: project-path}
+          plan_path: {type: string, format: project-path, const: .lockstep/plan.md}
       checks:
         - type: md_has_sections
           path_from: plan_path
           sections: [Goal, Acceptance Criteria, Steps]
         - type: fresh
           path_from: plan_path
+        - type: diff_only
+          paths: [.lockstep/plan.md]
 
   validate_plan: {type: python, tool: run_checks}
 
@@ -82,7 +78,7 @@ nodes:
           glob: src/**
           since: previous
         - type: diff_only
-          paths: [tests/, .lockstep/]
+          paths: [tests/, .pytest_cache/]
 
   validate_tests: {type: python, tool: run_checks}
 
@@ -107,7 +103,7 @@ nodes:
           glob: tests/**
           since: previous
         - type: diff_only
-          paths: [src/, .lockstep/]
+          paths: [src/, .pytest_cache/]
 
   validate_implement: {type: python, tool: run_checks}
 
@@ -126,24 +122,11 @@ nodes:
           summary: {type: string}
       checks:
         - type: junit_gate
-          command: "pytest -q"
+          command: "pytest -q -p no:cacheprovider"
           min_tests: 1
           max_skipped: 0
-        - type: unchanged
-          glob: src/**
-          since: previous
-        - type: unchanged
-          glob: tests/**
-          since: previous
-        - type: unchanged
-          glob: conftest.py
-          since: start
-        - type: unchanged
-          glob: pytest.ini
-          since: start
-        - type: unchanged
-          glob: pyproject.toml
-          since: start
+        - type: diff_only
+          paths: [.pytest_cache/]
 
   validate_verify: {type: python, tool: run_checks}
 
@@ -188,29 +171,16 @@ nodes:
       evidence_schema:
         required: [review_path]
         properties:
-          review_path: {type: string, format: project-path}
+          review_path: {type: string, format: project-path, const: .lockstep/review.md}
       checks:
         - type: file_matches_hash
           path_from: review_path
           hash_from: _subcall_envelope.artifact_hashes.review
-        - type: file_matches
+        - type: review_verdict
           path_from: review_path
-          regex: "(?m)^\\s*Verdict:\\s*PASS\\s*$"
-        - type: unchanged
-          glob: src/**
-          since: previous
-        - type: unchanged
-          glob: tests/**
-          since: previous
-        - type: unchanged
-          glob: conftest.py
-          since: start
-        - type: unchanged
-          glob: pytest.ini
-          since: start
-        - type: unchanged
-          glob: pyproject.toml
-          since: start
+          expected: PASS
+        - type: diff_only
+          paths: [.lockstep/review.md, .pytest_cache/]
 
   validate_accept: {type: python, tool: run_checks}
 

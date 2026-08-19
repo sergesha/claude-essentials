@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from lockstep_mcp.engine import Engine
 from _subcall_helpers import write_runners_yaml
 
@@ -27,6 +29,7 @@ def _start_daily_change(tmp_path, monkeypatch):
         "def add(left, right):\n    return left - right\n"
     )
     (project / "pytest.ini").write_text("[pytest]\npythonpath = .\n")
+    (project / "README.md").write_text("Original\n")
     monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(state))
     monkeypatch.setenv("LOCKSTEP_RUNNER", "codex")
     engine = Engine(state_dir=state, recipes_dir=EXAMPLES, memory_only=False)
@@ -142,23 +145,100 @@ def test_fail_review_is_rejected_by_the_parent(tmp_path, monkeypatch):
     )
 
     assert out["passed"] is False
-    assert any("Verdict" in reason for reason in out["reasons"])
+    assert any("review_verdict" in reason for reason in out["reasons"])
     assert engine.status(run["run_id"])["step"] == "accept"
 
 
-def test_source_change_after_review_is_rejected(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("relative_path", "replacement"),
+    [
+        ("src/calculator.py", "def add(left, right):\n    return 999\n"),
+        ("tests/test_calculator.py", "def test_nothing():\n    assert True\n"),
+        ("pytest.ini", "[pytest]\naddopts = --ignore=tests\n"),
+        (".lockstep/plan.md", "# Goal\nChanged after review.\n"),
+    ],
+)
+def test_reviewed_inputs_cannot_change_after_review(
+    tmp_path, monkeypatch, relative_path, replacement,
+):
     engine, project, run = _start_daily_change(tmp_path, monkeypatch)
     _pass_plan_and_tests(engine, project, run)
     _pass_implementation_and_verification(engine, project, run)
     _complete_review(engine, project, run)
-    (project / "src" / "calculator.py").write_text(
-        "def add(left, right):\n    return 999\n"
-    )
+    (project / relative_path).write_text(replacement)
 
     out = engine.done(
         run["run_id"], "accept", {"review_path": ".lockstep/review.md"}
     )
 
     assert out["passed"] is False
-    assert any("src" in reason for reason in out["reasons"])
+    assert any(relative_path in reason for reason in out["reasons"])
     assert engine.status(run["run_id"])["step"] == "accept"
+
+
+def test_plan_cannot_change_after_it_passes(tmp_path, monkeypatch):
+    engine, project, run = _start_daily_change(tmp_path, monkeypatch)
+    _pass_plan_and_tests(engine, project, run)
+    (project / "src" / "calculator.py").write_text(
+        "def add(left, right):\n    return left + right\n"
+    )
+    (project / ".lockstep" / "plan.md").write_text(
+        "# Goal\nShip anything.\n\n# Acceptance Criteria\nNone.\n\n# Steps\nBypass review.\n"
+    )
+
+    out = engine.done(run["run_id"], "implement", {"summary": "Changed code and plan"})
+
+    assert out["passed"] is False
+    assert any("plan.md" in reason for reason in out["reasons"])
+
+
+def test_child_cannot_change_an_unlisted_project_file(tmp_path, monkeypatch):
+    engine, project, run = _start_daily_change(tmp_path, monkeypatch)
+    _pass_plan_and_tests(engine, project, run)
+    _pass_implementation_and_verification(engine, project, run)
+    child = engine._runs.children(run["run_id"])[0]
+    (project / ".lockstep" / "review.md").write_text(
+        "# Findings\nNone.\n\nVerdict: PASS\n"
+    )
+    (project / "README.md").write_text("Rewritten by reviewer\n")
+
+    out = engine.done(
+        child.run_id, "review", {"review_path": ".lockstep/review.md"}
+    )
+
+    assert out["passed"] is False
+    assert any("README.md" in reason for reason in out["reasons"])
+
+
+def test_conflicting_review_verdicts_are_rejected(tmp_path, monkeypatch):
+    engine, project, run = _start_daily_change(tmp_path, monkeypatch)
+    _pass_plan_and_tests(engine, project, run)
+    _pass_implementation_and_verification(engine, project, run)
+    child = engine._runs.children(run["run_id"])[0]
+    (project / ".lockstep" / "review.md").write_text(
+        "# Findings\nBlocking issue.\n\nVerdict: FAIL\nVerdict: PASS\n"
+    )
+
+    out = engine.done(
+        child.run_id, "review", {"review_path": ".lockstep/review.md"}
+    )
+
+    assert out["passed"] is False
+    assert any("review_verdict" in reason for reason in out["reasons"])
+
+
+def test_accept_cannot_substitute_an_alias_for_the_declared_review(tmp_path, monkeypatch):
+    engine, project, run = _start_daily_change(tmp_path, monkeypatch)
+    _pass_plan_and_tests(engine, project, run)
+    _pass_implementation_and_verification(engine, project, run)
+    _complete_review(engine, project, run)
+    original = (project / ".lockstep" / "review.md").read_text()
+    (project / ".lockstep" / "review-alias.md").write_text(original)
+    (project / ".lockstep" / "review.md").write_text("tampered\n")
+
+    out = engine.done(
+        run["run_id"], "accept", {"review_path": ".lockstep/review-alias.md"}
+    )
+
+    assert out["accepted"] is False
+    assert out["errors"]

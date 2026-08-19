@@ -53,6 +53,43 @@ def test_md_has_sections_missing(tmp_path):
     assert any("Verdict" in reason for reason in r["verdict_reasons"])
 
 
+def test_review_verdict_requires_one_final_expected_verdict(tmp_path):
+    review = tmp_path / "review.md"
+    check = {"type": "review_verdict", "path_from": "review_path", "expected": "PASS"}
+    state = _state(
+        [check], {"review_path": "review.md"}, _project=str(tmp_path)
+    )
+
+    review.write_text("# Findings\nNone.\n\nVerdict: PASS\n")
+    assert run_checks(state, execute=True)["verdict_status"] == "pass"
+
+    for invalid in (
+        "Verdict: FAIL\nVerdict: PASS\n",
+        "Verdict: PASS\ntrailing content\n",
+        "Verdict: FAIL\n",
+    ):
+        review.write_text(invalid)
+        result = run_checks(state, execute=True)
+        assert result["verdict_status"] == "fail", invalid
+        assert any("review_verdict" in reason for reason in result["verdict_reasons"])
+
+
+def test_review_verdict_can_accept_either_single_final_value(tmp_path):
+    review = tmp_path / "review.md"
+    review.write_text("# Findings\nOne issue.\n\nVerdict: FAIL\n")
+
+    result = run_checks(
+        _state(
+            [{"type": "review_verdict", "path_from": "review_path"}],
+            {"review_path": "review.md"},
+            _project=str(tmp_path),
+        ),
+        execute=True,
+    )
+
+    assert result["verdict_status"] == "pass"
+
+
 def test_cmd_ok_true_and_false(tmp_path):
     r = run_checks(
         _state([{"type": "cmd_ok", "command": "true"}], {}, _project=str(tmp_path)),

@@ -97,7 +97,16 @@ with evidence → repeat. See `skills/lockstep/SKILL.md` for the full loop and
 `skills/lockstep-author/SKILL.md` for writing your own recipe.
 
 For ordinary Python feature and bug-fix work where the agent authors tests,
-copy both `daily-change-reviewed.yaml` and `daily-review-gate.yaml` instead.
+copy both recipes instead:
+
+```bash
+mkdir -p .lockstep/recipes
+curl -fsSL https://raw.githubusercontent.com/sergesha/claude-essentials/main/lockstep/recipes/examples/daily-change-reviewed.yaml \
+  -o .lockstep/recipes/daily-change-reviewed.yaml
+curl -fsSL https://raw.githubusercontent.com/sergesha/claude-essentials/main/lockstep/recipes/examples/daily-review-gate.yaml \
+  -o .lockstep/recipes/daily-review-gate.yaml
+```
+
 Start `daily-change-reviewed`; it enforces plan → tests → implementation →
 full pytest → independent fractal review. Tests are frozen before implementation,
 and source plus tests are hash/baseline-pinned across the review. The workflow

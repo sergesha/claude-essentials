@@ -6,13 +6,7 @@ description: >
   configuration remain frozen. A stated FAIL is a valid review artifact,
   but the parent recipe will reject it.
 
-baseline_globs:
-  - .lockstep/**
-  - src/**
-  - tests/**
-  - conftest.py
-  - pytest.ini
-  - pyproject.toml
+baseline_globs: ["**"]
 
 state:
   brief: dict
@@ -39,16 +33,15 @@ nodes:
       evidence_schema:
         required: [review_path]
         properties:
-          review_path: {type: string, format: project-path}
+          review_path: {type: string, format: project-path, const: .lockstep/review.md}
       checks:
         - type: md_has_sections
           path_from: review_path
           sections: [Findings]
-        - type: file_matches
+        - type: review_verdict
           path_from: review_path
-          regex: "(?m)^\\s*Verdict:\\s*(PASS|FAIL)\\s*$"
         - type: diff_only
-          paths: [.lockstep/]
+          paths: [.lockstep/review.md, .pytest_cache/]
 
   validate_review: {type: python, tool: run_checks}
 
