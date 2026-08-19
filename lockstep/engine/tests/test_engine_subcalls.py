@@ -23,6 +23,14 @@ def _wait_status(e, run_id, want, deadline_s=10.0):
     return st
 
 
+def test_engine_normalizes_state_and_recipe_dirs_before_child_launch(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    e = Engine(state_dir=Path("state"), recipes_dir=Path("recipes"), memory_only=True)
+
+    assert e._state_dir == (tmp_path / "state").resolve()
+    assert e._recipes_dir == (tmp_path / "recipes").resolve()
+
+
 def test_subcall_runs_and_completes(tmp_path, monkeypatch):
     e, proj = make_engine(tmp_path, monkeypatch)
     r = e.start("subcall-one-shot", vars={}, project=str(proj))

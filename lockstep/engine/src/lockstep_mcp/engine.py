@@ -141,8 +141,11 @@ def _subst(text: str, vars_: dict) -> str:
 
 class Engine:
     def __init__(self, state_dir: Path, recipes_dir: Path, memory_only: bool = False) -> None:
-        self._state_dir = Path(state_dir)
-        self._recipes_dir = Path(recipes_dir)
+        # Runs and child processes may use different working directories.
+        # Pin both roots once so inherited env and Codex MCP overrides keep
+        # addressing the same state and recipe snapshots.
+        self._state_dir = Path(state_dir).resolve()
+        self._recipes_dir = Path(recipes_dir).resolve()
         self._memory_only = memory_only
         self._runs = RunIndex(self._state_dir)
         # memory_only has no durable checkpoint file to recompile from, so
