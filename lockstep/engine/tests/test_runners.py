@@ -225,6 +225,25 @@ def test_codex_argv_exact_hostile_prompt_stays_behind_terminator(tmp_path):
     ]
 
 
+def test_codex_child_mcp_override_is_before_exec_and_contains_no_credential(tmp_path):
+    exe = _fake_exe(tmp_path)
+    (tmp_path / "runners.yaml").write_text(textwrap.dedent(f"""
+        runners:
+          reviewer:
+            driver: codex
+            path: {exe}
+            models: [gpt-5.6-luna]
+    """))
+    spec = resolve(tmp_path, "reviewer", {})
+    wrapper = tmp_path / "state/codex-child-mcp"
+    argv = build_argv(spec, "review", None, None, str(wrapper))
+
+    assert argv[:4] == [
+        str(exe), "-c", f'mcp_servers.lockstep.command="{wrapper}"', "exec",
+    ]
+    assert argv[-2:] == ["--", "review"]
+
+
 def test_codex_resume_is_rejected_loudly(tmp_path):
     exe = _fake_exe(tmp_path)
     (tmp_path / "runners.yaml").write_text(textwrap.dedent(f"""

@@ -162,6 +162,33 @@ def test_codex_default_runner_completes_one_shot_and_records_thread(tmp_path, mo
     assert envelope["session_id"] == "fake-thread-1"
 
 
+def test_codex_fractal_uses_private_mcp_credential_wrapper(tmp_path, monkeypatch):
+    e, proj = make_engine(
+        tmp_path,
+        monkeypatch,
+        runner="codex",
+        driver="codex",
+        model="gpt-5.6-luna",
+    )
+    run = e.start("subcall-fractal-default", vars={}, project=str(proj))
+    pass_plan(e, proj, run)
+    child = e._runs.children(run["run_id"])[0]
+    workdir = (
+        tmp_path / "state" / "runs" /
+        f"{run['run_id']}.subcalls" / "review"
+    )
+    meta = json.loads((workdir / "proc.json").read_text())
+    wrapper = workdir / "codex-child-mcp"
+
+    assert wrapper.is_file()
+    assert child.run_id in wrapper.read_text()
+    assert child.nonce in wrapper.read_text()
+    assert child.nonce not in json.dumps(meta["argv"])
+    assert meta["argv"][1:4] == [
+        "-c", f'mcp_servers.lockstep.command="{wrapper}"', "exec",
+    ]
+
+
 def test_explicit_claude_runner_overrides_codex_adapter_default(tmp_path, monkeypatch):
     e, proj = make_engine(
         tmp_path,

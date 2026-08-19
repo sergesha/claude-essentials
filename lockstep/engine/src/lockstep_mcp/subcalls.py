@@ -88,13 +88,14 @@ def validate_resume_session(resume_session: Any) -> str:
 
 
 def safe_argv(spec: RunnerSpec, prompt: str, model: str | None = None,
-              resume_session: str | None = None) -> list[str]:
+              resume_session: str | None = None,
+              codex_mcp_command: str | None = None) -> list[str]:
     """The only sanctioned way to build a subcall argv: shape-gates
     resume_session, then delegates to the frozen ``runners.build_argv``
     (model allowlist, ``--`` terminator, prompt last)."""
     if resume_session is not None:
         resume_session = validate_resume_session(resume_session)
-    return build_argv(spec, prompt, model, resume_session)
+    return build_argv(spec, prompt, model, resume_session, codex_mcp_command)
 
 
 # --- process layer -----------------------------------------------------------

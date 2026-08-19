@@ -11,6 +11,7 @@ from an agent running as the same OS user (see ``assert_state_dir_sane``).
 from __future__ import annotations
 
 import os
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -176,7 +177,9 @@ def resolve(state_dir: Path, node_runner: str | None, env: Mapping[str, str]) ->
     return spec
 
 
-def build_argv(spec: RunnerSpec, prompt: str, model: str | None, resume_session: str | None) -> list[str]:
+def build_argv(spec: RunnerSpec, prompt: str, model: str | None,
+               resume_session: str | None,
+               codex_mcp_command: str | None = None) -> list[str]:
     if not spec.models:
         raise RunnerError(f"runner '{spec.name}': models allowlist is required and must be non-empty")
     if model is None:
@@ -195,8 +198,12 @@ def build_argv(spec: RunnerSpec, prompt: str, model: str | None, resume_session:
             raise RunnerError(
                 f"runner '{spec.name}': resume_session is not supported by the codex driver"
             )
-        argv = [
-            spec.path,
+        argv = [spec.path]
+        if codex_mcp_command is not None:
+            if not os.path.isabs(codex_mcp_command):
+                raise RunnerError("codex_mcp_command must be an absolute path")
+            argv += ["-c", f"mcp_servers.lockstep.command={json.dumps(codex_mcp_command)}"]
+        argv += [
             "exec",
             "--json",
             "--sandbox",
