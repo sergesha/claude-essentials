@@ -113,11 +113,15 @@ has been silent longer. Read only by the hooks — the engine neither reads nor 
 The shipped manifests intentionally do not emit unresolved optional
 placeholders for the first two variables, so absent values reach the engine's
 built-in defaults. Each adapter sets only its literal `LOCKSTEP_RUNNER` host
-default. To configure non-default state/recipe paths, export the variables in
-the parent environment before starting Claude Code or Codex so both MCP and
-separately launched hook processes inherit identical values. An MCP-entry-only
-`env` override is unsafe for `LOCKSTEP_STATE_DIR`: hooks would inspect a
-different default state directory and policy binding could fail closed.
+default. The defaults are the portable shared configuration for a stock plugin
+install. Claude can use non-default paths by exporting both variables before
+launch so its MCP and hook processes inherit the same values. Codex isolates a
+bundled stdio MCP server to the manifest's explicit environment, so arbitrary
+parent variables do not reach it: keep the defaults, or use an owner-maintained
+local plugin copy that injects identical literal values into `.mcp.json` and
+every hook command. An MCP-entry-only `LOCKSTEP_STATE_DIR` override is unsafe
+on either host because hooks would inspect a different state directory and
+policy binding could fail closed.
 
 ## Protecting the state dir, recipes, and the engine itself
 
