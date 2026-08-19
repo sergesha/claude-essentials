@@ -43,8 +43,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-from lockstep_mcp.runners import RunnerError, RunnerSpec, build_argv, verified_path
-from lockstep_mcp.runs import RunIndex  # no cycle: runs imports only locking
+from lockstep.runners import RunnerError, RunnerSpec, build_argv, verified_path
+from lockstep.runs import RunIndex  # no cycle: runs imports only locking
 
 _PROC = "proc.json"
 _OUT = "stdout.txt"

@@ -7,7 +7,7 @@ import stat
 import textwrap
 from pathlib import Path
 
-from lockstep_mcp.engine import Engine
+from lockstep.engine import Engine
 
 FIX = Path(__file__).parent / "fixtures" / "recipes"
 FAKE = Path(__file__).parent / "fixtures" / "fake_runner.py"

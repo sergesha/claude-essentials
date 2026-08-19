@@ -98,7 +98,7 @@ def test_launcher_resolves_engine_but_preserves_caller_cwd(tmp_path):
     lines = result.stdout.splitlines()
     assert lines[0] == str(project)
     assert lines[1:] == [
-        "run", "--project", str(ROOT / "engine"), "lockstep-mcp", "doctor",
+        "run", "--project", str(ROOT / "engine"), "lockstep", "doctor",
     ]
 
 

@@ -14,7 +14,7 @@ state:
 tools:
   run_checks:
     type: python
-    module: lockstep_mcp.validators
+    module: lockstep.validators
     function: run_checks
 
 # violation: recipe-level checkpointer block

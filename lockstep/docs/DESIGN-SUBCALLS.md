@@ -108,7 +108,7 @@ A subcall is a recipe-level triple using ONLY existing node types:
 ```yaml
   review_spawn:                # python — our hook, same channel as run_checks
     type: python
-    tool: subcall_spawn        # lockstep_mcp.subcalls:spawn
+    tool: subcall_spawn        # lockstep.subcalls:spawn
   review_wait:
     type: interrupt            # NATIVE park; message carries the subcall MARKER
     message: {step: _subcall, node: review, runner: claude}   # marker brief
@@ -117,7 +117,7 @@ A subcall is a recipe-level triple using ONLY existing node types:
     idempotent: false
   review_poll:
     type: python
-    tool: subcall_poll         # lockstep_mcp.subcalls:poll
+    tool: subcall_poll         # lockstep.subcalls:poll
 ```
 
 with a native `loop_until`-style conditional edge poll→wait while running,
@@ -129,7 +129,7 @@ Division of labor:
 |---|---|
 | Park, checkpoint, resume, poll loop, loop exit | yamlgraph/langgraph native (proven) |
 | Triple structure | recipe convention (profile-checked, like step triples) |
-| `subcall_spawn` / `subcall_poll` hooks | plugin module (`lockstep_mcp.subcalls`): spawn the child under a supervisor (`_subcall_wrapper.py`) via stdlib `subprocess` (portable options only — no `setsid`/`creationflags` platform branches); `proc.json` + captured output + first-writer-wins `exit.json` under `runs/<id>.subcalls/`; termination by touching the `cancel` file (the supervisor owns the handle — no pid-based liveness or kill); reattach after server restart is files-only |
+| `subcall_spawn` / `subcall_poll` hooks | plugin module (`lockstep.subcalls`): spawn the child under a supervisor (`_subcall_wrapper.py`) via stdlib `subprocess` (portable options only — no `setsid`/`creationflags` platform branches); `proc.json` + captured output + first-writer-wins `exit.json` under `runs/<id>.subcalls/`; termination by touching the `cancel` file (the supervisor owns the handle — no pid-based liveness or kill); reattach after server restart is files-only |
 | ONE new engine rule | a run parked on a `{step: _subcall}` marker is AUTO-POLLED on `scenario_status`/`scenario_done` entry (engine resumes with an internal `{_subcall_poll: true}` tick — `_`-prefixed = engine-internal channel, consistent with the verdict convention) instead of being served to the agent as a brief; a worker's `scenario_done` while a subcall is in progress is REFUSED with "subcall in progress: <node>, <runner>, <minutes>m"; status reports `{subcall: {node, runner, running_minutes}}` |
 
 Liveness model (stated honestly): polling happens ONLY on
@@ -348,7 +348,7 @@ suite must be green on both with zero platform skips in the core paths.
 
 ## Engine/API deltas (complete list)
 
-- `lockstep_mcp/subcalls.py` (new): spawn/poll hooks + process lifecycle
+- `lockstep/subcalls.py` (new): spawn/poll hooks + process lifecycle
   (pidfile records pid AND process start-time — a recycled pid after
   server restart must not read as "still running") + budgets + runner
   registry (absolute paths).

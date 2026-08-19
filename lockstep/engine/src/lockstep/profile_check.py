@@ -47,7 +47,7 @@ Rules enforced (errors unless noted):
 - Any baseline check (`fresh`/`unchanged`/`changed_in`/`diff_only`) present
   while top-level `baseline_globs` is absent/empty is an error — else the
   check errors forever at runtime, never a vacuous pass.
-- A `tools:` entry whose `module` is not under `lockstep_mcp.` is a
+- A `tools:` entry whose `module` is not under `lockstep.` is a
   WARNING, not an error (local `tools.py` — last resort, human review).
 
 The subcall triple (spawn -> `_subcall` marker -> poll) is a
@@ -92,7 +92,7 @@ import yaml
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
 
-from lockstep_mcp.validators import _path_covered
+from lockstep.validators import _path_covered
 
 FORBIDDEN_NODE_TYPES = {"llm", "agent", "router", "copilot", "race"}
 BASELINE_CHECK_TYPES = {"fresh", "unchanged", "changed_in", "diff_only"}
@@ -115,12 +115,12 @@ def _is_subcall_marker(message: Any) -> bool:
 
 def subcall_node_kind(node: Any, tools: dict) -> str | None:
     """Classify by RESOLVED module/function, never by tool NAME: a
-    recipe aliasing `my_spawn: {module: lockstep_mcp.subcalls, function:
+    recipe aliasing `my_spawn: {module: lockstep.subcalls, function:
     spawn}` must hit every subcall rule. Shared with Engine._predict_spawn."""
     if not isinstance(node, dict) or node.get("type") != "python":
         return None
     tool_cfg = tools.get(node.get("tool")) if isinstance(tools, dict) else None
-    if not isinstance(tool_cfg, dict) or tool_cfg.get("module") != "lockstep_mcp.subcalls":
+    if not isinstance(tool_cfg, dict) or tool_cfg.get("module") != "lockstep.subcalls":
         return None
     fn = tool_cfg.get("function")
     return fn if fn in ("spawn", "poll") else None
@@ -609,10 +609,10 @@ def check_recipe_full(
 
     for tname, tcfg in (doc.get("tools") or {}).items():
         module = tcfg.get("module") if isinstance(tcfg, dict) else None
-        if module and not module.startswith("lockstep_mcp."):
+        if module and not module.startswith("lockstep."):
             warnings.append(
                 f"local tools.py: tool '{tname}' references module '{module}' outside "
-                "lockstep_mcp — human review recommended"
+                "lockstep — human review recommended"
             )
 
     return errors, warnings

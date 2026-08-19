@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from lockstep_mcp.runs import RunIndex, TERMINAL_STATUSES
+from lockstep.runs import RunIndex, TERMINAL_STATUSES
 
 ISO_PREFIX_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
 
@@ -202,7 +202,7 @@ def test_update_refuses_identity_and_credential_fields(tmp_path):
 
 
 def test_create_raises_on_run_id_collision(tmp_path, monkeypatch):
-    import lockstep_mcp.runs as runs_mod
+    import lockstep.runs as runs_mod
 
     class _FixedUUID:
         hex = "deadbeefcafef00d"
@@ -282,7 +282,7 @@ def test_writes_are_serialized_under_lock(tmp_path):
 def test_every_save_happens_inside_a_lock_hold(tmp_path, monkeypatch):
     # every _save — create's included — must occur
     # between file_lock enter and exit.
-    import lockstep_mcp.runs as runs_mod
+    import lockstep.runs as runs_mod
     from contextlib import contextmanager
 
     real_lock = runs_mod.file_lock

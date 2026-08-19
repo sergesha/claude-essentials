@@ -9,8 +9,8 @@ import shutil
 
 import pytest
 
-from lockstep_mcp.engine import Engine, LockstepError
-from lockstep_mcp.runs import RunIndex
+from lockstep.engine import Engine, LockstepError
+from lockstep.runs import RunIndex
 
 from pathlib import Path
 
@@ -531,7 +531,7 @@ def test_a_second_report_while_one_is_in_flight_is_refused(tmp_path):
     # resume lands on the NEXT step's interrupt carrying a `pass` the
     # republish-only validator trusts — that step passes with its checks
     # never executed. The critical section is what makes that impossible.
-    from lockstep_mcp.locking import file_lock
+    from lockstep.locking import file_lock
 
     eng = _engine(tmp_path)
     project = _project(tmp_path)
@@ -552,7 +552,7 @@ def test_a_second_report_while_one_is_in_flight_is_refused(tmp_path):
 def test_status_still_answers_while_the_run_is_busy(tmp_path):
     # Busy is not an error to a reader: report the run as recorded, minus
     # the reconcile/auto-poll the holder is already doing.
-    from lockstep_mcp.locking import file_lock
+    from lockstep.locking import file_lock
 
     eng = _engine(tmp_path)
     project = _project(tmp_path)

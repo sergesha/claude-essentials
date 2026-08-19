@@ -30,8 +30,8 @@ Build **lockstep**: a self-sufficient flow-enforcement plugin.
   and Codex manifests both route MCP and hook verbs through the shared
   `scripts/lockstep-plugin` launcher, which resolves the adjacent engine; no
   PyPI dependency. A PyPI
-  package `lockstep-mcp` (name verified free 2026-08-07), installable via `uvx
-  lockstep-mcp==X.Y.Z`, is optional future distribution. No Docker required
+  package `lockstep` (name verified free 2026-08-07), installable via `uvx
+  lockstep==X.Y.Z`, is optional future distribution. No Docker required
   (optional image later if wanted). Releases via release-please, tag
   `lockstep-vX.Y.Z`.
 - **Standalone**: zero knowledge of ours-fleet or any other consumer. Vocabulary
@@ -129,7 +129,7 @@ state:
 tools:
   run_checks:
     type: python
-    module: lockstep_mcp.validators
+    module: lockstep.validators
     function: run_checks
 
 nodes:
@@ -334,8 +334,8 @@ all three need real design of their own, not a side-effect of v1.
 | 2. Stop-hook | active run + turn ends without done/escalate → block + remind (blocks ONCE per stop chain — our handler allows on `stop_hook_active`; the harness itself caps chains at 8 — a DELAY, never the guarantee) | model "forgot" the scenario |
 | 3. SessionStart-hook | after restart/compaction: "active run X, step N, criterion Y" | amnesia after restarts |
 | 4. Consumer permissions | deny writes to state dir / recipes / settings / hook scripts (README guidance, consumer-side) | gate self-modification; .db + recipe tampering via Bash |
-| 5. PreToolUse no-run gate (opt-in per project) | owner marks a project via `lockstep-mcp policy require --recipe <X>` (policy file in the agent-unwritable state dir); Write/Edit/NotebookEdit/Bash/Task are DENIED unless an active run of THE POLICY'S RECIPE exists in THIS project (any-recipe unlock would let the cheapest lying-around recipe open the gate); no Bash parsing, so heredoc bypasses are moot (Read/Grep stay open) | "agent never starts a run / works outside the mechanism" — in policy-marked projects, the path of least resistance IS `scenario_start` of the required recipe |
-| 6. Observability | `list_runs` shows stalled runs; `lockstep-mcp doctor` checks dirs + installed version, and fails loudly on an active run with no binding sidecar — the signature of a PostToolUse matcher that does not match this install's tool names (handler self-exec is still v2). Hook death is silent — nothing observes hook liveness; the engine's evidence gate is the load-bearing layer and does not depend on hooks. Known caveat: write-capable MCP tools from OTHER servers are outside the PreToolUse matcher — README lists it | silent ignoring |
+| 5. PreToolUse no-run gate (opt-in per project) | owner marks a project via `lockstep policy require --recipe <X>` (policy file in the agent-unwritable state dir); Write/Edit/NotebookEdit/Bash/Task are DENIED unless an active run of THE POLICY'S RECIPE exists in THIS project (any-recipe unlock would let the cheapest lying-around recipe open the gate); no Bash parsing, so heredoc bypasses are moot (Read/Grep stay open) | "agent never starts a run / works outside the mechanism" — in policy-marked projects, the path of least resistance IS `scenario_start` of the required recipe |
+| 6. Observability | `list_runs` shows stalled runs; `lockstep doctor` checks dirs + installed version, and fails loudly on an active run with no binding sidecar — the signature of a PostToolUse matcher that does not match this install's tool names (handler self-exec is still v2). Hook death is silent — nothing observes hook liveness; the engine's evidence gate is the load-bearing layer and does not depend on hooks. Known caveat: write-capable MCP tools from OTHER servers are outside the PreToolUse matcher — README lists it | silent ignoring |
 
 Hook handler discipline: only PreToolUse is internally fail-closed (it is
 the one hook that can actually block an action — any internal exception
@@ -393,11 +393,11 @@ status signal", not "process compliance".
 
 - **Dogfooded authoring scenario**: packaged `author.yaml` + builtin recipe
   search path in the wheel + owner-approval channel (e.g.
-  `lockstep-mcp approve <run>` nonce) — v2, designed together.
+  `lockstep approve <run>` nonce) — v2, designed together.
 - Gemini and other runner/plugin adapters.
 - Time-travel/fork, streaming.
 - Resumable escalation: in v1 `escalated` is TERMINAL. v2 design SETTLED
-  (2026-08-07): `lockstep-mcp approve <run>` run by the owner writes a
+  (2026-08-07): `lockstep approve <run>` run by the owner writes a
   nonce file into the agent-unwritable state dir; agent-callable
   `scenario_resume(run)` requires + consumes it (file existence in the
   denied dir IS the authentication — no new trust channel);

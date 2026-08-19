@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from lockstep_mcp import subcalls
-from lockstep_mcp.engine import Engine, LockstepError
+from lockstep import subcalls
+from lockstep.engine import Engine, LockstepError
 from _subcall_helpers import FAKE, FIX, make_engine, pass_plan, write_runners_yaml
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "recipes" / "examples"
@@ -737,7 +737,7 @@ def test_previous_baseline_is_snapshotted_before_the_child_is_spawned(tmp_path, 
     # of BEFORE the runner process exists — whatever the child writes in its
     # first moments must not be baked into it. The write from inside the
     # resume is the deterministic stand-in for that racing child.
-    from lockstep_mcp import engine as engine_mod
+    from lockstep import engine as engine_mod
 
     e, proj = make_engine(tmp_path, monkeypatch)
     src = proj / "src"; src.mkdir()

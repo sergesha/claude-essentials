@@ -12,9 +12,9 @@ state:
   _subcall_status: str
   _subcall_envelope: dict
 tools:
-  run_checks:    {type: python, module: lockstep_mcp.validators, function: run_checks}
-  subcall_spawn: {type: python, module: lockstep_mcp.subcalls, function: spawn}
-  subcall_poll:  {type: python, module: lockstep_mcp.subcalls, function: poll}
+  run_checks:    {type: python, module: lockstep.validators, function: run_checks}
+  subcall_spawn: {type: python, module: lockstep.subcalls, function: spawn}
+  subcall_poll:  {type: python, module: lockstep.subcalls, function: poll}
 nodes:
   step_plan:
     type: interrupt

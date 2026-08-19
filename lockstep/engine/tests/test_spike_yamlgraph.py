@@ -6,7 +6,7 @@ place.
 
 from pathlib import Path
 
-import lockstep_mcp.yamlgraph_api as yg
+import lockstep.yamlgraph_api as yg
 
 FIX = Path(__file__).parent / "fixtures" / "recipes" / "good" / "minimal.yaml"
 

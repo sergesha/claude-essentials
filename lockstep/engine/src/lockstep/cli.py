@@ -1,5 +1,5 @@
-"""`main()` argparse-routes the console-script verbs. `serve` (the default
-when no verb is given) runs the FastMCP app over stdio.
+"""`main()` argparse-routes the console-script verbs. Only explicit `serve`
+runs the FastMCP app over stdio.
 
 The hook/policy/doctor handlers:
 
@@ -50,8 +50,8 @@ from pathlib import Path
 
 import yaml
 
-from lockstep_mcp import __version__, sessions
-from lockstep_mcp.runs import ACTIVE_STATUS, RunIndex
+from lockstep import __version__, sessions
+from lockstep.runs import ACTIVE_STATUS, RunIndex
 
 # ---------------------------------------------------------------------------
 # shared paths / env
@@ -411,7 +411,7 @@ def hook_pretool(stdin_json: dict, state_dir: Path) -> tuple[int, str]:
 # under another key) is still accepted by hook_posttool — but only via
 # the server-stamped response marker (`sessions.BINDING_MARKER_KEY`), so
 # extending the platform matcher is the ONLY step such an install needs;
-# `lockstep-mcp doctor` detects the missed-binding state and says exactly
+# `lockstep doctor` detects the missed-binding state and says exactly
 # that.
 LOCKSTEP_TOOL_MATCHER = r"mcp__lockstep__.*|mcp__plugin_.+_lockstep__.*"
 _LOCKSTEP_TOOL_RE = re.compile(LOCKSTEP_TOOL_MATCHER)
@@ -655,7 +655,7 @@ def _read_stdin_json() -> dict:
 
 
 def _cmd_serve(args: argparse.Namespace) -> int:
-    from lockstep_mcp.server import app
+    from lockstep.server import app
 
     app.run()
     return 0
@@ -700,8 +700,8 @@ def _cmd_policy(args: argparse.Namespace) -> int:
     elif action == "clear":
         policy_clear(_state_dir(), args.project)
     else:
-        print("usage: lockstep-mcp policy require --project PATH --recipe NAME")
-        print("       lockstep-mcp policy clear --project PATH")
+        print("usage: lockstep policy require --project PATH --recipe NAME")
+        print("       lockstep policy clear --project PATH")
     return 0
 
 
@@ -728,7 +728,7 @@ _HANDLERS = {
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="lockstep-mcp")
+    parser = argparse.ArgumentParser(prog="lockstep")
     parser.add_argument("--version", action="store_true", help="print the installed version and exit")
     sub = parser.add_subparsers(dest="verb")
     for verb in _HANDLERS:
@@ -753,8 +753,9 @@ def main(argv: list[str] | None = None) -> int:
     if getattr(args, "version", False):
         print(__version__)
         return 0
-    verb = args.verb or "serve"
-    return _HANDLERS[verb](args)
+    if args.verb is None:
+        parser.error("the following arguments are required: verb")
+    return _HANDLERS[args.verb](args)
 
 
 if __name__ == "__main__":

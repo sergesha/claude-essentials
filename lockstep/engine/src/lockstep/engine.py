@@ -64,14 +64,14 @@ from typing import Any
 
 import yaml
 
-from lockstep_mcp import evidence as evidence_mod
-from lockstep_mcp import profile_check
-from lockstep_mcp import runners
-from lockstep_mcp import subcalls
-from lockstep_mcp import validators
-from lockstep_mcp import yamlgraph_api as yg
-from lockstep_mcp.locking import LockTimeout, file_lock
-from lockstep_mcp.runs import TERMINAL_STATUSES, RunIndex, RunRecord
+from lockstep import evidence as evidence_mod
+from lockstep import profile_check
+from lockstep import runners
+from lockstep import subcalls
+from lockstep import validators
+from lockstep import yamlgraph_api as yg
+from lockstep.locking import LockTimeout, file_lock
+from lockstep.runs import TERMINAL_STATUSES, RunIndex, RunRecord
 
 _PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_]\w*)\}")
 
@@ -1195,7 +1195,7 @@ class Engine:
                 f"export LOCKSTEP_RECIPES={shlex.quote(str(self._recipes_dir))}\n"
                 f"export LOCKSTEP_CHILD_RUN={shlex.quote(child_run)}\n"
                 f"export LOCKSTEP_CHILD_NONCE={shlex.quote(nonce)}\n"
-                f"exec uv run --project {shlex.quote(str(engine_dir))} lockstep-mcp \"$@\"\n"
+                f"exec uv run --project {shlex.quote(str(engine_dir))} lockstep \"$@\"\n"
             )
             tmp = workdir / f"codex-child-mcp.{os.getpid()}.{time.time_ns()}.tmp"
             try:

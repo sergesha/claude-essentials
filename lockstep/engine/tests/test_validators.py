@@ -6,7 +6,7 @@ r["verdict_status"] / r["verdict_reasons"], never nested.
 import json
 import subprocess
 
-from lockstep_mcp.validators import _path_covered, build_manifest, run_checks
+from lockstep.validators import _path_covered, build_manifest, run_checks
 
 
 def _state(checks, evidence, **ctx):

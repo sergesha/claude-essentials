@@ -50,7 +50,7 @@ live failure mode, not a style preference.
 
 **Every step is a triple**: an `interrupt` node (the agent-facing step) → an unconditional edge
 → a `python` validator node (`tool: run_checks`, wired once via `tools: { run_checks: {type:
-python, module: lockstep_mcp.validators, function: run_checks} }`) → two **conditional edges**
+python, module: lockstep.validators, function: run_checks} }`) → two **conditional edges**
 back out of the validator:
 
 ```yaml
@@ -251,8 +251,8 @@ their shape rather than improvising. `recipes/examples/feature-dev-reviewed.yaml
 
 ```yaml
 tools:
-  subcall_spawn: {type: python, module: lockstep_mcp.subcalls, function: spawn}
-  subcall_poll:  {type: python, module: lockstep_mcp.subcalls, function: poll}
+  subcall_spawn: {type: python, module: lockstep.subcalls, function: spawn}
+  subcall_poll:  {type: python, module: lockstep.subcalls, function: poll}
 
 nodes:
   review_spawn: {type: python, tool: subcall_spawn}
@@ -369,9 +369,9 @@ the project tree, and for what this setup does and does NOT guarantee.
 ## `tools:` / local `tools.py` policy — last resort
 
 A recipe's `tools:` block wires python functions as validator nodes. Every fixture and example
-in this repo wires exactly one: `run_checks` from `lockstep_mcp.validators` (the generic
+in this repo wires exactly one: `run_checks` from `lockstep.validators` (the generic
 check-registry runner — see the dialect crib above). If a recipe's `tools:` entry references a
-`module` NOT under `lockstep_mcp.` — i.e. a project-local `tools.py` with bespoke validation
+`module` NOT under `lockstep.` — i.e. a project-local `tools.py` with bespoke validation
 logic — the profile does not reject it, but flags it as a **warning**: "local tools.py: ...
 human review recommended". Treat that warning as a hard stop until a human has actually read
 the referenced module. A local tool runs arbitrary python as part of the graph; nothing in the

@@ -13,8 +13,8 @@ state:
   _subcall_status: str
   _subcall_envelope: dict
 tools:
-  subcall_spawn: {type: python, module: lockstep_mcp.subcalls, function: spawn}
-  subcall_poll:  {type: python, module: lockstep_mcp.subcalls, function: poll}
+  subcall_spawn: {type: python, module: lockstep.subcalls, function: spawn}
+  subcall_poll:  {type: python, module: lockstep.subcalls, function: poll}
 nodes:
   review_spawn: {type: python, tool: subcall_spawn}
   review_wait:

@@ -17,8 +17,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from lockstep_mcp import server
-from lockstep_mcp.engine import LockstepError
+from lockstep import server
+from lockstep.engine import LockstepError
 
 FIXTURES = Path(__file__).parent / "fixtures" / "recipes"
 GOOD = FIXTURES / "good"
@@ -132,7 +132,7 @@ def test_run_naming_responses_carry_the_binding_marker(tmp_path, monkeypatch):
     # response that names a run_id is stamped with the binding marker, so
     # binding survives ANY tool-name spelling the platform matcher lets
     # through. Responses without a run_id stay unstamped.
-    from lockstep_mcp import sessions
+    from lockstep import sessions
 
     _configure(monkeypatch, tmp_path)
 

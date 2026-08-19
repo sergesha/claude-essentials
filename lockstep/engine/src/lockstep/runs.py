@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from lockstep_mcp.locking import file_lock
+from lockstep.locking import file_lock
 
 ACTIVE_STATUS = "awaiting"
 TERMINAL_STATUSES = {"done", "escalated", "aborted"}

@@ -17,9 +17,9 @@ from pathlib import Path
 
 import pytest
 
-import lockstep_mcp.cli as cli
-from lockstep_mcp import server
-from lockstep_mcp.engine import LockstepError
+import lockstep.cli as cli
+from lockstep import server
+from lockstep.engine import LockstepError
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "recipes" / "examples"
 

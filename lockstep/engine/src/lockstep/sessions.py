@@ -39,7 +39,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from lockstep_mcp.locking import file_lock
+from lockstep.locking import file_lock
 
 # The response marker: the MCP server stamps this key into every tool
 # result that names a `run_id` (server._mark), and the PostToolUse hook

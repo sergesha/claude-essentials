@@ -32,9 +32,9 @@ from pathlib import Path
 
 import yaml
 
-import lockstep_mcp.cli as cli
-from lockstep_mcp import sessions
-from lockstep_mcp.runs import RunIndex
+import lockstep.cli as cli
+from lockstep import sessions
+from lockstep.runs import RunIndex
 
 S1 = "session-aaaa-1111"
 S2 = "session-bbbb-2222"
@@ -92,13 +92,13 @@ def _posttool(state: Path, proj: Path, session_id: str,
 
 
 def _bind(state: Path, run_id: str, session_id: str) -> None:
-    from lockstep_mcp import sessions
+    from lockstep import sessions
 
     assert sessions.touch(state, run_id, session_id, 30.0) in ("bound", "adopted")
 
 
 def _age_binding(state: Path, run_id: str, minutes: float) -> None:
-    from lockstep_mcp import sessions
+    from lockstep import sessions
 
     p = sessions.binding_path(state, run_id)
     data = json.loads(p.read_text())
@@ -118,7 +118,7 @@ def _denied(out: str) -> str:
 
 
 def test_owner_session_is_allowed_and_refreshed(tmp_path):
-    from lockstep_mcp import sessions
+    from lockstep import sessions
 
     proj, state = _setup(tmp_path)
     run_id = _mk_run(state, str(proj.resolve()))
@@ -179,7 +179,7 @@ def test_missing_session_id_fails_closed(tmp_path):
 
 
 def test_scenario_start_response_binds_the_starting_session(tmp_path):
-    from lockstep_mcp import sessions
+    from lockstep import sessions
 
     proj, state = _setup(tmp_path)
     run_id = _mk_run(state, str(proj.resolve()))
@@ -196,7 +196,7 @@ def test_scenario_start_response_binds_the_starting_session(tmp_path):
 def test_bind_reads_run_id_from_text_wrapped_tool_response(tmp_path):
     # MCP tool responses may arrive as content blocks with the JSON as
     # text — the run_id must still be found.
-    from lockstep_mcp import sessions
+    from lockstep import sessions
 
     proj, state = _setup(tmp_path)
     run_id = _mk_run(state, str(proj.resolve()))
@@ -212,7 +212,7 @@ def test_bind_reads_run_id_from_text_wrapped_tool_response(tmp_path):
 def test_status_poll_refreshes_the_owner_binding(tmp_path):
     # A parent waiting out a long subcall only polls scenario_status — that
     # touch must keep its binding live, or a poller could be robbed mid-wait.
-    from lockstep_mcp import sessions
+    from lockstep import sessions
 
     proj, state = _setup(tmp_path)
     run_id = _mk_run(state, str(proj.resolve()))
@@ -226,7 +226,7 @@ def test_status_poll_refreshes_the_owner_binding(tmp_path):
 
 
 def test_touch_ignores_terminal_and_unknown_runs(tmp_path):
-    from lockstep_mcp import sessions
+    from lockstep import sessions
 
     proj, state = _setup(tmp_path)
     run_id = _mk_run(state, str(proj.resolve()))
@@ -270,7 +270,7 @@ def _force_run_id(state: Path, old: str, new: str) -> None:
 
 
 def test_bind_from_recorded_plugin_install_payload(tmp_path):
-    from lockstep_mcp import sessions
+    from lockstep import sessions
 
     proj, state = _setup(tmp_path)
     payload = _recorded_payload()
@@ -332,7 +332,7 @@ def test_bind_from_plugin_install_under_any_plugin_name(tmp_path):
     # The recorded payload with ONLY the plugin install name changed — the
     # third shape the smoke report warned about. Binding must be
     # independent of what the user named the plugin.
-    from lockstep_mcp import sessions
+    from lockstep import sessions
 
     proj, state = _setup(tmp_path)
     payload = _recorded_payload()
@@ -386,13 +386,13 @@ def test_recorded_codex_payload_preserves_live_owner_and_stale_adoption(tmp_path
 
 
 def _marked(payload: dict) -> dict:
-    from lockstep_mcp import sessions
+    from lockstep import sessions
 
     return {**payload, sessions.BINDING_MARKER_KEY: sessions.BINDING_MARKER_VALUE}
 
 
 def test_custom_server_name_binds_via_response_marker(tmp_path):
-    from lockstep_mcp import sessions
+    from lockstep import sessions
 
     proj, state = _setup(tmp_path)
     run_id = _mk_run(state, str(proj.resolve()))
@@ -408,7 +408,7 @@ def test_custom_server_name_binds_via_response_marker(tmp_path):
 def test_foreign_tool_bare_run_id_never_binds(tmp_path):
     # A foreign mcp tool whose response happens to carry a live run_id —
     # the runs.json-through-a-file-read shape — must bind nothing.
-    from lockstep_mcp import sessions
+    from lockstep import sessions
 
     proj, state = _setup(tmp_path)
     run_id = _mk_run(state, str(proj.resolve()))
@@ -425,7 +425,7 @@ def test_foreign_tool_bare_run_id_never_binds(tmp_path):
 def test_marker_must_sit_beside_run_id_in_one_object(tmp_path):
     # Scattered coincidence is not identity: the marker key in one object
     # and a run_id in another must not combine into a binding.
-    from lockstep_mcp import sessions
+    from lockstep import sessions
 
     proj, state = _setup(tmp_path)
     run_id = _mk_run(state, str(proj.resolve()))
@@ -438,7 +438,7 @@ def test_marker_must_sit_beside_run_id_in_one_object(tmp_path):
 
 
 def test_non_mcp_tools_never_bind(tmp_path):
-    from lockstep_mcp import sessions
+    from lockstep import sessions
 
     proj, state = _setup(tmp_path)
     run_id = _mk_run(state, str(proj.resolve()))
@@ -459,7 +459,7 @@ def test_adoption_after_owner_crash(tmp_path):
     # silent past the window. The resumed conversation (NEW session id)
     # touches the run with scenario_status — the PostToolUse hook adopts —
     # and only then does the gate open for it.
-    from lockstep_mcp import sessions
+    from lockstep import sessions
 
     proj, state = _setup(tmp_path)
     run_id = _mk_run(state, str(proj.resolve()))
@@ -481,7 +481,7 @@ def test_adoption_after_owner_crash(tmp_path):
 def test_touch_cannot_steal_a_live_run(tmp_path):
     # The abuse case: a second session touches a run whose owner is live.
     # The binding must not move, and the gate must stay shut for the toucher.
-    from lockstep_mcp import sessions
+    from lockstep import sessions
 
     proj, state = _setup(tmp_path)
     run_id = _mk_run(state, str(proj.resolve()))
@@ -497,7 +497,7 @@ def test_touch_cannot_steal_a_live_run(tmp_path):
 
 
 def test_adoption_window_configurable_via_env(tmp_path, monkeypatch):
-    from lockstep_mcp import sessions
+    from lockstep import sessions
 
     proj, state = _setup(tmp_path)
     run_id = _mk_run(state, str(proj.resolve()))

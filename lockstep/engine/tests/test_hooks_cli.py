@@ -19,10 +19,10 @@ from pathlib import Path
 
 import yaml
 
-import lockstep_mcp.cli as cli
-from lockstep_mcp import sessions, validators
-from lockstep_mcp.engine import Engine
-from lockstep_mcp.runs import RunIndex
+import lockstep.cli as cli
+from lockstep import sessions, validators
+from lockstep.engine import Engine
+from lockstep.runs import RunIndex
 
 GOOD_RECIPES = Path(__file__).parent / "fixtures" / "recipes" / "good"
 SESSION = "session-under-test"

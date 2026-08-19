@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from lockstep_mcp.runners import (
+from lockstep.runners import (
     DEFAULTS,
     RunnerError,
     build_argv,
@@ -292,7 +292,7 @@ def test_model_must_be_allowlisted(tmp_path):
 
 
 def test_verified_path_revalidates_immediately_before_use(tmp_path):
-    from lockstep_mcp.runners import verified_path
+    from lockstep.runners import verified_path
 
     exe = _fake_exe(tmp_path); _write_runners(tmp_path, exe)
     spec = resolve(tmp_path, "claude", {})
@@ -308,7 +308,7 @@ def test_verified_path_revalidates_immediately_before_use(tmp_path):
 
 
 def test_state_dir_inside_project_is_rejected(tmp_path):
-    from lockstep_mcp.runners import assert_state_dir_sane
+    from lockstep.runners import assert_state_dir_sane
 
     project = tmp_path / "proj"
     (project / ".lockstep").mkdir(parents=True)
@@ -320,7 +320,7 @@ def test_state_dir_inside_project_is_rejected(tmp_path):
 
 
 def test_state_dir_symlink_into_project_is_rejected(tmp_path):
-    from lockstep_mcp.runners import assert_state_dir_sane
+    from lockstep.runners import assert_state_dir_sane
 
     project = tmp_path / "proj"
     (project / "inner").mkdir(parents=True)
@@ -337,7 +337,7 @@ def test_alias_spelling_of_project_is_still_inside(tmp_path):
     # (device+inode) catches it. Runtime-probe the filesystem: use the case
     # variant where it aliases the same dir, else a symlink alias — both
     # spellings resolve to the same inode, which is what samestat sees.
-    from lockstep_mcp.runners import assert_state_dir_sane
+    from lockstep.runners import assert_state_dir_sane
 
     project = tmp_path / "proj"
     project.mkdir()
@@ -350,7 +350,7 @@ def test_alias_spelling_of_project_is_still_inside(tmp_path):
 
 
 def test_home_shaped_state_dir_still_sane(tmp_path):
-    from lockstep_mcp.runners import assert_state_dir_sane
+    from lockstep.runners import assert_state_dir_sane
 
     home = tmp_path / "home"
     (home / "work" / "proj").mkdir(parents=True)
@@ -362,7 +362,7 @@ def test_home_shaped_state_dir_still_sane(tmp_path):
 
 
 def test_engine_start_refuses_state_dir_inside_project(tmp_path):
-    from lockstep_mcp.engine import Engine
+    from lockstep.engine import Engine
 
     project = tmp_path / "proj"
     project.mkdir()

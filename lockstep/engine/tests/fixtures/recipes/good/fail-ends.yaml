@@ -12,7 +12,7 @@ state:
   verdict_status: str
   verdict_reasons: list
 tools:
-  run_checks: {type: python, module: lockstep_mcp.validators, function: run_checks}
+  run_checks: {type: python, module: lockstep.validators, function: run_checks}
 nodes:
   step_one:
     type: interrupt

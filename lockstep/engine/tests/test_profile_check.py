@@ -10,8 +10,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from lockstep_mcp import yamlgraph_api as yg
-from lockstep_mcp.profile_check import check_recipe, check_recipe_full
+from lockstep import yamlgraph_api as yg
+from lockstep.profile_check import check_recipe, check_recipe_full
 
 FIXTURES = Path(__file__).parent / "fixtures" / "recipes"
 GOOD = FIXTURES / "good"

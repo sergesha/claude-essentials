@@ -12,7 +12,7 @@ import os
 
 import pytest
 
-from lockstep_mcp import server, subcalls
+from lockstep import server, subcalls
 from _subcall_helpers import FIX, write_runners_yaml
 
 

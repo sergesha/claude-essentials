@@ -21,15 +21,15 @@ state:
 tools:
   run_checks:
     type: python
-    module: lockstep_mcp.validators
+    module: lockstep.validators
     function: run_checks
   subcall_spawn:
     type: python
-    module: lockstep_mcp.subcalls
+    module: lockstep.subcalls
     function: spawn
   subcall_poll:
     type: python
-    module: lockstep_mcp.subcalls
+    module: lockstep.subcalls
     function: poll
 
 nodes:

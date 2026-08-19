@@ -23,4 +23,4 @@ if [ "${LOCKSTEP_RUNNER:-}" = codex ] && [ -z "${CODEX_HOME:-}" ]; then
   esac
 fi
 
-exec uv run --project "$lockstep_plugin_root/engine" lockstep-mcp "$@"
+exec uv run --project "$lockstep_plugin_root/engine" lockstep "$@"

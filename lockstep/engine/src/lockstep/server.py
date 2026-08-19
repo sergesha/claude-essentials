@@ -51,12 +51,12 @@ import yaml
 from mcp.server.mcpserver import Context
 from mcp.server.mcpserver import MCPServer as FastMCP
 
-from lockstep_mcp import evidence as evidence_mod
-from lockstep_mcp import profile_check
-from lockstep_mcp import sessions
-from lockstep_mcp import validators
-from lockstep_mcp import yamlgraph_api as yg
-from lockstep_mcp.engine import Engine, LockstepError
+from lockstep import evidence as evidence_mod
+from lockstep import profile_check
+from lockstep import sessions
+from lockstep import validators
+from lockstep import yamlgraph_api as yg
+from lockstep.engine import Engine, LockstepError
 
 app = FastMCP("lockstep")
 

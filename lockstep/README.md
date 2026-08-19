@@ -156,8 +156,8 @@ The honest guarantee above is conditional on this. Deny the agent write access t
   can edit the *live* file before ever calling `scenario_start` can smuggle a weakened recipe
   into the very run it then starts
 - the plugin/engine source itself (the installed plugin files,
-  including `lockstep/engine/`): v2 executes `lockstep_mcp/_subcall_wrapper.py` by path as the
-  subcall supervisor, and every hook/server invocation runs the cloned `lockstep_mcp` code — an
+  including `lockstep/engine/`): v2 executes `lockstep/_subcall_wrapper.py` by path as the
+  subcall supervisor, and every hook/server invocation runs the cloned `lockstep` code — an
   agent that can rewrite it replaces the supervisor and owns the "independent" session outright
 - the hooks/plugin config itself and the host's Claude/Codex settings, for the same reason
 
@@ -167,7 +167,7 @@ file permissions on those paths, nothing lockstep-specific enforces it.
 
 ## Policy gate + doctor
 
-**Policy gate** (opt-in per project): `lockstep-mcp policy require --project <path> --recipe
+**Policy gate** (opt-in per project): `lockstep policy require --project <path> --recipe
 <name>` writes a policy file under `$LOCKSTEP_STATE_DIR/policy.d/`, owner-authored only (the
 agent can't write there per the previous section). Once set, the PreToolUse hook denies
 `Write|Edit|NotebookEdit|apply_patch|Bash|Task|Agent` in that project unless **the calling session is driving an
@@ -198,13 +198,13 @@ nudge refreshes the parent's `updated`, which the gate does not read, and never 
 bindings. A spawned child session's gate is unchanged by bindings — its `LOCKSTEP_CHILD_RUN`
 credential plus an all-awaiting ancestry chain rooted in a policy-recipe run is the whole
 predicate; the env credential binds the child to its run more tightly than a sidecar could.
-`lockstep-mcp policy clear --project <path>` removes the gate. No policy file for a
+`lockstep policy clear --project <path>` removes the gate. No policy file for a
 project → always allowed (opt-in only, and bindings are policy-gate machinery only — no
 policy, no gate, regardless of bindings); policy file present but state unreadable → deny
 (internally fail-closed — the only hook that can, since it's the only one that actually blocks
 an action).
 
-**`lockstep-mcp doctor`**: diagnostic — state/recipes dirs exist, the installed version
+**`lockstep doctor`**: diagnostic — state/recipes dirs exist, the installed version
 (self-reported, informational — there's no external pin to check it against; distribution is
 the plugin's own cloned files), and the **binding-liveness check**: every ACTIVE run must have
 a `bindings/<run-id>.json` sidecar, written by the PostToolUse hook on the very
@@ -379,7 +379,7 @@ so the server reads the active workspace from Codex tool-call metadata. Hooks
 match a run to the current project by resolved-equality-or-parent-prefix.
 **VERIFIED live** for Claude (2026-08-07): a
 scratch project directory with a `.mcp.json` pointing `uv run --project
-<clone>/lockstep/engine lockstep-mcp serve` at a throwaway `LOCKSTEP_STATE_DIR`, driven by
+<clone>/lockstep/engine lockstep serve` at a throwaway `LOCKSTEP_STATE_DIR`, driven by
 `claude -p --mcp-config .mcp.json --strict-mcp-config --allowedTools
 "mcp__lockstep__scenario_start" --model haiku` with a prompt making exactly one
 `scenario_start(recipe="two-steps")` call. The resulting `runs.json` record's `project` field
@@ -411,7 +411,7 @@ equally dead). Three layers make binding independent of the spelling:
    marker beside it — so an install under a fully custom server name needs exactly one change,
    adding its prefix to the platform matcher, and no code edit; and a foreign tool's response
    containing a bare `run_id` (e.g. a file-read surfacing `runs.json`) can never bind.
-3. `lockstep-mcp doctor` detects the residual case loudly (see "Policy gate + doctor"): an
+3. `lockstep doctor` detects the residual case loudly (see "Policy gate + doctor"): an
    active run with no binding sidecar fails the report and names the matcher to fix.
 
 **Session binding VERIFIED live** (2026-08-07,

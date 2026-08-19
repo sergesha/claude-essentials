@@ -1,5 +1,5 @@
-"""cli.py verb routing. `serve` is the default verb and runs
-the FastMCP app; `hook-stop`/`hook-session-start`/`hook-pretool`/
+"""cli.py verb routing. Explicit `serve` runs the FastMCP app;
+`hook-stop`/`hook-session-start`/`hook-pretool`/
 `hook-posttool`/`policy` are no-ops with nothing configured. `doctor`'s
 exit code reflects health (missing dirs -> 1). This test asserts
 DISPATCH — the right handler is called for each verb — not a closed verb
@@ -12,16 +12,17 @@ developer's real `~/.lockstep`. `LOCKSTEP_RECIPES` likewise, for
 
 from __future__ import annotations
 
-import lockstep_mcp.cli as cli
-from lockstep_mcp import __version__
+import lockstep.cli as cli
+from lockstep import __version__
+import pytest
 
 
-def test_default_verb_dispatches_to_serve(monkeypatch):
-    calls = []
-    monkeypatch.setitem(cli._HANDLERS, "serve", lambda args: calls.append("serve") or 0)
+def test_no_verb_prints_argparse_usage_and_exits_nonzero(capsys):
+    with pytest.raises(SystemExit) as exit_status:
+        cli.main([])
 
-    assert cli.main([]) == 0
-    assert calls == ["serve"]
+    assert exit_status.value.code == 2
+    assert "serve" in capsys.readouterr().err
 
 
 def test_serve_verb_dispatches_explicitly(monkeypatch):

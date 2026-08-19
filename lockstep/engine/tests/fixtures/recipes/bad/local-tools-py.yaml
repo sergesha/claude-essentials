@@ -2,7 +2,7 @@ version: "1.0"
 name: lockstep-warn-local-tools-py
 description: >
   Warning fixture: otherwise identical to good/minimal.yaml, plus
-  a second tools: entry pointing outside lockstep_mcp (a project-local
+  a second tools: entry pointing outside lockstep (a project-local
   tools.py — last resort, human review). Expect: zero errors, one warning
   mentioning "tools.py".
 
@@ -16,7 +16,7 @@ state:
 tools:
   run_checks:
     type: python
-    module: lockstep_mcp.validators
+    module: lockstep.validators
     function: run_checks
   helper:
     type: python
