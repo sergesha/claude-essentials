@@ -6,6 +6,7 @@ for the error-verdict mechanic) under fixtures/recipes/good/.
 
 import json
 import shutil
+import yaml
 
 import pytest
 
@@ -27,6 +28,20 @@ def _project(tmp_path):
     p = tmp_path / "project"
     p.mkdir()
     return p
+
+
+def _effect_recipe(tmp_path, *, checks, allowed_writes):
+    recipes = tmp_path / "effect-recipes"
+    recipes.mkdir()
+    doc = yaml.safe_load((GOOD / "minimal.recipe.yaml").read_text())
+    doc["name"] = "effect"
+    doc["baseline_globs"] = ["**"]
+    message = doc["nodes"]["step_one"]["message"]
+    message["allowed_writes"] = allowed_writes
+    message["checks"] = checks
+    message["evidence_schema"] = {"required": [], "properties": {}}
+    (recipes / "effect.recipe.yaml").write_text(yaml.safe_dump(doc, sort_keys=False))
+    return recipes
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +114,59 @@ def test_durability_across_engine_instances(tmp_path):
     assert result["accepted"] is True
     assert result["passed"] is True
     assert result["done"] is True
+
+
+@pytest.mark.parametrize(
+    "checks",
+    [
+        [{"type": "file_exists", "path": "expected.txt"}],
+        [{"type": "file_exists", "path": "missing.txt"}],
+        [{"type": "cmd_ok", "command": "definitely-not-a-lockstep-command"}],
+        [],
+    ],
+    ids=["pass", "fail", "error", "no-checks"],
+)
+def test_effect_aware_brief_rejects_undeclared_mutation_before_routing(tmp_path, checks):
+    startup_checks = checks or [{"type": "file_exists", "path": "expected.txt"}]
+    eng = _engine(tmp_path, _effect_recipe(tmp_path, checks=startup_checks, allowed_writes=[]))
+    project = _project(tmp_path)
+    started = eng.start("effect", {}, str(project))
+    if not checks:
+        # yamlgraph profile rejects a source recipe with no checks; the
+        # runtime still must manifest-gate a damaged/old owned brief.
+        brief = dict(eng._runs.get(started["run_id"]).brief)
+        brief["checks"] = []
+        eng._runs.update(started["run_id"], brief=brief)
+    snapshot = eng._effect_snapshot_path(started["run_id"])
+    assert snapshot.exists()
+    (project / "undeclared.txt").write_text("mutation")
+
+    result = eng.done(started["run_id"], "one", {})
+
+    assert result["accepted"] is True
+    assert result["error"] is True
+    assert "integrity: undeclared project mutation: undeclared.txt" in result["reasons"]
+    assert eng._read_baseline_counter(started["run_id"]) == 0
+
+
+def test_effect_aware_valid_pass_advances_baseline_only_after_gate(tmp_path):
+    eng = _engine(
+        tmp_path,
+        _effect_recipe(
+            tmp_path,
+            checks=[{"type": "file_exists", "path": "out.txt"}],
+            allowed_writes=["out.txt"],
+        ),
+    )
+    project = _project(tmp_path)
+    started = eng.start("effect", {}, str(project))
+    (project / "out.txt").write_text("approved")
+
+    result = eng.done(started["run_id"], "one", {})
+
+    assert result["passed"] is True
+    assert eng._read_baseline_counter(started["run_id"]) == 1
+    assert "out.txt" in json.loads(eng._baseline_n_path(started["run_id"], 1).read_text())
 
 
 # ---------------------------------------------------------------------------

@@ -20,6 +20,16 @@ class PathContractError(ValueError):
     """A path cannot safely be used as a project write surface."""
 
 
+# Narrow test seams for deterministic swap/mutation regressions.  Production
+# leaves both as no-ops; the checks after the seam are the security boundary.
+def _before_regular_hash() -> None:
+    return None
+
+
+def _before_directory_open() -> None:
+    return None
+
+
 def _sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
@@ -39,11 +49,13 @@ def _read_regular_nofollow(path: Path) -> bytes:
         raise PathContractError(f"project entry changed while capturing: {path}") from exc
     try:
         opened = os.fstat(fd)
-        if opened.st_dev != expected.st_dev or opened.st_ino != expected.st_ino:
+        if _identity(opened) != _identity(expected):
             raise PathContractError(f"project entry changed while capturing: {path}")
         chunks: list[bytes] = []
         while chunk := os.read(fd, 1024 * 1024):
             chunks.append(chunk)
+        if _identity(os.fstat(fd)) != _identity(expected):
+            raise PathContractError(f"project entry changed while capturing: {path}")
         return b"".join(chunks)
     finally:
         os.close(fd)
@@ -58,7 +70,9 @@ def _optional_regular_sha256(path: Path) -> str | None:
         raise
 
 
-def _sha256_regular_nofollow(path: Path, expected: os.stat_result) -> str:
+def _sha256_regular_nofollow(
+    path: Path | str, expected: os.stat_result, *, dir_fd: int | None = None
+) -> str:
     """Hash the exact regular file lstat'd by the manifest walk.
 
     An ``lstat`` followed by ``Path.read_bytes`` is a symlink-swap window.
@@ -67,23 +81,33 @@ def _sha256_regular_nofollow(path: Path, expected: os.stat_result) -> str:
     """
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(path, flags)
+        fd = os.open(path, flags, dir_fd=dir_fd)
     except OSError as exc:
         raise PathContractError(f"project entry changed while capturing: {path}") from exc
     try:
         opened = os.fstat(fd)
-        if (
-            not stat.S_ISREG(opened.st_mode)
-            or opened.st_dev != expected.st_dev
-            or opened.st_ino != expected.st_ino
-        ):
+        if not stat.S_ISREG(opened.st_mode) or _identity(opened) != _identity(expected):
             raise PathContractError(f"project entry changed while capturing: {path}")
+        _before_regular_hash()
         digest = hashlib.sha256()
         while chunk := os.read(fd, 1024 * 1024):
             digest.update(chunk)
+        if _identity(os.fstat(fd)) != _identity(expected):
+            raise PathContractError(f"project entry changed while capturing: {path}")
         return digest.hexdigest()
     finally:
         os.close(fd)
+
+
+def _identity(metadata: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
 
 
 def _collision_key(part: str) -> str:
@@ -142,7 +166,7 @@ class ProjectWritePath:
         if any(_is_windows_alias(part) for part in parts):
             raise PathContractError(f"platform path alias is not allowed: {raw!r}")
         relative = PurePosixPath(*parts)
-        if relative.parts[0] == ".git":
+        if _collision_key(relative.parts[0]) == _collision_key(".git"):
             raise PathContractError(".git is never a project write surface")
 
         root = Path(project).resolve()
@@ -183,6 +207,7 @@ class GitAttestation:
     head_sha256: str | None
     index_sha256: str | None
     worktree_config_sha256: str | None
+    worktree_config_worktree_sha256: str | None
     common_config_sha256: str | None
     common_refs_sha256: str
     linkage_sha256: str
@@ -199,6 +224,70 @@ class EffectResult:
     integrity_error: bool
     reasons: tuple[str, ...]
     baseline_eligible: bool
+
+
+def snapshot_to_data(snapshot: ProjectSnapshot) -> dict[str, object]:
+    """Stable, JSON-safe durable representation for an ownership boundary."""
+    return {
+        "entries": [
+            {
+                "path": entry.path,
+                "kind": entry.kind,
+                "executable": entry.executable,
+                "sha256": entry.sha256,
+            }
+            for entry in snapshot.entries
+        ],
+        "git": None
+        if snapshot.git is None
+        else {
+            "head_sha256": snapshot.git.head_sha256,
+            "index_sha256": snapshot.git.index_sha256,
+            "worktree_config_sha256": snapshot.git.worktree_config_sha256,
+            "worktree_config_worktree_sha256": snapshot.git.worktree_config_worktree_sha256,
+            "common_config_sha256": snapshot.git.common_config_sha256,
+            "common_refs_sha256": snapshot.git.common_refs_sha256,
+            "linkage_sha256": snapshot.git.linkage_sha256,
+        },
+    }
+
+
+def snapshot_from_data(data: object) -> ProjectSnapshot:
+    """Parse an owner-state snapshot defensively; malformed state fails closed."""
+    if not isinstance(data, dict) or not isinstance(data.get("entries"), list):
+        raise PathContractError("invalid effect snapshot")
+    entries: list[ManifestEntry] = []
+    for item in data["entries"]:
+        if not isinstance(item, dict):
+            raise PathContractError("invalid effect snapshot entry")
+        path, kind, executable, digest = (
+            item.get("path"), item.get("kind"), item.get("executable"), item.get("sha256")
+        )
+        if (
+            not isinstance(path, str)
+            or kind not in {"file", "directory", "symlink"}
+            or not isinstance(executable, bool)
+            or (digest is not None and not isinstance(digest, str))
+        ):
+            raise PathContractError("invalid effect snapshot entry")
+        entries.append(ManifestEntry(path, kind, executable, digest))
+    raw_git = data.get("git")
+    if raw_git is None:
+        git = None
+    elif isinstance(raw_git, dict):
+        required = {
+            "head_sha256", "index_sha256", "worktree_config_sha256",
+            "worktree_config_worktree_sha256", "common_config_sha256",
+            "common_refs_sha256", "linkage_sha256",
+        }
+        if set(raw_git) != required or any(
+            raw_git[key] is not None and not isinstance(raw_git[key], str) for key in required
+        ) or not isinstance(raw_git["common_refs_sha256"], str) or not isinstance(raw_git["linkage_sha256"], str):
+            raise PathContractError("invalid Git effect snapshot")
+        git = GitAttestation(**raw_git)
+    else:
+        raise PathContractError("invalid Git effect snapshot")
+    return ProjectSnapshot(tuple(entries), git)
 
 
 def _ensure_directory_without_symlinks(path: Path) -> None:
@@ -264,54 +353,93 @@ def _git_dir(project: Path) -> tuple[Path | None, Path | None, bytes]:
         if common_candidate != candidate.parent.parent:
             raise PathContractError(f"escaping commondir marker: {commondir_marker}")
         _ensure_directory_without_symlinks(common_candidate)
+        own_linkage_marker = candidate / "gitdir"
+        own_linkage = _parse_marker(own_linkage_marker, b"").decode("utf-8", "surrogateescape")
+        own_linkage_path = Path(own_linkage)
+        if not own_linkage_path.is_absolute():
+            own_linkage_path = Path(os.path.normpath(candidate / own_linkage_path))
+        expected_project_marker = project / ".git"
+        try:
+            expected_mode = os.lstat(expected_project_marker).st_mode
+        except FileNotFoundError as exc:
+            raise PathContractError(f"missing linked-worktree marker: {expected_project_marker}") from exc
+        if (
+            stat.S_ISLNK(expected_mode)
+            or not stat.S_ISREG(expected_mode)
+            or own_linkage_path.resolve() != expected_project_marker.resolve()
+        ):
+            raise PathContractError(f"invalid linked-worktree linkage: {own_linkage_marker}")
         return (
             candidate,
             common_candidate,
             b"file:" + _read_regular_nofollow(marker)
-            + b";commondir:" + _read_regular_nofollow(commondir_marker),
+            + b";commondir:" + _read_regular_nofollow(commondir_marker)
+            + b";gitdir:" + _read_regular_nofollow(own_linkage_marker),
         )
     raise PathContractError(f"invalid Git marker: {marker}")
 
 
 def _metadata_tree_digest(root: Path, names: Sequence[str]) -> str:
     digest = hashlib.sha256()
-    for name in names:
-        node = root / name
-        try:
-            node_mode = os.lstat(node).st_mode
-        except FileNotFoundError:
-            digest.update(f"absent:{name}\0".encode())
-            continue
-        if stat.S_ISLNK(node_mode):
-            raise PathContractError(f"symlink in frozen Git metadata: {node}")
-        if stat.S_ISREG(node_mode):
-            digest.update(f"file:{name}\0".encode())
-            digest.update(_sha256_regular_nofollow(node, os.lstat(node)).encode())
-            continue
-        if not stat.S_ISDIR(node_mode):
-            raise PathContractError(f"invalid frozen Git metadata: {node}")
-        for directory, dirs, files in os.walk(node, followlinks=False):
-            directory_path = Path(directory)
-            for dirname in dirs:
-                directory_stat = os.lstat(directory_path / dirname)
-                if stat.S_ISLNK(directory_stat.st_mode):
-                    raise PathContractError(
-                        f"symlink in frozen Git metadata: {directory_path / dirname}"
-                    )
-                if not stat.S_ISDIR(directory_stat.st_mode):
-                    raise PathContractError(
-                        f"invalid frozen Git metadata: {directory_path / dirname}"
-                    )
-            for filename in sorted(files):
-                item = directory_path / filename
-                relative = item.relative_to(root).as_posix()
-                item_stat = os.lstat(item)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+
+    def digest_directory(directory_fd: int, expected: os.stat_result, prefix: str) -> None:
+        with os.scandir(directory_fd) as children:
+            for child in sorted(children, key=lambda item: item.name):
+                relative = f"{prefix}/{child.name}" if prefix else child.name
+                item_stat = os.stat(child.name, dir_fd=directory_fd, follow_symlinks=False)
                 if stat.S_ISLNK(item_stat.st_mode):
-                    raise PathContractError(f"symlink in frozen Git metadata: {item}")
-                if not stat.S_ISREG(item_stat.st_mode):
-                    raise PathContractError(f"invalid frozen Git metadata: {item}")
-                digest.update(f"file:{relative}\0".encode())
-                digest.update(_sha256_regular_nofollow(item, item_stat).encode())
+                    raise PathContractError(f"symlink in frozen Git metadata: {relative}")
+                if stat.S_ISREG(item_stat.st_mode):
+                    digest.update(f"file:{relative}\0".encode())
+                    digest.update(_sha256_regular_nofollow(child.name, item_stat, dir_fd=directory_fd).encode())
+                elif stat.S_ISDIR(item_stat.st_mode):
+                    try:
+                        child_fd = os.open(child.name, flags, dir_fd=directory_fd)
+                    except OSError as exc:
+                        raise PathContractError(f"Git metadata directory changed while capturing: {relative}") from exc
+                    try:
+                        if _identity(os.fstat(child_fd)) != _identity(item_stat):
+                            raise PathContractError(f"Git metadata directory changed while capturing: {relative}")
+                        digest_directory(child_fd, item_stat, relative)
+                    finally:
+                        os.close(child_fd)
+                else:
+                    raise PathContractError(f"invalid frozen Git metadata: {relative}")
+        if _identity(os.fstat(directory_fd)) != _identity(expected):
+            raise PathContractError(f"Git metadata directory changed while capturing: {prefix}")
+
+    try:
+        root_fd = os.open(root, flags)
+    except OSError as exc:
+        raise PathContractError(f"cannot safely open frozen Git metadata: {root}") from exc
+    try:
+        for name in names:
+            try:
+                node_stat = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                digest.update(f"absent:{name}\0".encode())
+                continue
+            if stat.S_ISLNK(node_stat.st_mode):
+                raise PathContractError(f"symlink in frozen Git metadata: {name}")
+            if stat.S_ISREG(node_stat.st_mode):
+                digest.update(f"file:{name}\0".encode())
+                digest.update(_sha256_regular_nofollow(name, node_stat, dir_fd=root_fd).encode())
+                continue
+            if not stat.S_ISDIR(node_stat.st_mode):
+                raise PathContractError(f"invalid frozen Git metadata: {name}")
+            try:
+                node_fd = os.open(name, flags, dir_fd=root_fd)
+            except OSError as exc:
+                raise PathContractError(f"Git metadata directory changed while capturing: {name}") from exc
+            try:
+                if _identity(os.fstat(node_fd)) != _identity(node_stat):
+                    raise PathContractError(f"Git metadata directory changed while capturing: {name}")
+                digest_directory(node_fd, node_stat, name)
+            finally:
+                os.close(node_fd)
+    finally:
+        os.close(root_fd)
     return digest.hexdigest()
 
 
@@ -325,6 +453,7 @@ def capture_git_attestation(project: Path) -> GitAttestation | None:
         head_sha256=_optional_regular_sha256(git_dir / "HEAD"),
         index_sha256=_optional_regular_sha256(git_dir / "index"),
         worktree_config_sha256=_optional_regular_sha256(git_dir / "config"),
+        worktree_config_worktree_sha256=_optional_regular_sha256(git_dir / "config.worktree"),
         common_config_sha256=_optional_regular_sha256(common_dir / "config"),
         common_refs_sha256=_metadata_tree_digest(common_dir, ("refs", "packed-refs")),
         linkage_sha256=_sha256_bytes(linkage),
@@ -337,7 +466,13 @@ def _is_dependency(rel: str, dependencies: Sequence[str]) -> bool:
 
 def capture_project(project: Path, dependencies: Iterable[ProjectWritePath | str] = ()) -> ProjectSnapshot:
     """Capture every filesystem entry below ``project`` without following links."""
-    root = Path(project).resolve()
+    supplied_root = Path(project)
+    try:
+        if stat.S_ISLNK(os.lstat(supplied_root).st_mode):
+            raise PathContractError(f"project root may not be a symlink: {supplied_root}")
+    except FileNotFoundError:
+        pass
+    root = supplied_root.resolve()
     if not root.is_dir():
         raise PathContractError(f"project root is not a directory: {root}")
     ignored: list[str] = []
@@ -349,8 +484,8 @@ def capture_project(project: Path, dependencies: Iterable[ProjectWritePath | str
 
     entries: list[ManifestEntry] = []
 
-    def walk(directory: Path, rel_prefix: str = "") -> None:
-        with os.scandir(directory) as children:
+    def walk(directory_fd: int, expected_directory: os.stat_result, rel_prefix: str = "") -> None:
+        with os.scandir(directory_fd) as children:
             seen: dict[str, str] = {}
             for child in sorted(children, key=lambda item: item.name):
                 key = _collision_key(child.name)
@@ -360,26 +495,67 @@ def capture_project(project: Path, dependencies: Iterable[ProjectWritePath | str
                     )
                 seen[key] = child.name
                 rel = f"{rel_prefix}/{child.name}" if rel_prefix else child.name
+                if _collision_key(child.name) == _collision_key(".git") and child.name != ".git":
+                    raise PathContractError(f"reserved .git alias in project: {child.name!r}")
                 if rel == ".git" or rel.startswith(".git/") or _is_dependency(rel, ignored):
                     continue
-                child_path = Path(child.path)
-                mode = os.lstat(child_path).st_mode
+                try:
+                    child_stat = os.stat(child.name, dir_fd=directory_fd, follow_symlinks=False)
+                except FileNotFoundError as exc:
+                    raise PathContractError(f"project entry changed while capturing: {rel}") from exc
+                mode = child_stat.st_mode
                 executable = bool(mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
                 if stat.S_ISLNK(mode):
-                    target = os.readlink(child_path)
+                    try:
+                        target = os.readlink(child.name, dir_fd=directory_fd)
+                    except OSError as exc:
+                        raise PathContractError(f"project entry changed while capturing: {rel}") from exc
+                    if _identity(os.stat(child.name, dir_fd=directory_fd, follow_symlinks=False)) != _identity(child_stat):
+                        raise PathContractError(f"project entry changed while capturing: {rel}")
                     entries.append(ManifestEntry(rel, "symlink", False, _sha256_bytes(os.fsencode(target))))
                 elif stat.S_ISDIR(mode):
                     entries.append(ManifestEntry(rel, "directory", executable, None))
-                    walk(child_path, rel)
+                    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+                    _before_directory_open()
+                    try:
+                        child_fd = os.open(child.name, flags, dir_fd=directory_fd)
+                    except OSError as exc:
+                        raise PathContractError(f"project directory changed while capturing: {rel}") from exc
+                    try:
+                        opened = os.fstat(child_fd)
+                        if _identity(opened) != _identity(child_stat):
+                            raise PathContractError(f"project directory changed while capturing: {rel}")
+                        walk(child_fd, child_stat, rel)
+                        if _identity(os.fstat(child_fd)) != _identity(child_stat):
+                            raise PathContractError(f"project directory changed while capturing: {rel}")
+                    finally:
+                        os.close(child_fd)
                 elif stat.S_ISREG(mode):
-                    entries.append(ManifestEntry(rel, "file", executable, _sha256_regular_nofollow(child_path, os.lstat(child_path))))
+                    entries.append(
+                        ManifestEntry(
+                            rel, "file", executable,
+                            _sha256_regular_nofollow(child.name, child_stat, dir_fd=directory_fd),
+                        )
+                    )
                 else:
                     # Device/socket/FIFO entries have no safe portable project
                     # representation.  Treating them as a regular file would
                     # make the contract lie, so fail before execution routing.
                     raise PathContractError(f"unsupported project entry: {rel}")
 
-    walk(root)
+        if _identity(os.fstat(directory_fd)) != _identity(expected_directory):
+            raise PathContractError(f"project directory changed while capturing: {rel_prefix or root}")
+
+    root_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        root_fd = os.open(root, root_flags)
+    except OSError as exc:
+        raise PathContractError(f"cannot safely open project root: {root}") from exc
+    try:
+        root_stat = os.fstat(root_fd)
+        walk(root_fd, root_stat)
+    finally:
+        os.close(root_fd)
     return ProjectSnapshot(entries=tuple(entries), git=capture_git_attestation(root))
 
 
@@ -397,8 +573,11 @@ def compare_effect(
     changed = sorted(path for path in old.keys() | new.keys() if old.get(path) != new.get(path))
     reasons: list[str] = []
     for path in changed:
-        entry = new.get(path)
-        if entry is not None and entry.kind == "symlink":
+        old_entry = old.get(path)
+        new_entry = new.get(path)
+        if (old_entry is not None and old_entry.kind == "symlink") or (
+            new_entry is not None and new_entry.kind == "symlink"
+        ):
             reasons.append(f"integrity: symlink output is forbidden: {path}")
         elif not any(surface.allows(path) for surface in allowed):
             reasons.append(f"integrity: undeclared project mutation: {path}")

@@ -70,6 +70,25 @@ class SandboxProvider(Protocol):
     ) -> ProcessHandle: ...
 
 
+def spawn_verified(
+    provider: SandboxProvider,
+    policy: SandboxPolicy,
+    argv: Sequence[str],
+    *,
+    stdin: bytes = b"",
+) -> ProcessHandle:
+    """Preflight and verify a provider before any managed process starts."""
+    attestation = provider.preflight(policy)
+    if (
+        attestation.policy_digest != policy.digest
+        or not attestation.denies_outside_workspace
+        or not attestation.denies_vcs_write
+        or not attestation.denies_symlink_escape
+    ):
+        raise ValueError("sandbox attestation does not satisfy the required policy")
+    return provider.spawn(policy, argv, stdin=stdin)
+
+
 class FakeSandboxProvider:
     """Test-only provider: records an argv array and never invokes a process."""
 

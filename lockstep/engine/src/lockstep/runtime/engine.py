@@ -70,6 +70,13 @@ from lockstep.recipe.loader import RecipeError, RecipeLoader
 from lockstep.runtime import evidence as evidence_mod
 from lockstep.runtime import runners, subcalls, validators
 from lockstep.runtime.locking import LockTimeout, file_lock
+from lockstep.runtime.manifests import (
+    PathContractError,
+    ProjectWritePath,
+    capture_project,
+    snapshot_from_data,
+    snapshot_to_data,
+)
 from lockstep.runtime.runs import TERMINAL_STATUSES, RunIndex, RunRecord
 
 _PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_]\w*)\}")
@@ -221,6 +228,9 @@ class Engine:
     def _baseline_counter_path(self, run_id: str) -> Path:
         return self._runs_dir() / f"{run_id}.baseline_index"
 
+    def _effect_snapshot_path(self, run_id: str) -> Path:
+        return self._runs_dir() / f"{run_id}.effect.json"
+
     def route_log_path(self, run_id: str) -> Path:
         return self._runs_dir() / f"{run_id}.route.jsonl"
 
@@ -320,12 +330,46 @@ class Engine:
         )
 
     def _brief_to_dict(self, brief: yg.StepBrief) -> dict:
-        return {
+        saved = {
             "step": brief.step,
             "task": brief.task,
             "exit_criterion": brief.exit_criterion,
             "evidence_schema": brief.evidence_schema,
             "checks": brief.checks,
+        }
+        # `raw` is a compiler/recipe snapshot, never agent evidence.  Keep
+        # only this closed field; forwarding arbitrary raw message data would
+        # turn yamlgraph configuration into an implicit authority surface.
+        if "allowed_writes" in brief.raw:
+            saved["allowed_writes"] = brief.raw["allowed_writes"]
+        return saved
+
+    def _effect_paths(self, brief: dict, project: str) -> tuple[ProjectWritePath, ...] | None:
+        if "allowed_writes" not in brief:
+            return None
+        raw_paths = brief["allowed_writes"]
+        if not isinstance(raw_paths, list) or any(not isinstance(path, str) for path in raw_paths):
+            raise PathContractError("invalid closed allowed_writes contract")
+        return tuple(ProjectWritePath.parse(path, Path(project)) for path in raw_paths)
+
+    def _capture_effect_boundary(self, run_id: str, project: str, brief: dict) -> None:
+        paths = self._effect_paths(brief, project)
+        snapshot_path = self._effect_snapshot_path(run_id)
+        if paths is None:
+            snapshot_path.unlink(missing_ok=True)
+            return
+        self._write_json(snapshot_path, snapshot_to_data(capture_project(Path(project))))
+
+    def _effect_context(self, run_id: str, project: str, brief: dict) -> dict[str, Any]:
+        paths = self._effect_paths(brief, project)
+        if paths is None:
+            return {}
+        snapshot_path = self._effect_snapshot_path(run_id)
+        if not snapshot_path.is_file():
+            raise PathContractError("missing effect snapshot at owned step boundary")
+        return {
+            "_effect_before": snapshot_from_data(json.loads(snapshot_path.read_text())),
+            "_effect_allowed": paths,
         }
 
     # ------------------------------------------------------------------
@@ -572,6 +616,10 @@ class Engine:
         substituted = self._substitute_brief(adv.brief, vars)
         record.step = substituted.step
         record.brief = self._brief_to_dict(substituted)
+        try:
+            self._capture_effect_boundary(run_id, project, record.brief)
+        except PathContractError as exc:
+            raise LockstepError(f"invalid effect contract at start: {exc}") from exc
         self._runs.insert(record)
 
         return {
@@ -682,6 +730,16 @@ class Engine:
             return {"accepted": False, "errors": path_errors}
 
         globs = self._read_baseline_globs(self._snapshot_path(run_id))
+        try:
+            effect_context = self._effect_context(run_id, record.project, brief_dict)
+        except PathContractError as exc:
+            return {
+                "accepted": True,
+                "passed": False,
+                "error": True,
+                "reasons": [f"integrity: {exc}"],
+                "step": step,
+            }
         state = {
             "brief": brief_dict,
             "evidence": raw_evidence,
@@ -690,10 +748,12 @@ class Engine:
             "_baseline_prev": str(self._current_prev_baseline_path(run_id)),
             "_baseline_globs": globs,
             "_state": self._peek_state(run_id),
+            **effect_context,
         }
         verdict = validators.run_checks(state, execute=True)
         vstatus = verdict["verdict_status"]
         reasons = list(verdict.get("verdict_reasons") or [])
+        effect_baseline_eligible = bool(verdict.get("effect_baseline_eligible", True))
 
         if vstatus == "error":
             # never resume; loop budget untouched by
@@ -739,7 +799,7 @@ class Engine:
         # really advance (never on the loop-cap escalate below).
         pending_baseline = (
             validators.build_manifest(Path(record.project), globs)
-            if vstatus == "pass"
+            if vstatus == "pass" and effect_baseline_eligible
             else None
         )
         resume_payload = {**raw_evidence, "_verdict_status": vstatus,
@@ -827,6 +887,14 @@ class Engine:
                 "reasons": [note],
             }
 
+        if not effect_baseline_eligible:
+            return {
+                "accepted": True,
+                "passed": False,
+                "error": True,
+                "reasons": ["integrity: valid PASS lacked an eligible effect baseline"],
+                "step": step,
+            }
         self._advance_baseline(run_id, record.project, globs, manifest=pending_baseline)
 
         parked = self._maybe_park_subcall(
@@ -850,7 +918,18 @@ class Engine:
 
         vars_ = self._read_vars(run_id)
         substituted = self._substitute_brief(adv.brief, vars_)
-        self._runs.update(run_id, step=substituted.step, brief=self._brief_to_dict(substituted))
+        next_brief = self._brief_to_dict(substituted)
+        try:
+            self._capture_effect_boundary(run_id, record.project, next_brief)
+        except PathContractError as exc:
+            return {
+                "accepted": True,
+                "passed": False,
+                "error": True,
+                "reasons": [f"integrity: {exc}"],
+                "step": step,
+            }
+        self._runs.update(run_id, step=substituted.step, brief=next_brief)
         self._log_transition(run_id, step, "pass", substituted.step)
         return {
             "accepted": True,

@@ -600,34 +600,34 @@ def run_checks(state: dict[str, Any], execute: bool = False) -> dict[str, Any]:
         "_state": state.get("_state") or {},
     }
 
-    if not checks:
-        return {"verdict_status": "fail", "verdict_reasons": ["no checks configured"]}
-
     reasons: list[str] = []
     deferred: list[dict] = []
-    try:
-        for check in checks:
-            ctype = check.get("type")
-            if ctype == "unchanged":
-                # TOCTOU guard: unchanged re-hashes AFTER every command in
-                # this pass, regardless of its position in the list.
-                deferred.append(check)
-                continue
-            fn = CHECKS.get(ctype)
-            if fn is None:
-                reasons.append(f"unknown check type: {ctype!r}")
-                continue
-            reasons.extend(fn(check, evidence, ctx))
-        for check in deferred:
-            reasons.extend(_check_unchanged(check, evidence, ctx))
-    except Exception as e:  # noqa: BLE001 - deliberate: any raise -> error verdict
-        verdict = {"verdict_status": "error", "verdict_reasons": [str(e)]}
+    if not checks:
+        verdict = {"verdict_status": "fail", "verdict_reasons": ["no checks configured"]}
     else:
-        verdict = (
-            {"verdict_status": "fail", "verdict_reasons": reasons}
-            if reasons
-            else {"verdict_status": "pass", "verdict_reasons": []}
-        )
+        try:
+            for check in checks:
+                ctype = check.get("type")
+                if ctype == "unchanged":
+                    # TOCTOU guard: unchanged re-hashes AFTER every command in
+                    # this pass, regardless of its position in the list.
+                    deferred.append(check)
+                    continue
+                fn = CHECKS.get(ctype)
+                if fn is None:
+                    reasons.append(f"unknown check type: {ctype!r}")
+                    continue
+                reasons.extend(fn(check, evidence, ctx))
+            for check in deferred:
+                reasons.extend(_check_unchanged(check, evidence, ctx))
+        except Exception as e:  # noqa: BLE001 - deliberate: any raise -> error verdict
+            verdict = {"verdict_status": "error", "verdict_reasons": [str(e)]}
+        else:
+            verdict = (
+                {"verdict_status": "fail", "verdict_reasons": reasons}
+                if reasons
+                else {"verdict_status": "pass", "verdict_reasons": []}
+            )
 
     # DSL execution supplies the before-manifest and compiler-derived paths.
     # Existing yamlgraph recipes have no effect contract yet, so their legacy
@@ -647,4 +647,5 @@ def run_checks(state: dict[str, Any], execute: bool = False) -> dict[str, Any]:
         return {"verdict_status": "error", "verdict_reasons": [f"integrity: {exc}"]}
     if result.integrity_error:
         return {"verdict_status": "error", "verdict_reasons": list(result.reasons)}
+    verdict["effect_baseline_eligible"] = result.baseline_eligible
     return verdict
