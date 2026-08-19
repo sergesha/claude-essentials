@@ -10,7 +10,10 @@ import yaml
 
 import pytest
 
+from lockstep.recipe import yamlgraph_adapter as yg
+import lockstep.runtime.engine as engine_mod
 from lockstep.runtime.engine import Engine, LockstepError
+from lockstep.runtime.manifests import PathContractError
 from lockstep.runtime.runs import RunIndex
 
 from pathlib import Path
@@ -41,6 +44,21 @@ def _effect_recipe(tmp_path, *, checks, allowed_writes):
     message["checks"] = checks
     message["evidence_schema"] = {"required": [], "properties": {}}
     (recipes / "effect.recipe.yaml").write_text(yaml.safe_dump(doc, sort_keys=False))
+    return recipes
+
+
+def _effect_two_step_recipe(tmp_path):
+    recipes = tmp_path / "effect-two-recipes"
+    recipes.mkdir()
+    doc = yaml.safe_load((GOOD / "two-steps.recipe.yaml").read_text())
+    doc["name"] = "effect-two"
+    doc["baseline_globs"] = ["**"]
+    for node, artifact in (("step_one", "one.txt"), ("step_two", "two.txt")):
+        message = doc["nodes"][node]["message"]
+        message["allowed_writes"] = [artifact]
+        message["checks"] = [{"type": "file_exists", "path": artifact}]
+        message["evidence_schema"] = {"required": [], "properties": {}}
+    (recipes / "effect-two.recipe.yaml").write_text(yaml.safe_dump(doc, sort_keys=False))
     return recipes
 
 
@@ -167,6 +185,140 @@ def test_effect_aware_valid_pass_advances_baseline_only_after_gate(tmp_path):
     assert result["passed"] is True
     assert eng._read_baseline_counter(started["run_id"]) == 1
     assert "out.txt" in json.loads(eng._baseline_n_path(started["run_id"], 1).read_text())
+
+
+def test_effect_pending_boundary_promotes_pre_resume_snapshot_for_next_step(tmp_path):
+    eng = _engine(tmp_path, _effect_two_step_recipe(tmp_path))
+    project = _project(tmp_path)
+    started = eng.start("effect-two", {}, str(project))
+    (project / "one.txt").write_text("one")
+
+    result = eng.done(started["run_id"], "one", {})
+
+    assert result["step"] == "two"
+    snapshot = json.loads(eng._effect_snapshot_path(started["run_id"]).read_text())
+    assert any(entry["path"] == "one.txt" for entry in snapshot["entries"])
+    assert not eng._effect_pending_path(started["run_id"]).exists()
+
+
+def test_effect_pending_crash_after_resume_recovers_before_publishing_next_step(tmp_path, monkeypatch):
+    recipes = _effect_two_step_recipe(tmp_path)
+    eng = _engine(tmp_path, recipes)
+    project = _project(tmp_path)
+    started = eng.start("effect-two", {}, str(project))
+    (project / "one.txt").write_text("one")
+    monkeypatch.setattr(eng, "_promote_effect_pending", lambda *args: (_ for _ in ()).throw(RuntimeError("crash")))
+
+    with pytest.raises(RuntimeError, match="crash"):
+        eng.done(started["run_id"], "one", {})
+
+    recovered = Engine(tmp_path / "state", recipes).status(started["run_id"])
+    assert recovered["step"] == "two"
+    assert not eng._effect_pending_path(started["run_id"]).exists()
+
+
+def test_effect_pending_crash_before_resume_leaves_checkpoint_index_and_baseline_unchanged(tmp_path, monkeypatch):
+    eng = _engine(tmp_path, _effect_two_step_recipe(tmp_path))
+    project = _project(tmp_path)
+    started = eng.start("effect-two", {}, str(project))
+    (project / "one.txt").write_text("one")
+    monkeypatch.setattr(eng, "_prepare_effect_pending", lambda *args: (_ for _ in ()).throw(PathContractError("capture failed")))
+
+    result = eng.done(started["run_id"], "one", {})
+
+    assert result["error"] is True
+    assert eng.status(started["run_id"])["step"] == "one"
+    assert eng._read_baseline_counter(started["run_id"]) == 0
+
+
+def test_effect_pending_crash_after_promote_before_index_recovers_idempotently(tmp_path, monkeypatch):
+    recipes = _effect_two_step_recipe(tmp_path)
+    eng = _engine(tmp_path, recipes)
+    project = _project(tmp_path)
+    started = eng.start("effect-two", {}, str(project))
+    (project / "one.txt").write_text("one")
+    original_update = eng._runs.update
+
+    def crash_before_index(run_id, **changes):
+        if changes.get("step") == "two":
+            raise RuntimeError("index crash")
+        return original_update(run_id, **changes)
+
+    monkeypatch.setattr(eng._runs, "update", crash_before_index)
+    with pytest.raises(RuntimeError, match="index crash"):
+        eng.done(started["run_id"], "one", {})
+
+    recovered = Engine(tmp_path / "state", recipes).status(started["run_id"])
+    assert recovered["step"] == "two"
+
+
+def test_effect_contract_collision_that_appears_mid_run_blocks_before_resume(tmp_path):
+    recipes = _effect_two_step_recipe(tmp_path)
+    recipe = recipes / "effect-two.recipe.yaml"
+    doc = yaml.safe_load(recipe.read_text())
+    doc["nodes"]["step_one"]["message"]["allowed_writes"] = ["Out.txt"]
+    doc["nodes"]["step_one"]["message"]["checks"] = [{"type": "file_exists", "path": "Out.txt"}]
+    doc["nodes"]["step_two"]["message"]["allowed_writes"] = ["out.txt"]
+    recipe.write_text(yaml.safe_dump(doc, sort_keys=False))
+    eng = _engine(tmp_path, recipes)
+    project = _project(tmp_path)
+    started = eng.start("effect-two", {}, str(project))
+    (project / "Out.txt").write_text("one")
+
+    result = eng.done(started["run_id"], "one", {})
+
+    assert result["error"] is True
+    assert "collision" in result["reasons"][0]
+    assert eng.status(started["run_id"])["step"] == "one"
+
+
+def test_effect_pending_recovers_same_step_transition_after_crash(tmp_path, monkeypatch):
+    recipes = _effect_recipe(
+        tmp_path,
+        checks=[{"type": "file_exists", "path": "out.txt"}],
+        allowed_writes=["out.txt"],
+    )
+    recipe = recipes / "effect.recipe.yaml"
+    doc = yaml.safe_load(recipe.read_text())
+    for edge in doc["edges"]:
+        if edge.get("from") == "validate_one" and edge.get("condition") == "verdict_status == 'pass'":
+            edge["to"] = "step_one"
+    recipe.write_text(yaml.safe_dump(doc, sort_keys=False))
+    eng = _engine(tmp_path, recipes)
+    project = _project(tmp_path)
+    started = eng.start("effect", {}, str(project))
+    (project / "out.txt").write_text("out")
+    monkeypatch.setattr(eng, "_promote_effect_pending", lambda *args: (_ for _ in ()).throw(RuntimeError("crash")))
+
+    with pytest.raises(RuntimeError, match="crash"):
+        eng.done(started["run_id"], "one", {})
+
+    recovered = Engine(tmp_path / "state", recipes).status(started["run_id"])
+    assert recovered["step"] == "one"
+    assert not eng._effect_pending_path(started["run_id"]).exists()
+
+
+def test_auto_poll_prepares_and_promotes_effect_boundary_to_user_step(tmp_path, monkeypatch):
+    eng = _engine(tmp_path, _effect_two_step_recipe(tmp_path))
+    project = _project(tmp_path)
+    started = eng.start("effect-two", {}, str(project))
+    eng._runs.update(started["run_id"], step="_subcall", brief={"step": "_subcall", "node": "review"})
+    monkeypatch.setattr(eng, "_poll_ctx", lambda *_: {"poll": True})
+    next_brief = yg.StepBrief(
+        step="two", task="next", exit_criterion="done", checks=[],
+        raw={"allowed_writes": ["two.txt"]},
+    )
+    monkeypatch.setattr(
+        engine_mod.yg,
+        "resume",
+        lambda *_args, **_kwargs: yg.Advance(done=False, brief=next_brief, state={"poll": "advanced"}),
+    )
+
+    record = eng._auto_poll(started["run_id"])
+
+    assert record.step == "two"
+    assert eng._effect_snapshot_path(started["run_id"]).is_file()
+    assert not eng._effect_pending_path(started["run_id"]).exists()
 
 
 # ---------------------------------------------------------------------------

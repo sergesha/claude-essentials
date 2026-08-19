@@ -78,6 +78,8 @@ def spawn_verified(
     stdin: bytes = b"",
 ) -> ProcessHandle:
     """Preflight and verify a provider before any managed process starts."""
+    if tuple(argv) != policy.argv:
+        raise ValueError("sandbox argv does not match the attested policy")
     attestation = provider.preflight(policy)
     if (
         attestation.policy_digest != policy.digest
@@ -86,7 +88,10 @@ def spawn_verified(
         or not attestation.denies_symlink_escape
     ):
         raise ValueError("sandbox attestation does not satisfy the required policy")
-    return provider.spawn(policy, argv, stdin=stdin)
+    handle = provider.spawn(policy, argv, stdin=stdin)
+    if handle.argv != policy.argv or handle.policy_digest != policy.digest:
+        raise ValueError("sandbox process handle does not match the attested policy")
+    return handle
 
 
 class FakeSandboxProvider:

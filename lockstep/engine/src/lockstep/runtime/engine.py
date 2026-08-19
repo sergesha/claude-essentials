@@ -50,6 +50,7 @@ Mechanics implemented here:
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import secrets
@@ -231,6 +232,9 @@ class Engine:
     def _effect_snapshot_path(self, run_id: str) -> Path:
         return self._runs_dir() / f"{run_id}.effect.json"
 
+    def _effect_pending_path(self, run_id: str) -> Path:
+        return self._runs_dir() / f"{run_id}.effect.pending.json"
+
     def route_log_path(self, run_id: str) -> Path:
         return self._runs_dir() / f"{run_id}.route.jsonl"
 
@@ -360,6 +364,83 @@ class Engine:
             return
         self._write_json(snapshot_path, snapshot_to_data(capture_project(Path(project))))
 
+    def _clear_effect_state(self, run_id: str) -> None:
+        self._effect_pending_path(run_id).unlink(missing_ok=True)
+        self._effect_snapshot_path(run_id).unlink(missing_ok=True)
+
+    def _workflow_has_effect_contracts(self, run_id: str) -> bool:
+        doc = self._snapshot_doc(run_id)
+        return any(
+            isinstance(node, dict)
+            and isinstance(node.get("message"), dict)
+            and "allowed_writes" in node["message"]
+            for node in (doc.get("nodes") or {}).values()
+        )
+
+    def _validate_recipe_effect_contracts(self, doc: dict, project: str) -> None:
+        for node_name, node in (doc.get("nodes") or {}).items():
+            message = node.get("message") if isinstance(node, dict) else None
+            if isinstance(message, dict) and "allowed_writes" in message:
+                try:
+                    self._effect_paths({"allowed_writes": message["allowed_writes"]}, project)
+                except PathContractError as exc:
+                    raise LockstepError(
+                        f"invalid allowed_writes contract in recipe node {node_name!r}: {exc}"
+                    ) from exc
+
+    @staticmethod
+    def _transition_state_digest(state: dict) -> str:
+        canonical = json.dumps(state, sort_keys=True, separators=(",", ":"), default=str)
+        return hashlib.sha256(canonical.encode()).hexdigest()
+
+    def _prepare_effect_pending(self, run_id: str, from_step: str, project: str) -> None:
+        if not self._workflow_has_effect_contracts(run_id):
+            return
+        # A path collision can become visible only after an earlier step
+        # creates a differently-cased/NFC-spelled entry.  Recheck every
+        # trusted node against the just-produced tree before checkpoint
+        # mutation; promotion is intentionally filesystem-free.
+        self._validate_recipe_effect_contracts(self._snapshot_doc(run_id), project)
+        pending = {
+            "from_step": from_step,
+            "before_state_digest": self._transition_state_digest(self._peek_state(run_id)),
+            "snapshot": snapshot_to_data(capture_project(Path(project))),
+        }
+        self._write_json(self._effect_pending_path(run_id), pending)
+
+    def _promote_effect_pending(
+        self, run_id: str, from_step: str, next_brief: dict, advanced_state: dict
+    ) -> bool:
+        pending_path = self._effect_pending_path(run_id)
+        if not pending_path.is_file():
+            if "allowed_writes" in next_brief:
+                raise PathContractError("missing pending effect boundary for next owned step")
+            return False
+        try:
+            pending = json.loads(pending_path.read_text())
+            if (
+                not isinstance(pending, dict)
+                or pending.get("from_step") != from_step
+                or not isinstance(pending.get("before_state_digest"), str)
+            ):
+                raise PathContractError("pending effect boundary does not match transition")
+            snapshot = snapshot_from_data(pending.get("snapshot"))
+        except (OSError, ValueError, TypeError) as exc:
+            raise PathContractError("invalid pending effect boundary") from exc
+        if pending["before_state_digest"] == self._transition_state_digest(advanced_state):
+            return False
+        # Contract path/collision validation was completed before the resume
+        # and is bound by this pending record.  Do not re-open a fresh
+        # filesystem validation failure window after the checkpoint commits.
+        if "allowed_writes" not in next_brief:
+            self._effect_snapshot_path(run_id).unlink(missing_ok=True)
+            return True
+        raw_paths = next_brief["allowed_writes"]
+        if not isinstance(raw_paths, list) or any(not isinstance(path, str) for path in raw_paths):
+            raise PathContractError("invalid prevalidated next effect contract")
+        self._write_json(self._effect_snapshot_path(run_id), snapshot_to_data(snapshot))
+        return True
+
     def _effect_context(self, run_id: str, project: str, brief: dict) -> dict[str, Any]:
         paths = self._effect_paths(brief, project)
         if paths is None:
@@ -406,6 +487,7 @@ class Engine:
         if adv.done:
             if record.status != "done":
                 record = self._runs.update(run_id, status="done", brief=None)
+                self._clear_effect_state(run_id)
                 self._cascade_terminate(run_id)
             return record
 
@@ -420,6 +502,7 @@ class Engine:
                     step="escalate",
                     brief={"step": "escalate", "reason": "loop limit reached"},
                 )
+                self._clear_effect_state(run_id)
                 self._cascade_terminate(run_id)
             return record
 
@@ -429,20 +512,31 @@ class Engine:
             # `started_at`). A repair that never saw the park writes the
             # marker without `started_at` — the "?m" path.
             if record.status != "awaiting" or (record.brief or {}).get("step") != "_subcall":
+                self._effect_pending_path(run_id).unlink(missing_ok=True)
                 record = self._runs.update(
                     run_id, status="awaiting", step="_subcall", brief=dict(adv.brief.raw)
                 )
             return record
 
-        if record.status != "awaiting" or adv.brief.step != record.step or record.brief is None:
+        needs_index_repair = record.status != "awaiting" or adv.brief.step != record.step or record.brief is None
+        pending_exists = self._effect_pending_path(run_id).is_file()
+        if needs_index_repair or pending_exists:
             vars_ = self._read_vars(run_id)
             substituted = self._substitute_brief(adv.brief, vars_)
-            record = self._runs.update(
-                run_id,
-                status="awaiting",
-                step=substituted.step,
-                brief=self._brief_to_dict(substituted),
-            )
+            next_brief = self._brief_to_dict(substituted)
+            # A checkpoint may have committed while the process died before
+            # its index write.  Promotion consumes only the pre-resume
+            # pending snapshot, never a fresh post-crash filesystem view.
+            promoted = self._promote_effect_pending(run_id, record.step, next_brief, adv.state)
+            if needs_index_repair:
+                record = self._runs.update(
+                    run_id,
+                    status="awaiting",
+                    step=substituted.step,
+                    brief=next_brief,
+                )
+            if promoted:
+                self._effect_pending_path(run_id).unlink(missing_ok=True)
         return record
 
     # ------------------------------------------------------------------
@@ -513,6 +607,9 @@ class Engine:
         # owns), and on success they become runs/<id>.child.<scenario>.yaml —
         # the ONLY source `_start_child` will launch from.
         doc = yaml.safe_load(raw_bytes) or {}
+        if not isinstance(doc, dict):
+            raise LockstepError(f"recipe {recipe!r} must be a YAML mapping")
+        self._validate_recipe_effect_contracts(doc, project)
         scenarios = sorted({m["scenario"] for m in self._marker_messages(doc)
                             if isinstance(m.get("scenario"), str) and m["scenario"]})
         for scenario in scenarios:
@@ -802,6 +899,17 @@ class Engine:
             if vstatus == "pass" and effect_baseline_eligible
             else None
         )
+        if vstatus == "pass":
+            try:
+                self._prepare_effect_pending(run_id, step, record.project)
+            except (PathContractError, LockstepError) as exc:
+                return {
+                    "accepted": True,
+                    "passed": False,
+                    "error": True,
+                    "reasons": [f"integrity: {exc}"],
+                    "step": step,
+                }
         resume_payload = {**raw_evidence, "_verdict_status": vstatus,
                           "_verdict_reasons": reasons, **ctx}
         adv = yg.resume(self._app(run_id), resume_payload, run_id)
@@ -814,6 +922,7 @@ class Engine:
                     step="escalate",
                     brief={"step": "escalate", "reason": "; ".join(reasons) or "loop limit reached"},
                 )
+                self._clear_effect_state(run_id)
                 self._cascade_terminate(run_id)
                 self._log_transition(run_id, step, "fail", "escalate")
                 return {
@@ -835,6 +944,7 @@ class Engine:
                 # finished, so the run is terminal. Reported honestly as
                 # `passed: False` — there is no next step to hand back.
                 self._runs.update(run_id, status="done", step=step, brief=None)
+                self._clear_effect_state(run_id)
                 self._cascade_terminate(run_id)
                 self._log_transition(run_id, step, "fail", None)
                 return {"accepted": True, "passed": False, "reasons": reasons,
@@ -876,6 +986,7 @@ class Engine:
                 step="escalate",
                 brief={"step": "escalate", "reason": note},
             )
+            self._clear_effect_state(run_id)
             self._cascade_terminate(run_id)
             self._log_transition(run_id, step, "pass", "escalate")
             return {
@@ -905,6 +1016,7 @@ class Engine:
 
         if adv.done:
             self._runs.update(run_id, status="done", step=step, brief=None)
+            self._clear_effect_state(run_id)
             self._cascade_terminate(run_id)
             self._log_transition(run_id, step, "pass", None)
             return {
@@ -920,7 +1032,7 @@ class Engine:
         substituted = self._substitute_brief(adv.brief, vars_)
         next_brief = self._brief_to_dict(substituted)
         try:
-            self._capture_effect_boundary(run_id, record.project, next_brief)
+            self._promote_effect_pending(run_id, step, next_brief, adv.state)
         except PathContractError as exc:
             return {
                 "accepted": True,
@@ -930,6 +1042,7 @@ class Engine:
                 "step": step,
             }
         self._runs.update(run_id, step=substituted.step, brief=next_brief)
+        self._effect_pending_path(run_id).unlink(missing_ok=True)
         self._log_transition(run_id, step, "pass", substituted.step)
         return {
             "accepted": True,
@@ -964,6 +1077,7 @@ class Engine:
             step="escalate",
             brief={"step": "escalate", "reason": reason},
         )
+        self._clear_effect_state(run_id)
         self._cascade_terminate(run_id)
         return {"run_id": run_id, "status": "escalated", "reason": reason}
 
@@ -977,6 +1091,7 @@ class Engine:
         if record.status != "awaiting":
             raise LockstepError(f"run {run_id} is {record.status} — terminal")
         self._runs.update(run_id, status="aborted")
+        self._clear_effect_state(run_id)
         self._cascade_terminate(run_id)
         return {"run_id": run_id, "status": "aborted"}
 
@@ -1008,6 +1123,7 @@ class Engine:
         started — never hand it `step: "_subcall", task: ""` as work."""
         if adv.done or adv.brief is None or adv.brief.step != "_subcall":
             return None
+        self._effect_pending_path(run_id).unlink(missing_ok=True)
         marker = dict(adv.brief.raw)                   # FULL marker: node/runner/prompt/...
         if resolved_runner:
             marker["runner"] = resolved_runner
@@ -1339,6 +1455,7 @@ class Engine:
         any path here: a subcall is not a checked step."""
         record = self._runs.get(run_id)
         payload = self._poll_ctx(run_id, record)
+        self._prepare_effect_pending(run_id, "_subcall", record.project)
         adv = yg.resume(self._app(run_id), payload, run_id)
         if adv.done:
             # v1's done tail records the final step name, not a placeholder —
@@ -1347,6 +1464,7 @@ class Engine:
             # actually just finished.
             marker = record.brief or {}
             self._runs.update(run_id, status="done", step=marker.get("node", "_subcall"), brief=None)
+            self._clear_effect_state(run_id)
             self._cascade_terminate(run_id)
             self._log_transition(run_id, "_subcall", "done", None)
         elif adv.brief is not None and adv.brief.step == "escalate":
@@ -1354,14 +1472,19 @@ class Engine:
             reason = "; ".join(str(r) for r in (env.get("reasons") or [])) or "subcall failed"
             self._runs.update(run_id, status="escalated", step="escalate",
                               brief={"step": "escalate", "reason": reason})
+            self._clear_effect_state(run_id)
             self._cascade_terminate(run_id)
             self._log_transition(run_id, "_subcall", "error", "escalate")
         elif adv.brief is not None and adv.brief.step == "_subcall":
+            self._effect_pending_path(run_id).unlink(missing_ok=True)
             pass                                           # still parked; index brief already true
         elif adv.brief is not None:
             vars_ = self._read_vars(run_id)
             substituted = self._substitute_brief(adv.brief, vars_)
+            next_brief = self._brief_to_dict(substituted)
+            self._promote_effect_pending(run_id, "_subcall", next_brief, adv.state)
             self._runs.update(run_id, step=substituted.step,
-                              brief=self._brief_to_dict(substituted))
+                              brief=next_brief)
+            self._effect_pending_path(run_id).unlink(missing_ok=True)
             self._log_transition(run_id, "_subcall", "done", substituted.step)
         return self._runs.get(run_id)

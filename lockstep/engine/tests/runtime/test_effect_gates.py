@@ -190,3 +190,29 @@ def test_verified_sandbox_spawn_rejects_invalid_attestation_before_process_handl
     with pytest.raises(ValueError, match="attestation"):
         spawn_verified(provider, policy, policy.argv)
     assert provider.spawned is False
+
+
+def test_verified_sandbox_spawn_rejects_unbound_argv_and_bad_returned_handle(project: Path) -> None:
+    policy = SandboxPolicy(
+        read_roots=(project,), write_root=project, temp_root=project / ".tmp",
+        argv=("tool",), cwd=project, environment=(("PATH", "/trusted/bin"),),
+    )
+
+    class PermissiveProvider(FakeSandboxProvider):
+        spawned = False
+
+        def spawn(self, *args, **kwargs):
+            self.spawned = True
+            return super().spawn(*args, **kwargs)
+
+    provider = PermissiveProvider()
+    with pytest.raises(ValueError, match="argv"):
+        spawn_verified(provider, policy, ("other",))
+    assert provider.spawned is False
+
+    class BadHandleProvider(FakeSandboxProvider):
+        def spawn(self, *args, **kwargs):
+            return type("BadHandle", (), {"argv": ("other",), "policy_digest": "wrong"})()
+
+    with pytest.raises(ValueError, match="process handle"):
+        spawn_verified(BadHandleProvider(), policy, policy.argv)
