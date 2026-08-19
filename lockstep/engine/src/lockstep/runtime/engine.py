@@ -483,9 +483,11 @@ class Engine:
         try:
             child_staging.mkdir()
             for scenario in scenarios:
-                live = self._recipes_dir / f"{scenario}.recipe.yaml"
-                if live.exists():
-                    (child_staging / f"{scenario}.recipe.yaml").write_bytes(live.read_bytes())
+                try:
+                    live = RecipeLoader(self._recipes_dir).resolve(scenario).path
+                except RecipeError as exc:
+                    raise LockstepError(f"child recipe {scenario!r}: {exc}") from exc
+                (child_staging / f"{scenario}.recipe.yaml").write_bytes(live.read_bytes())
             # A child recipe that fails its own profile check or fails to
             # compile is otherwise discovered only at the spawn gate, where
             # `_start_child`'s failure returns an `error` verdict — no

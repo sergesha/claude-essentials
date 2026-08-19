@@ -52,6 +52,7 @@ from mcp.server.mcpserver import Context
 from mcp.server.mcpserver import MCPServer as FastMCP
 
 from lockstep.recipe import profile
+from lockstep.recipe.loader import RecipeLoader
 from lockstep.recipe import yamlgraph_adapter as yg
 from lockstep.runtime import evidence as evidence_mod
 from lockstep.runtime import sessions, validators
@@ -304,7 +305,7 @@ def list_recipes(ctx: Context | None = None) -> list[str]:
     d = Path(
         _eng(_project_for_context(ctx))._recipes_dir  # noqa: SLF001
     )
-    return sorted(p.name.removesuffix(".recipe.yaml") for p in d.glob("*.recipe.yaml"))
+    return sorted(RecipeLoader(d).discover())
 
 
 @app.tool()

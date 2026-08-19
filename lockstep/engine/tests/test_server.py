@@ -18,6 +18,7 @@ from types import SimpleNamespace
 import pytest
 
 from lockstep.mcp import server
+from lockstep.recipe.loader import RecipeError
 from lockstep.runtime.engine import LockstepError
 
 FIXTURES = Path(__file__).parent / "fixtures" / "recipes"
@@ -59,6 +60,29 @@ def _configure(monkeypatch, tmp_path, recipes_dir=GOOD):
 def test_tools_registered():
     names = {t.name for t in server.app._tool_manager.list_tools()}
     assert names == EXPECTED_TOOLS
+
+
+def test_list_recipes_discovers_nested_recipes(tmp_path, monkeypatch):
+    recipes = tmp_path / "recipes"
+    recipe = recipes / "nested" / "release.recipe.yaml"
+    recipe.parent.mkdir(parents=True)
+    recipe.write_text("name: release\nnodes: {}\n")
+    _configure(monkeypatch, tmp_path, recipes)
+
+    assert server.list_recipes() == ["release"]
+
+
+def test_list_recipes_rejects_symlink_escape(tmp_path, monkeypatch):
+    recipes = tmp_path / "recipes"
+    recipes.mkdir()
+    outside = tmp_path / "outside" / "release.recipe.yaml"
+    outside.parent.mkdir()
+    outside.write_text("name: release\nnodes: {}\n")
+    (recipes / "release.recipe.yaml").symlink_to(outside)
+    _configure(monkeypatch, tmp_path, recipes)
+
+    with pytest.raises(RecipeError, match="escapes recipe directory"):
+        server.list_recipes()
 
 
 def test_codex_workspace_metadata_supplies_project_and_default_recipes(tmp_path, monkeypatch):

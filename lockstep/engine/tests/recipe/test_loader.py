@@ -34,6 +34,25 @@ def test_loader_rejects_document_name_mismatch(tmp_path):
         RecipeLoader(tmp_path).discover()
 
 
+def test_loader_rejects_duplicate_logical_names(tmp_path):
+    write_recipe(tmp_path / "one" / "release.recipe.yaml", name="release")
+    write_recipe(tmp_path / "two" / "release.recipe.yaml", name="release")
+
+    with pytest.raises(RecipeError, match="duplicate recipe name"):
+        RecipeLoader(tmp_path).discover()
+
+
+def test_loader_rejects_symlink_that_escapes_recipe_root(tmp_path):
+    outside = tmp_path / "outside" / "release.recipe.yaml"
+    write_recipe(outside, name="release")
+    recipes = tmp_path / "recipes"
+    recipes.mkdir()
+    (recipes / "release.recipe.yaml").symlink_to(outside)
+
+    with pytest.raises(RecipeError, match="escapes recipe directory"):
+        RecipeLoader(recipes).discover()
+
+
 def test_loader_marks_mapping_metadata_as_generated(tmp_path):
     path = tmp_path / "release.recipe.yaml"
     write_recipe(path, name="release", generated=True)

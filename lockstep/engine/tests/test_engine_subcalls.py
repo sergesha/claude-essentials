@@ -31,6 +31,30 @@ def test_engine_normalizes_state_and_recipe_dirs_before_child_launch(tmp_path, m
     assert e._recipes_dir == (tmp_path / "recipes").resolve()
 
 
+def test_fractal_child_symlink_escape_is_refused_at_start(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCKSTEP_RUNNER", "claude")
+    state = tmp_path / "state"
+    write_runners_yaml(state)
+    project = tmp_path / "project"
+    project.mkdir()
+    recipes = tmp_path / "recipes"
+    recipes.mkdir()
+    (recipes / "subcall-fractal.recipe.yaml").write_bytes(
+        (FIX / "good" / "subcall-fractal.recipe.yaml").read_bytes()
+    )
+    outside = tmp_path / "outside" / "child-review.recipe.yaml"
+    outside.parent.mkdir()
+    outside.write_bytes((FIX / "good" / "child-review.recipe.yaml").read_bytes())
+    (recipes / "child-review.recipe.yaml").symlink_to(outside)
+    engine = Engine(state, recipes)
+
+    with pytest.raises(LockstepError, match="escapes recipe directory"):
+        engine._launch(  # noqa: SLF001 - probes recursive child recipe resolution
+            "subcall-fractal", {}, str(project), src=recipes / "subcall-fractal.recipe.yaml"
+        )
+    assert engine._runs.list() == []
+
+
 def test_subcall_runs_and_completes(tmp_path, monkeypatch):
     e, proj = make_engine(tmp_path, monkeypatch)
     r = e.start("subcall-one-shot", vars={}, project=str(proj))
