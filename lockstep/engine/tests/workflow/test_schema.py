@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
@@ -80,6 +81,96 @@ def test_loader_rejects_aliases_and_duplicate_keys(workflow_file: Path) -> None:
     workflow_file.write_text(BASE + "flow: []\nname: release\n")
     duplicate = raises_diagnostic("LSW103", workflow_file)
     assert duplicate.pointer == "/name"
+
+
+def test_loader_reports_the_nested_pointer_for_an_alias(workflow_file: Path) -> None:
+    workflow_file.write_text(
+        BASE + "flow:\n- verify: {command: &command pytest -q, cwd: *command}\n"
+    )
+
+    alias = raises_diagnostic("LSW102", workflow_file)
+
+    assert alias.pointer == "/flow/0/verify/cwd"
+
+
+def test_include_graph_accepts_the_documented_unquoted_on_key(workflow_file: Path) -> None:
+    workflow_file.write_text(
+        BASE
+        + '''\
+flow:
+- include_graph:
+    id: approval-fragment
+    path: .lockstep/fragments/release-approval.graph.yaml
+    on:
+      pass: next
+      fail: escalate
+      error: escalate
+'''
+    )
+
+    workflow = parse_workflow(load_workflow(workflow_file))
+
+    assert workflow.flow[0].on == {"pass": "next", "fail": "escalate", "error": "escalate"}
+
+
+def test_ir_recursively_freezes_mapping_fields_and_retains_defaults(workflow_file: Path) -> None:
+    workflow_file.write_text(
+        BASE
+        + '''\
+defaults:
+  retry: {limit: 2, exhausted: escalate}
+flow:
+- step: plan
+  task: Make a plan
+  exit: A plan exists
+  evidence: {answer: {type: string}}
+- decide:
+    using: {type: changed-paths, since: start, cases: {high: [src/**]}, default: low}
+'''
+    )
+
+    workflow = parse_workflow(load_workflow(workflow_file))
+
+    assert workflow.defaults.retry.limit == 2
+    assert isinstance(workflow.flow[0].evidence, MappingProxyType)
+    with pytest.raises(TypeError):
+        workflow.flow[0].evidence["answer"] = "changed"
+    with pytest.raises(TypeError):
+        workflow.flow[0].evidence["answer"]["type"] = "changed"
+    with pytest.raises(TypeError):
+        workflow.flow[1].using["cases"]["high"] = ()
+
+
+@pytest.mark.parametrize(
+    ("block", "pointer"),
+    [
+        ("verify: {command: pytest -q}\n  command: ruff check .", "/flow/0/command"),
+        ("decide: {using: {type: changed-paths, since: start, cases: {}, default: low}}\n  id: risk", "/flow/0/id"),
+    ],
+)
+def test_mapping_blocks_reject_outer_fields_instead_of_discarding_them(
+    workflow_file: Path, block: str, pointer: str
+) -> None:
+    workflow_file.write_text(BASE + "flow:\n- " + block + "\n")
+
+    assert raises_diagnostic("LSW105", workflow_file).pointer == pointer
+
+
+@pytest.mark.parametrize(
+    ("block", "pointer"),
+    [
+        ("graph: {fragment: {exits: {pass: done}, effects: {mode: read-only, writes: []}}, nodes: {}, edges: []}", "/flow/0/graph/fragment"),
+        ("graph: {fragment: {entry: start, exits: {}, effects: {mode: read-only, writes: []}}, nodes: {}, edges: []}", "/flow/0/graph/fragment/exits"),
+        ("include_graph: {id: approval, path: f.graph.yaml, on: {pass: wrong}}", "/flow/0/include_graph/on/pass"),
+        ("include_graph: {id: approval, path: f.graph.yaml, on: {pass: next, race: escalate}}", "/flow/0/include_graph/on/race"),
+    ],
+)
+def test_graph_boundaries_validate_their_structural_contract(
+    workflow_file: Path, block: str, pointer: str
+) -> None:
+    workflow_file.write_text(BASE + "flow:\n- " + block + "\n")
+
+    assert raises_diagnostic("LSW1", workflow_file).pointer == pointer
 
 
 def test_extensions_remain_inert(workflow_file: Path) -> None:

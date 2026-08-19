@@ -8,13 +8,13 @@ import re
 from typing import Any, Iterable, Mapping, NoReturn
 
 import yaml
-from yaml.events import AliasEvent
+from yaml.events import AliasEvent, MappingEndEvent, SequenceEndEvent
 from yaml.nodes import MappingNode, Node, SequenceNode
 
 from .diagnostics import Diagnostic, DiagnosticError
 from .ir import (
     AcceptIR, BlockIR, CallIR, ChooseIR, DecideIR, EscalateIR, GraphIR,
-    ParallelIR, RepeatIR, StepIR, VerifyIR, WorkflowIR,
+    ParallelIR, RepeatIR, RetryIR, StepIR, VerifyIR, WorkflowDefaultsIR, WorkflowIR,
 )
 
 
@@ -56,11 +56,71 @@ class _MarkedYamlError(Exception):
 
 
 class _MarkedSafeLoader(yaml.SafeLoader):
+    yaml_implicit_resolvers = {
+        initial: [entry for entry in entries if entry[0] != "tag:yaml.org,2002:bool"]
+        for initial, entries in yaml.SafeLoader.yaml_implicit_resolvers.items()
+    }
+    yaml_implicit_resolvers.setdefault("t", []).append(("tag:yaml.org,2002:bool", re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$")))
+    yaml_implicit_resolvers.setdefault("T", []).append(("tag:yaml.org,2002:bool", re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$")))
+    yaml_implicit_resolvers.setdefault("f", []).append(("tag:yaml.org,2002:bool", re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$")))
+    yaml_implicit_resolvers.setdefault("F", []).append(("tag:yaml.org,2002:bool", re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$")))
+
+    def __init__(self, stream: Any) -> None:
+        super().__init__(stream)
+        self._node_pointers: dict[int, str] = {}
+
+    def _pointer_for(self, parent: Node | None, index: Any) -> str:
+        if parent is None:
+            return ""
+        parent_pointer = self._node_pointers[id(parent)]
+        if isinstance(parent, MappingNode) and isinstance(index, yaml.ScalarNode):
+            return f"{parent_pointer}/{_escape(index.value)}"
+        if isinstance(parent, SequenceNode) and isinstance(index, int):
+            return f"{parent_pointer}/{index}"
+        return parent_pointer
+
     def compose_node(self, parent: Node | None, index: Any) -> Node:
-        if self.check_event(AliasEvent):
-            event = self.get_event()
-            raise _MarkedYamlError("LSW102", "YAML aliases are not allowed", "", event.start_mark)
-        return super().compose_node(parent, index)
+        previous = getattr(self, "_next_pointer", "")
+        self._next_pointer = self._pointer_for(parent, index)
+        try:
+            if self.check_event(AliasEvent):
+                event = self.get_event()
+                raise _MarkedYamlError("LSW102", "YAML aliases are not allowed", self._next_pointer, event.start_mark)
+            return super().compose_node(parent, index)
+        finally:
+            self._next_pointer = previous
+
+    def compose_mapping_node(self, anchor: str | None) -> MappingNode:
+        start = self.get_event()
+        tag = start.tag or self.resolve(MappingNode, None, start.implicit)
+        node = MappingNode(tag, [], start.start_mark, None, flow_style=start.flow_style)
+        self._node_pointers[id(node)] = self._pointer_for_current(node)
+        if anchor is not None:
+            self.anchors[anchor] = node
+        while not self.check_event(MappingEndEvent):
+            key = self.compose_node(node, None)
+            value = self.compose_node(node, key)
+            node.value.append((key, value))
+        node.end_mark = self.get_event().end_mark
+        return node
+
+    def _pointer_for_current(self, node: Node) -> str:
+        # compose_node assigns this transient parent/index context immediately before dispatch.
+        return getattr(self, "_next_pointer", "")
+
+    def compose_sequence_node(self, anchor: str | None) -> SequenceNode:
+        start = self.get_event()
+        tag = start.tag or self.resolve(SequenceNode, None, start.implicit)
+        node = SequenceNode(tag, [], start.start_mark, None, flow_style=start.flow_style)
+        self._node_pointers[id(node)] = self._pointer_for_current(node)
+        if anchor is not None:
+            self.anchors[anchor] = node
+        index = 0
+        while not self.check_event(SequenceEndEvent):
+            node.value.append(self.compose_node(node, index))
+            index += 1
+        node.end_mark = self.get_event().end_mark
+        return node
 
 
 def _escape(pointer_part: str) -> str:
@@ -199,13 +259,14 @@ class _Parser:
         protect = self.strings(root["protect"], "/protect", "protect")
         if protect != ("**",):
             self.fail("LSW301", "v1 workflows must protect the complete project", "/protect", 'use protect: ["**"]')
+        defaults_ir = WorkflowDefaultsIR()
         if "defaults" in root:
             defaults = self.mapping(root["defaults"], "/defaults", "defaults")
             self.keys(defaults, "/defaults", {"retry"})
             if "retry" in defaults:
-                self.retry(defaults["retry"], "/defaults/retry")
+                defaults_ir = WorkflowDefaultsIR(self.retry(defaults["retry"], "/defaults/retry"))
         flow = tuple(self.parse_flow(self.sequence(root["flow"], "/flow", "flow"), "/flow"))
-        return WorkflowIR("1", name, description, protect, flow)
+        return WorkflowIR("1", name, description, protect, flow, defaults_ir)
 
     def parse_flow(self, items: list[Any], pointer: str, parallel: bool = False) -> list[BlockIR]:
         blocks: list[BlockIR] = []
@@ -240,14 +301,13 @@ class _Parser:
         return StepIR(self.identifier(item.get("id"), f"{pointer}/id", optional=True), step, self.string(item["task"], f"{pointer}/task", "task"), self.string(item["exit"], f"{pointer}/exit", "exit"), self.strings(item.get("writes", []), f"{pointer}/writes", "writes"), self.optional_mapping(item, "evidence", pointer), self.optional_mapping(item, "artifact", pointer), self.retry(item["retry"], f"{pointer}/retry") if "retry" in item else None, self.handler(item.get("on_failure"), f"{pointer}/on_failure"), self.handler(item.get("on_error"), f"{pointer}/on_error"))
 
     def block_verify(self, item: dict[str, Any], pointer: str) -> VerifyIR:
-        self.keys(item, pointer, {"verify", "id", "command", "cwd", "timeout", "junit", "writes", "retry", "on_failure", "on_error"})
+        self.keys(item, pointer, {"verify"})
         body = self.mapping(item["verify"], f"{pointer}/verify", "verify")
         self.keys(body, f"{pointer}/verify", {"id", "command", "cwd", "timeout", "junit", "writes", "retry", "on_failure", "on_error"}, {"command"})
-        merged = {**body, **{key: value for key, value in item.items() if key != "verify"}}
-        return VerifyIR(self.identifier(merged.get("id"), f"{pointer}/verify/id", optional=True), self.string(merged["command"], f"{pointer}/verify/command", "command"), self.string(merged["cwd"], f"{pointer}/verify/cwd", "cwd") if "cwd" in merged else None, self.positive_int(merged["timeout"], f"{pointer}/verify/timeout", "timeout") if "timeout" in merged else None, self.optional_mapping(merged, "junit", f"{pointer}/verify"), self.strings(merged.get("writes", []), f"{pointer}/verify/writes", "writes"), self.retry(merged["retry"], f"{pointer}/verify/retry") if "retry" in merged else None, self.handler(merged.get("on_failure"), f"{pointer}/verify/on_failure"), self.handler(merged.get("on_error"), f"{pointer}/verify/on_error"))
+        return VerifyIR(self.identifier(body.get("id"), f"{pointer}/verify/id", optional=True), self.string(body["command"], f"{pointer}/verify/command", "command"), self.string(body["cwd"], f"{pointer}/verify/cwd", "cwd") if "cwd" in body else None, self.positive_int(body["timeout"], f"{pointer}/verify/timeout", "timeout") if "timeout" in body else None, self.optional_mapping(body, "junit", f"{pointer}/verify"), self.strings(body.get("writes", []), f"{pointer}/verify/writes", "writes"), self.retry(body["retry"], f"{pointer}/verify/retry") if "retry" in body else None, self.handler(body.get("on_failure"), f"{pointer}/verify/on_failure"), self.handler(body.get("on_error"), f"{pointer}/verify/on_error"))
 
     def block_decide(self, item: dict[str, Any], pointer: str) -> DecideIR:
-        self.keys(item, pointer, {"decide", "id", "on_failure", "on_error"})
+        self.keys(item, pointer, {"decide"})
         body = self.mapping(item["decide"], f"{pointer}/decide", "decide")
         self.keys(body, f"{pointer}/decide", {"id", "using", "on_failure", "on_error"}, {"using"})
         using = self.mapping(body["using"], f"{pointer}/decide/using", "decision provider")
@@ -262,7 +322,7 @@ class _Parser:
         return DecideIR(self.identifier(body.get("id"), f"{pointer}/decide/id", optional=True), using, self.handler(body.get("on_failure"), f"{pointer}/decide/on_failure"), self.handler(body.get("on_error"), f"{pointer}/decide/on_error"))
 
     def block_choose(self, item: dict[str, Any], pointer: str) -> ChooseIR:
-        self.keys(item, pointer, {"choose", "id"})
+        self.keys(item, pointer, {"choose"})
         body = self.mapping(item["choose"], f"{pointer}/choose", "choose")
         self.keys(body, f"{pointer}/choose", {"id", "value", "cases", "default"}, {"value", "cases"})
         cases_raw = self.mapping(body["cases"], f"{pointer}/choose/cases", "choose cases")
@@ -271,13 +331,13 @@ class _Parser:
         return ChooseIR(self.identifier(body.get("id"), f"{pointer}/choose/id", optional=True), self.string(body["value"], f"{pointer}/choose/value", "choose value"), cases, default)
 
     def block_repeat(self, item: dict[str, Any], pointer: str) -> RepeatIR:
-        self.keys(item, pointer, {"repeat", "id"})
+        self.keys(item, pointer, {"repeat"})
         body = self.mapping(item["repeat"], f"{pointer}/repeat", "repeat")
         self.keys(body, f"{pointer}/repeat", {"id", "limit", "until", "do", "exhausted"}, {"limit", "until", "do", "exhausted"})
         return RepeatIR(self.identifier(body.get("id"), f"{pointer}/repeat/id", optional=True), self.positive_int(body["limit"], f"{pointer}/repeat/limit", "repeat limit"), self.string(body["until"], f"{pointer}/repeat/until", "repeat until"), tuple(self.parse_flow(self.sequence(body["do"], f"{pointer}/repeat/do", "repeat do"), f"{pointer}/repeat/do")), self.handler(body["exhausted"], f"{pointer}/repeat/exhausted") or "")
 
     def block_call(self, item: dict[str, Any], pointer: str) -> CallIR:
-        self.keys(item, pointer, {"call", "id"})
+        self.keys(item, pointer, {"call"})
         body = self.mapping(item["call"], f"{pointer}/call", "call")
         self.keys(body, f"{pointer}/call", {"id", "workflow", "runner", "timeout_minutes", "artifacts", "on_failure", "on_error"}, {"workflow", "runner"})
         artifacts = self.string_mapping(body.get("artifacts", {}), f"{pointer}/call/artifacts", "artifacts")
@@ -286,7 +346,7 @@ class _Parser:
         return CallIR(self.identifier(body.get("id"), f"{pointer}/call/id", optional=True), self.identifier(body["workflow"], f"{pointer}/call/workflow", "workflow") or "", self.identifier(body["runner"], f"{pointer}/call/runner", "runner") or "", self.positive_int(body["timeout_minutes"], f"{pointer}/call/timeout_minutes", "timeout minutes") if "timeout_minutes" in body else None, artifacts, self.handler(body.get("on_failure"), f"{pointer}/call/on_failure"), self.handler(body.get("on_error"), f"{pointer}/call/on_error"))
 
     def block_accept(self, item: dict[str, Any], pointer: str) -> AcceptIR:
-        self.keys(item, pointer, {"accept", "id"})
+        self.keys(item, pointer, {"accept"})
         body = self.mapping(item["accept"], f"{pointer}/accept", "accept")
         self.keys(body, f"{pointer}/accept", {"id", "artifact", "hash_from", "artifact_from", "verdict"}, {"verdict"})
         paired = "artifact" in body and "hash_from" in body
@@ -298,7 +358,7 @@ class _Parser:
         return AcceptIR(self.identifier(body.get("id"), f"{pointer}/accept/id", optional=True), self.string(body["artifact"], f"{pointer}/accept/artifact", "artifact") if paired else None, self.string(body["hash_from"], f"{pointer}/accept/hash_from", "hash_from") if paired else None, self.string(body["artifact_from"], f"{pointer}/accept/artifact_from", "artifact_from") if from_handle else None, "PASS")
 
     def block_parallel(self, item: dict[str, Any], pointer: str) -> ParallelIR:
-        self.keys(item, pointer, {"parallel", "id"})
+        self.keys(item, pointer, {"parallel"})
         body = self.mapping(item["parallel"], f"{pointer}/parallel", "parallel")
         self.keys(body, f"{pointer}/parallel", {"id", "join", "timeout_minutes", "branches", "on_failure", "on_error"}, {"join", "branches"})
         if body["join"] != "all":
@@ -314,32 +374,66 @@ class _Parser:
         return ParallelIR(self.identifier(body.get("id"), f"{pointer}/parallel/id", optional=True), "all", branches, self.positive_int(body["timeout_minutes"], f"{pointer}/parallel/timeout_minutes", "timeout minutes") if "timeout_minutes" in body else None, self.handler(body.get("on_failure"), f"{pointer}/parallel/on_failure"), self.handler(body.get("on_error"), f"{pointer}/parallel/on_error"))
 
     def block_graph(self, item: dict[str, Any], pointer: str) -> GraphIR:
-        self.keys(item, pointer, {"graph", "id"})
+        self.keys(item, pointer, {"graph"})
         body = self.mapping(item["graph"], f"{pointer}/graph", "graph")
         self.keys(body, f"{pointer}/graph", {"id", "fragment", "state", "tools", "nodes", "edges", "loop_limits", "loop_exits"}, {"fragment", "nodes", "edges"})
-        self.mapping(body["fragment"], f"{pointer}/graph/fragment", "graph fragment")
+        self.fragment(body["fragment"], f"{pointer}/graph/fragment")
         self.mapping(body["nodes"], f"{pointer}/graph/nodes", "graph nodes")
         self.sequence(body["edges"], f"{pointer}/graph/edges", "graph edges")
         return GraphIR(self.identifier(body.get("id"), f"{pointer}/graph/id", optional=True), "inline", body)
 
     def block_include_graph(self, item: dict[str, Any], pointer: str) -> GraphIR:
-        self.keys(item, pointer, {"include_graph", "id"})
+        self.keys(item, pointer, {"include_graph"})
         body = self.mapping(item["include_graph"], f"{pointer}/include_graph", "include_graph")
         self.keys(body, f"{pointer}/include_graph", {"id", "path", "on"}, {"id", "path"})
-        on = self.string_mapping(body.get("on", {}), f"{pointer}/include_graph/on", "include_graph on")
+        on = self.include_on(body.get("on"), f"{pointer}/include_graph/on")
         return GraphIR(self.identifier(body["id"], f"{pointer}/include_graph/id") or "", "include", None, self.string(body["path"], f"{pointer}/include_graph/path", "graph path"), on)
 
     def block_escalate(self, item: dict[str, Any], pointer: str) -> EscalateIR:
-        self.keys(item, pointer, {"escalate", "id"})
+        self.keys(item, pointer, {"escalate"})
         body = item["escalate"]
         if body is not None:
             self.mapping(body, f"{pointer}/escalate", "escalate")
-        return EscalateIR(self.identifier(item.get("id"), f"{pointer}/id", optional=True))
+        return EscalateIR()
 
-    def retry(self, value: Any, pointer: str) -> dict[str, Any]:
+    def retry(self, value: Any, pointer: str) -> RetryIR:
         retry = self.mapping(value, pointer, "retry")
         self.keys(retry, pointer, {"limit", "exhausted"}, {"limit", "exhausted"})
-        return {"limit": self.positive_int(retry["limit"], f"{pointer}/limit", "retry limit"), "exhausted": self.handler(retry["exhausted"], f"{pointer}/exhausted")}
+        return RetryIR(self.positive_int(retry["limit"], f"{pointer}/limit", "retry limit"), self.handler(retry["exhausted"], f"{pointer}/exhausted"))
+
+    def fragment(self, value: Any, pointer: str) -> None:
+        fragment = self.mapping(value, pointer, "graph fragment")
+        self.keys(fragment, pointer, {"entry", "exits", "effects"}, {"entry", "exits", "effects"})
+        self.string(fragment["entry"], f"{pointer}/entry", "fragment entry")
+        exits = self.mapping(fragment["exits"], f"{pointer}/exits", "fragment exits")
+        if not exits:
+            self.fail("LSW108", "fragment exits must not be empty", f"{pointer}/exits", "declare at least one named exit")
+        for name, target in exits.items():
+            self.string(name, f"{pointer}/exits/{_escape(str(name))}", "exit name")
+            self.string(target, f"{pointer}/exits/{_escape(str(name))}", "exit target")
+        effects = self.mapping(fragment["effects"], f"{pointer}/effects", "fragment effects")
+        self.keys(effects, f"{pointer}/effects", {"mode", "writes"}, {"mode", "writes"})
+        writes = self.strings(effects["writes"], f"{pointer}/effects/writes", "effect writes")
+        mode = effects["mode"]
+        if mode == "read-only" and writes:
+            self.fail("LSW108", "read-only graph effects require writes: []", f"{pointer}/effects/writes", "use writes: []")
+        if mode == "declared-writes" and not writes:
+            self.fail("LSW108", "declared-writes graph effects require writes", f"{pointer}/effects/writes", "declare at least one write path")
+        if mode not in {"read-only", "declared-writes"}:
+            self.fail("LSW108", "invalid graph effects mode", f"{pointer}/effects/mode", "use read-only or declared-writes")
+
+    def include_on(self, value: Any, pointer: str) -> dict[str, str]:
+        if value is None:
+            return {"pass": "next", "fail": "escalate", "error": "escalate"}
+        on = self.mapping(value, pointer, "include_graph on")
+        self.keys(on, pointer, {"pass", "fail", "error"}, {"pass"})
+        result = {"pass": self.string(on["pass"], f"{pointer}/pass", "include pass handler"), "fail": self.string(on.get("fail", "escalate"), f"{pointer}/fail", "include fail handler"), "error": self.string(on.get("error", "escalate"), f"{pointer}/error", "include error handler")}
+        if result["pass"] != "next":
+            self.fail("LSW108", "include_graph on.pass must be next", f"{pointer}/pass", "use pass: next")
+        for outcome in ("fail", "error"):
+            if result[outcome] == "next":
+                self.fail("LSW108", f"include_graph on.{outcome} cannot be next", f"{pointer}/{outcome}", "use escalate or a structured handler")
+        return result
 
     def optional_mapping(self, item: dict[str, Any], key: str, pointer: str) -> dict[str, Any] | None:
         return self.mapping(item[key], f"{pointer}/{key}", key) if key in item else None
