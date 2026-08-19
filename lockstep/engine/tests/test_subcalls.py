@@ -6,8 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from lockstep import subcalls
-from lockstep.runners import RunnerError, RunnerSpec
+from lockstep.runtime import subcalls
+from lockstep.runtime.runners import RunnerError, RunnerSpec
 
 FAKE = Path(__file__).parent / "fixtures" / "fake_runner.py"
 

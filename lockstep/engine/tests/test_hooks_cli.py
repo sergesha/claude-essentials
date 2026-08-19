@@ -1,4 +1,4 @@
-"""hook handlers in cli.py — Stop / SessionStart / PreToolUse, plus
+"""hook handlers in hooks.py — Stop / SessionStart / PreToolUse, plus
 the `policy` and `doctor` CLI verbs.
 
 All path matching is `Path.resolve()`
@@ -20,9 +20,10 @@ from pathlib import Path
 import yaml
 
 import lockstep.cli as cli
-from lockstep import sessions, validators
-from lockstep.engine import Engine
-from lockstep.runs import RunIndex
+import lockstep.runtime.hooks as hooks
+from lockstep.runtime import sessions, validators
+from lockstep.runtime.engine import Engine
+from lockstep.runtime.runs import RunIndex
 
 GOOD_RECIPES = Path(__file__).parent / "fixtures" / "recipes" / "good"
 SESSION = "session-under-test"
@@ -38,7 +39,7 @@ def _mk_run(state_dir: Path, project: str, step: str = "one", recipe: str = "fea
 def _write_policy(state_dir: Path, project: str, recipe: str) -> Path:
     policy_dir = state_dir / "policy.d"
     policy_dir.mkdir(parents=True, exist_ok=True)
-    slug = cli._policy_slug(project)
+    slug = hooks._policy_slug(project)
     path = policy_dir / f"{slug}.yaml"
     path.write_text(yaml.safe_dump({"project": str(Path(project).resolve()), "recipe": recipe}))
     return path
@@ -85,7 +86,7 @@ def test_stop_blocks_on_active_run(tmp_path):
     state_dir = tmp_path / "state"
     run_id = _mk_run(state_dir, str(project.resolve()))
 
-    exit_code, out = cli.hook_stop({"stop_hook_active": False}, state_dir, str(project))
+    exit_code, out = hooks.hook_stop({"stop_hook_active": False}, state_dir, str(project))
 
     assert exit_code == 0
     data = json.loads(out)
@@ -103,14 +104,14 @@ def test_stop_allows_when_hook_active(tmp_path):
     state_dir = tmp_path / "state"
     _mk_run(state_dir, str(project.resolve()))
 
-    exit_code, out = cli.hook_stop({"stop_hook_active": True}, state_dir, str(project))
+    exit_code, out = hooks.hook_stop({"stop_hook_active": True}, state_dir, str(project))
 
     assert exit_code == 0
     assert out == ""
 
 
 def test_stop_allows_no_runs(tmp_path):
-    exit_code, out = cli.hook_stop({"stop_hook_active": False}, tmp_path / "state", str(tmp_path))
+    exit_code, out = hooks.hook_stop({"stop_hook_active": False}, tmp_path / "state", str(tmp_path))
 
     assert exit_code == 0
     assert out == ""
@@ -122,7 +123,7 @@ def test_session_start_lists_active_runs(tmp_path):
     state_dir = tmp_path / "state"
     run_id = _mk_run(state_dir, str(project.resolve()))
 
-    text = cli.hook_session_start(state_dir, str(project))
+    text = hooks.hook_session_start(state_dir, str(project))
 
     assert run_id in text
     assert "one" in text
@@ -142,7 +143,7 @@ def test_stop_ignores_other_projects(tmp_path):
     state_dir = tmp_path / "state"
     _mk_run(state_dir, str(other.resolve()))
 
-    exit_code, out = cli.hook_stop({"stop_hook_active": False}, state_dir, str(proj))
+    exit_code, out = hooks.hook_stop({"stop_hook_active": False}, state_dir, str(proj))
 
     assert exit_code == 0
     assert out == ""
@@ -156,7 +157,7 @@ def test_stop_matches_subdirectory_cwd(tmp_path):
     state_dir = tmp_path / "state"
     run_id = _mk_run(state_dir, str(proj.resolve()))
 
-    exit_code, out = cli.hook_stop({"stop_hook_active": False}, state_dir, str(sub))
+    exit_code, out = hooks.hook_stop({"stop_hook_active": False}, state_dir, str(sub))
 
     assert exit_code == 0
     data = json.loads(out)
@@ -173,7 +174,7 @@ def test_session_start_flags_runs_with_no_live_driver(tmp_path):
     state_dir = tmp_path / "state"
     _mk_run(state_dir, str(proj.resolve()))
 
-    text = cli.hook_session_start(state_dir, str(proj))
+    text = hooks.hook_session_start(state_dir, str(proj))
 
     assert "no live driving session" in text
     assert "scenario_status" in text
@@ -186,7 +187,7 @@ def test_session_start_does_not_flag_a_driven_run(tmp_path):
     run_id = _mk_run(state_dir, str(proj.resolve()))
     sessions.touch(state_dir, run_id, SESSION, 30.0)
 
-    text = cli.hook_session_start(state_dir, str(proj))
+    text = hooks.hook_session_start(state_dir, str(proj))
 
     assert "no live driving session" not in text
 
@@ -197,7 +198,7 @@ def test_session_start_does_not_flag_a_driven_run(tmp_path):
 
 
 def test_pretool_no_policy_allows(tmp_path):
-    exit_code, out = cli.hook_pretool({"cwd": str(tmp_path)}, tmp_path / "state")
+    exit_code, out = hooks.hook_pretool({"cwd": str(tmp_path)}, tmp_path / "state")
 
     assert exit_code == 0
     assert out == ""
@@ -213,7 +214,7 @@ def test_pretool_matching_policy_and_run_allows(tmp_path):
     run_id = _mk_run(state_dir, str(proj.resolve()), recipe="feature-dev")
     sessions.touch(state_dir, run_id, SESSION, 30.0)
 
-    exit_code, out = cli.hook_pretool({"cwd": str(proj), "session_id": SESSION}, state_dir)
+    exit_code, out = hooks.hook_pretool({"cwd": str(proj), "session_id": SESSION}, state_dir)
 
     assert exit_code == 0
     assert out == ""
@@ -225,7 +226,7 @@ def test_pretool_policy_no_run_denies(tmp_path):
     state_dir = tmp_path / "state"
     _write_policy(state_dir, str(proj), "feature-dev")
 
-    exit_code, out = cli.hook_pretool({"cwd": str(proj)}, state_dir)
+    exit_code, out = hooks.hook_pretool({"cwd": str(proj)}, state_dir)
 
     assert exit_code == 0
     data = json.loads(out)
@@ -243,7 +244,7 @@ def test_pretool_recipe_mismatch_stays_denied(tmp_path):
     _write_policy(state_dir, str(proj), "feature-dev")
     _mk_run(state_dir, str(proj.resolve()), recipe="other-recipe")
 
-    exit_code, out = cli.hook_pretool({"cwd": str(proj)}, state_dir)
+    exit_code, out = hooks.hook_pretool({"cwd": str(proj)}, state_dir)
 
     assert exit_code == 0
     data = json.loads(out)
@@ -259,7 +260,7 @@ def test_pretool_cross_project_run_stays_denied(tmp_path):
     _write_policy(state_dir, str(proj), "feature-dev")
     _mk_run(state_dir, str(other.resolve()), recipe="feature-dev")
 
-    exit_code, out = cli.hook_pretool({"cwd": str(proj)}, state_dir)
+    exit_code, out = hooks.hook_pretool({"cwd": str(proj)}, state_dir)
 
     assert exit_code == 0
     data = json.loads(out)
@@ -284,11 +285,11 @@ def test_pretool_child_session_unlock_narrowed_to_its_own_chain(tmp_path, monkey
     monkeypatch.setenv("LOCKSTEP_CHILD_RUN", child.run_id)
     monkeypatch.setenv("LOCKSTEP_CHILD_NONCE", "n")
 
-    exit_code, out = cli.hook_pretool({"cwd": str(proj)}, state_dir)
+    exit_code, out = hooks.hook_pretool({"cwd": str(proj)}, state_dir)
     assert exit_code == 0 and out == ""        # own chain awaiting: unlocked
 
     idx.update(parent.run_id, status="escalated")
-    exit_code, out = cli.hook_pretool({"cwd": str(proj)}, state_dir)
+    exit_code, out = hooks.hook_pretool({"cwd": str(proj)}, state_dir)
     assert exit_code == 0
     data = json.loads(out)
     # denied although the unrelated awaiting policy run still exists —
@@ -305,7 +306,7 @@ def test_pretool_child_env_with_unknown_run_fails_closed(tmp_path, monkeypatch):
     idx.create("feature-dev", str(proj.resolve()))         # would unlock a plain worker
     monkeypatch.setenv("LOCKSTEP_CHILD_RUN", "no-such-run")
 
-    exit_code, out = cli.hook_pretool({"cwd": str(proj)}, state_dir)
+    exit_code, out = hooks.hook_pretool({"cwd": str(proj)}, state_dir)
     assert exit_code == 0
     assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
 
@@ -326,11 +327,11 @@ def test_pretool_worker_predicate_is_session_binding(tmp_path, monkeypatch):
     sessions.touch(state_dir, parent.run_id, SESSION, 30.0)
     sessions.touch(state_dir, child.run_id, SESSION, 30.0)
 
-    exit_code, out = cli.hook_pretool({"cwd": str(proj), "session_id": SESSION}, state_dir)
+    exit_code, out = hooks.hook_pretool({"cwd": str(proj), "session_id": SESSION}, state_dir)
     assert exit_code == 0 and out == ""
 
     idx.update(parent.run_id, status="escalated")
-    exit_code, out = cli.hook_pretool({"cwd": str(proj), "session_id": SESSION}, state_dir)
+    exit_code, out = hooks.hook_pretool({"cwd": str(proj), "session_id": SESSION}, state_dir)
     assert exit_code == 0
     data = json.loads(out)
     assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
@@ -349,7 +350,7 @@ def test_pretool_deny_advice_works_end_to_end(tmp_path, monkeypatch):
     eng = Engine(state_dir, GOOD_RECIPES)
     run_id = eng.start("minimal", {}, str(proj.resolve()))["run_id"]  # crashed owner: no binding
 
-    exit_code, out = cli.hook_pretool({"cwd": str(proj), "session_id": SESSION}, state_dir)
+    exit_code, out = hooks.hook_pretool({"cwd": str(proj), "session_id": SESSION}, state_dir)
     assert exit_code == 0
     data = json.loads(out)
     assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
@@ -357,20 +358,20 @@ def test_pretool_deny_advice_works_end_to_end(tmp_path, monkeypatch):
     assert "scenario_status" in reason and run_id in reason
 
     status = eng.status(run_id)                          # advice road 1: touch the run…
-    cli.hook_posttool({"cwd": str(proj), "session_id": SESSION,   # …and the hook that fire brings
+    hooks.hook_posttool({"cwd": str(proj), "session_id": SESSION,   # …and the hook that fire brings
                        "tool_name": "mcp__lockstep__scenario_status",
                        "tool_input": {"run_id": run_id}, "tool_response": status},
                       state_dir)
-    exit_code, out = cli.hook_pretool({"cwd": str(proj), "session_id": SESSION}, state_dir)
+    exit_code, out = hooks.hook_pretool({"cwd": str(proj), "session_id": SESSION}, state_dir)
     assert exit_code == 0 and out == ""                  # adopted: gate open
 
     eng.abort(run_id)                                    # advice road 2: abort…
     out2 = eng.start("minimal", {}, str(proj.resolve()))  # …fresh start…
-    cli.hook_posttool({"cwd": str(proj), "session_id": SESSION,
+    hooks.hook_posttool({"cwd": str(proj), "session_id": SESSION,
                        "tool_name": "mcp__lockstep__scenario_start",
                        "tool_input": {"recipe": "minimal"}, "tool_response": out2},
                       state_dir)                         # …bound at birth
-    exit_code, out = cli.hook_pretool({"cwd": str(proj), "session_id": SESSION}, state_dir)
+    exit_code, out = hooks.hook_pretool({"cwd": str(proj), "session_id": SESSION}, state_dir)
     assert exit_code == 0 and out == ""
 
 
@@ -390,7 +391,7 @@ def test_pretool_engine_calls_alone_never_open_the_gate(tmp_path, monkeypatch):
     eng.status(run_id)                                   # the tempting "recovery" step
 
     assert sessions.read_binding(state_dir, run_id) is None
-    exit_code, out = cli.hook_pretool({"cwd": str(proj), "session_id": SESSION}, state_dir)
+    exit_code, out = hooks.hook_pretool({"cwd": str(proj), "session_id": SESSION}, state_dir)
     assert exit_code == 0
     assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
 
@@ -405,9 +406,9 @@ def test_pretool_exception_denies(tmp_path, monkeypatch):
         def __init__(self, *a, **k):
             raise RuntimeError("boom")
 
-    monkeypatch.setattr(cli, "RunIndex", _Boom)
+    monkeypatch.setattr(hooks, "RunIndex", _Boom)
 
-    exit_code, out = cli.hook_pretool({"cwd": str(proj)}, state_dir)
+    exit_code, out = hooks.hook_pretool({"cwd": str(proj)}, state_dir)
 
     assert exit_code == 0
     data = json.loads(out)
@@ -426,7 +427,7 @@ def test_policy_require_then_clear_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(state_dir))
 
     assert cli.main(["policy", "require", "--project", str(proj), "--recipe", "feature-dev"]) == 0
-    slug = cli._policy_slug(str(proj))
+    slug = hooks._policy_slug(str(proj))
     policy_file = state_dir / "policy.d" / f"{slug}.yaml"
     assert policy_file.exists()
     doc = yaml.safe_load(policy_file.read_text())
@@ -454,7 +455,7 @@ def test_doctor_all_green(tmp_path):
     state_dir.mkdir()
     recipes_dir.mkdir()
 
-    ok, report = cli.doctor(state_dir, recipes_dir)
+    ok, report = hooks.doctor(state_dir, recipes_dir)
 
     assert ok is True
     assert "all green" in report
@@ -462,7 +463,7 @@ def test_doctor_all_green(tmp_path):
 
 
 def test_doctor_flags_missing_dirs(tmp_path):
-    ok, report = cli.doctor(tmp_path / "nope", tmp_path / "also-nope")
+    ok, report = hooks.doctor(tmp_path / "nope", tmp_path / "also-nope")
 
     assert ok is False
     assert "issues found" in report
@@ -480,12 +481,12 @@ def test_doctor_screams_on_active_run_without_binding(tmp_path):
     proj.mkdir()
     run_id = _mk_run(state_dir, str(proj.resolve()))
 
-    ok, report = cli.doctor(state_dir, recipes_dir)
+    ok, report = hooks.doctor(state_dir, recipes_dir)
 
     assert ok is False
     assert run_id in report
     assert "PostToolUse" in report
-    assert cli.LOCKSTEP_TOOL_MATCHER in report         # the exact matcher, verbatim
+    assert hooks.LOCKSTEP_TOOL_MATCHER in report         # the exact matcher, verbatim
     assert "scenario_status" in report                 # ...and the recovery touch
 
 
@@ -498,7 +499,7 @@ def test_doctor_green_when_active_run_is_bound(tmp_path):
     run_id = _mk_run(state_dir, str(proj.resolve()))
     assert sessions.touch(state_dir, run_id, SESSION, 30.0) == "bound"
 
-    ok, report = cli.doctor(state_dir, recipes_dir)
+    ok, report = hooks.doctor(state_dir, recipes_dir)
 
     assert ok is True
     assert run_id in report and SESSION in report
@@ -515,7 +516,7 @@ def test_doctor_ignores_terminal_runs_without_bindings(tmp_path):
     run_id = _mk_run(state_dir, str(proj.resolve()))
     RunIndex(state_dir).update(run_id, status="aborted")
 
-    ok, report = cli.doctor(state_dir, recipes_dir)
+    ok, report = hooks.doctor(state_dir, recipes_dir)
 
     assert ok is True
 
@@ -527,10 +528,10 @@ def test_hooks_write_nothing_to_the_state_dir(tmp_path):
     # posttool observer included — leaves it absent.
     state_dir = tmp_path / "state"
 
-    cli.hook_stop({"stop_hook_active": False}, state_dir, str(tmp_path))
-    cli.hook_session_start(state_dir, str(tmp_path))
-    cli.hook_pretool({"cwd": str(tmp_path)}, state_dir)
-    cli.hook_posttool({"cwd": str(tmp_path), "session_id": SESSION,
+    hooks.hook_stop({"stop_hook_active": False}, state_dir, str(tmp_path))
+    hooks.hook_session_start(state_dir, str(tmp_path))
+    hooks.hook_pretool({"cwd": str(tmp_path)}, state_dir)
+    hooks.hook_posttool({"cwd": str(tmp_path), "session_id": SESSION,
                        "tool_name": "mcp__lockstep__scenario_status",
                        "tool_input": {"run_id": "no-such-run"}, "tool_response": {}},
                       state_dir)
@@ -550,7 +551,7 @@ def test_stop_text_is_subcall_aware_per_run(tmp_path):
                brief={"step": "_subcall", "node": "review", "runner": "claude"})
     working = idx.create("rec2", "/proj")
     idx.update(working.run_id, step="one", brief={"step": "one"})
-    code, out = cli.hook_stop({"stop_hook_active": False, "cwd": "/proj"}, tmp_path, cwd="/proj")
+    code, out = hooks.hook_stop({"stop_hook_active": False, "cwd": "/proj"}, tmp_path, cwd="/proj")
     payload = json.loads(out)["reason"]
     # the parked run's line must NOT say scenario_done; the working
     # run's line still must — per-run rendering, not one joined sentence.
@@ -572,7 +573,7 @@ def test_session_start_marks_the_sessions_own_child_run(tmp_path, monkeypatch):
     idx.update(child.run_id, step="review", brief={"step": "review"})
     monkeypatch.setenv("LOCKSTEP_CHILD_RUN", child.run_id)
     monkeypatch.setenv("LOCKSTEP_CHILD_NONCE", "n")
-    ctx = cli.hook_session_start(tmp_path, cwd="/proj")
+    ctx = hooks.hook_session_start(tmp_path, cwd="/proj")
     child_line = next(l for l in ctx.splitlines() if child.run_id in l)
     parent_line = next(l for l in ctx.splitlines() if parent.run_id in l)
     assert "OWN child run" in child_line
@@ -584,7 +585,7 @@ def test_session_start_names_the_subcall_not_the_raw_marker(tmp_path):
     r = idx.create("rec", "/proj")
     idx.update(r.run_id, step="_subcall",
                brief={"step": "_subcall", "node": "review", "runner": "claude"})
-    ctx = cli.hook_session_start(tmp_path, cwd="/proj")
+    ctx = hooks.hook_session_start(tmp_path, cwd="/proj")
     # v1 renders the step repr-quoted: awaiting step '_subcall' — that
     # exact token must be gone. Asserted on the token itself: a
     # replace()-based assertion here is tautological.
@@ -599,7 +600,7 @@ def test_empty_state_dir_env_reads_as_absent(monkeypatch, tmp_path):
     monkeypatch.setenv("LOCKSTEP_STATE_DIR", "")
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.chdir(tmp_path / "..")
-    assert cli._state_dir() == Path(tmp_path) / ".lockstep"
+    assert hooks._state_dir() == Path(tmp_path) / ".lockstep"
     assert validators._state_dir() == Path(tmp_path) / ".lockstep"
 
 
@@ -623,11 +624,11 @@ def test_pretool_child_run_without_its_nonce_is_denied(tmp_path, monkeypatch):
             monkeypatch.delenv("LOCKSTEP_CHILD_NONCE", raising=False)
         else:
             monkeypatch.setenv("LOCKSTEP_CHILD_NONCE", wrong)
-        exit_code, out = cli.hook_pretool({"cwd": str(proj)}, state_dir)
+        exit_code, out = hooks.hook_pretool({"cwd": str(proj)}, state_dir)
         assert exit_code == 0
         data = json.loads(out)
         assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
         assert "credential" in data["hookSpecificOutput"]["permissionDecisionReason"]
 
     monkeypatch.setenv("LOCKSTEP_CHILD_NONCE", "the-real-nonce")
-    assert cli.hook_pretool({"cwd": str(proj)}, state_dir) == (0, "")
+    assert hooks.hook_pretool({"cwd": str(proj)}, state_dir) == (0, "")

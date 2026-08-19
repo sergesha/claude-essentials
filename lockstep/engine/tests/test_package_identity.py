@@ -57,7 +57,7 @@ def cli() -> object:
         if probe_startup:
             probe = "\nserver.app.run = lambda: print('MCP_INITIALIZED')\n"
         code = (
-            "from lockstep import cli, server\n"
+            "from lockstep import cli\nfrom lockstep.mcp import server\n"
             + probe
             + "raise SystemExit(cli.main())\n"
         )

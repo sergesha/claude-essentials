@@ -32,9 +32,9 @@ from pathlib import Path
 
 import yaml
 
-import lockstep.cli as cli
-from lockstep import sessions
-from lockstep.runs import RunIndex
+import lockstep.runtime.hooks as hooks
+from lockstep.runtime import sessions
+from lockstep.runtime.runs import RunIndex
 
 S1 = "session-aaaa-1111"
 S2 = "session-bbbb-2222"
@@ -54,7 +54,7 @@ def _mk_run(state_dir: Path, project: str, step: str = "one", recipe: str = "fea
 def _write_policy(state_dir: Path, project: str, recipe: str) -> Path:
     policy_dir = state_dir / "policy.d"
     policy_dir.mkdir(parents=True, exist_ok=True)
-    path = policy_dir / f"{cli._policy_slug(project)}.yaml"
+    path = policy_dir / f"{hooks._policy_slug(project)}.yaml"
     path.write_text(yaml.safe_dump({"project": str(Path(project).resolve()), "recipe": recipe}))
     return path
 
@@ -78,13 +78,13 @@ def _pretool(state: Path, proj: Path, session_id: str | None):
     stdin = {"cwd": str(proj)}
     if session_id is not None:
         stdin["session_id"] = session_id
-    return cli.hook_pretool(stdin, state)
+    return hooks.hook_pretool(stdin, state)
 
 
 def _posttool(state: Path, proj: Path, session_id: str,
               tool: str = "mcp__lockstep__scenario_status",
               tool_input: dict | None = None, tool_response=None):
-    return cli.hook_posttool(
+    return hooks.hook_posttool(
         {"cwd": str(proj), "session_id": session_id, "tool_name": tool,
          "tool_input": tool_input or {}, "tool_response": tool_response or {}},
         state,
@@ -92,13 +92,13 @@ def _posttool(state: Path, proj: Path, session_id: str,
 
 
 def _bind(state: Path, run_id: str, session_id: str) -> None:
-    from lockstep import sessions
+    from lockstep.runtime import sessions
 
     assert sessions.touch(state, run_id, session_id, 30.0) in ("bound", "adopted")
 
 
 def _age_binding(state: Path, run_id: str, minutes: float) -> None:
-    from lockstep import sessions
+    from lockstep.runtime import sessions
 
     p = sessions.binding_path(state, run_id)
     data = json.loads(p.read_text())
@@ -118,7 +118,7 @@ def _denied(out: str) -> str:
 
 
 def test_owner_session_is_allowed_and_refreshed(tmp_path):
-    from lockstep import sessions
+    from lockstep.runtime import sessions
 
     proj, state = _setup(tmp_path)
     run_id = _mk_run(state, str(proj.resolve()))
@@ -179,7 +179,7 @@ def test_missing_session_id_fails_closed(tmp_path):
 
 
 def test_scenario_start_response_binds_the_starting_session(tmp_path):
-    from lockstep import sessions
+    from lockstep.runtime import sessions
 
     proj, state = _setup(tmp_path)
     run_id = _mk_run(state, str(proj.resolve()))
@@ -196,7 +196,7 @@ def test_scenario_start_response_binds_the_starting_session(tmp_path):
 def test_bind_reads_run_id_from_text_wrapped_tool_response(tmp_path):
     # MCP tool responses may arrive as content blocks with the JSON as
     # text — the run_id must still be found.
-    from lockstep import sessions
+    from lockstep.runtime import sessions
 
     proj, state = _setup(tmp_path)
     run_id = _mk_run(state, str(proj.resolve()))
@@ -212,7 +212,7 @@ def test_bind_reads_run_id_from_text_wrapped_tool_response(tmp_path):
 def test_status_poll_refreshes_the_owner_binding(tmp_path):
     # A parent waiting out a long subcall only polls scenario_status — that
     # touch must keep its binding live, or a poller could be robbed mid-wait.
-    from lockstep import sessions
+    from lockstep.runtime import sessions
 
     proj, state = _setup(tmp_path)
     run_id = _mk_run(state, str(proj.resolve()))
@@ -226,7 +226,7 @@ def test_status_poll_refreshes_the_owner_binding(tmp_path):
 
 
 def test_touch_ignores_terminal_and_unknown_runs(tmp_path):
-    from lockstep import sessions
+    from lockstep.runtime import sessions
 
     proj, state = _setup(tmp_path)
     run_id = _mk_run(state, str(proj.resolve()))
@@ -270,7 +270,7 @@ def _force_run_id(state: Path, old: str, new: str) -> None:
 
 
 def test_bind_from_recorded_plugin_install_payload(tmp_path):
-    from lockstep import sessions
+    from lockstep.runtime import sessions
 
     proj, state = _setup(tmp_path)
     payload = _recorded_payload()
@@ -278,7 +278,7 @@ def test_bind_from_recorded_plugin_install_payload(tmp_path):
     run_id = json.loads(run_id)["run_id"]              # the hook must dig it out itself
     _force_run_id(state, _mk_run(state, str(proj.resolve())), run_id)
 
-    cli.hook_posttool(payload, state)                  # byte-for-byte as the platform sent it
+    hooks.hook_posttool(payload, state)                  # byte-for-byte as the platform sent it
 
     binding = sessions.read_binding(state, run_id)
     assert binding is not None, "recorded payload did not bind — matcher or parser regressed"
@@ -288,13 +288,13 @@ def test_bind_from_recorded_plugin_install_payload(tmp_path):
 def test_bind_from_recorded_codex_payload(tmp_path):
     proj, state = _setup(tmp_path)
     payload = _recorded_codex_payload()
-    run_id = cli._posttool_run_id(
+    run_id = hooks._posttool_run_id(
         payload.get("tool_input"), payload.get("tool_response"), payload.get("tool_name", "")
     )
     assert run_id
     _force_run_id(state, _mk_run(state, str(proj.resolve())), run_id)
 
-    cli.hook_posttool(payload, state)
+    hooks.hook_posttool(payload, state)
 
     binding = sessions.read_binding(state, run_id)
     assert binding is not None
@@ -307,13 +307,13 @@ def test_shipped_hook_matcher_covers_install_shapes():
     # ANY name (the plugin segment is the user's install name; the server
     # segment `lockstep` is pinned by the shipped manifest's mcpServers
     # key) — asserted mechanically against the file that ships, and against
-    # cli.py's single-home copy of the same pattern.
+    # hooks.py's single-home copy of the same pattern.
     import re
 
-    hooks = json.loads((Path(__file__).parents[2] / "hooks" / "hooks.json").read_text())
-    (entry,) = hooks["hooks"]["PostToolUse"]
+    hook_config = json.loads((Path(__file__).parents[2] / "hooks" / "hooks.json").read_text())
+    (entry,) = hook_config["hooks"]["PostToolUse"]
     matcher = entry["matcher"]
-    assert matcher == cli.LOCKSTEP_TOOL_MATCHER    # ONE pattern, two homes, byte-equal
+    assert matcher == hooks.LOCKSTEP_TOOL_MATCHER    # ONE pattern, two homes, byte-equal
     assert re.fullmatch(matcher, _recorded_payload()["tool_name"])
     assert re.fullmatch(matcher, _recorded_codex_payload()["tool_name"])
     assert re.fullmatch(matcher, "mcp__lockstep__scenario_start")
@@ -332,7 +332,7 @@ def test_bind_from_plugin_install_under_any_plugin_name(tmp_path):
     # The recorded payload with ONLY the plugin install name changed — the
     # third shape the smoke report warned about. Binding must be
     # independent of what the user named the plugin.
-    from lockstep import sessions
+    from lockstep.runtime import sessions
 
     proj, state = _setup(tmp_path)
     payload = _recorded_payload()
@@ -340,7 +340,7 @@ def test_bind_from_plugin_install_under_any_plugin_name(tmp_path):
     run_id = json.loads(payload["tool_response"][0]["text"])["run_id"]
     _force_run_id(state, _mk_run(state, str(proj.resolve())), run_id)
 
-    cli.hook_posttool(payload, state)
+    hooks.hook_posttool(payload, state)
 
     binding = sessions.read_binding(state, run_id)
     assert binding is not None, "renamed-plugin payload did not bind"
@@ -350,12 +350,12 @@ def test_bind_from_plugin_install_under_any_plugin_name(tmp_path):
 def test_recorded_codex_payload_preserves_live_owner_and_stale_adoption(tmp_path):
     proj, state = _setup(tmp_path)
     payload = _recorded_codex_payload()
-    run_id = cli._posttool_run_id(
+    run_id = hooks._posttool_run_id(
         payload.get("tool_input"), payload.get("tool_response"), payload.get("tool_name", "")
     )
     assert run_id
     _force_run_id(state, _mk_run(state, str(proj.resolve())), run_id)
-    cli.hook_posttool(payload, state)
+    hooks.hook_posttool(payload, state)
 
     session_b = "codex-session-b"
     assert _pretool(state, proj, session_b)[1]
@@ -366,12 +366,12 @@ def test_recorded_codex_payload_preserves_live_owner_and_stale_adoption(tmp_path
         "tool_input": {"run_id": run_id},
         "tool_response": {"run_id": run_id, "status": "awaiting"},
     }
-    cli.hook_posttool(status_payload, state)
+    hooks.hook_posttool(status_payload, state)
     assert sessions.read_binding(state, run_id)["session_id"] == payload["session_id"]
     assert _pretool(state, proj, session_b)[1]
 
     _age_binding(state, run_id, 31.0)
-    cli.hook_posttool(status_payload, state)
+    hooks.hook_posttool(status_payload, state)
     assert sessions.read_binding(state, run_id)["session_id"] == session_b
     assert _pretool(state, proj, session_b) == (0, "")
 
@@ -386,13 +386,13 @@ def test_recorded_codex_payload_preserves_live_owner_and_stale_adoption(tmp_path
 
 
 def _marked(payload: dict) -> dict:
-    from lockstep import sessions
+    from lockstep.runtime import sessions
 
     return {**payload, sessions.BINDING_MARKER_KEY: sessions.BINDING_MARKER_VALUE}
 
 
 def test_custom_server_name_binds_via_response_marker(tmp_path):
-    from lockstep import sessions
+    from lockstep.runtime import sessions
 
     proj, state = _setup(tmp_path)
     run_id = _mk_run(state, str(proj.resolve()))
@@ -408,7 +408,7 @@ def test_custom_server_name_binds_via_response_marker(tmp_path):
 def test_foreign_tool_bare_run_id_never_binds(tmp_path):
     # A foreign mcp tool whose response happens to carry a live run_id —
     # the runs.json-through-a-file-read shape — must bind nothing.
-    from lockstep import sessions
+    from lockstep.runtime import sessions
 
     proj, state = _setup(tmp_path)
     run_id = _mk_run(state, str(proj.resolve()))
@@ -425,7 +425,7 @@ def test_foreign_tool_bare_run_id_never_binds(tmp_path):
 def test_marker_must_sit_beside_run_id_in_one_object(tmp_path):
     # Scattered coincidence is not identity: the marker key in one object
     # and a run_id in another must not combine into a binding.
-    from lockstep import sessions
+    from lockstep.runtime import sessions
 
     proj, state = _setup(tmp_path)
     run_id = _mk_run(state, str(proj.resolve()))
@@ -438,7 +438,7 @@ def test_marker_must_sit_beside_run_id_in_one_object(tmp_path):
 
 
 def test_non_mcp_tools_never_bind(tmp_path):
-    from lockstep import sessions
+    from lockstep.runtime import sessions
 
     proj, state = _setup(tmp_path)
     run_id = _mk_run(state, str(proj.resolve()))
@@ -459,7 +459,7 @@ def test_adoption_after_owner_crash(tmp_path):
     # silent past the window. The resumed conversation (NEW session id)
     # touches the run with scenario_status — the PostToolUse hook adopts —
     # and only then does the gate open for it.
-    from lockstep import sessions
+    from lockstep.runtime import sessions
 
     proj, state = _setup(tmp_path)
     run_id = _mk_run(state, str(proj.resolve()))
@@ -481,7 +481,7 @@ def test_adoption_after_owner_crash(tmp_path):
 def test_touch_cannot_steal_a_live_run(tmp_path):
     # The abuse case: a second session touches a run whose owner is live.
     # The binding must not move, and the gate must stay shut for the toucher.
-    from lockstep import sessions
+    from lockstep.runtime import sessions
 
     proj, state = _setup(tmp_path)
     run_id = _mk_run(state, str(proj.resolve()))
@@ -497,7 +497,7 @@ def test_touch_cannot_steal_a_live_run(tmp_path):
 
 
 def test_adoption_window_configurable_via_env(tmp_path, monkeypatch):
-    from lockstep import sessions
+    from lockstep.runtime import sessions
 
     proj, state = _setup(tmp_path)
     run_id = _mk_run(state, str(proj.resolve()))
@@ -623,8 +623,8 @@ def test_stop_does_not_block_a_session_that_does_not_drive_the_run(tmp_path):
     run_id = _mk_run(state, str(proj.resolve()))
     _bind(state, run_id, S1)
 
-    code, out = cli.hook_stop({"session_id": S2}, state, str(proj))
+    code, out = hooks.hook_stop({"session_id": S2}, state, str(proj))
     assert (code, out) == (0, "")
 
-    code, out = cli.hook_stop({"session_id": S1}, state, str(proj))
+    code, out = hooks.hook_stop({"session_id": S1}, state, str(proj))
     assert json.loads(out)["decision"] == "block"

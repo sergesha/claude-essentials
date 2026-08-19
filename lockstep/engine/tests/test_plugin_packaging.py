@@ -137,7 +137,7 @@ def test_launcher_derives_codex_home_from_installed_plugin_path(tmp_path):
 
 
 def test_distributed_default_recipe_does_not_pin_a_host_runner():
-    recipe = (ROOT / "recipes/examples/feature-dev-reviewed.yaml").read_text()
+    recipe = (ROOT / "recipes/examples/feature-dev-reviewed.recipe.yaml").read_text()
     assert "runner: claude" not in recipe
     assert "runner: codex" not in recipe
 

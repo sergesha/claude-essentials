@@ -17,8 +17,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from lockstep import server
-from lockstep.engine import LockstepError
+from lockstep.mcp import server
+from lockstep.runtime.engine import LockstepError
 
 FIXTURES = Path(__file__).parent / "fixtures" / "recipes"
 GOOD = FIXTURES / "good"
@@ -65,7 +65,7 @@ def test_codex_workspace_metadata_supplies_project_and_default_recipes(tmp_path,
     project = tmp_path / "project"
     recipes = project / ".lockstep" / "recipes"
     recipes.mkdir(parents=True)
-    (recipes / "minimal.yaml").write_text((GOOD / "minimal.yaml").read_text())
+    (recipes / "minimal.recipe.yaml").write_text((GOOD / "minimal.recipe.yaml").read_text())
     plugin_root = tmp_path / "installed-plugin"
     plugin_root.mkdir()
     monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(tmp_path / "state"))
@@ -132,7 +132,7 @@ def test_run_naming_responses_carry_the_binding_marker(tmp_path, monkeypatch):
     # response that names a run_id is stamped with the binding marker, so
     # binding survives ANY tool-name spelling the platform matcher lets
     # through. Responses without a run_id stay unstamped.
-    from lockstep import sessions
+    from lockstep.runtime import sessions
 
     _configure(monkeypatch, tmp_path)
 
@@ -159,12 +159,12 @@ def test_run_naming_responses_carry_the_binding_marker(tmp_path, monkeypatch):
 def test_validate_recipe_reports_profile(tmp_path, monkeypatch):
     _configure(monkeypatch, tmp_path)
 
-    good = server.validate_recipe(str(GOOD / "minimal.yaml"))
+    good = server.validate_recipe(str(GOOD / "minimal.recipe.yaml"))
     assert good["ok"] is True
     assert good["errors"] == []
     assert good["yamlgraph"]["ok"] is True
 
-    bad = server.validate_recipe(str(BAD / "llm-node.yaml"))
+    bad = server.validate_recipe(str(BAD / "llm-node.recipe.yaml"))
     assert bad["ok"] is False
     assert any("forbidden node type" in e for e in bad["errors"])
 
@@ -215,7 +215,7 @@ def test_scenario_dryrun_reports_clean_error_on_recipe_pinned_path_escape(tmp_pa
     """A shape check's `path:` is recipe-PINNED (not evidence-
     sourced), so `_containment_errors` — which only resolves/contains
     evidence keys annotated `format: project-path` — never sees it. The
-    literal `../outside.md` in `dryrun-path-escape.yaml` reaches
+    literal `../outside.md` in `dryrun-path-escape.recipe.yaml` reaches
     `validators._resolve_path` raw and raises ValueError; `scenario_dryrun`
     must turn that into a clean per-check error result, not an uncaught
     crash."""

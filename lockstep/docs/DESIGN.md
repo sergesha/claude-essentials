@@ -99,7 +99,7 @@ Abridged example (only the `plan` step shown; further steps follow the same
 triple pattern, chained the way `validate_plan`'s pass edge below would
 target `step_implement` instead of `END`). This is copied verbatim in shape
 from the fixture the engine's own tests compile and run
-(`lockstep/engine/tests/fixtures/recipes/good/two-steps.yaml`) — not an abridged sketch of a different, easier dialect.
+(`lockstep/engine/tests/fixtures/recipes/good/two-steps.recipe.yaml`) — not an abridged sketch of a different, easier dialect.
 Conventions — ONE dialect, this one: reused state keys
 `brief`/`evidence`/`verdict_status`/`verdict_reasons` across all steps
 (sequential graphs make reuse safe; one generic validator serves every

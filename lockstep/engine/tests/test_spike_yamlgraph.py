@@ -6,9 +6,9 @@ place.
 
 from pathlib import Path
 
-import lockstep.yamlgraph_api as yg
+import lockstep.recipe.yamlgraph_adapter as yg
 
-FIX = Path(__file__).parent / "fixtures" / "recipes" / "good" / "minimal.yaml"
+FIX = Path(__file__).parent / "fixtures" / "recipes" / "good" / "minimal.recipe.yaml"
 
 
 def test_start_parks_on_interrupt():
@@ -37,13 +37,13 @@ def test_sqlite_survives_new_app(tmp_path):
     assert adv.done is True
 
 
-def test_cli_validate_ok():
-    ok, _msg = yg.cli_validate(FIX)
+def test_validate_ok():
+    ok, _msg = yg.validate(FIX)
     assert ok is True
 
 
-def test_cli_mermaid():
-    out = yg.cli_mermaid(FIX, None)
+def test_render():
+    out = yg.render(FIX)
     assert "step_one" in out
 
 

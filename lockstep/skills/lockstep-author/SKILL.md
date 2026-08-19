@@ -19,7 +19,7 @@ dialect reference and vocabulary table, then validate it with the `validate_reci
    these; a recipe encodes a real workflow contract and should read back as one the human
    recognizes.
 2. **Draft the recipe** using the dialect below. Start from
-   `lockstep/recipes/examples/feature-dev.yaml` — copy it into `<project>/.lockstep/recipes/`
+   `lockstep/recipes/examples/feature-dev.recipe.yaml` — copy it into `<project>/.lockstep/recipes/`
    and adapt the steps, `evidence_schema`, and `checks` rather than writing the yamlgraph
    scaffolding (interrupt/validator/passthrough/escalate wiring) from scratch.
 3. **`validate_recipe(path)`** until clean. It runs two independent checks and reports both:
@@ -43,8 +43,8 @@ dialect reference and vocabulary table, then validate it with the `validate_reci
 ## Recipe dialect crib
 
 The dialect below is **pinned** to yamlgraph 0.5.18 — copied verbatim from
-`lockstep/engine/tests/fixtures/recipes/good/two-steps.yaml` and
-`lockstep/recipes/examples/feature-dev.yaml`, the two real fixtures the engine's own tests
+`lockstep/engine/tests/fixtures/recipes/good/two-steps.recipe.yaml` and
+`lockstep/recipes/examples/feature-dev.recipe.yaml`, the two real fixtures the engine's own tests
 compile and run. Do not improvise a different shape for any of the traps below: each one is a
 live failure mode, not a style preference.
 
@@ -144,7 +144,7 @@ edges:
 ```
 
 All steps in one recipe can and should share the same `escalate_gate`/`escalate` pair — see
-`feature-dev.yaml`, where four validators all point `loop_exits` at the same gate.
+`feature-dev.recipe.yaml`, where four validators all point `loop_exits` at the same gate.
 
 **Forbidden node types**: `llm`, `agent`, `router`, `copilot`, `race` — anywhere in `nodes:`.
 Lockstep recipes are deterministic graphs; anything that puts an LLM call or nondeterministic
@@ -211,7 +211,7 @@ recipe, never sourced from evidence.
 | `fresh` | `path` **or** `path_from` | File exists AND its hash differs from the run-**start** baseline (or is new since start). | **Always compares against run start — there is no `since:` option for `fresh`.** (Contrast `unchanged`/`changed_in`, which do take `since:`.) Target must be covered by `baseline_globs` or the check raises (→ `error` verdict, not a vacuous pass). |
 | `unchanged` | `glob` (fnmatch-style pattern, e.g. `"tests/**"`); `since: start\|previous` (default `start`) | No file matching `glob` differs from the selected baseline snapshot. | Deferred to the END of the check pass regardless of list position, and re-hashes AFTER every `cmd_ok`/`junit_gate` in the same pass (TOCTOU guard — a command earlier in the list that mutates a "frozen" file is still caught). **Coverage rule differs from the others**: `glob` must appear **verbatim** as an entry in `baseline_globs` (or match existing manifest entries) or the check raises — not just prefix-covered. `since: start` treats "absent at start and absent now" as pass (a project with no `pytest.ini` stays clean; *creating* one mid-run counts as a change → fail). |
 | `changed_in` | `paths: [str, ...]`; `since: start\|previous` (default `start`) | At least one file under any of `paths` differs from the selected baseline snapshot. | Each declared path must be covered by `baseline_globs` (prefix-match) or the check raises. |
-| `diff_only` | `paths: [str, ...]` | No file OUTSIDE `paths` differs from the **previous**-step baseline snapshot. | **Always compares against the previous step's snapshot — there is no `since:` option for `diff_only`, it is hardwired to `previous`.** Each declared path must be covered by `baseline_globs` or the check raises. Use this on the LAST step too, not just implementation steps — a recipe that only fences intermediate steps lets post-gate weakening of tests/config slip through clean at the very end (see `feature-dev.yaml`'s review step). |
+| `diff_only` | `paths: [str, ...]` | No file OUTSIDE `paths` differs from the **previous**-step baseline snapshot. | **Always compares against the previous step's snapshot — there is no `since:` option for `diff_only`, it is hardwired to `previous`.** Each declared path must be covered by `baseline_globs` or the check raises. Use this on the LAST step too, not just implementation steps — a recipe that only fences intermediate steps lets post-gate weakening of tests/config slip through clean at the very end (see `feature-dev.recipe.yaml`'s review step). |
 | `file_matches_hash` | `path_from` (evidence-relative); `hash_from` (recipe-pinned string, must match `_subcall_envelope.artifact_hashes.<name>`) | File's SHA-256 must equal the hash pinned at `hash_from` in graph state. | **Fractal subcalls only** — `hash_from` resolves against the child run's own validated baseline snapshot, never against collect-time project bytes. **Be precise about what that buys**: the pin proves the bytes are unchanged **since the child run's last validated PASS** — the worker can author them up to that instant, so the pin is provenance, not content. Always pair it with a content check on the same file (the shipped example uses `review_verdict` with `expected: PASS` — without it a FAIL verdict passes the gate). A one-shot subcall (no `scenario:` on the marker) never populates `artifact_hashes` — it validates the **envelope** instead (`output`/`exit_code`/`session_id`), not a project file. `hash_from` naming an artifact no marker declares in `artifacts:` is a profile error. |
 
 **`baseline_globs`** (top-level recipe key, required whenever any baseline check above is used):
@@ -225,7 +225,7 @@ read a baseline enforce anything; declaring `baseline_globs` without a correspon
 `unchanged`/`changed_in`/`diff_only`/`fresh` check is a no-op. If a step gates on a test run
 (`junit_gate`), the runner's **config surface** — `conftest.py`, `pytest.ini`,
 `pyproject.toml`, or whatever your runner reads — must be in `baseline_globs` too, or an agent
-can silently reconfigure the runner instead of fixing the code; see `feature-dev.yaml`'s
+can silently reconfigure the runner instead of fixing the code; see `feature-dev.recipe.yaml`'s
 `test_step` for the pattern (`unchanged` on the test tree AND every config file, `since: start`).
 
 **Check-crash semantics** (relevant when you're debugging a recipe, not something you author):
@@ -240,12 +240,12 @@ would be a real integrity hole.
 A **subcall** is a recipe-level triple built from existing node types only —
 a `python` spawn node, an `interrupt` marker node, a `python` poll node —
 that hands one closed sub-task to a separate configured CLI-agent process the
-main (worker) agent cannot read or steer. `subcall-one-shot.yaml` (one-shot,
-validated by its captured output) and `subcall-fractal.yaml` +
-`child-review.yaml` (fractal — the spawned session runs its own lockstep
+main (worker) agent cannot read or steer. `subcall-one-shot.recipe.yaml` (one-shot,
+validated by its captured output) and `subcall-fractal.recipe.yaml` +
+`child-review.recipe.yaml` (fractal — the spawned session runs its own lockstep
 child run) in `tests/fixtures/recipes/good/` are the ground truth; copy
-their shape rather than improvising. `recipes/examples/feature-dev-reviewed.yaml`
-+ `review-gate.yaml` are a full worked example of the fractal form.
+their shape rather than improvising. `recipes/examples/feature-dev-reviewed.recipe.yaml`
++ `review-gate.recipe.yaml` are a full worked example of the fractal form.
 
 **The triple:**
 
@@ -381,14 +381,14 @@ a human review gate when you do.
 
 ## Starting point
 
-Copy `lockstep/recipes/examples/feature-dev.yaml` into `<project>/.lockstep/recipes/` as the
+Copy `lockstep/recipes/examples/feature-dev.recipe.yaml` into `<project>/.lockstep/recipes/` as the
 skeleton for any new recipe — it exercises the full hardened vocabulary (`baseline_globs`,
 `unchanged`/`changed_in`/`diff_only`/`fresh`, `md_has_sections`, `file_matches`, `junit_gate`)
 end to end, in the exact pinned dialect, with the escalate-gate wiring already correct.
 Adapt the steps and checks; keep the wiring shape.
 
 For a recipe that needs an independent review gate, copy
-`feature-dev-reviewed.yaml` + `review-gate.yaml` together (both, into the
+`feature-dev-reviewed.recipe.yaml` + `review-gate.recipe.yaml` together (both, into the
 same `.lockstep/recipes/`) instead — the fractal subcall triple, its
 `file_matches_hash` verify step, and the child recipe it spawns, wired end
 to end.

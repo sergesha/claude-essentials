@@ -1,6 +1,6 @@
 """Engine — durable runs, terminal escalation, var substitution,
-project-relative evidence. Uses the good fixtures (minimal.yaml, two-steps.yaml)
-as the dialect authority, plus error-check.yaml (a raising cmd_ok check,
+project-relative evidence. Uses the good fixtures (minimal.recipe.yaml, two-steps.recipe.yaml)
+as the dialect authority, plus error-check.recipe.yaml (a raising cmd_ok check,
 for the error-verdict mechanic) under fixtures/recipes/good/.
 """
 
@@ -9,8 +9,8 @@ import shutil
 
 import pytest
 
-from lockstep.engine import Engine, LockstepError
-from lockstep.runs import RunIndex
+from lockstep.runtime.engine import Engine, LockstepError
+from lockstep.runtime.runs import RunIndex
 
 from pathlib import Path
 
@@ -131,7 +131,7 @@ def test_fail_verdict_retries_then_escalates(tmp_path):
 
 
 def test_pass_at_loop_cap_reports_honest_escalation(tmp_path):
-    """Sequence empirically derived against `minimal.yaml`'s
+    """Sequence empirically derived against `minimal.recipe.yaml`'s
     `loop_limits: {validate_one: 2}`: yamlgraph's
     loop guard runs BEFORE the validator node executes, keyed on a count
     that starts at 0 and blocks once count >= limit. fail (count 0->1),
@@ -333,14 +333,14 @@ def test_path_escape_rejected(tmp_path):
 def test_midrun_recipe_edit_is_inert(tmp_path):
     recipes_dir = tmp_path / "recipes"
     recipes_dir.mkdir()
-    shutil.copy(GOOD / "minimal.yaml", recipes_dir / "minimal.yaml")
+    shutil.copy(GOOD / "minimal.recipe.yaml", recipes_dir / "minimal.recipe.yaml")
 
     eng = Engine(tmp_path / "state", recipes_dir)
     project = _project(tmp_path)
     res = eng.start("minimal", {}, str(project))
     run_id = res["run_id"]
 
-    (recipes_dir / "minimal.yaml").write_text("garbage: [[[not yaml")
+    (recipes_dir / "minimal.recipe.yaml").write_text("garbage: [[[not yaml")
 
     d = project / ".lockstep"
     d.mkdir()
@@ -515,7 +515,7 @@ def test_recipe_name_cannot_walk_out_of_the_recipes_dir(tmp_path):
     project = _project(tmp_path)
     outside = tmp_path / "outside"
     outside.mkdir()
-    (outside / "evil.yaml").write_bytes((GOOD / "minimal.yaml").read_bytes())
+    (outside / "evil.yaml").write_bytes((GOOD / "minimal.recipe.yaml").read_bytes())
 
     with pytest.raises(LockstepError) as exc:
         eng.start("../outside/evil", {}, str(project))
@@ -531,7 +531,7 @@ def test_a_second_report_while_one_is_in_flight_is_refused(tmp_path):
     # resume lands on the NEXT step's interrupt carrying a `pass` the
     # republish-only validator trusts — that step passes with its checks
     # never executed. The critical section is what makes that impossible.
-    from lockstep.locking import file_lock
+    from lockstep.runtime.locking import file_lock
 
     eng = _engine(tmp_path)
     project = _project(tmp_path)
@@ -552,7 +552,7 @@ def test_a_second_report_while_one_is_in_flight_is_refused(tmp_path):
 def test_status_still_answers_while_the_run_is_busy(tmp_path):
     # Busy is not an error to a reader: report the run as recorded, minus
     # the reconcile/auto-poll the holder is already doing.
-    from lockstep.locking import file_lock
+    from lockstep.runtime.locking import file_lock
 
     eng = _engine(tmp_path)
     project = _project(tmp_path)

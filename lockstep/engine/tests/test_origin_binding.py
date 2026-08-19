@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from lockstep import server
-from lockstep.runs import RunIndex
+from lockstep.mcp import server
+from lockstep.runtime.runs import RunIndex
 
 GOOD = Path(__file__).parent / "fixtures" / "recipes" / "good"    # absolute, not cwd-dependent
 

@@ -1,8 +1,8 @@
 """end-to-end fake-agent cycle over the REAL `feature-dev` example
-recipe (`lockstep/recipes/examples/feature-dev.yaml`) — the one thing no
+recipe (`lockstep/recipes/examples/feature-dev.recipe.yaml`) — the one thing no
 unit test exercises: durability across a full engine restart, terminal
 escalation, and abort, all through the same surfaces a real agent/hook
-setup uses (`server.py` tools + `cli.hook_stop`).
+setup uses (`server.py` tools + `hooks.hook_stop`).
 
 Only the "plan" step is driven to completion here (shape + `fresh` checks).
 Accepted gap: `junit_gate`/`changed_in`/`diff_only`/
@@ -17,9 +17,9 @@ from pathlib import Path
 
 import pytest
 
-import lockstep.cli as cli
-from lockstep import server
-from lockstep.engine import LockstepError
+import lockstep.runtime.hooks as hooks
+from lockstep.mcp import server
+from lockstep.runtime.engine import LockstepError
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "recipes" / "examples"
 
@@ -74,7 +74,7 @@ def test_full_cycle_restart_durability_terminal_escalation_abort(tmp_path, monke
     status = server.scenario_status(run_id)
     assert status["step"] == "implement"
 
-    exit_code, out = cli.hook_stop({"stop_hook_active": False}, state_dir, str(project))
+    exit_code, out = hooks.hook_stop({"stop_hook_active": False}, state_dir, str(project))
     assert exit_code == 0
     assert "implement" in out
 
@@ -92,7 +92,7 @@ def test_full_cycle_restart_durability_terminal_escalation_abort(tmp_path, monke
     aborted = server.scenario_abort(run_id2)
     assert aborted["status"] == "aborted"
 
-    exit_code2, out2 = cli.hook_stop({"stop_hook_active": False}, state_dir, str(project))
+    exit_code2, out2 = hooks.hook_stop({"stop_hook_active": False}, state_dir, str(project))
     assert exit_code2 == 0
     assert out2 == ""
 

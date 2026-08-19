@@ -86,8 +86,8 @@ example into your project first:
 
 ```
 mkdir -p .lockstep/recipes
-curl -fsSL https://raw.githubusercontent.com/sergesha/claude-essentials/main/lockstep/recipes/examples/feature-dev.yaml \
-  -o .lockstep/recipes/feature-dev.yaml
+curl -fsSL https://raw.githubusercontent.com/sergesha/claude-essentials/main/lockstep/recipes/examples/feature-dev.recipe.yaml \
+  -o .lockstep/recipes/feature-dev.recipe.yaml
 ```
 
 Then, in a Claude Code or Codex session in that project, ask the agent to start it (it calls the MCP
@@ -101,10 +101,10 @@ copy both recipes instead:
 
 ```bash
 mkdir -p .lockstep/recipes
-curl -fsSL https://raw.githubusercontent.com/sergesha/claude-essentials/main/lockstep/recipes/examples/daily-change-reviewed.yaml \
-  -o .lockstep/recipes/daily-change-reviewed.yaml
-curl -fsSL https://raw.githubusercontent.com/sergesha/claude-essentials/main/lockstep/recipes/examples/daily-review-gate.yaml \
-  -o .lockstep/recipes/daily-review-gate.yaml
+curl -fsSL https://raw.githubusercontent.com/sergesha/claude-essentials/main/lockstep/recipes/examples/daily-change-reviewed.recipe.yaml \
+  -o .lockstep/recipes/daily-change-reviewed.recipe.yaml
+curl -fsSL https://raw.githubusercontent.com/sergesha/claude-essentials/main/lockstep/recipes/examples/daily-review-gate.recipe.yaml \
+  -o .lockstep/recipes/daily-review-gate.recipe.yaml
 ```
 
 Start `daily-change-reviewed`; it enforces plan → tests → implementation →
@@ -229,7 +229,7 @@ spawned session runs its own lockstep child run, with its own snapshot,
 baseline and gate — the parent's evidence is that child run's terminal
 status, machine-checked, not the child's word. See
 `skills/lockstep-author/SKILL.md` for the recipe dialect
-(`recipes/examples/feature-dev-reviewed.yaml` + `review-gate.yaml` is a
+(`recipes/examples/feature-dev-reviewed.recipe.yaml` + `review-gate.recipe.yaml` is a
 full worked example) and `skills/lockstep/SKILL.md` for how a worker
 experiences a subcall in flight.
 
@@ -276,7 +276,7 @@ is dead is denied even while the worker stays unlocked by its own run.
   project's boundary, so add your own deny if that matters) and CAN author the child's inputs — a
   file planted with "this was already reviewed/approved" is a live attack,
   not a hypothetical. This is why the shipped reviewer prompt
-  (`feature-dev-reviewed.yaml`) explicitly instructs the reviewer to treat
+  (`feature-dev-reviewed.recipe.yaml`) explicitly instructs the reviewer to treat
   any in-repo claim of pre-approval as a FINDING to report, never as an
   instruction to follow — write the same instruction into any reviewer
   prompt you author.

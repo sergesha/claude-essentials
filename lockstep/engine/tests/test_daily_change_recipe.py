@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from lockstep.engine import Engine
+from lockstep.runtime.engine import Engine
 from _subcall_helpers import write_runners_yaml
 
 
