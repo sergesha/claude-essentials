@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+import os
+import subprocess
+import sys
 
 import pytest
 
 from lockstep.workflow.diagnostics import DiagnosticError
 from lockstep.workflow.ir import (
-    AcceptIR, CallIR, ChooseIR, DecideIR, EscalateIR, ParallelIR, RepeatIR, StepIR,
+    AcceptIR, CallIR, ChooseIR, DecideIR, EscalateIR, GraphIR, ParallelIR, RepeatIR, StepIR,
     VerifyIR, WorkflowIR,
 )
 from lockstep.workflow.schema import load_workflow, parse_workflow
@@ -523,3 +527,80 @@ def test_direct_ir_semantic_diagnostic_has_no_source_mark() -> None:
     error = semantic_error(workflow)
 
     assert (error.line, error.column) == (None, None)
+
+
+@pytest.mark.parametrize(
+    ("workflow", "pointer"),
+    [
+        (WorkflowIR("2", "release", "Release safely", ("**",), ()), "/workflow_version"),
+        (WorkflowIR("1", "release", "Release safely", ("src/**",), ()), "/protect"),
+        (WorkflowIR("1", "release", "Release safely", ("**",), (GraphIR(None, "other"),)), "/flow/0"),
+        (WorkflowIR("1", "release", "Release safely", ("**",), (AcceptIR(None, None, None, None, "FAIL"),)), "/flow/0/accept/verdict"),
+        (WorkflowIR("1", "release", "Release safely", ("**",), (AcceptIR(None, ".lockstep/a.md", "review.review", "review.review", "PASS"),)), "/flow/0/accept"),
+        (WorkflowIR("1", "release", "Release safely", ("**",), (AcceptIR(None, None, "review.review", None, "PASS"),)), "/flow/0/accept"),
+    ],
+)
+def test_direct_ir_rechecks_v1_document_graph_and_accept_boundaries(workflow: WorkflowIR, pointer: str) -> None:
+    """Constructed IR must not bypass document, graph, or accept-form invariants."""
+    error = semantic_error(workflow)
+
+    assert error.pointer == pointer
+    assert error.code in {"LSW108", "LSW120", "LSW301"}
+
+
+@pytest.mark.parametrize("label", ["bad/key", "bad~key"])
+def test_semantic_pointers_escape_dynamic_choose_labels(workflow_file: Path, label: str) -> None:
+    """Unescaped labels make diagnostics point at a different YAML location."""
+    workflow = parse(
+        workflow_file,
+        f'''\
+- decide:
+    id: risk
+    using: {{type: changed-paths, since: start, cases: {{}}, default: low}}
+- choose:
+    value: risk
+    cases: {{"{label}": [{{escalate: {{}}}}]}}
+''',
+    )
+
+    error = semantic_error(workflow)
+
+    assert error.pointer == f"/flow/1/choose/cases/{label.replace('~', '~0').replace('/', '~1')}"
+    assert (error.line, error.column) == (11, 24)
+
+
+def test_parallel_artifact_order_is_deterministic_across_hash_seeds() -> None:
+    """A set-derived iteration order would make canonical generated artifact maps nondeterministic."""
+    program = '''
+import json
+from lockstep.workflow.ir import CallIR, ParallelIR, VerifyIR, WorkflowIR
+from lockstep.workflow.semantics import ChildArtifactContract, ChildWorkflowContract, InMemoryWorkflowCatalog, validate_semantics
+workflow = WorkflowIR("1", "release", "Release safely", ("**",), (
+    ParallelIR("gates", "all", {
+        "review": (CallIR("child", "reviewer", "codex", artifacts={"alpha": "alpha.md", "beta": "beta.md", "gamma": "gamma.md"}),),
+        "checks": (VerifyIR(None, "pytest -q"),),
+    }),
+))
+catalog = InMemoryWorkflowCatalog({"reviewer": ChildWorkflowContract(
+    outcomes=("pass", "fail", "error"),
+    exports={
+        "alpha": ChildArtifactContract("alpha", "alpha.md"),
+        "beta": ChildArtifactContract("beta", "beta.md"),
+        "gamma": ChildArtifactContract("gamma", "gamma.md"),
+    },
+)})
+print(json.dumps(list(validate_semantics(workflow, catalog).artifacts)))
+'''
+    outputs = []
+    for seed in ("1", "7", "99"):
+        environment = dict(os.environ, PYTHONHASHSEED=seed)
+        result = subprocess.run(
+            [sys.executable, "-c", program], capture_output=True, check=True, text=True, env=environment
+        )
+        outputs.append(json.loads(result.stdout))
+
+    assert outputs == [[
+        "gates.review.child.alpha",
+        "gates.review.child.beta",
+        "gates.review.child.gamma",
+    ]] * 3

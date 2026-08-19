@@ -24,6 +24,11 @@ _ID = re.compile(r"^[a-z][a-z0-9-]*$")
 _TERMINAL_VALUES = ("pass", "fail", "error")
 
 
+def _escape(pointer_part: str) -> str:
+    """Encode one RFC 6901 JSON Pointer token."""
+    return pointer_part.replace("~", "~0").replace("/", "~1")
+
+
 class OutcomeProvenance(str, Enum):
     DECISION = "decision"
     VALIDATOR = "validator"
@@ -195,6 +200,10 @@ class _Validator:
         ),))
 
     def validate(self) -> ValidatedWorkflow:
+        if self.workflow.version != "1":
+            self.fail("LSW120", "only workflow_version '1' is supported", "/workflow_version", "use workflow_version: '1'")
+        if self.workflow.protect != ("**",):
+            self.fail("LSW301", "v1 workflows must protect the complete project", "/protect", 'use protect: ["**"]')
         flow = self.flow(self.workflow.flow, "/flow", {}, parallel=False)
         return ValidatedWorkflow(self.workflow, flow, self.outcomes, self.artifacts)
 
@@ -255,6 +264,8 @@ class _Validator:
                 self.fail("LSP101", "nested parallel is not available in Workflow DSL v1", pointer, "move the inner parallel block outside its branch")
             return self.parallel(block, pointer, symbols)
         if isinstance(block, GraphIR):
+            if block.kind not in {"inline", "include"}:
+                self.fail("LSW120", "invalid graph block kind", pointer, "use an inline graph or include_graph")
             writes = self.graph_effects(block, pointer)
             if parallel and writes:
                 self.fail("LSP102", "parallel graph fragments must be read-only", pointer, "use a read-only graph fragment")
@@ -316,7 +327,7 @@ class _Validator:
             self.fail("LSW301", "choose.value must reference a prior trusted outcome", f"{pointer}/choose/value", "use a decision, validator, child, or parallel result")
         unknown = [label for label in block.cases if label not in symbol.values]
         if unknown:
-            self.fail("LSW302", f"choose case {unknown[0]!r} is not an outcome of {block.value!r}", f"{pointer}/choose/cases/{unknown[0]}", "use one of the declared outcome values")
+            self.fail("LSW302", f"choose case {unknown[0]!r} is not an outcome of {block.value!r}", f"{pointer}/choose/cases/{_escape(unknown[0])}", "use one of the declared outcome values")
         missing = [value for value in symbol.values if value not in block.cases]
         if missing and block.default is None:
             self.fail("LSW302", "choose cases must exhaust the trusted outcome enum or declare default", f"{pointer}/choose/cases", "add the missing cases or a default flow")
@@ -326,7 +337,7 @@ class _Validator:
         branch_artifacts: list[dict[str, ArtifactContract]] = []
         for label, branch in block.cases.items():
             self.artifacts = dict(base_artifacts)
-            branch_flow = self.flow(branch, f"{pointer}/choose/cases/{label}", symbols, parallel=parallel)
+            branch_flow = self.flow(branch, f"{pointer}/choose/cases/{_escape(label)}", symbols, parallel=parallel)
             branch_contracts[label] = branch_flow
             branch_effects.append(branch_flow.effects)
             branch_artifacts.append(dict(self.artifacts))
@@ -336,7 +347,10 @@ class _Validator:
             default_contract = self.flow(block.default, f"{pointer}/choose/default", symbols, parallel=parallel)
             branch_effects.append(default_contract.effects)
             branch_artifacts.append(dict(self.artifacts))
-        shared_handles = set.intersection(*(set(view) for view in branch_artifacts)) if branch_artifacts else set()
+        shared_handles = (
+            tuple(handle for handle in branch_artifacts[0] if all(handle in view for view in branch_artifacts[1:]))
+            if branch_artifacts else ()
+        )
         self.artifacts = {
             **base_artifacts,
             **{handle: branch_artifacts[0][handle] for handle in shared_handles if handle not in base_artifacts},
@@ -377,12 +391,15 @@ class _Validator:
             if isinstance(item, EscalateIR):
                 self.fail("LSW303", "repeat paths cannot bypass their terminal producer", item_pointer, "remove escalation from repeat do or move it after the repeat")
             if isinstance(item, ChooseIR):
-                branches = list(item.cases.items())
+                branches = [(label, branch, False) for label, branch in item.cases.items()]
                 if item.default is not None:
-                    branches.append(("default", item.default))
+                    branches.append(("", item.default, True))
                 branch_counts: list[int] = []
-                for label, branch in branches:
-                    branch_pointer = f"{item_pointer}/choose/{'default' if label == 'default' else f'cases/{label}'}"
+                for label, branch, is_default in branches:
+                    branch_pointer = (
+                        f"{item_pointer}/choose/default"
+                        if is_default else f"{item_pointer}/choose/cases/{_escape(label)}"
+                    )
                     branch_counts.extend(self.repeat_cardinalities(branch, branch_pointer, producer))
                 cardinalities = tuple(before + count for before in cardinalities for count in branch_counts)
                 continue
@@ -417,12 +434,12 @@ class _Validator:
         for handle, destination in block.artifacts.items():
             export = contract.exports.get(handle)
             if export is None:
-                self.fail("LSW304", f"child {block.workflow!r} does not export artifact {handle!r}", f"{pointer}/call/artifacts/{handle}", "select a declared child export handle")
+                self.fail("LSW304", f"child {block.workflow!r} does not export artifact {handle!r}", f"{pointer}/call/artifacts/{_escape(handle)}", "select a declared child export handle")
             if parallel:
-                self.parallel_destination(destination, f"{pointer}/call/artifacts/{handle}")
+                self.parallel_destination(destination, f"{pointer}/call/artifacts/{_escape(handle)}")
             qualified = self.qualified_handle(block.id or "", handle, pointer, parallel)
             if qualified in self.artifacts:
-                self.fail("LSW304", f"duplicate qualified artifact handle {qualified!r}", f"{pointer}/call/artifacts/{handle}", "use a unique call and artifact handle")
+                self.fail("LSW304", f"duplicate qualified artifact handle {qualified!r}", f"{pointer}/call/artifacts/{_escape(handle)}", "use a unique call and artifact handle")
             artifact = ArtifactContract(qualified, export.fixed_source, destination)
             self.artifacts[qualified] = artifact
             effect = effect.union(EffectContract((destination,)))
@@ -435,10 +452,19 @@ class _Validator:
         # Branch qualification is applied by parallel(), which has the branch
         # identity.  Calls in a regular flow are already globally unique.
         if not _ID.fullmatch(handle):
-            self.fail("LSW304", "artifact export handle is invalid", f"{pointer}/call/artifacts/{handle}", "use a logical export handle")
+            self.fail("LSW304", "artifact export handle is invalid", f"{pointer}/call/artifacts/{_escape(handle)}", "use a logical export handle")
         return call_id + "." + handle
 
     def accept(self, block: AcceptIR, pointer: str) -> BlockContract:
+        if block.verdict != "PASS":
+            self.fail("LSW108", "accept verdict must be PASS", f"{pointer}/accept/verdict", "use verdict: PASS")
+        paired = block.artifact is not None and block.hash_from is not None
+        from_handle = block.artifact_from is not None
+        if paired == from_handle or (block.artifact is None) != (block.hash_from is None):
+            self.fail("LSW108", "accept requires artifact plus hash_from, or artifact_from", f"{pointer}/accept", "choose exactly one accept artifact form")
+        values = (block.artifact, block.hash_from) if paired else (block.artifact_from,)
+        if any(not isinstance(value, str) or not value for value in values):
+            self.fail("LSW108", "accept references must be non-empty strings", f"{pointer}/accept", "provide a non-empty artifact reference")
         if block.hash_from is not None:
             artifact = self.artifacts.get(block.hash_from)
             if artifact is None:
@@ -465,17 +491,17 @@ class _Validator:
         branch_contracts: dict[str, FlowContract] = {}
         for name, branch in block.branches.items():
             if not _ID.fullmatch(name):
-                self.fail("LSP101", "parallel branch name is invalid", f"{pointer}/parallel/branches/{name}", "use a lowercase branch identifier")
+                self.fail("LSP101", "parallel branch name is invalid", f"{pointer}/parallel/branches/{_escape(name)}", "use a lowercase branch identifier")
             # Artifact registration is shared so downstream accepts resolve;
             # rename any branch-local call handles into the required namespace.
             self.artifacts = dict(base_artifacts)
-            branch_flow = self.flow(branch, f"{pointer}/parallel/branches/{name}", symbols, parallel=True)
+            branch_flow = self.flow(branch, f"{pointer}/parallel/branches/{_escape(name)}", symbols, parallel=True)
             branch_contracts[name] = branch_flow
-            for handle in tuple(set(self.artifacts) - set(base_artifacts)):
+            for handle in tuple(handle for handle in self.artifacts if handle not in base_artifacts):
                 artifact = self.artifacts.pop(handle)
                 qualified = f"{block.id}.{name}.{handle}"
                 if qualified in published_artifacts:
-                    self.fail("LSP102", f"duplicate parallel artifact handle {qualified!r}", f"{pointer}/parallel/branches/{name}", "use unique branch/call/export identities")
+                    self.fail("LSP102", f"duplicate parallel artifact handle {qualified!r}", f"{pointer}/parallel/branches/{_escape(name)}", "use unique branch/call/export identities")
                 published_artifacts[qualified] = ArtifactContract(qualified, artifact.source, artifact.destination)
             effects.append(branch_flow.effects)
         self.artifacts = {**base_artifacts, **published_artifacts}

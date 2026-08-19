@@ -278,3 +278,31 @@ def test_repeat_exposes_exact_one_terminal_producer_per_normal_path(workflow_fil
     assert repeat.control.terminal_producer == "tests"
     assert repeat.control.producer_cardinalities == (1,)
     assert repeat.control.falls_through is True
+
+
+def test_repeat_case_named_default_is_not_the_default_branch(workflow_file: Path) -> None:
+    """Treating the literal label as the default branch corrupts its source pointer."""
+    workflow = parse(
+        workflow_file,
+        '''\
+- decide:
+    id: risk
+    using: {type: changed-paths, since: start, cases: {}, default: default}
+- repeat:
+    id: cycle
+    limit: 2
+    until: tests.passed
+    exhausted: escalate
+    do:
+      - choose:
+          value: risk
+          cases:
+            default: [{escalate: {}}]
+      - verify: {id: tests, command: pytest -q}
+''',
+    )
+
+    error = semantic_error(workflow)
+
+    assert error.code == "LSW303"
+    assert error.pointer == "/flow/1/repeat/do/0/choose/cases/default/0"
