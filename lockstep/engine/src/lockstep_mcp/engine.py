@@ -1188,16 +1188,27 @@ class Engine:
             engine_dir = Path(__file__).resolve().parents[2]
             script = (
                 "#!/bin/sh\nset -eu\n"
+                f"export LOCKSTEP_STATE_DIR={shlex.quote(str(self._state_dir))}\n"
+                f"export LOCKSTEP_RECIPES={shlex.quote(str(self._recipes_dir))}\n"
                 f"export LOCKSTEP_CHILD_RUN={shlex.quote(child_run)}\n"
                 f"export LOCKSTEP_CHILD_NONCE={shlex.quote(nonce)}\n"
                 f"exec uv run --project {shlex.quote(str(engine_dir))} lockstep-mcp \"$@\"\n"
             )
             tmp = workdir / f"codex-child-mcp.{os.getpid()}.{time.time_ns()}.tmp"
-            fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o700)
-            with os.fdopen(fd, "w") as fh:
-                fh.write(script)
-            os.replace(tmp, codex_mcp_command)
-            codex_mcp_command.chmod(0o700)
+            try:
+                fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o700)
+                with os.fdopen(fd, "w") as fh:
+                    fh.write(script)
+                os.replace(tmp, codex_mcp_command)
+            except OSError as exc:
+                for path in (tmp, codex_mcp_command):
+                    try:
+                        path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                raise LockstepError(
+                    f"could not create Codex child MCP launcher: {exc}"
+                ) from exc
         argv = subcalls.safe_argv(
             spec, prompt, None, None,
             str(codex_mcp_command) if codex_mcp_command is not None else None,

@@ -15,7 +15,13 @@ def _test_controls(argv: list[str]):
 
 
 def _parse_agent_argv(argv: list[str]) -> tuple[str, str | None, str]:
+    codex_overrides = []
+    while len(argv) >= 2 and argv[0] == "-c":
+        codex_overrides.append(argv[1])
+        argv = argv[2:]
     if argv and argv[0] == "exec":
+        if any(not value.startswith("mcp_servers.lockstep.command=") for value in codex_overrides):
+            raise SystemExit(2)
         ap = argparse.ArgumentParser()
         ap.add_argument("command")
         ap.add_argument("--json", action="store_true")

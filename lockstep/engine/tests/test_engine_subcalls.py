@@ -181,12 +181,45 @@ def test_codex_fractal_uses_private_mcp_credential_wrapper(tmp_path, monkeypatch
     wrapper = workdir / "codex-child-mcp"
 
     assert wrapper.is_file()
-    assert child.run_id in wrapper.read_text()
-    assert child.nonce in wrapper.read_text()
+    script = wrapper.read_text()
+    assert child.run_id in script
+    assert child.nonce in script
+    assert f"export LOCKSTEP_STATE_DIR={tmp_path / 'state'}" in script
+    assert f"export LOCKSTEP_RECIPES={FIX / 'good'}" in script
     assert child.nonce not in json.dumps(meta["argv"])
     assert meta["argv"][1:4] == [
         "-c", f'mcp_servers.lockstep.command="{wrapper}"', "exec",
     ]
+
+
+def test_codex_wrapper_write_failure_is_structured_and_leaves_no_credential_file(
+    tmp_path, monkeypatch,
+):
+    e, proj = make_engine(
+        tmp_path,
+        monkeypatch,
+        runner="codex",
+        driver="codex",
+        model="gpt-5.6-luna",
+    )
+    run = e.start("subcall-fractal-default", vars={}, project=str(proj))
+    real_replace = os.replace
+
+    def fail_wrapper_replace(src, dst):
+        if Path(dst).name == "codex-child-mcp":
+            raise OSError("simulated wrapper failure")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", fail_wrapper_replace)
+    out = pass_plan(e, proj, run)
+    workdir = (
+        tmp_path / "state" / "runs" /
+        f"{run['run_id']}.subcalls" / "review"
+    )
+
+    assert out.get("error") is True
+    assert any("Codex child MCP launcher" in reason for reason in out["reasons"])
+    assert list(workdir.glob("codex-child-mcp*")) == []
 
 
 def test_explicit_claude_runner_overrides_codex_adapter_default(tmp_path, monkeypatch):

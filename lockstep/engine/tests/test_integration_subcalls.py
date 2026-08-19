@@ -7,6 +7,8 @@ success with it), child-terminal poll + hash collection, tamper detection,
 nonce redaction.
 """
 import hashlib
+import json
+import os
 
 import pytest
 
@@ -42,6 +44,8 @@ def test_full_subcall_cycle_with_restart(tmp_path, monkeypatch, runner, driver, 
     (proj / ".lockstep" / "plan.md").write_text("x")
     out = server.scenario_done(r["run_id"], "plan", {"plan_path": ".lockstep/plan.md"})
     assert out["step"] == "_subcall" and out["subcall"]["node"] == "review"
+    proc = json.loads(next((state / "runs").glob(f"{r['run_id']}.subcalls/*/proc.json")).read_text())
+    os.kill(proc["pid"], 0)                    # exact Codex/Claude grammar kept the runner alive
 
     # 2. while the subcall runs, the parent is untouchable
     refused = server.scenario_done(r["run_id"], "review", {"anything": 1})
