@@ -25,6 +25,14 @@ def freeze(value: Any) -> Any:
 
 
 @dataclass(frozen=True)
+class SourceLocation:
+    """Immutable source coordinate retained by the parser without YAML coupling."""
+
+    line: int
+    column: int
+
+
+@dataclass(frozen=True)
 class RetryIR:
     limit: int
     exhausted: str | None
@@ -168,3 +176,13 @@ class WorkflowIR:
     flow: tuple[BlockIR, ...]
     defaults: WorkflowDefaultsIR = field(default_factory=WorkflowDefaultsIR)
     source_path: Path | None = None
+    source_marks: Mapping[str, SourceLocation] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "source_marks", freeze(self.source_marks))
+
+    def location_for(self, pointer: str) -> SourceLocation | None:
+        current = pointer
+        while current not in self.source_marks and current:
+            current = current.rsplit("/", 1)[0]
+        return self.source_marks.get(current) or self.source_marks.get("")

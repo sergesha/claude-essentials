@@ -114,6 +114,15 @@ class RepeatSimulation:
 
 
 @dataclass(frozen=True)
+class RepeatControlContract:
+    """Structured loop boundary consumed by deterministic compiler lowering."""
+
+    terminal_producer: str
+    producer_cardinalities: tuple[int, ...]
+    falls_through: bool = True
+
+
+@dataclass(frozen=True)
 class RepeatContract:
     id: str | None
     limit: int
@@ -121,6 +130,7 @@ class RepeatContract:
     exhausted: str
     effects: EffectContract
     body: FlowContract
+    control: RepeatControlContract
 
     def simulate(self, terminal_outcomes: tuple[str, ...]) -> RepeatSimulation:
         """Model only the terminal producer's routing, including final failure."""
@@ -176,7 +186,13 @@ class _Validator:
         self.ids: set[str] = set()
 
     def fail(self, code: str, message: str, pointer: str, hint: str) -> None:
-        raise DiagnosticError((Diagnostic(code, message, self.workflow.source_path or Path("<workflow>"), pointer=pointer, hint=hint),))
+        location = self.workflow.location_for(pointer)
+        raise DiagnosticError((Diagnostic(
+            code, message, self.workflow.source_path or Path("<workflow>"),
+            line=location.line if location else None,
+            column=location.column if location else None,
+            pointer=pointer, hint=hint,
+        ),))
 
     def validate(self) -> ValidatedWorkflow:
         flow = self.flow(self.workflow.flow, "/flow", {}, parallel=False)
@@ -201,6 +217,12 @@ class _Validator:
     def block(
         self, block: BlockIR, pointer: str, symbols: Mapping[str, OutcomeSymbol], *, parallel: bool
     ) -> tuple[BlockContract | RepeatContract, Mapping[str, OutcomeSymbol]]:
+        known_blocks = (StepIR, VerifyIR, DecideIR, ChooseIR, RepeatIR, CallIR, AcceptIR, ParallelIR, GraphIR, EscalateIR)
+        if not isinstance(block, known_blocks):
+            code = "LSP101" if parallel else "LSW120"
+            self.fail(code, "unsupported Workflow DSL v1 block", pointer, "remove the unsupported block")
+        if parallel and not isinstance(block, (VerifyIR, DecideIR, ChooseIR, CallIR, GraphIR)):
+            self.fail("LSP101", "block is not permitted in a parallel branch", pointer, "use verify, decide, choose, call, or a read-only graph")
         self.track_id(block, pointer)
         if isinstance(block, StepIR):
             if parallel:
@@ -335,10 +357,38 @@ class _Validator:
         last = block.do[-1]
         if not isinstance(last, VerifyIR) or last.id != producer:
             self.fail("LSW303", "repeat.until must name the last normally reachable verify in do", f"{pointer}/repeat/until", "make the referenced verify the final block of every iteration")
+        effective_retry = last.retry or self.workflow.defaults.retry
+        if effective_retry is not None:
+            self.fail("LSW303", "repeat terminal producer cannot retry", f"{pointer}/repeat/do/{len(block.do) - 1}/verify/retry", "remove retry from the terminal producer and workflow defaults")
+        cardinalities = self.repeat_cardinalities(block.do, f"{pointer}/repeat/do", producer)
+        if not cardinalities or any(count != 1 for count in cardinalities):
+            self.fail("LSW303", "every repeat path must execute its terminal producer exactly once", f"{pointer}/repeat/until", "make every path reconverge through the final producer exactly once")
         # The normal path is intentionally linear in v1: the final producer is
         # parsed exactly once, and all earlier failure/error paths escalate.
         nested = self.flow(block.do, f"{pointer}/repeat/do", symbols, parallel=False)
-        return RepeatContract(block.id, block.limit, block.until, block.exhausted, nested.effects, nested), {}
+        control = RepeatControlContract(producer, cardinalities)
+        return RepeatContract(block.id, block.limit, block.until, block.exhausted, nested.effects, nested, control), {}
+
+    def repeat_cardinalities(self, blocks: tuple[BlockIR, ...], pointer: str, producer: str) -> tuple[int, ...]:
+        """Count producer executions on every structured path through one iteration."""
+        cardinalities = (0,)
+        for index, item in enumerate(blocks):
+            item_pointer = f"{pointer}/{index}"
+            if isinstance(item, EscalateIR):
+                self.fail("LSW303", "repeat paths cannot bypass their terminal producer", item_pointer, "remove escalation from repeat do or move it after the repeat")
+            if isinstance(item, ChooseIR):
+                branches = list(item.cases.items())
+                if item.default is not None:
+                    branches.append(("default", item.default))
+                branch_counts: list[int] = []
+                for label, branch in branches:
+                    branch_pointer = f"{item_pointer}/choose/{'default' if label == 'default' else f'cases/{label}'}"
+                    branch_counts.extend(self.repeat_cardinalities(branch, branch_pointer, producer))
+                cardinalities = tuple(before + count for before in cardinalities for count in branch_counts)
+                continue
+            increment = int(isinstance(item, VerifyIR) and item.id == producer)
+            cardinalities = tuple(count + increment for count in cardinalities)
+        return cardinalities
 
     def repeat_target(self, value: str, pointer: str) -> tuple[str, str]:
         if value.count(".") != 1:
@@ -359,8 +409,10 @@ class _Validator:
         if block.id is None and block.artifacts:
             self.fail("LSW304", "a call with artifacts requires an explicit id", f"{pointer}/call/id", "add a unique call id")
         self.handlers(block.on_failure, block.on_error, f"{pointer}/call")
-        if parallel and contract.non_artifact_writes:
-            self.fail("LSP102", "parallel child calls may have no non-artifact writes", f"{pointer}/call", "use a child with only declared fixed artifact exports")
+        if contract.non_artifact_writes:
+            if parallel:
+                self.fail("LSP102", "parallel child calls may have no non-artifact writes", f"{pointer}/call", "use a child with only declared fixed artifact exports")
+            self.fail("LSW304", "call contracts may expose only their declared parent artifacts", f"{pointer}/call", "remove child non-artifact writes or declare a fixed exported artifact")
         effect = EffectContract()
         for handle, destination in block.artifacts.items():
             export = contract.exports.get(handle)

@@ -6,7 +6,7 @@ import pytest
 
 from lockstep.workflow.diagnostics import DiagnosticError
 from lockstep.workflow.ir import (
-    AcceptIR, CallIR, ChooseIR, DecideIR, ParallelIR, RepeatIR, StepIR,
+    AcceptIR, CallIR, ChooseIR, DecideIR, EscalateIR, ParallelIR, RepeatIR, StepIR,
     VerifyIR, WorkflowIR,
 )
 from lockstep.workflow.schema import load_workflow, parse_workflow
@@ -471,3 +471,55 @@ def test_child_contract_requires_terminal_engine_owned_outcomes(workflow_file: P
 
     assert error.code == "LSW304"
     assert error.pointer == "/flow/0/call/workflow"
+
+
+def test_sequential_call_rejects_child_non_artifact_writes(workflow_file: Path) -> None:
+    """A call contract must not grant project writes beyond its declared parent artifacts."""
+    workflow = parse(workflow_file, "- call: {id: review, workflow: independent-review, runner: codex}\n")
+
+    error = semantic_error(
+        workflow,
+        InMemoryWorkflowCatalog({"independent-review": review_contract(non_artifact_writes=("src/",))}),
+    )
+
+    assert error.code == "LSW304"
+    assert error.pointer == "/flow/0/call"
+
+
+def test_parallel_direct_ir_rejects_explicit_escalate_block() -> None:
+    """Parallel's v1 allowlist is positive; terminal control blocks cannot slip through direct IR."""
+    workflow = WorkflowIR(
+        "1", "release", "Release safely", ("**",),
+        (ParallelIR("gates", "all", {"one": (EscalateIR(),), "two": ()}),),
+    )
+
+    error = semantic_error(workflow)
+
+    assert error.code == "LSP101"
+    assert error.pointer == "/flow/0/parallel/branches/one/0"
+
+
+def test_semantic_diagnostic_uses_the_exact_parsed_yaml_mark(workflow_file: Path) -> None:
+    """Removing source locations would make semantic diagnostics unactionable in a workflow file."""
+    workflow = parse(
+        workflow_file,
+        '''\
+- choose:
+    value: evidence.approved
+    cases: {yes: [{escalate: {}}]}
+    default: [{escalate: {}}]
+''',
+    )
+
+    error = semantic_error(workflow)
+
+    assert (error.line, error.column, error.pointer) == (7, 12, "/flow/0/choose/value")
+
+
+def test_direct_ir_semantic_diagnostic_has_no_source_mark() -> None:
+    """Direct IR remains valid for compiler tests without inventing a false source location."""
+    workflow = WorkflowIR("1", "release", "Release safely", ("**",), (ChooseIR(None, "evidence.approved", {}, ()),))
+
+    error = semantic_error(workflow)
+
+    assert (error.line, error.column) == (None, None)

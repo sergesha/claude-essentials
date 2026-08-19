@@ -14,7 +14,7 @@ from yaml.nodes import MappingNode, Node, SequenceNode
 from .diagnostics import Diagnostic, DiagnosticError
 from .ir import (
     AcceptIR, BlockIR, CallIR, ChooseIR, DecideIR, EscalateIR, GraphIR,
-    ParallelIR, RepeatIR, RetryIR, StepIR, VerifyIR, WorkflowDefaultsIR, WorkflowIR,
+    ParallelIR, RepeatIR, RetryIR, SourceLocation, StepIR, VerifyIR, WorkflowDefaultsIR, WorkflowIR,
 )
 
 
@@ -31,10 +31,7 @@ _V2_KEYS = frozenset({
 })
 
 
-@dataclass(frozen=True)
-class SourceMark:
-    line: int
-    column: int
+SourceMark = SourceLocation
 
 
 @dataclass(frozen=True)
@@ -266,7 +263,7 @@ class _Parser:
             if "retry" in defaults:
                 defaults_ir = WorkflowDefaultsIR(self.retry(defaults["retry"], "/defaults/retry"))
         flow = tuple(self.parse_flow(self.sequence(root["flow"], "/flow", "flow"), "/flow"))
-        return WorkflowIR("1", name, description, protect, flow, defaults_ir, self.document.path)
+        return WorkflowIR("1", name, description, protect, flow, defaults_ir, self.document.path, self.document.marks)
 
     def parse_flow(self, items: list[Any], pointer: str, parallel: bool = False) -> list[BlockIR]:
         blocks: list[BlockIR] = []
