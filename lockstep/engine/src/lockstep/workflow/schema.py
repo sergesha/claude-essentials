@@ -241,8 +241,8 @@ class _Parser:
         if value is None:
             return None
         text = self.string(value, pointer, "outcome handler")
-        if text in {"continue", "goto"}:
-            self.fail("LSW120", f"{text!r} is not available in Workflow DSL v1", pointer, "use escalate or a structured handler")
+        if text != "escalate":
+            self.fail("LSW108", "v1 outcome handlers must be escalate", pointer, "use escalate")
         return text
 
     def parse(self) -> WorkflowIR:
@@ -427,13 +427,10 @@ class _Parser:
             return {"pass": "next", "fail": "escalate", "error": "escalate"}
         on = self.mapping(value, pointer, "include_graph on")
         self.keys(on, pointer, {"pass", "fail", "error"}, {"pass"})
-        result = {"pass": self.string(on["pass"], f"{pointer}/pass", "include pass handler"), "fail": self.string(on.get("fail", "escalate"), f"{pointer}/fail", "include fail handler"), "error": self.string(on.get("error", "escalate"), f"{pointer}/error", "include error handler")}
+        result = {"pass": self.string(on["pass"], f"{pointer}/pass", "include pass handler"), "fail": self.handler(on.get("fail", "escalate"), f"{pointer}/fail"), "error": self.handler(on.get("error", "escalate"), f"{pointer}/error")}
         if result["pass"] != "next":
             self.fail("LSW108", "include_graph on.pass must be next", f"{pointer}/pass", "use pass: next")
-        for outcome in ("fail", "error"):
-            if result[outcome] == "next":
-                self.fail("LSW108", f"include_graph on.{outcome} cannot be next", f"{pointer}/{outcome}", "use escalate or a structured handler")
-        return result
+        return {key: value or "escalate" for key, value in result.items()}
 
     def optional_mapping(self, item: dict[str, Any], key: str, pointer: str) -> dict[str, Any] | None:
         return self.mapping(item[key], f"{pointer}/{key}", key) if key in item else None

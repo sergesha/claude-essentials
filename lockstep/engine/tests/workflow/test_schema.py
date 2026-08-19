@@ -113,6 +113,51 @@ flow:
     assert workflow.flow[0].on == {"pass": "next", "fail": "escalate", "error": "escalate"}
 
 
+@pytest.mark.parametrize("outcome", ["fail", "error"])
+def test_include_graph_rejects_arbitrary_failure_handler_values(
+    workflow_file: Path, outcome: str
+) -> None:
+    workflow_file.write_text(
+        BASE
+        + f'''\
+flow:
+- include_graph:
+    id: approval-fragment
+    path: .lockstep/fragments/release-approval.graph.yaml
+    on: {{pass: next, {outcome}: typo}}
+'''
+    )
+
+    assert raises_diagnostic("LSW108", workflow_file).pointer == f"/flow/0/include_graph/on/{outcome}"
+
+
+def test_include_graph_accepts_exact_failure_routing_tokens(workflow_file: Path) -> None:
+    workflow_file.write_text(
+        BASE
+        + '''\
+flow:
+- include_graph:
+    id: approval-fragment
+    path: .lockstep/fragments/release-approval.graph.yaml
+    on: {pass: next, fail: escalate, error: escalate}
+'''
+    )
+
+    assert parse_workflow(load_workflow(workflow_file)).flow[0].on == {
+        "pass": "next", "fail": "escalate", "error": "escalate"
+    }
+
+
+def test_include_graph_defaults_omitted_failure_routing_to_escalate(workflow_file: Path) -> None:
+    workflow_file.write_text(
+        BASE + "flow:\n- include_graph: {id: approval, path: f.graph.yaml}\n"
+    )
+
+    assert parse_workflow(load_workflow(workflow_file)).flow[0].on == {
+        "pass": "next", "fail": "escalate", "error": "escalate"
+    }
+
+
 def test_ir_recursively_freezes_mapping_fields_and_retains_defaults(workflow_file: Path) -> None:
     workflow_file.write_text(
         BASE
