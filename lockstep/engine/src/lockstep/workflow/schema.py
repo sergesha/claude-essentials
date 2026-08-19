@@ -266,7 +266,7 @@ class _Parser:
             if "retry" in defaults:
                 defaults_ir = WorkflowDefaultsIR(self.retry(defaults["retry"], "/defaults/retry"))
         flow = tuple(self.parse_flow(self.sequence(root["flow"], "/flow", "flow"), "/flow"))
-        return WorkflowIR("1", name, description, protect, flow, defaults_ir)
+        return WorkflowIR("1", name, description, protect, flow, defaults_ir, self.document.path)
 
     def parse_flow(self, items: list[Any], pointer: str, parallel: bool = False) -> list[BlockIR]:
         blocks: list[BlockIR] = []

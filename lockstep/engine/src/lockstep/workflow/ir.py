@@ -7,6 +7,7 @@ effect, fragment, and runtime rules are compiler responsibilities.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal, Mapping, TypeAlias
 
@@ -166,3 +167,4 @@ class WorkflowIR:
     protect: tuple[str, ...]
     flow: tuple[BlockIR, ...]
     defaults: WorkflowDefaultsIR = field(default_factory=WorkflowDefaultsIR)
+    source_path: Path | None = None
