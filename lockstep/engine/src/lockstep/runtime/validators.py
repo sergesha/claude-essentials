@@ -57,6 +57,8 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Callable
 
+from lockstep.runtime.manifests import ProjectSnapshot, ProjectWritePath, capture_project, compare_effect
+
 DEFAULT_TIMEOUT = 600
 
 # default ignore set for baseline manifests.
@@ -619,8 +621,30 @@ def run_checks(state: dict[str, Any], execute: bool = False) -> dict[str, Any]:
         for check in deferred:
             reasons.extend(_check_unchanged(check, evidence, ctx))
     except Exception as e:  # noqa: BLE001 - deliberate: any raise -> error verdict
-        return {"verdict_status": "error", "verdict_reasons": [str(e)]}
+        verdict = {"verdict_status": "error", "verdict_reasons": [str(e)]}
+    else:
+        verdict = (
+            {"verdict_status": "fail", "verdict_reasons": reasons}
+            if reasons
+            else {"verdict_status": "pass", "verdict_reasons": []}
+        )
 
-    if reasons:
-        return {"verdict_status": "fail", "verdict_reasons": reasons}
-    return {"verdict_status": "pass", "verdict_reasons": []}
+    # DSL execution supplies the before-manifest and compiler-derived paths.
+    # Existing yamlgraph recipes have no effect contract yet, so their legacy
+    # validator behavior remains unchanged until they are migrated.
+    before = state.get("_effect_before")
+    if before is None:
+        return verdict
+    if not isinstance(before, ProjectSnapshot):
+        return {"verdict_status": "error", "verdict_reasons": ["integrity: invalid effect baseline"]}
+    try:
+        allowed = state.get("_effect_allowed") or []
+        if not all(isinstance(path, ProjectWritePath) for path in allowed):
+            raise TypeError("effect contract contains an invalid write path")
+        outcome = state.get("_effect_outcome", verdict["verdict_status"])
+        result = compare_effect(before, capture_project(Path(state["_project"])), allowed, outcome)
+    except Exception as exc:  # noqa: BLE001 - integrity gate must fail closed
+        return {"verdict_status": "error", "verdict_reasons": [f"integrity: {exc}"]}
+    if result.integrity_error:
+        return {"verdict_status": "error", "verdict_reasons": list(result.reasons)}
+    return verdict
