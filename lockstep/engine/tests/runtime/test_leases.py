@@ -68,6 +68,19 @@ def test_same_owner_renews_live_lease_without_changing_epoch(lease_store):
     assert renewed.expires_at > first.expires_at
 
 
+def test_release_then_reacquire_preserves_monotonic_fence(lease_store):
+    store, _clock = lease_store
+    stale = store.acquire("invoke", "thread-aba", "worker-a", 30)
+
+    assert store.release(stale)
+    current = store.acquire("invoke", "thread-aba", "worker-a", 30)
+
+    assert current.epoch == stale.epoch + 1
+    assert not store.is_current(stale)
+    assert not store.release(stale)
+    assert store.is_current(current)
+
+
 def test_lease_rejects_empty_identity_and_nonpositive_ttl(lease_store):
     store, _clock = lease_store
 

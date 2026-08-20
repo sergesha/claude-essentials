@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Callable
 
-from sqlalchemy import and_, delete, select, update
+from sqlalchemy import and_, select, update
 
 from lockstep.runtime.storage import SQLiteStore
 
@@ -110,7 +110,7 @@ class LeaseStore:
     def is_current(self, lease: Lease) -> bool:
         now = _utc(self._clock())
         table = self._store.tables.leases
-        with self._store.engine.connect() as connection:
+        with self._store.read_connection() as connection:
             row = connection.execute(
                 select(table.c.owner, table.c.epoch, table.c.expires_at).where(
                     and_(table.c.scope == lease.scope, table.c.lease_key == lease.key)
@@ -124,13 +124,14 @@ class LeaseStore:
         )
 
     def release(self, lease: Lease) -> bool:
-        """Release only a live matching epoch; stale owners are fenced out."""
+        """Expire a live epoch without deleting its monotonic fence history."""
 
         now = _utc(self._clock())
         table = self._store.tables.leases
         with self._store.write_transaction() as connection:
             result = connection.execute(
-                delete(table).where(
+                update(table)
+                .where(
                     and_(
                         table.c.scope == lease.scope,
                         table.c.lease_key == lease.key,
@@ -139,5 +140,6 @@ class LeaseStore:
                         table.c.expires_at > _dump(now),
                     )
                 )
+                .values(expires_at=_dump(now))
             )
         return result.rowcount == 1

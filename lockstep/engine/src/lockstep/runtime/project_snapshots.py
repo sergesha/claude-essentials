@@ -2,17 +2,26 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
 import errno
 import hashlib
 import json
 import os
-from pathlib import Path, PurePosixPath
 import stat
+import tempfile
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
 
 from lockstep.runtime.blobs import BlobRef, BlobStore, DigestMismatch
 from lockstep.runtime.locking import file_lock
+from lockstep.runtime.owner_state import (
+    InsecureStatePath,
+    StorageLimitExceeded,
+    ensure_owner_directory,
+    initialize_owner_state,
+    seal_owner_file,
+    verify_owner_file,
+)
 
 
 class UnsafeSnapshotPath(ValueError):
@@ -93,6 +102,25 @@ class ProjectSnapshot:
     previous: ProjectSnapshotRef | None
 
 
+@dataclass(frozen=True)
+class SnapshotLimits:
+    max_files: int = 10_000
+    max_total_bytes: int = 256 * 1024 * 1024
+    max_manifest_bytes: int = 4 * 1024 * 1024
+    max_provenance_bytes: int = 256 * 1024
+    max_provenance_depth: int = 32
+
+    def __post_init__(self) -> None:
+        if min(
+            self.max_files,
+            self.max_total_bytes,
+            self.max_manifest_bytes,
+            self.max_provenance_bytes,
+            self.max_provenance_depth,
+        ) <= 0:
+            raise ValueError("snapshot limits must be positive")
+
+
 def _canonical(data: object) -> bytes:
     return json.dumps(
         _plain_json(data),
@@ -118,6 +146,20 @@ def _freeze_json(value: object) -> object:
     return value
 
 
+def _enforce_json_depth(value: object, max_depth: int) -> None:
+    pending = [(value, 1)]
+    while pending:
+        current, depth = pending.pop()
+        if depth > max_depth:
+            raise StorageLimitExceeded(
+                f"snapshot provenance depth exceeds {max_depth} admission limit"
+            )
+        if isinstance(current, Mapping):
+            pending.extend((item, depth + 1) for item in current.values())
+        elif isinstance(current, (list, tuple)):
+            pending.extend((item, depth + 1) for item in current)
+
+
 def _safe_path(raw: str, *, allow_prefix: bool = False) -> str:
     if not raw or "\\" in raw or "\x00" in raw or any(char in raw for char in "*?["):
         raise UnsafeSnapshotPath(f"unsafe snapshot path {raw!r}")
@@ -137,7 +179,7 @@ def _validate_digest(digest: str) -> None:
         raise ValueError("project snapshot reference must be a lowercase SHA-256 digest")
 
 
-def _read_manifest_regular(path: Path) -> bytes:
+def _read_manifest_regular(path: Path, *, max_bytes: int) -> bytes:
     if path.is_symlink():
         raise SnapshotStorageError(f"snapshot manifest symlink rejected: {path}")
     try:
@@ -147,18 +189,40 @@ def _read_manifest_regular(path: Path) -> bytes:
             raise SnapshotStorageError(f"snapshot manifest symlink rejected: {path}") from exc
         raise
     try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
             raise SnapshotStorageError(f"snapshot manifest is not a regular file: {path}")
+        if info.st_size > max_bytes:
+            raise StorageLimitExceeded(
+                f"snapshot manifest exceeds {max_bytes} byte admission limit"
+            )
         with os.fdopen(descriptor, "rb", closefd=False) as stream:
             return stream.read()
     finally:
         os.close(descriptor)
 
 
+def _verify_manifest_owner(path: Path) -> None:
+    try:
+        verify_owner_file(path)
+    except InsecureStatePath as exc:
+        if path.is_symlink():
+            raise SnapshotStorageError(f"snapshot manifest symlink rejected: {path}") from exc
+        raise SnapshotStorageError(f"insecure snapshot manifest: {path}") from exc
+
+
 class ProjectSnapshotStore:
-    def __init__(self, owner_state_dir: str | Path, blob_store: BlobStore | None = None) -> None:
-        self._directory = Path(owner_state_dir) / "project-snapshots"
-        self._blob_store = blob_store or BlobStore(owner_state_dir)
+    def __init__(
+        self,
+        owner_state_dir: str | Path,
+        blob_store: BlobStore | None = None,
+        *,
+        limits: SnapshotLimits | None = None,
+    ) -> None:
+        self._owner_state = initialize_owner_state(owner_state_dir)
+        self._directory = ensure_owner_directory(self._owner_state, "project-snapshots")
+        self._blob_store = blob_store or BlobStore(self._owner_state)
+        self._limits = limits or SnapshotLimits()
 
     def manifest_path(self, ref: ProjectSnapshotRef) -> Path:
         _validate_digest(ref.digest)
@@ -173,14 +237,24 @@ class ProjectSnapshotStore:
         previous: ProjectSnapshotRef | None = None,
     ) -> ProjectSnapshotRef:
         raw_files = list(files.items()) if isinstance(files, Mapping) else list(files)
+        if len(raw_files) > self._limits.max_files:
+            raise StorageLimitExceeded(
+                f"snapshot files exceed {self._limits.max_files} admission limit"
+            )
         entries: list[SnapshotFile] = []
         seen: set[str] = set()
+        total_bytes = 0
         for raw_path, blob in raw_files:
             path = _safe_path(raw_path)
             if path in seen:
                 raise DuplicateSnapshotPath(f"duplicate snapshot path {path!r}")
             if not isinstance(blob, BlobRef):
                 raise TypeError("project snapshots contain BlobRef values")
+            total_bytes += blob.size
+            if total_bytes > self._limits.max_total_bytes:
+                raise StorageLimitExceeded(
+                    f"snapshot bytes exceed {self._limits.max_total_bytes} admission limit"
+                )
             self._blob_store.read(blob)
             seen.add(path)
             entries.append(SnapshotFile(path=path, blob=blob))
@@ -198,13 +272,21 @@ class ProjectSnapshotStore:
                 for declaration in declarations
             ):
                 raise UndeclaredSnapshotPath(f"snapshot path {entry.path!r} is not declared")
-        if not isinstance(provenance, Mapping) or any(not isinstance(key, str) for key in provenance):
+        if not isinstance(provenance, Mapping) or any(
+            not isinstance(key, str) for key in provenance
+        ):
             raise TypeError("snapshot provenance must be a string-keyed mapping")
+        _enforce_json_depth(provenance, self._limits.max_provenance_depth)
         provenance_data = _freeze_json(provenance)
         try:
-            _canonical(provenance_data)
+            provenance_encoded = _canonical(provenance_data)
         except (TypeError, ValueError) as exc:
             raise TypeError("snapshot provenance must be JSON serializable") from exc
+        if len(provenance_encoded) > self._limits.max_provenance_bytes:
+            raise StorageLimitExceeded(
+                "snapshot provenance exceeds "
+                f"{self._limits.max_provenance_bytes} byte admission limit"
+            )
         if previous is not None:
             self.read(previous)
         data = {
@@ -221,18 +303,29 @@ class ProjectSnapshotStore:
             "previous": previous.digest if previous is not None else None,
         }
         encoded = _canonical(data)
+        if len(encoded) > self._limits.max_manifest_bytes:
+            raise StorageLimitExceeded(
+                f"snapshot manifest exceeds {self._limits.max_manifest_bytes} byte admission limit"
+            )
         ref = ProjectSnapshotRef(hashlib.sha256(encoded).hexdigest())
         path = self.manifest_path(ref)
-        path.parent.mkdir(parents=True, exist_ok=True)
         with file_lock(path, timeout=30.0, stale_after=300.0):
             if path.exists() or path.is_symlink():
-                if _read_manifest_regular(path) != encoded:
+                _verify_manifest_owner(path)
+                existing = _read_manifest_regular(
+                    path, max_bytes=self._limits.max_manifest_bytes
+                )
+                if existing != encoded:
                     raise DigestMismatch(f"project snapshot manifest collision at {ref.digest}")
             else:
-                tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+                fd, raw_tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+                tmp = Path(raw_tmp)
                 try:
-                    tmp.write_bytes(encoded)
-                    tmp.chmod(0o444)
+                    with os.fdopen(fd, "wb") as stream:
+                        stream.write(encoded)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    seal_owner_file(tmp, writable=False)
                     os.replace(tmp, path)
                 finally:
                     if tmp.exists():
@@ -242,7 +335,8 @@ class ProjectSnapshotStore:
     def read(self, ref: ProjectSnapshotRef) -> ProjectSnapshot:
         path = self.manifest_path(ref)
         try:
-            encoded = _read_manifest_regular(path)
+            _verify_manifest_owner(path)
+            encoded = _read_manifest_regular(path, max_bytes=self._limits.max_manifest_bytes)
         except FileNotFoundError as exc:
             raise KeyError(ref.digest) from exc
         observed = hashlib.sha256(encoded).hexdigest()
@@ -266,7 +360,7 @@ class ProjectSnapshotStore:
             )
             provenance = data["provenance"]
             if not isinstance(provenance, dict):
-                raise ValueError("provenance is not an object")
+                raise TypeError("provenance is not an object")
             previous = (
                 ProjectSnapshotRef(data["previous"]) if data["previous"] is not None else None
             )
@@ -276,6 +370,14 @@ class ProjectSnapshotStore:
             raise ValueError("project snapshot entries are not ordered")
         if len({entry.path for entry in entries}) != len(entries):
             raise DuplicateSnapshotPath("duplicate path in project snapshot manifest")
+        if len(entries) > self._limits.max_files:
+            raise StorageLimitExceeded("snapshot file count exceeds admission limit")
+        if sum(entry.blob.size for entry in entries) > self._limits.max_total_bytes:
+            raise StorageLimitExceeded("snapshot byte size exceeds admission limit")
+        _enforce_json_depth(provenance, self._limits.max_provenance_depth)
+        provenance_encoded = _canonical(provenance)
+        if len(provenance_encoded) > self._limits.max_provenance_bytes:
+            raise StorageLimitExceeded("snapshot provenance exceeds admission limit")
         for entry in entries:
             if not any(
                 entry.path == declaration

@@ -137,7 +137,10 @@ def test_snapshot_frozen_provenance_round_trips_deterministically(stores):
 
 
 def test_snapshot_rejects_undeclared_or_unsafe_paths(stores):
-    from lockstep.runtime.project_snapshots import UndeclaredSnapshotPath, UnsafeSnapshotPath
+    from lockstep.runtime.project_snapshots import (
+        UndeclaredSnapshotPath,
+        UnsafeSnapshotPath,
+    )
 
     blob_store, snapshot_store = stores
     blob = blob_store.put(b"content")
@@ -282,4 +285,92 @@ def test_snapshot_reuse_rejects_symlink_backed_manifest(stores, tmp_path):
             files,
             declared_paths=["app.py"],
             provenance={"revision": "1"},
+        )
+
+
+def test_snapshot_limits_fail_before_manifest_publication(tmp_path):
+    from lockstep.runtime.blobs import BlobStore
+    from lockstep.runtime.project_snapshots import (
+        ProjectSnapshotStore,
+        SnapshotLimits,
+        StorageLimitExceeded,
+    )
+
+    owner = tmp_path / "limited-state"
+    blobs = BlobStore(owner)
+    blob = blobs.put(b"content")
+    store = ProjectSnapshotStore(
+        owner,
+        blobs,
+        limits=SnapshotLimits(
+            max_files=1,
+            max_total_bytes=1024,
+            max_manifest_bytes=1024,
+            max_provenance_bytes=12,
+            max_provenance_depth=2,
+        ),
+    )
+
+    with pytest.raises(StorageLimitExceeded, match="provenance"):
+        store.capture(
+            {"app.py": blob},
+            declared_paths=["app.py"],
+            provenance={"provider": {"nested": "too large"}},
+        )
+    assert not list((owner / "project-snapshots").glob("*.json"))
+
+
+def test_snapshot_read_enforces_manifest_limit(tmp_path):
+    from lockstep.runtime.blobs import BlobStore
+    from lockstep.runtime.project_snapshots import (
+        ProjectSnapshotStore,
+        SnapshotLimits,
+        StorageLimitExceeded,
+    )
+
+    owner = tmp_path / "limited-read-state"
+    blobs = BlobStore(owner)
+    permissive = ProjectSnapshotStore(owner, blobs)
+    ref = permissive.capture(
+        {"app.py": blobs.put(b"content")},
+        declared_paths=["app.py"],
+        provenance={"provider": "memory"},
+    )
+    strict = ProjectSnapshotStore(
+        owner,
+        blobs,
+        limits=SnapshotLimits(max_manifest_bytes=8),
+    )
+
+    with pytest.raises(StorageLimitExceeded, match="manifest"):
+        strict.read(ref)
+
+
+def test_snapshot_rejects_deep_provenance_before_recursive_freezing(tmp_path):
+    from lockstep.runtime.blobs import BlobStore
+    from lockstep.runtime.project_snapshots import (
+        ProjectSnapshotStore,
+        SnapshotLimits,
+        StorageLimitExceeded,
+    )
+
+    owner = tmp_path / "deep-provenance-state"
+    blobs = BlobStore(owner)
+    store = ProjectSnapshotStore(
+        owner,
+        blobs,
+        limits=SnapshotLimits(max_provenance_depth=8),
+    )
+    provenance = {}
+    current = provenance
+    for _ in range(2_000):
+        child = {}
+        current["child"] = child
+        current = child
+
+    with pytest.raises(StorageLimitExceeded, match="depth"):
+        store.capture(
+            {"app.py": blobs.put(b"content")},
+            declared_paths=["app.py"],
+            provenance=provenance,
         )

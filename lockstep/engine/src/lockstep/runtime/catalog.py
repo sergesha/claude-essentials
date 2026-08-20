@@ -6,9 +6,9 @@ and terminal outcome are projections of public LangGraph snapshots.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
-from typing import Callable
 
 from sqlalchemy import select
 
@@ -33,6 +33,16 @@ def _iso_utc(value: datetime) -> str:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc).isoformat()
+
+
+def _canonical_created_at(value: str) -> str:
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("created_at must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("created_at must include a timezone")
+    return _iso_utc(parsed)
 
 
 class RunCatalog:
@@ -70,8 +80,15 @@ class RunCatalog:
 
     def create(self, binding: RunBinding) -> RunBinding:
         self._validate(binding)
-        created_at = binding.created_at or _iso_utc(self._clock())
-        candidate = replace(binding, created_at=created_at)
+        requested = (
+            replace(binding, created_at=_canonical_created_at(binding.created_at))
+            if binding.created_at is not None
+            else binding
+        )
+        candidate = replace(
+            requested,
+            created_at=requested.created_at or _iso_utc(self._clock()),
+        )
         table = self._store.tables.runs
         with self._store.write_transaction() as connection:
             rows = connection.execute(
@@ -82,7 +99,7 @@ class RunCatalog:
             ).all()
             if rows:
                 matches = [self._from_row(row) for row in rows]
-                if len(matches) == 1 and self._same_requested(matches[0], binding):
+                if len(matches) == 1 and self._same_requested(matches[0], requested):
                     return matches[0]
                 raise ImmutableBindingConflict(
                     "public_run_id or thread_id is already bound to different immutable data"
@@ -101,7 +118,7 @@ class RunCatalog:
 
     def get(self, run_id: str) -> RunBinding:
         table = self._store.tables.runs
-        with self._store.engine.connect() as connection:
+        with self._store.read_connection() as connection:
             row = connection.execute(
                 select(table).where(table.c.public_run_id == run_id)
             ).first()
@@ -116,5 +133,5 @@ class RunCatalog:
             .where(table.c.project_identity == project_identity)
             .order_by(table.c.created_at, table.c.public_run_id)
         )
-        with self._store.engine.connect() as connection:
+        with self._store.read_connection() as connection:
             return [self._from_row(row) for row in connection.execute(statement)]

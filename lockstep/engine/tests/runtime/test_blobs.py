@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 import hashlib
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -69,3 +69,32 @@ def test_concurrent_duplicate_blob_puts_publish_one_value(blob_store):
 
     assert len(set(refs)) == 1
     assert blob_store.read(refs[0]) == payload
+
+
+def test_blob_limit_rejects_before_publication(tmp_path):
+    from lockstep.runtime.blobs import BlobLimits, BlobStore, StorageLimitExceeded
+
+    store = BlobStore(tmp_path / "owner-state", limits=BlobLimits(max_bytes=4))
+
+    with pytest.raises(StorageLimitExceeded, match="blob"):
+        store.put(b"12345")
+    assert not list((tmp_path / "owner-state" / "blobs" / "sha256").rglob("[0-9a-f]" * 64))
+
+
+def test_blob_state_paths_are_owner_only(blob_store):
+    ref = blob_store.put(b"private")
+
+    path = blob_store.path_for(ref)
+    assert path.stat().st_mode & 0o077 == 0
+    assert path.parent.stat().st_mode & 0o077 == 0
+
+
+def test_blob_store_rejects_insecure_existing_state_root(tmp_path):
+    from lockstep.runtime.blobs import BlobStore
+    from lockstep.runtime.owner_state import InsecureStatePath
+
+    root = tmp_path / "owner-state"
+    root.mkdir(mode=0o755)
+
+    with pytest.raises(InsecureStatePath, match="owner-only"):
+        BlobStore(root)

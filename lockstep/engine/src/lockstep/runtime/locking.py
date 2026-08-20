@@ -91,9 +91,9 @@ from __future__ import annotations
 import json
 import os
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
 
 _POLL = 0.02  # acquire-loop poll interval (seconds)
 _RELEASE_SESSION_WAIT = 0.25  # max wait for a session at release before fallback
@@ -156,7 +156,7 @@ def _recover_break_mutex(brk: Path, stale_after: float) -> None:
     except OSError:
         return
     try:
-        fd = os.open(brk, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        fd = os.open(brk, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     except OSError:
         pass
     else:
@@ -184,7 +184,7 @@ def _breaker_session(brk: Path, stale_after: float) -> Iterator[bool]:
     """
     token = f"{os.getpid()}:{time.time_ns()}"
     try:
-        fd = os.open(brk, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        fd = os.open(brk, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     except FileExistsError:
         if _is_stale(brk, stale_after):
             _recover_break_mutex(brk, stale_after)
@@ -265,7 +265,7 @@ def file_lock(target: Path, timeout: float = 10.0, stale_after: float = 60.0) ->
     acquired = False
     while True:
         try:
-            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError:
             broke = False
             if _is_stale(lock, stale_after):
