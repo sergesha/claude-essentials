@@ -260,12 +260,15 @@ def hook_pretool(stdin_json: dict, state_dir: Path) -> tuple[int, str]:
                 "lockstep policy: hook input carried no session_id — run "
                 "ownership cannot be established; failing closed"
             )
+        stale_minutes = _session_stale_minutes()
         for binding, _status in candidates:
             if sessions.refresh_if_owner(
-                state_dir, binding.public_run_id, session_id
+                state_dir,
+                binding.public_run_id,
+                session_id,
+                stale_minutes,
             ):
                 return 0, ""
-        stale_minutes = _session_stale_minutes()
         binding, _status = candidates[0]
         run_id = binding.public_run_id
         if sessions.is_live(sessions.read_binding(state_dir, run_id), stale_minutes):

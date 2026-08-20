@@ -130,8 +130,13 @@ def locked_owner(
         yield
 
 
-def refresh_if_owner(state_dir: Path, run_id: str, session_id: str) -> bool:
-    """True iff the binding names `session_id`; refreshes `last_seen`.
+def refresh_if_owner(
+    state_dir: Path,
+    run_id: str,
+    session_id: str,
+    stale_minutes: float,
+) -> bool:
+    """True iff the binding names a still-live `session_id`; refreshes `last_seen`.
     Never binds, never adopts — the gate's only verb."""
     path = binding_path(state_dir, run_id)
     b = read_binding(state_dir, run_id)
@@ -143,7 +148,11 @@ def refresh_if_owner(state_dir: Path, run_id: str, session_id: str) -> bool:
     # moment, never the whole budget.
     with _binding_lock(path, timeout=_REFRESH_LOCK_WAIT):
         b = read_binding(state_dir, run_id)
-        if b is None or b["session_id"] != session_id:
+        if (
+            b is None
+            or b["session_id"] != session_id
+            or not is_live(b, stale_minutes)
+        ):
             return False                               # re-verified under the lock
         b["last_seen"] = _now_iso()
         _write(path, b)

@@ -1,7 +1,10 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from lockstep.runtime import sessions
+from lockstep.runtime.engine import LockstepError
 from lockstep.runtime.hooks import hook_posttool, hook_pretool, policy_require
 from lockstep.runtime.service import LockstepService
 
@@ -81,6 +84,37 @@ def test_pretool_policy_requires_current_native_run_session(tmp_path, monkeypatc
     assert json.loads(raw)["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
+def test_pretool_cannot_revive_expired_exact_owner_or_enable_resume(
+    tmp_path, monkeypatch
+):
+    state, project, run_id = _run(tmp_path, monkeypatch)
+    sessions.touch(state, run_id, "expired-owner", 30)
+    policy_require(state, str(project), "native-parent-direct")
+    path = sessions.binding_path(state, run_id)
+    binding = json.loads(path.read_text())
+    binding["last_seen"] = "2000-01-01T00:00:00+00:00"
+    path.write_text(json.dumps(binding, sort_keys=True))
+    before = path.read_bytes()
+
+    _code, raw = hook_pretool(
+        {"cwd": str(project), "session_id": "expired-owner"}, state
+    )
+    assert json.loads(raw)["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert path.read_bytes() == before
+
+    service = LockstepService(state, tmp_path / "recipes")
+    with pytest.raises(LockstepError, match="stale"):
+        service.scenario_done(
+            run_id,
+            "answer",
+            {"answer": "yes"},
+            session_id="expired-owner",
+            project=str(project),
+        )
+    assert service.status(run_id, str(project))["status"] == "awaiting"
+    service.close()
+
+
 def test_pretool_policy_binds_exact_transitive_recipe_digest(tmp_path, monkeypatch):
     state, project, run_id = _run(tmp_path, monkeypatch)
     sessions.touch(state, run_id, "owner", 30)
@@ -109,8 +143,6 @@ def test_pretool_uses_most_specific_policy_and_exact_policy_project(tmp_path, mo
     decision = json.loads(raw)["hookSpecificOutput"]
     assert decision["permissionDecision"] == "deny"
     assert "start recipe native-child-interrupt" in decision["permissionDecisionReason"]
-
-
 
 def test_pretool_does_not_reuse_parent_run_for_child_policy(tmp_path, monkeypatch):
     state, parent, parent_run = _run(tmp_path, monkeypatch)
