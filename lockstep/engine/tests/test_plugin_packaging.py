@@ -69,7 +69,9 @@ def test_launcher_is_executable_and_does_not_change_directory():
     source = launcher.read_text()
     assert source.startswith("#!/bin/sh\n")
     assert "cd " not in source
+    assert '"$lockstep_plugin_root/scripts/lockstep-install"' in source
     assert "exec uv run --project" in source
+    assert "--no-sync lockstep" in source
 
 
 def test_launcher_resolves_engine_but_preserves_caller_cwd(tmp_path):
@@ -98,7 +100,12 @@ def test_launcher_resolves_engine_but_preserves_caller_cwd(tmp_path):
     lines = result.stdout.splitlines()
     assert lines[0] == str(project)
     assert lines[1:] == [
-        "run", "--project", str(ROOT / "engine"), "lockstep", "doctor",
+        "sync", "--project", str(ROOT / "engine"), "--frozen",
+        str(project),
+        "run", "--project", str(ROOT / "engine"), "--no-sync",
+        "lockstep-dependency-install",
+        str(project),
+        "run", "--project", str(ROOT / "engine"), "--no-sync", "lockstep", "doctor",
     ]
 
 
@@ -112,6 +119,7 @@ def test_launcher_derives_codex_home_from_installed_plugin_path(tmp_path):
     (plugin_root / "engine").mkdir()
     launcher = scripts_dir / "lockstep-plugin"
     shutil.copy2(ROOT / "scripts/lockstep-plugin", launcher)
+    shutil.copy2(ROOT / "scripts/lockstep-install", scripts_dir / "lockstep-install")
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -133,7 +141,52 @@ def test_launcher_derives_codex_home_from_installed_plugin_path(tmp_path):
         check=True,
     )
 
-    assert result.stdout.strip() == str(codex_home)
+    assert set(result.stdout.splitlines()) == {str(codex_home)}
+
+
+def test_install_build_and_plugin_enforce_sync_patch_no_sync_order(tmp_path):
+    """An implicit sync after patching would restore the vulnerable wheel."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_uv = fake_bin / "uv"
+    fake_uv.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$*\" >> \"$LOCKSTEP_TEST_LOG\"\n"
+    )
+    fake_uv.chmod(fake_uv.stat().st_mode | stat.S_IXUSR)
+    log = tmp_path / "uv.log"
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+        "LOCKSTEP_TEST_LOG": str(log),
+    }
+
+    subprocess.run([str(ROOT / "scripts/lockstep-install")], env=env, check=True)
+    assert log.read_text().splitlines() == [
+        f"sync --project {ROOT / 'engine'} --frozen",
+        f"run --project {ROOT / 'engine'} --no-sync lockstep-dependency-install",
+    ]
+
+    log.write_text("")
+    subprocess.run([str(ROOT / "scripts/lockstep-build")], env=env, check=True)
+    assert log.read_text().splitlines() == [
+        f"sync --project {ROOT / 'engine'} --frozen",
+        f"run --project {ROOT / 'engine'} --no-sync lockstep-dependency-install",
+        f"build --project {ROOT / 'engine'}",
+    ]
+
+    log.write_text("")
+    subprocess.run(
+        [str(ROOT / "scripts/lockstep-plugin"), "doctor"],
+        cwd=tmp_path,
+        env=env,
+        check=True,
+    )
+    assert log.read_text().splitlines() == [
+        f"sync --project {ROOT / 'engine'} --frozen",
+        f"run --project {ROOT / 'engine'} --no-sync lockstep-dependency-install",
+        f"run --project {ROOT / 'engine'} --no-sync lockstep doctor",
+    ]
 
 
 def test_distributed_default_recipe_does_not_pin_a_host_runner():

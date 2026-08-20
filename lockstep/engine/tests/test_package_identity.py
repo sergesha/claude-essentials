@@ -74,9 +74,12 @@ def cli() -> object:
     return run
 
 
-def test_only_lockstep_console_script(pyproject):
+def test_expected_console_scripts(pyproject):
     assert pyproject["project"]["name"] == "lockstep"
-    assert pyproject["project"]["scripts"] == {"lockstep": "lockstep.cli:main"}
+    assert pyproject["project"]["scripts"] == {
+        "lockstep": "lockstep.bootstrap:main",
+        "lockstep-dependency-install": "lockstep.dependency_patch:main",
+    }
 
 
 def test_executable_sources_have_no_obsolete_names(repo_root):

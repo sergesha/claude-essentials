@@ -218,6 +218,8 @@ def test_codex_fractal_uses_private_mcp_credential_wrapper(tmp_path, monkeypatch
     assert child.nonce in script
     assert f"export LOCKSTEP_STATE_DIR={tmp_path / 'state'}" in script
     assert f"export LOCKSTEP_RECIPES={FIX / 'good'}" in script
+    assert "/scripts/lockstep-install" in script
+    assert "uv run --project" in script and "--no-sync lockstep" in script
     assert child.nonce not in json.dumps(meta["argv"])
     assert meta["argv"][1:4] == [
         "-c", f'mcp_servers.lockstep.command="{wrapper}"', "exec",

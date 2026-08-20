@@ -1473,14 +1473,17 @@ class Engine:
             # state-dir launcher, then override only the child session's MCP
             # command. The nonce never appears in argv/proc.json.
             codex_mcp_command = workdir / "codex-child-mcp"
-            engine_dir = Path(__file__).resolve().parents[2]
+            engine_dir = Path(__file__).resolve().parents[3]
+            install_script = engine_dir.parent / "scripts" / "lockstep-install"
             script = (
                 "#!/bin/sh\nset -eu\n"
                 f"export LOCKSTEP_STATE_DIR={shlex.quote(str(self._state_dir))}\n"
                 f"export LOCKSTEP_RECIPES={shlex.quote(str(self._recipes_dir))}\n"
                 f"export LOCKSTEP_CHILD_RUN={shlex.quote(child_run)}\n"
                 f"export LOCKSTEP_CHILD_NONCE={shlex.quote(nonce)}\n"
-                f"exec uv run --project {shlex.quote(str(engine_dir))} lockstep \"$@\"\n"
+                f"{shlex.quote(str(install_script))}\n"
+                f"exec uv run --project {shlex.quote(str(engine_dir))} "
+                "--no-sync lockstep \"$@\"\n"
             )
             tmp = workdir / f"codex-child-mcp.{os.getpid()}.{time.time_ns()}.tmp"
             try:

@@ -1,0 +1,32 @@
+version: "1.0"
+name: native-wrapped-child
+state:
+  seed: str
+  seen: str
+  answer: str
+  phase: str
+tools:
+  capture:
+    type: python
+    path: native_tools.py
+    function: capture
+nodes:
+  observe:
+    type: python
+    tool: capture
+    timeout: 1
+  ask:
+    type: interrupt
+    message: Wrapped answer?
+    state_key: question
+    resume_key: answer
+    idempotent: false
+  finish:
+    type: passthrough
+    output:
+      phase: complete
+edges:
+  - {from: START, to: observe}
+  - {from: observe, to: ask}
+  - {from: ask, to: finish}
+  - {from: finish, to: END}

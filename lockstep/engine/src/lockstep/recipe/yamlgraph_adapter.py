@@ -1,4 +1,4 @@
-"""ALL yamlgraph (0.5.18) + langgraph (1.2.10) knowledge isolated here.
+"""ALL yamlgraph (0.5.22 + reviewed source patch) knowledge is isolated here.
 
 Nothing outside this module imports yamlgraph or langgraph directly. The
 dialect below is what the installed packages actually do (read off their
@@ -143,7 +143,9 @@ the same `Advance`/`_parse_brief` machinery, fed from `get_state()`.
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
+from dataclasses import fields as dataclass_fields, is_dataclass
 from pathlib import Path
 from typing import Any
 
@@ -153,6 +155,13 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 from yamlgraph.compile.graph_loader import compile_graph, load_graph_config
 from yamlgraph.mermaid_export import parse_route_lines, render_mermaid, render_overlay
+
+from lockstep.runtime.native_models import (
+    NativeCoordinate,
+    NativeEvent,
+    NativeInterrupt,
+    NativeSnapshot,
+)
 
 
 @dataclass
@@ -170,6 +179,183 @@ class Advance:
     done: bool
     brief: StepBrief | None
     state: dict
+
+
+def _neutral(value: Any) -> Any:
+    """Convert native/package objects into stable standard-library values."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Mapping):
+        return {str(key): _neutral(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return tuple(_neutral(item) for item in value)
+    if isinstance(value, list):
+        return [_neutral(item) for item in value]
+    if isinstance(value, set):
+        return tuple(sorted((_neutral(item) for item in value), key=repr))
+    if is_dataclass(value):
+        return {
+            item.name: _neutral(getattr(value, item.name))
+            for item in dataclass_fields(value)
+        }
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        return _neutral(model_dump())
+    return str(value)
+
+
+def _snapshot_config(snapshot: Any) -> tuple[str, str]:
+    configurable = (getattr(snapshot, "config", None) or {}).get("configurable", {})
+    return str(configurable.get("checkpoint_id") or ""), str(
+        configurable.get("checkpoint_ns") or ""
+    )
+
+
+def _pending_interrupts(snapshot: Any) -> tuple[NativeInterrupt, ...]:
+    pending: list[NativeInterrupt] = []
+    seen: set[str] = set()
+
+    def visit(current: Any) -> None:
+        checkpoint_id, checkpoint_ns = _snapshot_config(current)
+        for task in getattr(current, "tasks", ()) or ():
+            child = getattr(task, "state", None)
+            if hasattr(child, "tasks") and hasattr(child, "config"):
+                visit(child)
+            # LangGraph retains the original Interrupt tuple as task metadata
+            # after a partial batch resume.  A non-None result means that task
+            # has completed and its interrupt is no longer pending.
+            if getattr(task, "result", None) is not None:
+                continue
+            for interrupt in getattr(task, "interrupts", ()) or ():
+                interrupt_id = str(getattr(interrupt, "id", ""))
+                if not interrupt_id or interrupt_id in seen:
+                    continue
+                seen.add(interrupt_id)
+                pending.append(
+                    NativeInterrupt(
+                        coordinate=NativeCoordinate(
+                            checkpoint_id=checkpoint_id,
+                            checkpoint_ns=checkpoint_ns,
+                            task_id=str(getattr(task, "id", "")),
+                            interrupt_id=interrupt_id,
+                        ),
+                        value=_neutral(getattr(interrupt, "value", None)),
+                    )
+                )
+
+    visit(snapshot)
+    return tuple(pending)
+
+
+def _to_native_snapshot(snapshot: Any) -> NativeSnapshot:
+    checkpoint_id, checkpoint_ns = _snapshot_config(snapshot)
+    return NativeSnapshot(
+        values=dict(_neutral(getattr(snapshot, "values", {}) or {})),
+        pending=_pending_interrupts(snapshot),
+        next=tuple(str(item) for item in (getattr(snapshot, "next", ()) or ())),
+        checkpoint_id=checkpoint_id,
+        checkpoint_ns=checkpoint_ns,
+        metadata=dict(_neutral(getattr(snapshot, "metadata", {}) or {})),
+        created_at=getattr(snapshot, "created_at", None),
+    )
+
+
+class NativeApp:
+    """Narrow facade over one compiled yamlgraph/LangGraph application."""
+
+    def __init__(self, app: Any, connection: sqlite3.Connection | None = None) -> None:
+        self._app = app
+        self._connection = connection
+        self._closed = False
+
+    @staticmethod
+    def _config(thread_id: str) -> dict[str, dict[str, str]]:
+        return {"configurable": {"thread_id": thread_id}}
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("NativeApp is closed")
+
+    def invoke(self, values: dict, *, thread_id: str) -> NativeSnapshot:
+        self._ensure_open()
+        config = self._config(thread_id)
+        self._app.invoke(dict(values), config=config)
+        return _to_native_snapshot(self._app.get_state(config, subgraphs=True))
+
+    async def ainvoke(self, values: dict, *, thread_id: str) -> NativeSnapshot:
+        self._ensure_open()
+        config = self._config(thread_id)
+        await self._app.ainvoke(dict(values), config=config)
+        return _to_native_snapshot(self._app.get_state(config, subgraphs=True))
+
+    def resume(
+        self,
+        *,
+        thread_id: str,
+        results_by_interrupt_id: Mapping[str, Any],
+    ) -> NativeSnapshot:
+        self._ensure_open()
+        if not results_by_interrupt_id:
+            raise ValueError("at least one interrupt result is required")
+        config = self._config(thread_id)
+        self._app.invoke(Command(resume=dict(results_by_interrupt_id)), config=config)
+        return _to_native_snapshot(self._app.get_state(config, subgraphs=True))
+
+    def stream(
+        self,
+        values_or_command: object,
+        *,
+        thread_id: str,
+    ) -> Iterable[NativeEvent]:
+        self._ensure_open()
+        for chunk in self._app.stream(
+            values_or_command,
+            config=self._config(thread_id),
+            stream_mode="updates",
+            subgraphs=True,
+        ):
+            yield NativeEvent(mode="updates", data=_neutral(chunk))
+
+    def snapshot(self, *, thread_id: str, subgraphs: bool = False) -> NativeSnapshot:
+        self._ensure_open()
+        snapshot = self._app.get_state(self._config(thread_id), subgraphs=subgraphs)
+        return _to_native_snapshot(snapshot)
+
+    def history(self, *, thread_id: str) -> Iterable[NativeSnapshot]:
+        self._ensure_open()
+        for snapshot in self._app.get_state_history(self._config(thread_id)):
+            yield _to_native_snapshot(snapshot)
+
+    def close(self) -> None:
+        if not self._closed and self._connection is not None:
+            self._connection.close()
+        self._closed = True
+
+    def __enter__(self) -> "NativeApp":
+        self._ensure_open()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+
+def open_native_app(recipe_path: Path, db_path: Path | None = None) -> NativeApp:
+    """Compile a recipe with an owned saver and return only the neutral facade."""
+    config = load_graph_config(Path(recipe_path))
+    graph = compile_graph(config)
+    connection: sqlite3.Connection | None = None
+    if db_path is None:
+        checkpointer = MemorySaver()
+    else:
+        connection = sqlite3.connect(str(db_path), check_same_thread=False)
+        checkpointer = SqliteSaver(connection)
+        checkpointer.setup()
+    try:
+        return NativeApp(graph.compile(checkpointer=checkpointer), connection)
+    except BaseException:
+        if connection is not None:
+            connection.close()
+        raise
 
 
 def _parse_brief(raw: dict) -> StepBrief:

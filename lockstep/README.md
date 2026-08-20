@@ -47,6 +47,15 @@ thin manifests: `.claude-plugin/plugin.json` for Claude Code and
 evidence model; no PyPI package is required. The first invocation may resolve
 dependencies into `uv`'s cache.
 
+Lockstep pins the official `yamlgraph==0.5.22` release and applies one reviewed,
+four-source-file patch during dependency installation. The canonical local
+development/install command is `scripts/lockstep-install`; builds use
+`scripts/lockstep-build`. Both run a locked sync, apply and verify the patch,
+then execute with `uv run --no-sync` so an implicit sync cannot restore the
+unpatched wheel. Ordinary `lockstep` and `python -m lockstep` never modify the
+environment: they fail closed until `lockstep-dependency-install` has proved the
+exact fully patched state.
+
 Claude Code, through the existing marketplace:
 
 ```
@@ -378,8 +387,9 @@ server process cwd; Codex plugin commands run from the installed plugin root,
 so the server reads the active workspace from Codex tool-call metadata. Hooks
 match a run to the current project by resolved-equality-or-parent-prefix.
 **VERIFIED live** for Claude (2026-08-07): a
-scratch project directory with a `.mcp.json` pointing `uv run --project
-<clone>/lockstep/engine lockstep serve` at a throwaway `LOCKSTEP_STATE_DIR`, driven by
+scratch project directory with a `.mcp.json` pointing to
+`<clone>/lockstep/scripts/lockstep-plugin serve` at a throwaway
+`LOCKSTEP_STATE_DIR`, driven by
 `claude -p --mcp-config .mcp.json --strict-mcp-config --allowedTools
 "mcp__lockstep__scenario_start" --model haiku` with a prompt making exactly one
 `scenario_start(recipe="two-steps")` call. The resulting `runs.json` record's `project` field

@@ -1,0 +1,41 @@
+version: "1.0"
+name: native-parallel-interrupts
+state:
+  answer_a: str
+  answer_b: str
+  joined: bool
+  contributions:
+    type: list
+    reducer: add
+nodes:
+  ask_a:
+    type: interrupt
+    message: Branch A?
+    state_key: question_a
+    resume_key: answer_a
+    idempotent: false
+  ask_b:
+    type: interrupt
+    message: Branch B?
+    state_key: question_b
+    resume_key: answer_b
+    idempotent: false
+  branch_a:
+    type: passthrough
+    output:
+      contributions: [a]
+  branch_b:
+    type: passthrough
+    output:
+      contributions: [b]
+  join:
+    type: passthrough
+    output:
+      joined: true
+edges:
+  - {from: START, to: [ask_a, ask_b]}
+  - {from: ask_a, to: branch_a}
+  - {from: ask_b, to: branch_b}
+  - {from: branch_a, to: join}
+  - {from: branch_b, to: join}
+  - {from: join, to: END}

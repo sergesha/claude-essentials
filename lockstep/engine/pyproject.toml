@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Flow-enforcement engine for coding agents: declarative yamlgraph recipes, durable runs, deterministic evidence gates"
 requires-python = ">=3.11"
 dependencies = [
-  "yamlgraph==0.5.18",
+  "yamlgraph==0.5.22",
   "langgraph==1.2.10",
   "mcp>=2.0,<3",
   "jsonschema>=4.21",
@@ -12,7 +12,8 @@ dependencies = [
 ]
 
 [project.scripts]
-lockstep = "lockstep.cli:main"
+lockstep = "lockstep.bootstrap:main"
+lockstep-dependency-install = "lockstep.dependency_patch:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -22,4 +23,7 @@ build-backend = "hatchling.build"
 packages = ["src/lockstep"]
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = [
+  "opentelemetry-sdk==1.44.0",
+  "pytest>=8",
+]

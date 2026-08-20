@@ -1,0 +1,18 @@
+version: "1.0"
+name: native-wrapped-parent
+state:
+  seed: str
+  seen: str
+  answer: str
+  phase: str
+nodes:
+  child:
+    type: subgraph
+    graph: wrapped_child.recipe.yaml
+    mode: direct
+  done:
+    type: passthrough
+edges:
+  - {from: START, to: child}
+  - {from: child, to: done}
+  - {from: done, to: END}

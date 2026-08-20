@@ -411,10 +411,12 @@ suite must be green on both with zero platform skips in the core paths.
 
 ## Upstream (issues to file, per upstream-first)
 
-1. sheikkinen/yamlgraph: `_maybe_wrap_otel` strips node `config`
-   (subgraph children run checkpointer-less; `direct` mode TypeError) —
-   with minimal repro + the two-line fix direction; after it lands,
-   native subgraph fractal becomes an option again.
+1. sheikkinen/yamlgraph issue
+   <https://github.com/sheikkinen/yamlgraph/issues/474> records the
+   `_maybe_wrap_otel`/direct-subgraph/config defects and the exact reviewed
+   patch. Lockstep applies its four source changes during the canonical install
+   flow until an official release passes the native capability gate; no runtime
+   monkeypatch or copied yamlgraph module is used.
 2. sheikkinen/yamlgraph: configurable argv for the copilot node (runner
    generalization); our PATH-shim is marked "delete when this lands".
 
@@ -425,7 +427,9 @@ suite must be green on both with zero platform skips in the core paths.
   first).
 - A2A as invocation channel (heavier than process spawn; only if
   cross-host children become real).
-- Native subgraph composition (blocked on upstream issue 1).
+- Migrating the legacy process-subcall surface to native subgraph composition
+  is handled by the replacement native architecture; the dependency blocker is
+  now enforced by the install-time capability gate above.
 - Owner-approved resume of escalated runs (separate v2 item, design
   settled in v1 follow-ups).
 

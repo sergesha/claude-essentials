@@ -11,9 +11,8 @@ The hook/policy/doctor functions:
   are called by the CLI's thin stdin/stdout plumbing.
 - `policy require|clear` writes/removes an owner-authored `policy.d/<slug>.yaml`
   file — the PreToolUse no-run gate reads these.
-- `doctor` is a diagnostic report (dirs exist, installed version
-  self-report — distribution is the plugin's own cloned files run via
-  `uv run`, so there is no version pin to check against) plus the loud
+- `doctor` is a diagnostic report (dirs exist and Lockstep version
+  self-report; dependency patch state is enforced earlier by bootstrap) plus the loud
   detector for the silent-lockout failure: an ACTIVE run with no binding
   sidecar means the PostToolUse hook never fired — matcher/tool-name
   mismatch — and the report names the exact matcher to fix.
@@ -535,9 +534,8 @@ def policy_clear(state_dir: Path, project: str) -> None:
 # binding sidecar means the PostToolUse binding hook never fired for it
 # (the installed matcher does not match this installation's tool names),
 # and the gate will deny even the session that started the run. No
-# version-pin check: distribution is the plugin's own cloned files run via
-# `uv run --project ${CLAUDE_PLUGIN_ROOT}/engine`, so there is nothing
-# external to fall out of sync with. NOT implemented: effective-settings
+# dependency patch check here: bootstrap already performs the pure read-only
+# verification before importing this module. NOT implemented: effective-settings
 # inspection, handler self-exec — those are v2.
 # ---------------------------------------------------------------------------
 

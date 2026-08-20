@@ -1,0 +1,127 @@
+diff --git a/yamlgraph/compile/node_otel.py b/yamlgraph/compile/node_otel.py
+index 9c40d432..c117e3e0 100644
+--- a/yamlgraph/compile/node_otel.py
++++ b/yamlgraph/compile/node_otel.py
+@@ -5,13 +5,18 @@ function is wrapped unconditionally at compile time, but the wrapper
+ itself checks :func:`yamlgraph.observability.otel.is_otel_enabled` at
+ call time, so a disabled run pays only a single environment lookup —
+ no OpenTelemetry import, no span, no behavior change (AC-03).
+-"""
+ 
+-from __future__ import annotations
++Native ``CompiledStateGraph`` subgraph nodes are not functions and must
++remain registered directly with LangGraph. Their compiled child functions
++are still wrapped, but no synthetic outer subgraph-node span is emitted.
++"""
+ 
+ from collections.abc import Callable
+ from typing import Any
+ 
++from langchain_core.runnables import RunnableConfig
++from langchain_core.runnables.config import call_func_with_variable_args
++
+ 
+ def _maybe_wrap_otel(
+     node_fn: Callable,
+@@ -29,14 +34,16 @@ def _maybe_wrap_otel(
+         A wrapped callable with identical behavior when OTEL is disabled.
+     """
+ 
+-    def otel_wrapped(state: dict) -> Any:
++    def otel_wrapped(
++        state: dict, config: RunnableConfig | None = None
++    ) -> Any:
+         from yamlgraph.observability import otel
+ 
+         if not otel.is_otel_enabled():
+-            return node_fn(state)
++            return call_func_with_variable_args(node_fn, state, config or {})
+ 
+         with otel.node_execution_span(node_name, node_type) as node_ctx:
+-            result = node_fn(state)
++            result = call_func_with_variable_args(node_fn, state, config or {})
+             if isinstance(result, dict):
+                 node_ctx.keys_written = list(result.keys())
+             return result
+diff --git a/yamlgraph/compile/subgraph_relay.py b/yamlgraph/compile/subgraph_relay.py
+index 555ffa5c..fb933e16 100644
+--- a/yamlgraph/compile/subgraph_relay.py
++++ b/yamlgraph/compile/subgraph_relay.py
+@@ -35,6 +35,12 @@ def compile_subgraph_node(ctx: "NodeCompileContext") -> tuple[str, Any] | None:
+     )
+     if isinstance(node_fn, tuple):
+         return _register_relay_pair(ctx, *node_fn)
++    if ctx.node_config.get("mode", "invoke") == "direct":
++        # A CompiledStateGraph must remain a native LangGraph subgraph node.
++        # Wrapping it as a callable both raises TypeError and prevents parent
++        # checkpointer/checkpoint-namespace inheritance.
++        ctx.graph.add_node(ctx.node_name, node_fn, cache_policy=ctx.cache_policy)
++        return None
+     node_fn = _maybe_wrap_otel(node_fn, ctx.node_name, NodeType.SUBGRAPH)
+     ctx.graph.add_node(ctx.node_name, node_fn, cache_policy=ctx.cache_policy)
+     return None
+diff --git a/yamlgraph/node_factory/subgraph_nodes.py b/yamlgraph/node_factory/subgraph_nodes.py
+index b9eb354e..c3fe5c68 100644
+--- a/yamlgraph/node_factory/subgraph_nodes.py
++++ b/yamlgraph/node_factory/subgraph_nodes.py
+@@ -84,6 +84,13 @@ def _build_child_config(
+     configurable = parent_config.get("configurable", {})
+     parent_thread_id = configurable.get("thread_id")
+ 
++    child_configurable = {
++        key: value
++        for key, value in configurable.items()
++        if not key.startswith("__pregel_")
++        and key not in {"checkpoint_id", "checkpoint_ns", "checkpoint_map"}
++    }
++
+     child_thread_id = (
+         f"{parent_thread_id}:{node_name}" if parent_thread_id else node_name
+     )
+@@ -91,7 +98,7 @@ def _build_child_config(
+     return {
+         **parent_config,
+         "configurable": {
+-            **configurable,
++            **child_configurable,
+             "thread_id": child_thread_id,
+         },
+     }
+diff --git a/yamlgraph/node_timeout.py b/yamlgraph/node_timeout.py
+index dcc7cbae..543f0fe9 100644
+--- a/yamlgraph/node_timeout.py
++++ b/yamlgraph/node_timeout.py
+@@ -4,13 +4,14 @@ Extracted from node_compiler.py (FR-677) to keep that module under the
+ 450-line ceiling. Behavior-preserving.
+ """
+ 
+-from __future__ import annotations
+-
+ import concurrent.futures
+ from collections.abc import Callable
+ from concurrent.futures import ThreadPoolExecutor
+ from typing import Any
+ 
++from langchain_core.runnables import RunnableConfig
++from langchain_core.runnables.config import call_func_with_variable_args
++
+ 
+ def _maybe_wrap_timeout(
+     node_fn: Callable,
+@@ -38,10 +39,14 @@ def _maybe_wrap_timeout(
+ 
+     state_key = node_config.get("state_key", node_name)
+ 
+-    def timed_fn(state: dict) -> dict:
++    def timed_fn(
++        state: dict, config: RunnableConfig | None = None
++    ) -> dict:
+         pool = ThreadPoolExecutor(max_workers=1)
+         try:
+-            return pool.submit(node_fn, state).result(timeout=timeout)
++            return pool.submit(
++                call_func_with_variable_args, node_fn, state, config or {}
++            ).result(timeout=timeout)
+         except concurrent.futures.TimeoutError as e:
+             from yamlgraph.models import PipelineError
+             from yamlgraph.models.schemas import ErrorType
