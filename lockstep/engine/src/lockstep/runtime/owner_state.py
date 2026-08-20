@@ -9,7 +9,12 @@ from __future__ import annotations
 
 import os
 import stat
+from collections.abc import Iterable
+from itertools import islice
 from pathlib import Path, PurePath
+from typing import TypeVar
+
+_T = TypeVar("_T")
 
 
 class InsecureStatePath(RuntimeError):
@@ -18,6 +23,17 @@ class InsecureStatePath(RuntimeError):
 
 class StorageLimitExceeded(ValueError):
     """Input exceeds a configured trusted-store admission ceiling."""
+
+
+def take_bounded(values: Iterable[_T], max_items: int, label: str) -> tuple[_T, ...]:
+    """Consume at most one item beyond a configured cardinality ceiling."""
+
+    if max_items < 0:
+        raise ValueError("item limit cannot be negative")
+    items = tuple(islice(iter(values), max_items + 1))
+    if len(items) > max_items:
+        raise StorageLimitExceeded(f"{label} exceed {max_items} admission limit")
+    return items
 
 
 def _verify_owner(stat_result: os.stat_result, path: Path) -> None:

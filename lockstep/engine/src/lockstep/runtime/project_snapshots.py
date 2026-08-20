@@ -20,6 +20,7 @@ from lockstep.runtime.owner_state import (
     ensure_owner_directory,
     initialize_owner_state,
     seal_owner_file,
+    take_bounded,
     verify_owner_file,
 )
 
@@ -105,18 +106,26 @@ class ProjectSnapshot:
 @dataclass(frozen=True)
 class SnapshotLimits:
     max_files: int = 10_000
+    max_declared_paths: int = 10_000
     max_total_bytes: int = 256 * 1024 * 1024
     max_manifest_bytes: int = 4 * 1024 * 1024
     max_provenance_bytes: int = 256 * 1024
     max_provenance_depth: int = 32
+    max_provenance_nodes: int = 10_000
+    max_provenance_items: int = 10_000
+    max_provenance_scalar_bytes: int = 256 * 1024
 
     def __post_init__(self) -> None:
         if min(
             self.max_files,
+            self.max_declared_paths,
             self.max_total_bytes,
             self.max_manifest_bytes,
             self.max_provenance_bytes,
             self.max_provenance_depth,
+            self.max_provenance_nodes,
+            self.max_provenance_items,
+            self.max_provenance_scalar_bytes,
         ) <= 0:
             raise ValueError("snapshot limits must be positive")
 
@@ -146,18 +155,59 @@ def _freeze_json(value: object) -> object:
     return value
 
 
-def _enforce_json_depth(value: object, max_depth: int) -> None:
+def _validate_provenance(value: object, limits: SnapshotLimits) -> None:
     pending = [(value, 1)]
+    nodes = 0
+    items = 0
+    scalar_bytes = 0
     while pending:
         current, depth = pending.pop()
-        if depth > max_depth:
+        nodes += 1
+        if nodes > limits.max_provenance_nodes:
             raise StorageLimitExceeded(
-                f"snapshot provenance depth exceeds {max_depth} admission limit"
+                "snapshot provenance nodes exceed "
+                f"{limits.max_provenance_nodes} admission limit"
+            )
+        if depth > limits.max_provenance_depth:
+            raise StorageLimitExceeded(
+                "snapshot provenance depth exceeds "
+                f"{limits.max_provenance_depth} admission limit"
             )
         if isinstance(current, Mapping):
-            pending.extend((item, depth + 1) for item in current.values())
+            remaining = limits.max_provenance_items - items
+            children = take_bounded(
+                current.items(), remaining, "snapshot provenance items"
+            )
+            items += len(children)
+            for key, child in children:
+                if not isinstance(key, str):
+                    raise TypeError("snapshot provenance must be a string-keyed mapping")
+                scalar_bytes += len(key.encode())
+                pending.append((child, depth + 1))
         elif isinstance(current, (list, tuple)):
-            pending.extend((item, depth + 1) for item in current)
+            remaining = limits.max_provenance_items - items
+            children = take_bounded(current, remaining, "snapshot provenance items")
+            items += len(children)
+            pending.extend((child, depth + 1) for child in children)
+        elif current is None or isinstance(current, (bool, int, float, str)):
+            try:
+                scalar_bytes += len(
+                    json.dumps(
+                        current,
+                        ensure_ascii=False,
+                        allow_nan=False,
+                        separators=(",", ":"),
+                    ).encode()
+                )
+            except (TypeError, ValueError) as exc:
+                raise TypeError("snapshot provenance must be JSON serializable") from exc
+        else:
+            raise TypeError("snapshot provenance must be JSON serializable")
+        if scalar_bytes > limits.max_provenance_scalar_bytes:
+            raise StorageLimitExceeded(
+                "snapshot provenance scalar bytes exceed "
+                f"{limits.max_provenance_scalar_bytes} admission limit"
+            )
 
 
 def _safe_path(raw: str, *, allow_prefix: bool = False) -> str:
@@ -236,11 +286,10 @@ class ProjectSnapshotStore:
         provenance: Mapping[str, object],
         previous: ProjectSnapshotRef | None = None,
     ) -> ProjectSnapshotRef:
-        raw_files = list(files.items()) if isinstance(files, Mapping) else list(files)
-        if len(raw_files) > self._limits.max_files:
-            raise StorageLimitExceeded(
-                f"snapshot files exceed {self._limits.max_files} admission limit"
-            )
+        file_values = files.items() if isinstance(files, Mapping) else files
+        raw_files = take_bounded(
+            file_values, self._limits.max_files, "snapshot files"
+        )
         entries: list[SnapshotFile] = []
         seen: set[str] = set()
         total_bytes = 0
@@ -259,8 +308,13 @@ class ProjectSnapshotStore:
             seen.add(path)
             entries.append(SnapshotFile(path=path, blob=blob))
         entries.sort(key=lambda entry: entry.path)
+        raw_declarations = take_bounded(
+            declared_paths,
+            self._limits.max_declared_paths,
+            "snapshot declared paths",
+        )
         normalized_declarations = [
-            _safe_path(path, allow_prefix=True) for path in declared_paths
+            _safe_path(path, allow_prefix=True) for path in raw_declarations
         ]
         if len(set(normalized_declarations)) != len(normalized_declarations):
             raise DuplicateSnapshotPath("duplicate declared snapshot path")
@@ -272,11 +326,9 @@ class ProjectSnapshotStore:
                 for declaration in declarations
             ):
                 raise UndeclaredSnapshotPath(f"snapshot path {entry.path!r} is not declared")
-        if not isinstance(provenance, Mapping) or any(
-            not isinstance(key, str) for key in provenance
-        ):
+        if not isinstance(provenance, Mapping):
             raise TypeError("snapshot provenance must be a string-keyed mapping")
-        _enforce_json_depth(provenance, self._limits.max_provenance_depth)
+        _validate_provenance(provenance, self._limits)
         provenance_data = _freeze_json(provenance)
         try:
             provenance_encoded = _canonical(provenance_data)
@@ -348,19 +400,32 @@ class ProjectSnapshotStore:
             data = json.loads(encoded)
             if data["schema"] != "lockstep.project-snapshot/v1":
                 raise ValueError("unknown project snapshot schema")
+            raw_entries = data["files"]
+            raw_declarations = data["declared_paths"]
+            if not isinstance(raw_entries, list) or not isinstance(
+                raw_declarations, list
+            ):
+                raise TypeError("snapshot paths must be arrays")
+            if len(raw_entries) > self._limits.max_files:
+                raise StorageLimitExceeded("snapshot file count exceeds admission limit")
+            if len(raw_declarations) > self._limits.max_declared_paths:
+                raise StorageLimitExceeded(
+                    "snapshot declared path count exceeds admission limit"
+                )
             entries = tuple(
                 SnapshotFile(
                     path=_safe_path(item["path"]),
                     blob=BlobRef(item["blob"]["sha256"], int(item["blob"]["size"])),
                 )
-                for item in data["files"]
+                for item in raw_entries
             )
             declarations = tuple(
-                _safe_path(item, allow_prefix=True) for item in data["declared_paths"]
+                _safe_path(item, allow_prefix=True) for item in raw_declarations
             )
             provenance = data["provenance"]
             if not isinstance(provenance, dict):
                 raise TypeError("provenance is not an object")
+            _validate_provenance(provenance, self._limits)
             previous = (
                 ProjectSnapshotRef(data["previous"]) if data["previous"] is not None else None
             )
@@ -370,11 +435,8 @@ class ProjectSnapshotStore:
             raise ValueError("project snapshot entries are not ordered")
         if len({entry.path for entry in entries}) != len(entries):
             raise DuplicateSnapshotPath("duplicate path in project snapshot manifest")
-        if len(entries) > self._limits.max_files:
-            raise StorageLimitExceeded("snapshot file count exceeds admission limit")
         if sum(entry.blob.size for entry in entries) > self._limits.max_total_bytes:
             raise StorageLimitExceeded("snapshot byte size exceeds admission limit")
-        _enforce_json_depth(provenance, self._limits.max_provenance_depth)
         provenance_encoded = _canonical(provenance)
         if len(provenance_encoded) > self._limits.max_provenance_bytes:
             raise StorageLimitExceeded("snapshot provenance exceeds admission limit")
