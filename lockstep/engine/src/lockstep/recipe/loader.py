@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-import yaml
-
+from lockstep.recipe.authority import (
+    RecipeAuthorityError,
+    RecipeCandidate,
+    StrictRecipeIngress,
+)
 
 _SUFFIX = ".recipe.yaml"
 
@@ -21,38 +25,56 @@ class RecipeRef:
     name: str
     path: Path
     kind: Literal["manual", "generated"]
+    definition_sha256: str
 
 
 class RecipeLoader:
     def __init__(self, recipes_dir: Path) -> None:
         self._root = Path(recipes_dir).resolve()
 
-    def _inside_root(self, path: Path) -> bool:
-        return path == self._root or self._root in path.parents
-
-    def _ref_for_path(self, path: Path) -> RecipeRef:
+    def _inspect_path(self, path: Path) -> tuple[RecipeCandidate, str, Path]:
         if path.name.endswith(_SUFFIX) is False:
             raise RecipeError(f"recipe path must end in {_SUFFIX}: {path}")
-        resolved = path.resolve()
-        if not self._inside_root(resolved):
-            raise RecipeError(f"recipe path escapes recipe directory: {path}")
-        if not resolved.is_file():
-            raise RecipeError(f"recipe not found: {path}")
+        absolute = path if path.is_absolute() else path.absolute()
         try:
-            doc = yaml.safe_load(resolved.read_text())
-        except yaml.YAMLError as exc:
-            raise RecipeError(f"recipe YAML is invalid: {resolved}") from exc
-        if not isinstance(doc, dict):
-            raise RecipeError(f"recipe document must be a mapping: {resolved}")
-        name = resolved.name.removesuffix(_SUFFIX)
+            logical = absolute.relative_to(self._root).as_posix()
+        except ValueError:
+            raise RecipeError(f"recipe path escapes recipe directory: {path}")
+        try:
+            candidate = StrictRecipeIngress(self._root).inspect(logical)
+        except (OSError, RecipeAuthorityError, ValueError) as exc:
+            raise RecipeError(str(exc)) from exc
+        return candidate, logical, self._root / logical
+
+    def _ref_for_inspection(
+        self,
+        candidate: RecipeCandidate,
+        logical: str,
+        canonical_path: Path,
+    ) -> RecipeRef:
+        doc = json.loads(
+            next(item.bytes for item in candidate.files if item.path == logical)
+        )
+        name = canonical_path.name.removesuffix(_SUFFIX)
         if doc.get("name") != name:
             raise RecipeError(
-                f"recipe document name must equal filename {name!r}: {resolved}"
+                f"recipe document name must equal filename {name!r}: {canonical_path}"
             )
         kind: Literal["manual", "generated"] = (
-            "generated" if isinstance(doc.get("x-lockstep-generated"), dict) else "manual"
+            "generated"
+            if isinstance(doc.get("x-lockstep-generated"), dict)
+            else "manual"
         )
-        return RecipeRef(name=name, path=resolved, kind=kind)
+        return RecipeRef(
+            name=name,
+            path=canonical_path,
+            kind=kind,
+            definition_sha256=candidate.definition_sha256,
+        )
+
+    def _ref_for_path(self, path: Path) -> RecipeRef:
+        candidate, logical, canonical_path = self._inspect_path(path)
+        return self._ref_for_inspection(candidate, logical, canonical_path)
 
     def discover(self) -> dict[str, RecipeRef]:
         if not self._root.exists():
@@ -74,12 +96,15 @@ class RecipeLoader:
         try:
             return self.discover()[str(name_or_path)]
         except KeyError as exc:
-            raise RecipeError(f"recipe not found: {name_or_path!r}; runnable recipes end in {_SUFFIX}") from exc
+            raise RecipeError(
+                f"recipe not found: {name_or_path!r}; runnable recipes end in {_SUFFIX}"
+            ) from exc
 
     def load(self, ref: RecipeRef) -> dict[str, Any]:
-        verified = self._ref_for_path(ref.path)
+        candidate, logical, canonical_path = self._inspect_path(ref.path)
+        verified = self._ref_for_inspection(candidate, logical, canonical_path)
         if verified != ref:
             raise RecipeError(f"recipe reference changed while loading: {ref.path}")
-        doc = yaml.safe_load(ref.path.read_text())
-        assert isinstance(doc, dict)  # _ref_for_path verified this shape
-        return doc
+        return json.loads(
+            next(item.bytes for item in candidate.files if item.path == logical)
+        )

@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import hmac
 import os
+import tempfile
 from dataclasses import asdict
 from pathlib import Path
 
@@ -52,11 +53,17 @@ from mcp.server.mcpserver import Context
 from mcp.server.mcpserver import MCPServer as FastMCP
 
 from lockstep.recipe import profile
-from lockstep.recipe.loader import RecipeLoader
 from lockstep.recipe import yamlgraph_adapter as yg
+from lockstep.recipe.authority import (
+    RecipeAuthorityError,
+    RecipeAuthorityPolicy,
+    StrictRecipeIngress,
+)
+from lockstep.recipe.loader import RecipeLoader
 from lockstep.runtime import evidence as evidence_mod
 from lockstep.runtime import sessions, validators
 from lockstep.runtime.engine import Engine, LockstepError
+from lockstep.runtime.recipe_bundles import RecipeBundleStore
 
 app = FastMCP("lockstep")
 
@@ -169,7 +176,7 @@ def _assert_origin(run_id: str, project: Path | None = None) -> None:
     and a worker with shell can Bash-launch its own credentialed engine.
     That is the SAME same-user residual class v1 already carries."
     """
-    record = _eng(project)._runs.get(run_id)  # noqa: SLF001
+    record = _eng(project)._runs.get(run_id)
     if record.parent_run is None:
         return
     env_run = os.environ.get("LOCKSTEP_CHILD_RUN")
@@ -303,7 +310,7 @@ def scenario_dryrun(
 @app.tool()
 def list_recipes(ctx: Context | None = None) -> list[str]:
     d = Path(
-        _eng(_project_for_context(ctx))._recipes_dir  # noqa: SLF001
+        _eng(_project_for_context(ctx))._recipes_dir
     )
     return sorted(RecipeLoader(d).discover())
 
@@ -314,8 +321,38 @@ def validate_recipe(path: str, ctx: Context | None = None) -> dict:
     p = Path(path)
     if not p.is_absolute():
         p = project / p
-    yg_ok, yg_msg = yg.validate(p)
-    errors, warnings = profile.check_recipe_full(p)
+    p = p.absolute()
+    try:
+        candidate = StrictRecipeIngress(p.parent).inspect(p.name)
+        # Until native typed effects can carry a coordinate-bound executable
+        # grant, validation is intentionally declarative-only.  In particular,
+        # it must not import a recipe-selected Python module merely to report
+        # diagnostics.
+        authorized = candidate.authorize(RecipeAuthorityPolicy())
+    except (OSError, RecipeAuthorityError, ValueError) as exc:
+        message = str(exc)
+        return {
+            "ok": False,
+            "yamlgraph": {"ok": False, "message": f"not compiled: {message}"},
+            "errors": [message],
+            "warnings": [],
+        }
+
+    with tempfile.TemporaryDirectory(prefix="lockstep-recipe-validation-") as raw:
+        store = RecipeBundleStore(Path(raw) / "owner-state")
+        materialized = authorized.capture(store).materialize(store)
+        errors, warnings = profile.check_recipe_full(materialized.source_path)
+        if errors:
+            return {
+                "ok": False,
+                "yamlgraph": {
+                    "ok": False,
+                    "message": "not compiled: Lockstep profile rejected recipe",
+                },
+                "errors": errors,
+                "warnings": warnings,
+            }
+        yg_ok, yg_msg = yg.validate_native(materialized)
     return {
         "ok": yg_ok and not errors,
         "yamlgraph": {"ok": yg_ok, "message": yg_msg},
@@ -344,7 +381,7 @@ def list_runs(
     active_only: bool = False,
     ctx: Context | None = None,
 ) -> list[dict]:
-    records = _eng(_project_for_context(ctx))._runs.list(  # noqa: SLF001
+    records = _eng(_project_for_context(ctx))._runs.list(
         project=project, active_only=active_only
     )
     out = []

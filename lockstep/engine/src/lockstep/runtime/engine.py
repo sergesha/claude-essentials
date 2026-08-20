@@ -49,8 +49,8 @@ Mechanics implemented here:
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import os
 import re
 import secrets
@@ -495,10 +495,12 @@ class Engine:
         if self._memory_only:
             app = self._apps.get(run_id)
             if app is None:
-                app = yg.compile_recipe(self._snapshot_path(run_id), db_path=None)
+                app = yg.legacy_compile_recipe(self._snapshot_path(run_id), db_path=None)
                 self._apps[run_id] = app
             return app
-        return yg.compile_recipe(self._snapshot_path(run_id), db_path=self._runs.db_path(run_id))
+        return yg.legacy_compile_recipe(
+            self._snapshot_path(run_id), db_path=self._runs.db_path(run_id)
+        )
 
     # ------------------------------------------------------------------
     # checkpoint-first write order + repair
@@ -700,7 +702,7 @@ class Engine:
                         f"child recipe {scenario!r} failed profile check: "
                         + "; ".join(child_errors)
                     )
-                ok, msg = yg.validate(staged)
+                ok, msg = yg.legacy_validate_recipe(staged)
                 if not ok:
                     raise LockstepError(f"child recipe {scenario!r} failed to compile: {msg}")
             # child_recipes_dir: the staging copy lives in state_dir/runs/,
@@ -712,7 +714,7 @@ class Engine:
                 raise LockstepError(
                     f"recipe {recipe!r} failed profile check: " + "; ".join(profile_errors)
                 )
-            ok, msg = yg.validate(staging)
+            ok, msg = yg.legacy_validate_recipe(staging)
             if not ok:
                 raise LockstepError(f"recipe {recipe!r} failed to compile: {msg}")
 

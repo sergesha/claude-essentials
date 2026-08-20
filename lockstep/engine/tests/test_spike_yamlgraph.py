@@ -12,7 +12,7 @@ FIX = Path(__file__).parent / "fixtures" / "recipes" / "good" / "minimal.recipe.
 
 
 def test_start_parks_on_interrupt():
-    app = yg.compile_recipe(FIX, db_path=None)
+    app = yg.legacy_compile_recipe(FIX, db_path=None)
     adv = yg.start(app, {}, "t1")
     assert adv.done is False
     assert adv.brief is not None
@@ -22,7 +22,7 @@ def test_start_parks_on_interrupt():
 
 
 def test_resume_reaches_end_on_pass():
-    app = yg.compile_recipe(FIX, db_path=None)
+    app = yg.legacy_compile_recipe(FIX, db_path=None)
     yg.start(app, {}, "t2")
     adv = yg.resume(app, {"_verdict_status": "pass"}, "t2")
     assert adv.done is True
@@ -30,15 +30,15 @@ def test_resume_reaches_end_on_pass():
 
 def test_sqlite_survives_new_app(tmp_path):
     db = tmp_path / "spike.db"
-    app = yg.compile_recipe(FIX, db_path=db)
+    app = yg.legacy_compile_recipe(FIX, db_path=db)
     yg.start(app, {}, "t3")
-    app2 = yg.compile_recipe(FIX, db_path=db)
+    app2 = yg.legacy_compile_recipe(FIX, db_path=db)
     adv = yg.resume(app2, {"_verdict_status": "pass"}, "t3")
     assert adv.done is True
 
 
 def test_validate_ok():
-    ok, _msg = yg.validate(FIX)
+    ok, _msg = yg.legacy_validate_recipe(FIX)
     assert ok is True
 
 
@@ -48,7 +48,7 @@ def test_render():
 
 
 def test_fail_retry_then_pass():
-    app = yg.compile_recipe(FIX, db_path=None)
+    app = yg.legacy_compile_recipe(FIX, db_path=None)
     yg.start(app, {}, "t10")
     adv = yg.resume(app, {"_verdict_status": "fail"}, "t10")  # fail verdict -> loops back
     assert adv.done is False and adv.brief.step == "one"  # parked on SAME step again
@@ -57,7 +57,7 @@ def test_fail_retry_then_pass():
 
 
 def test_loop_limit_fires_loop_exit_to_escalate():
-    app = yg.compile_recipe(FIX, db_path=None)
+    app = yg.legacy_compile_recipe(FIX, db_path=None)
     yg.start(app, {}, "t11")
     for _ in range(3):
         adv = yg.resume(app, {"_verdict_status": "fail"}, "t11")
@@ -66,16 +66,16 @@ def test_loop_limit_fires_loop_exit_to_escalate():
 
 def test_loop_counter_survives_restart(tmp_path):
     db = tmp_path / "r.db"
-    app = yg.compile_recipe(FIX, db_path=db)
+    app = yg.legacy_compile_recipe(FIX, db_path=db)
     yg.start(app, {}, "t12")
     yg.resume(app, {"_verdict_status": "fail"}, "t12")
     yg.resume(app, {"_verdict_status": "fail"}, "t12")
-    app2 = yg.compile_recipe(FIX, db_path=db)  # fresh process simulation
+    app2 = yg.legacy_compile_recipe(FIX, db_path=db)  # fresh process simulation
     adv = yg.resume(app2, {"_verdict_status": "fail"}, "t12")  # 3rd failure
     assert adv.brief.step == "escalate"  # counter lived in the CHECKPOINT
 
 
 def test_vars_reach_state():
-    app = yg.compile_recipe(FIX, db_path=None)
+    app = yg.legacy_compile_recipe(FIX, db_path=None)
     adv = yg.start(app, {"task_name": "X"}, "t13")
     assert adv.state.get("task_name") == "X"  # vars land in state (brief substitution is engine-side)

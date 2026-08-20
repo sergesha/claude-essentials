@@ -6,10 +6,10 @@ import time
 from pathlib import Path
 
 import pytest
+from _subcall_helpers import FAKE, FIX, make_engine, pass_plan, write_runners_yaml
 
 from lockstep.runtime import subcalls
 from lockstep.runtime.engine import Engine, LockstepError
-from _subcall_helpers import FAKE, FIX, make_engine, pass_plan, write_runners_yaml
 
 EXAMPLES = Path(__file__).resolve().parents[2] / "recipes" / "examples"
 
@@ -48,8 +48,8 @@ def test_fractal_child_symlink_escape_is_refused_at_start(tmp_path, monkeypatch)
     (recipes / "child-review.recipe.yaml").symlink_to(outside)
     engine = Engine(state, recipes)
 
-    with pytest.raises(LockstepError, match="escapes recipe directory"):
-        engine._launch(  # noqa: SLF001 - probes recursive child recipe resolution
+    with pytest.raises(LockstepError, match="linked recipe input rejected"):
+        engine._launch(
             "subcall-fractal", {}, str(project), src=recipes / "subcall-fractal.recipe.yaml"
         )
     assert engine._runs.list() == []

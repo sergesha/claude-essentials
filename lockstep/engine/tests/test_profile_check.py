@@ -118,7 +118,7 @@ def test_example_recipes_pass_profile_and_validate():
     assert recipes, f"no example recipes found under {EXAMPLES}"
     for recipe in recipes:
         assert check_recipe(recipe) == [], f"{recipe.name}: profile errors: {check_recipe(recipe)}"
-        ok, msg = yg.validate(recipe)
+        ok, msg = yg.legacy_validate_recipe(recipe)
         assert ok, f"{recipe.name}: validate failed: {msg}"
 
 

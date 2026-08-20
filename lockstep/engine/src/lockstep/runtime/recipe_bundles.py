@@ -101,7 +101,7 @@ def _canonical(data: object) -> bytes:
     return json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
 
 
-def _safe_relative(raw: str | os.PathLike[str]) -> str:
+def safe_recipe_relative_path(raw: str | os.PathLike[str]) -> str:
     text = os.fspath(raw)
     if not text or "\\" in text or "\x00" in text:
         raise UnsafeBundlePath(f"unsafe bundle path {text!r}")
@@ -119,7 +119,7 @@ def _validate_digest(digest: str) -> None:
         raise ValueError("recipe bundle reference must be a lowercase SHA-256 digest")
 
 
-def _open_project_root(base: Path) -> int:
+def open_recipe_source_root(base: Path) -> int:
     if os.name != "posix" or not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
         raise MaterializationError("descriptor-relative recipe capture is supported only on POSIX")
     if base.is_symlink():
@@ -134,7 +134,9 @@ def _open_project_root(base: Path) -> int:
     return descriptor
 
 
-def _read_regular_at(root_fd: int, relative: PurePosixPath, *, max_bytes: int) -> bytes:
+def read_recipe_source_file(
+    root_fd: int, relative: PurePosixPath, *, max_bytes: int
+) -> bytes:
     parent_fd = os.dup(root_fd)
     try:
         for part in relative.parts[:-1]:
@@ -221,8 +223,8 @@ class ValidatedDependencyDAG:
     def __post_init__(self) -> None:
         if not isinstance(self.root, str) or not isinstance(self.files, tuple):
             raise TypeError("validated dependency DAG requires a string root and tuple files")
-        root = _safe_relative(self.root)
-        normalized = tuple(_safe_relative(path) for path in self.files)
+        root = safe_recipe_relative_path(self.root)
+        normalized = tuple(safe_recipe_relative_path(path) for path in self.files)
         if root != self.root or normalized != self.files:
             raise UnsafeBundlePath("validated dependency DAG paths must be canonical")
         if len(set(normalized)) != len(normalized):
@@ -250,8 +252,8 @@ class ValidatedDependencyDAG:
             else "recipe files"
         )
         raw_files = take_bounded(files, max_admitted, label)
-        normalized_root = _safe_relative(root)
-        normalized_files = tuple(_safe_relative(path) for path in raw_files)
+        normalized_root = safe_recipe_relative_path(root)
+        normalized_files = tuple(safe_recipe_relative_path(path) for path in raw_files)
         return cls(normalized_root, normalized_files)
 
 
@@ -290,12 +292,12 @@ class RecipeBundleStore:
             )
 
         captured: dict[str, bytes] = {}
-        root_fd = _open_project_root(Path(source_root))
+        root_fd = open_recipe_source_root(Path(source_root))
         try:
             total = 0
             for logical in dependency_dag.files:
                 relative = PurePosixPath(logical)
-                data = _read_regular_at(
+                data = read_recipe_source_file(
                     root_fd,
                     relative,
                     max_bytes=self._limits.max_total_bytes - total,
@@ -376,10 +378,10 @@ class RecipeBundleStore:
             data = json.loads(encoded)
             if data["schema"] != "lockstep.recipe-bundle/v1":
                 raise ValueError("unknown recipe bundle schema")
-            root = _safe_relative(data["root"])
+            root = safe_recipe_relative_path(data["root"])
             entries = tuple(
                 RecipeBundleEntry(
-                    path=_safe_relative(item["path"]),
+                    path=safe_recipe_relative_path(item["path"]),
                     sha256=item["sha256"],
                     size=int(item["size"]),
                 )

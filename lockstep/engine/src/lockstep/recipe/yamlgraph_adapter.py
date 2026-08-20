@@ -113,7 +113,7 @@ Checkpointer
 `langgraph.checkpoint.sqlite.SqliteSaver(conn)` does NOT create its tables
 on construction (`sqlite_master` is empty until `.setup()`), and
 yamlgraph's `storage/checkpointer_factory.get_checkpointer()` never calls
-`.setup()` for the `sqlite` type. `compile_recipe()` below calls it
+`.setup()` for the `sqlite` type. `legacy_compile_recipe()` below calls it
 explicitly so a fresh db file works on the first `start()`.
 
 Route log
@@ -145,10 +145,10 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
-from dataclasses import fields as dataclass_fields, is_dataclass
+from dataclasses import dataclass, field, is_dataclass
+from dataclasses import fields as dataclass_fields
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, Self, TypedDict
 
 import yaml
 from langgraph.checkpoint.memory import MemorySaver
@@ -161,6 +161,7 @@ from yamlgraph.mermaid_export import parse_route_lines, render_mermaid, render_o
 from yamlgraph.node_factory.subgraph_nodes import _build_child_config
 from yamlgraph.node_timeout import _maybe_wrap_timeout
 
+from lockstep.recipe.authority import AuthorizedMaterialization
 from lockstep.runtime.native_models import (
     NativeCoordinate,
     NativeEvent,
@@ -339,7 +340,7 @@ class NativeApp:
             self._connection.close()
         self._closed = True
 
-    def __enter__(self) -> "NativeApp":
+    def __enter__(self) -> Self:
         self._ensure_open()
         return self
 
@@ -347,9 +348,9 @@ class NativeApp:
         self.close()
 
 
-def open_native_app(recipe_path: Path, db_path: Path | None = None) -> NativeApp:
-    """Compile a recipe with an owned saver and return only the neutral facade."""
-    config = load_graph_config(Path(recipe_path))
+def _open_native_path(recipe_path: Path, db_path: Path | None = None) -> NativeApp:
+    """Compile one path already proven to be an immutable authority artifact."""
+    config = load_graph_config(recipe_path)
     graph = compile_graph(config)
     connection: sqlite3.Connection | None = None
     if db_path is None:
@@ -364,6 +365,16 @@ def open_native_app(recipe_path: Path, db_path: Path | None = None) -> NativeApp
         if connection is not None:
             connection.close()
         raise
+
+
+def open_native_app(
+    recipe: AuthorizedMaterialization,
+    db_path: Path | None = None,
+) -> NativeApp:
+    """Compile only an authorized immutable canonical materialization."""
+    if not isinstance(recipe, AuthorizedMaterialization):
+        raise TypeError("open_native_app requires an AuthorizedMaterialization")
+    return _open_native_path(recipe.source_path, db_path)
 
 
 class _InjectedConfigProbeState(TypedDict, total=False):
@@ -412,7 +423,7 @@ def _run_wrapped_injected_config_probe(sentinel: str) -> dict[str, Any]:
         )
     )
     if not isinstance(result, dict):
-        raise RuntimeError("native injected-config probe did not return a mapping")
+        raise TypeError("native injected-config probe did not return a mapping")
     return result
 
 
@@ -499,10 +510,10 @@ def probe_native_capabilities() -> None:
         direct.write_text(_PROBE_DIRECT)
         invoke.write_text(_PROBE_INVOKE)
 
-        first = open_native_app(direct, database)
+        first = _open_native_path(direct, database)
         parked = first.invoke({}, thread_id="probe-direct")
         first.close()
-        restarted = open_native_app(direct, database)
+        restarted = _open_native_path(direct, database)
         completed = restarted.resume(
             thread_id="probe-direct",
             results_by_interrupt_id={
@@ -513,7 +524,7 @@ def probe_native_capabilities() -> None:
         assert completed.values["answer"] == "yes"
         assert completed.pending == ()
 
-        invoke_app = open_native_app(invoke)
+        invoke_app = _open_native_path(invoke)
         parked_a = invoke_app.invoke({}, thread_id="probe-a")
         parked_b = invoke_app.invoke({}, thread_id="probe-b")
         completed_a = invoke_app.resume(
@@ -551,10 +562,12 @@ def _advance_from_result(result: dict) -> Advance:
     return Advance(done=done, brief=brief, state=dict(result))
 
 
-def compile_recipe(recipe_path: Path, db_path: Path | None) -> object:
-    """Load + compile a recipe YAML, injecting the checkpointer ourselves
+def legacy_compile_recipe(recipe_path: Path, db_path: Path | None) -> object:
+    """Legacy Engine-only raw-path compiler; removed by Task 3's cutover.
+
+    Load + compile a recipe YAML, injecting the checkpointer ourselves
     (the engine, never a recipe `checkpointer:` block, owns persistence). `db_path is None` -> in-memory (MemorySaver); otherwise a
-    sqlite file survivable across fresh `compile_recipe()` calls (fresh
+    sqlite file survivable across fresh `legacy_compile_recipe()` calls (fresh
     process simulation)."""
     config = load_graph_config(Path(recipe_path))
     graph = compile_graph(config)
@@ -602,7 +615,7 @@ def peek(app, thread_id: str) -> Advance:
     return Advance(done=done, brief=brief, state=values)
 
 
-def cli_validate(recipe_path: Path) -> tuple[bool, str]:
+def _validate_path(recipe_path: Path) -> tuple[bool, str]:
     """Fallback engaged (see module docstring): compile-under-try/except
     IS the validation — the CLI's own `graph validate`/`lint` commands are
     print+sys.exit, not usable as a library call."""
@@ -614,9 +627,16 @@ def cli_validate(recipe_path: Path) -> tuple[bool, str]:
     return True, "ok"
 
 
-def validate(recipe_path: Path) -> tuple[bool, str]:
-    """Validate through the adapter without exposing yamlgraph to callers."""
-    return cli_validate(recipe_path)
+def validate_native(recipe: AuthorizedMaterialization) -> tuple[bool, str]:
+    """Check the same immutable authority artifact accepted by native start."""
+    if not isinstance(recipe, AuthorizedMaterialization):
+        raise TypeError("validate_native requires an AuthorizedMaterialization")
+    return _validate_path(recipe.source_path)
+
+
+def legacy_validate_recipe(recipe_path: Path) -> tuple[bool, str]:
+    """Legacy Engine/profile-test raw validation; removed by Task 3."""
+    return _validate_path(recipe_path)
 
 
 def cli_mermaid(recipe_path: Path, overlay: Path | None) -> str:

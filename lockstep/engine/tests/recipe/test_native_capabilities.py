@@ -7,7 +7,8 @@ from uuid import uuid4
 import pytest
 
 import lockstep.recipe.yamlgraph_adapter as yg
-
+from lockstep.recipe.authority import RecipeAuthorityPolicy, StrictRecipeIngress
+from lockstep.runtime.recipe_bundles import RecipeBundleStore
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "native"
 CHILD_INTERRUPT = FIXTURES / "child_interrupt.recipe.yaml"
@@ -17,6 +18,20 @@ PARALLEL_INTERRUPTS = FIXTURES / "parallel_interrupts.recipe.yaml"
 WRAPPED_PARENT_DIRECT = FIXTURES / "wrapped_parent_direct.recipe.yaml"
 
 
+@pytest.fixture(autouse=True)
+def _restore_materialization_permissions(tmp_path):
+    yield
+    for path in sorted(
+        tmp_path.rglob("*"), key=lambda item: len(item.parts), reverse=True
+    ):
+        if path.is_symlink():
+            continue
+        if path.is_dir():
+            path.chmod(0o700)
+        elif path.is_file():
+            path.chmod(0o600)
+
+
 def _results(snapshot, value_by_message: dict[str, str]) -> dict[str, str]:
     return {
         item.coordinate.interrupt_id: value_by_message[item.value]
@@ -24,15 +39,27 @@ def _results(snapshot, value_by_message: dict[str, str]) -> dict[str, str]:
     }
 
 
+def _authorized(path: Path, state_root: Path):
+    store = RecipeBundleStore(state_root / "recipe-authority")
+    return (
+        StrictRecipeIngress(path.parent)
+        .inspect(path.name)
+        .authorize(RecipeAuthorityPolicy())
+        .capture(store)
+        .materialize(store)
+    )
+
+
 def test_direct_child_interrupt_survives_sqlite_restart(tmp_path):
     """Wrapping a direct child as a callable loses its durable native checkpoint."""
     db = tmp_path / "checkpoints.sqlite"
-    first = yg.open_native_app(PARENT_DIRECT, db)
+    recipe = _authorized(PARENT_DIRECT, tmp_path)
+    first = yg.open_native_app(recipe, db)
     parked = first.invoke({}, thread_id="parent-a")
     coordinate = parked.pending[0].coordinate
     first.close()
 
-    restarted = yg.open_native_app(PARENT_DIRECT, db)
+    restarted = yg.open_native_app(recipe, db)
     completed = restarted.resume(
         thread_id="parent-a",
         results_by_interrupt_id={coordinate.interrupt_id: "yes"},
@@ -44,9 +71,9 @@ def test_direct_child_interrupt_survives_sqlite_restart(tmp_path):
     assert completed.pending == ()
 
 
-def test_parallel_interrupts_support_partial_then_batch_resume():
+def test_parallel_interrupts_support_partial_then_batch_resume(tmp_path):
     """Collapsing native interrupt IDs would make one branch resume the other."""
-    app = yg.open_native_app(PARALLEL_INTERRUPTS)
+    app = yg.open_native_app(_authorized(PARALLEL_INTERRUPTS, tmp_path))
     parked = app.invoke({}, thread_id="parallel-partial")
     assert {item.value for item in parked.pending} == {"Branch A?", "Branch B?"}
 
@@ -70,9 +97,9 @@ def test_parallel_interrupts_support_partial_then_batch_resume():
     assert sorted(completed.values["contributions"]) == ["a", "b"]
 
 
-def test_parallel_interrupts_support_one_batch_resume_and_native_join():
+def test_parallel_interrupts_support_one_batch_resume_and_native_join(tmp_path):
     """Resuming a batch one-at-a-time can expose a synthetic join race."""
-    app = yg.open_native_app(PARALLEL_INTERRUPTS)
+    app = yg.open_native_app(_authorized(PARALLEL_INTERRUPTS, tmp_path))
     parked = app.invoke({}, thread_id="parallel-batch")
     completed = app.resume(
         thread_id="parallel-batch",
@@ -92,7 +119,7 @@ def test_cycle_honors_yamlgraph_loop_limit(tmp_path):
     """Replacing native cycles with an outer scheduler would bypass yamlgraph's cap."""
     recipe = tmp_path / "bounded-cycle.recipe.yaml"
     recipe.write_text(
-        '''
+        """
 version: "1.0"
 name: bounded-cycle
 state:
@@ -109,10 +136,10 @@ loop_limits:
   tick: 2
 loop_exits:
   tick: END
-'''
+"""
     )
 
-    app = yg.open_native_app(recipe)
+    app = yg.open_native_app(_authorized(recipe, tmp_path))
     completed = app.invoke({"count": 0}, thread_id="bounded-cycle")
     app.close()
 
@@ -121,11 +148,11 @@ loop_exits:
     assert completed.values["_loop_limit_reached"] is True
 
 
-def test_ainvoke_is_a_real_async_direct_smoke():
+def test_ainvoke_is_a_real_async_direct_smoke(tmp_path):
     """An async facade implemented by calling sync invoke cannot prove native async use."""
 
     async def run():
-        app = yg.open_native_app(PARENT_DIRECT)
+        app = yg.open_native_app(_authorized(PARENT_DIRECT, tmp_path))
         parked = await app.ainvoke({}, thread_id="async-parent")
         app.close()
         return parked
@@ -134,9 +161,9 @@ def test_ainvoke_is_a_real_async_direct_smoke():
     assert [item.value for item in parked.pending] == ["Answer?"]
 
 
-def test_subgraph_snapshot_exposes_child_native_coordinate():
+def test_subgraph_snapshot_exposes_child_native_coordinate(tmp_path):
     """Flattening a child pause without namespace identity makes resume ambiguous."""
-    app = yg.open_native_app(PARENT_DIRECT)
+    app = yg.open_native_app(_authorized(PARENT_DIRECT, tmp_path))
     app.invoke({}, thread_id="subgraph-snapshot")
     snapshot = app.snapshot(thread_id="subgraph-snapshot", subgraphs=True)
     history = tuple(app.history(thread_id="subgraph-snapshot"))
@@ -151,9 +178,9 @@ def test_subgraph_snapshot_exposes_child_native_coordinate():
     assert all(isinstance(item, yg.NativeSnapshot) for item in history)
 
 
-def test_invoke_children_isolate_two_parent_checkpoint_identities():
+def test_invoke_children_isolate_two_parent_checkpoint_identities(tmp_path):
     """Dropping parent RunnableConfig aliases both child runs to one checkpoint."""
-    app = yg.open_native_app(PARENT_INVOKE)
+    app = yg.open_native_app(_authorized(PARENT_INVOKE, tmp_path))
     parked_a = app.invoke({}, thread_id="parent-a")
     parked_b = app.invoke({}, thread_id="parent-b")
 
@@ -174,15 +201,18 @@ def test_invoke_children_isolate_two_parent_checkpoint_identities():
     assert completed_b.values["child_phase"] == "complete"
 
 
-def test_stream_yields_only_native_neutral_dtos():
+def test_stream_yields_only_native_neutral_dtos(tmp_path):
     """Returning LangGraph chunks would leak native runtime types past the adapter."""
-    app = yg.open_native_app(PARENT_DIRECT)
+    app = yg.open_native_app(_authorized(PARENT_DIRECT, tmp_path))
     events = tuple(app.stream({}, thread_id="stream-parent"))
     app.close()
 
     assert events
     assert all(isinstance(event, yg.NativeEvent) for event in events)
-    assert all(type(event.data) in {dict, list, tuple, str, int, float, bool, type(None)} for event in events)
+    assert all(
+        type(event.data) in {dict, list, tuple, str, int, float, bool, type(None)}
+        for event in events
+    )
 
 
 def test_otel_timeout_wrappers_keep_direct_child_native_across_restart(
@@ -203,7 +233,8 @@ def test_otel_timeout_wrappers_keep_direct_child_native_across_restart(
     monkeypatch.setenv("YAMLGRAPH_OTEL_EXPORT", "otlp")
     db = tmp_path / "wrapped.sqlite"
 
-    first = yg.open_native_app(WRAPPED_PARENT_DIRECT, db)
+    recipe = _authorized(WRAPPED_PARENT_DIRECT, tmp_path)
+    first = yg.open_native_app(recipe, db)
     parked = first.invoke({"seed": "kept"}, thread_id="wrapped-parent")
     assert parked.pending[0].coordinate.checkpoint_ns
     coordinate = parked.pending[0].coordinate
@@ -211,7 +242,7 @@ def test_otel_timeout_wrappers_keep_direct_child_native_across_restart(
     assert coordinate.checkpoint_id
     first.close()
 
-    restarted = yg.open_native_app(WRAPPED_PARENT_DIRECT, db)
+    restarted = yg.open_native_app(recipe, db)
     completed = restarted.resume(
         thread_id="wrapped-parent",
         results_by_interrupt_id={coordinate.interrupt_id: "yes"},
@@ -231,9 +262,7 @@ def test_otel_timeout_wrappers_keep_direct_child_native_across_restart(
 
 
 @pytest.mark.parametrize("otel_enabled", [False, True])
-def test_wrapped_node_receives_langgraph_injected_config(
-    monkeypatch, otel_enabled
-):
+def test_wrapped_node_receives_langgraph_injected_config(monkeypatch, otel_enabled):
     """Calling a wrapper directly can only prove a caller-synthesized config."""
     if otel_enabled:
         monkeypatch.setenv("YAMLGRAPH_OTEL_EXPORT", "otlp")

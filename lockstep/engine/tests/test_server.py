@@ -66,7 +66,7 @@ def test_list_recipes_discovers_nested_recipes(tmp_path, monkeypatch):
     recipes = tmp_path / "recipes"
     recipe = recipes / "nested" / "release.recipe.yaml"
     recipe.parent.mkdir(parents=True)
-    recipe.write_text("name: release\nnodes: {}\n")
+    recipe.write_text("name: release\nnodes: {}\nedges: []\n")
     _configure(monkeypatch, tmp_path, recipes)
 
     assert server.list_recipes() == ["release"]
@@ -81,7 +81,7 @@ def test_list_recipes_rejects_symlink_escape(tmp_path, monkeypatch):
     (recipes / "release.recipe.yaml").symlink_to(outside)
     _configure(monkeypatch, tmp_path, recipes)
 
-    with pytest.raises(RecipeError, match="escapes recipe directory"):
+    with pytest.raises(RecipeError, match="linked recipe input rejected"):
         server.list_recipes()
 
 
@@ -108,7 +108,7 @@ def test_codex_workspace_metadata_supplies_project_and_default_recipes(tmp_path,
 
     result = server.scenario_start("minimal", {}, ctx=ctx)
 
-    record = server._eng(project)._runs.get(result["run_id"])  # noqa: SLF001
+    record = server._eng(project)._runs.get(result["run_id"])
     assert record.project == str(project.resolve())
 
 
@@ -184,13 +184,39 @@ def test_validate_recipe_reports_profile(tmp_path, monkeypatch):
     _configure(monkeypatch, tmp_path)
 
     good = server.validate_recipe(str(GOOD / "minimal.recipe.yaml"))
-    assert good["ok"] is True
-    assert good["errors"] == []
-    assert good["yamlgraph"]["ok"] is True
+    assert good["ok"] is False
+    assert any("executable authority denied" in e for e in good["errors"])
+    assert good["yamlgraph"]["ok"] is False
 
     bad = server.validate_recipe(str(BAD / "llm-node.recipe.yaml"))
     assert bad["ok"] is False
-    assert any("forbidden node type" in e for e in bad["errors"])
+    assert any("unsupported node kind" in e for e in bad["errors"])
+
+
+def test_validate_recipe_rejects_python_before_import_or_owner_state_mutation(
+    tmp_path, monkeypatch
+):
+    project = _configure(monkeypatch, tmp_path)
+    sentinel = project / "IMPORTED"
+    (project / "attacker_module.py").write_text(
+        f"from pathlib import Path\nPath({str(sentinel)!r}).write_text('ran')\n"
+        "def run(state): return state\n"
+    )
+    recipe = project / "attacker.recipe.yaml"
+    recipe.write_text(
+        "name: attacker\n"
+        "tools:\n"
+        "  code: {type: python, module: attacker_module, function: run}\n"
+        "nodes: {code: {type: python, tool: code}}\n"
+        "edges: [{from: START, to: code}, {from: code, to: END}]\n"
+    )
+
+    result = server.validate_recipe(str(recipe))
+
+    assert result["ok"] is False
+    assert any("executable authority denied" in e for e in result["errors"])
+    assert not sentinel.exists()
+    assert not (tmp_path / "state").exists()
 
 
 # ---------------------------------------------------------------------------

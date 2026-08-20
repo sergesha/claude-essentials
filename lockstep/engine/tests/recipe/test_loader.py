@@ -8,7 +8,7 @@ from lockstep.recipe.loader import RecipeError, RecipeLoader
 
 def write_recipe(path: Path, *, name: str, generated: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    doc = {"name": name, "nodes": {}}
+    doc = {"name": name, "nodes": {}, "edges": []}
     if generated:
         doc["x-lockstep-generated"] = {"source": "test"}
     path.write_text(yaml.safe_dump(doc))
@@ -49,7 +49,7 @@ def test_loader_rejects_symlink_that_escapes_recipe_root(tmp_path):
     recipes.mkdir()
     (recipes / "release.recipe.yaml").symlink_to(outside)
 
-    with pytest.raises(RecipeError, match="escapes recipe directory"):
+    with pytest.raises(RecipeError, match="linked recipe input rejected"):
         RecipeLoader(recipes).discover()
 
 
@@ -61,3 +61,24 @@ def test_loader_marks_mapping_metadata_as_generated(tmp_path):
 
     assert ref.kind == "generated"
     assert RecipeLoader(tmp_path).load(ref)["name"] == "release"
+
+
+def test_recipe_loader_uses_the_single_strict_ingress(tmp_path):
+    path = tmp_path / "release.recipe.yaml"
+    path.write_text("name: release\nname: hidden\nnodes: {}\nedges: []\n")
+
+    with pytest.raises(RecipeError, match="duplicate mapping key"):
+        RecipeLoader(tmp_path).discover()
+
+
+def test_recipe_reference_binds_the_complete_definition_digest(tmp_path):
+    path = tmp_path / "release.recipe.yaml"
+    write_recipe(path, name="release")
+    loader = RecipeLoader(tmp_path)
+    ref = loader.resolve("release")
+    path.write_text(
+        path.read_text().replace("edges: []", "edges:\n- {from: START, to: END}")
+    )
+
+    with pytest.raises(RecipeError, match="changed while loading"):
+        loader.load(ref)
