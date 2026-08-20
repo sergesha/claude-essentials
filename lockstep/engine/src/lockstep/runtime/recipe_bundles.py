@@ -169,7 +169,12 @@ def _read_regular_at(root_fd: int, relative: PurePosixPath, *, max_bytes: int) -
                 f"recipe bundle exceeds {max_bytes} byte admission limit"
             )
         with os.fdopen(descriptor, "rb", closefd=False) as stream:
-            return stream.read()
+            data = stream.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            raise StorageLimitExceeded(
+                f"recipe bundle exceeds {max_bytes} byte admission limit"
+            )
+        return data
     finally:
         os.close(descriptor)
 
@@ -291,7 +296,9 @@ class RecipeBundleStore:
             for logical in dependency_dag.files:
                 relative = PurePosixPath(logical)
                 data = _read_regular_at(
-                    root_fd, relative, max_bytes=self._limits.max_total_bytes
+                    root_fd,
+                    relative,
+                    max_bytes=self._limits.max_total_bytes - total,
                 )
                 total += len(data)
                 if total > self._limits.max_total_bytes:

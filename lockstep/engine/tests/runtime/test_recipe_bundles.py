@@ -366,6 +366,71 @@ def test_bundle_limits_fail_before_manifest_or_blob_publication(tmp_path, recipe
     assert not list((owner / "blobs" / "sha256").rglob("[0-9a-f]" * 64))
 
 
+def test_bundle_growth_after_fstat_reads_only_remaining_budget_plus_one(
+    tmp_path, monkeypatch
+):
+    from lockstep.runtime.owner_state import StorageLimitExceeded
+    from lockstep.runtime.recipe_bundles import RecipeBundleLimits, RecipeBundleStore
+
+    source = tmp_path / "growing-source"
+    source.mkdir()
+    root = source / "root.yaml"
+    root.write_bytes(b"root")
+    growing = source / "growing.bin"
+    growing.write_bytes(b"ok")
+    growing_inode = growing.stat().st_ino
+    owner = tmp_path / "growing-state"
+    store = RecipeBundleStore(owner, limits=RecipeBundleLimits(max_total_bytes=8))
+    dag = _dag(root, growing.name)
+    original_fstat = os.fstat
+    original_fdopen = os.fdopen
+    grew = False
+    read_sizes = []
+
+    def growing_fstat(descriptor):
+        nonlocal grew
+        info = original_fstat(descriptor)
+        if info.st_ino == growing_inode and not grew:
+            with growing.open("ab") as stream:
+                stream.write(b"overflow")
+            grew = True
+        return info
+
+    class RecordingReader:
+        def __init__(self, stream):
+            self._stream = stream
+
+        def __enter__(self):
+            self._stream.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self._stream.__exit__(*args)
+
+        def read(self, size=-1):
+            read_sizes.append(size)
+            if size != 5:
+                raise AssertionError(f"unexpected read size {size}")
+            return self._stream.read(size)
+
+    def recording_fdopen(descriptor, *args, **kwargs):
+        stream = original_fdopen(descriptor, *args, **kwargs)
+        if original_fstat(descriptor).st_ino == growing_inode:
+            return RecordingReader(stream)
+        return stream
+
+    monkeypatch.setattr(os, "fstat", growing_fstat)
+    monkeypatch.setattr(os, "fdopen", recording_fdopen)
+
+    with pytest.raises(StorageLimitExceeded, match="byte admission"):
+        store.capture(source, dag)
+
+    assert grew
+    assert read_sizes == [5]
+    assert not list((owner / "recipe-bundles").glob("*.json"))
+    assert not list((owner / "blobs" / "sha256").rglob("[0-9a-f]" * 64))
+
+
 def test_bundle_rejects_symlink_in_intermediate_component(
     bundle_store, recipe_tree
 ):
