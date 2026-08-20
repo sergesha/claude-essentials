@@ -57,6 +57,7 @@ def test_descriptor_is_closed_bounded_and_canonical() -> None:
         ({"writes": ["src/*.py"]}, "write"),
         ({"writes": [".git/config"]}, "write"),
         ({"writes": ["src//generated"]}, "write"),
+        ({"writes": ["src/\x00escape"]}, "NUL"),
         ({"inputs": {"brief": {"expression": "__import__('os')"}}}, "selector"),
         (
             {

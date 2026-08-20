@@ -492,6 +492,13 @@ class EffectLedger:
         runner_binding_digest: str | None = None,
         scope_descriptor: ScopeDescriptor | None = None,
     ) -> EffectRecord:
+        if (
+            isinstance(result, EffectResult)
+            and result.fixed_error_code == "launch_indeterminate"
+        ):
+            raise EffectConflict(
+                "launch_indeterminate may only be stored by mark_indeterminate"
+            )
         return self._transition(
             effect_id,
             expected_revision=expected_revision,

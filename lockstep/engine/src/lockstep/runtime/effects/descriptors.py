@@ -139,6 +139,8 @@ def _string_list(value: object, label: str, *, names: bool = False) -> tuple[str
 def _write_path(value: object) -> str:
     if not isinstance(value, str) or not value:
         raise ValueError("write path must be a non-empty string")
+    if "\x00" in value:
+        raise ValueError("write path may not contain NUL")
     if "\\" in value or any(char in value for char in _GLOB_CHARS):
         raise ValueError("write path must use literal POSIX-relative syntax")
     directory = value.endswith("/")

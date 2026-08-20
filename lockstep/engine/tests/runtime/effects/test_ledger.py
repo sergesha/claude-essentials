@@ -332,6 +332,123 @@ def test_launch_indeterminate_is_the_only_ambiguity_result_and_never_relaunches(
         )
 
 
+def test_public_seal_can_never_store_launch_indeterminate(ledger) -> None:
+    from lockstep.runtime.effects.descriptors import (
+        parse_effect_descriptor,
+        parse_effect_result,
+    )
+    from lockstep.runtime.effects.ledger import EffectConflict
+    from sqlalchemy import select
+
+    effect_ledger, storage = ledger
+
+    def facts() -> tuple[tuple[tuple, ...], tuple[tuple, ...]]:
+        with storage.read_connection() as connection:
+            effects = tuple(
+                tuple(row)
+                for row in connection.execute(
+                    select(storage.tables.effects).order_by(
+                        storage.tables.effects.c.effect_id
+                    )
+                )
+            )
+            observations = tuple(
+                tuple(row)
+                for row in connection.execute(
+                    select(storage.tables.effect_observations).order_by(
+                        storage.tables.effect_observations.c.effect_id,
+                        storage.tables.effect_observations.c.revision,
+                    )
+                )
+            )
+        return effects, observations
+
+    prepared = prepare(effect_ledger)
+    lease = effect_lease(storage, prepared.effect_id)
+    launching = effect_ledger.mark_launching(
+        prepared.effect_id,
+        expected_revision=prepared.revision,
+        lease=lease,
+        runner_binding_digest="b" * 64,
+    )
+    ambiguous = parse_effect_result(
+        {
+            **result_value(prepared.effect_id, outcome="ERROR"),
+            "result_ref": None,
+            "fixed_error_code": "launch_indeterminate",
+        }
+    )
+    before_launching = facts()
+    with pytest.raises(EffectConflict, match="mark_indeterminate"):
+        effect_ledger.seal(
+            launching.effect_id,
+            ambiguous,
+            expected_revision=launching.revision,
+            lease=lease,
+            runner_binding_digest="b" * 64,
+        )
+    assert facts() == before_launching
+
+    manual_value = descriptor_value("manual")
+    manual_value.update(kind="manual", runner=None, deadline_seconds=None)
+    manual = parse_effect_descriptor(manual_value)
+    manual_record = effect_ledger.prepare(
+        NativeCoordinate("manual-thread", "checkpoint", "", "task", "interrupt"),
+        manual,
+        deadline_at=None,
+        runner_binding_digest=None,
+        workspace_ref=None,
+    )
+    manual_ambiguous = parse_effect_result(
+        {
+            **result_value(manual_record.effect_id, outcome="ERROR"),
+            "result_ref": None,
+            "fixed_error_code": "launch_indeterminate",
+        }
+    )
+    before_manual = facts()
+    with pytest.raises(EffectConflict, match="mark_indeterminate"):
+        effect_ledger.seal(
+            manual_record.effect_id,
+            manual_ambiguous,
+            expected_revision=manual_record.revision,
+        )
+    assert facts() == before_manual
+
+
+def test_nul_write_rejects_before_ledger_prepare_without_any_fact(ledger) -> None:
+    from lockstep.runtime.effects.descriptors import parse_effect_descriptor
+    from sqlalchemy import func, select
+
+    effect_ledger, storage = ledger
+    value = descriptor_value()
+    value["writes"] = ["src/\x00escape"]
+
+    with pytest.raises(ValueError, match="NUL"):
+        descriptor = parse_effect_descriptor(value)
+        effect_ledger.prepare(
+            NativeCoordinate("thread", "checkpoint", "", "task", "interrupt"),
+            descriptor,
+            deadline_at=datetime(2026, 8, 20, 11, tzinfo=timezone.utc),
+            runner_binding_digest="b" * 64,
+            workspace_ref=None,
+        )
+
+    with storage.read_connection() as connection:
+        assert (
+            connection.execute(
+                select(func.count()).select_from(storage.tables.effects)
+            ).scalar_one()
+            == 0
+        )
+        assert (
+            connection.execute(
+                select(func.count()).select_from(storage.tables.effect_observations)
+            ).scalar_one()
+            == 0
+        )
+
+
 def test_seal_is_idempotent_for_same_result_and_conflicts_for_different_result(
     ledger,
 ) -> None:
