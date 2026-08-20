@@ -82,7 +82,38 @@ def test_fresh_start_restart_history_and_live_source_deletion(tmp_path):
     )
     assert completed.values["answer"] == "yes"
     assert completed.pending == ()
+    proof = restarted.interrupt_lineage(binding.public_run_id, coordinate)
+    assert proof is not None
+    assert proof.disposition == "descended"
+    assert proof.occurrence.coordinate == coordinate
+    assert proof.occurrence.value == parked.pending[0].value
     restarted.close()
+    store.close()
+
+
+@pytest.mark.parametrize(
+    "recipe_name",
+    ["sequential_interrupts.recipe.yaml", "parent_then_direct.recipe.yaml"],
+)
+def test_public_checkpoint_parent_chain_proves_exact_interrupt_ancestry(
+    tmp_path, recipe_name
+):
+    bundles, binding = _binding(tmp_path, FIXTURES / recipe_name)
+    store, runtime = _runtime(tmp_path, bundles)
+    runtime.bind(binding)
+    producer = runtime.start(binding.public_run_id, {}).pending[0]
+    consumer_snapshot = runtime.resume(
+        binding.public_run_id,
+        producer.coordinate,
+        {producer.coordinate.interrupt_id: "yes"},
+    )
+    consumer = consumer_snapshot.pending[0]
+
+    assert runtime.checkpoint_is_ancestor(
+        binding.public_run_id, producer.coordinate, consumer
+    )
+
+    runtime.close()
     store.close()
 
 
@@ -100,7 +131,10 @@ def test_resume_rejects_stale_checkpoint_wrong_task_and_unknown_interrupt(tmp_pa
     ):
         with pytest.raises(NativeCoordinateRejected):
             runtime.resume(binding.public_run_id, bad, {bad.interrupt_id: "x"})
-    assert runtime.snapshot(binding.public_run_id, subgraphs=True).pending == parked.pending
+    assert (
+        runtime.snapshot(binding.public_run_id, subgraphs=True).pending
+        == parked.pending
+    )
     runtime.close()
     store.close()
 
@@ -243,5 +277,131 @@ def test_public_history_consumption_has_a_hard_ceiling(tmp_path):
     with pytest.raises(NativeHistoryLimitExceeded):
         tuple(runtime.history(binding.public_run_id))
     assert len(consumed) == MAX_HISTORY_SNAPSHOTS + 1
+    runtime.close()
+    store.close()
+
+
+def test_lineage_rejects_foreign_same_interrupt_id_in_bound_thread(tmp_path):
+    from lockstep.runtime.native_models import (
+        NativeCoordinate,
+        NativeInterrupt,
+    )
+
+    bundles, binding = _binding(tmp_path, FIXTURES / "parent_direct.recipe.yaml")
+    store = SQLiteStore(tmp_path / "runtime.sqlite")
+    source = NativeCoordinate(
+        binding.thread_id, "source-checkpoint", "child", "source-task", "same-id"
+    )
+    foreign = replace(
+        source, checkpoint_id="foreign-checkpoint", task_id="foreign-task"
+    )
+
+    class App:
+        def snapshot(self, *, thread_id, subgraphs=False):
+            return NativeSnapshot(values={}, pending=())
+
+        def history(self, *, thread_id):
+            return (
+                NativeSnapshot(
+                    values={},
+                    pending=(NativeInterrupt(foreign, {"foreign": True}),),
+                ),
+            )
+
+        def interrupt_history(self, *, thread_id, checkpoint_ns, snapshot_limit):
+            from lockstep.runtime.native_models import NativeInterruptOccurrence
+
+            return (NativeInterruptOccurrence(foreign, {"foreign": True}),)
+
+        def close(self):
+            pass
+
+    runtime = GraphRuntime(
+        bundle_store=bundles,
+        leases=LeaseStore(store),
+        invocations=InvocationLockStore(tmp_path / "owner-state"),
+        checkpoint_path=tmp_path / "checkpoints.sqlite",
+        app_factory=lambda *_: App(),
+    )
+    runtime.bind(binding)
+
+    assert runtime.coordinate_lineage(binding.public_run_id, source) == "incompatible"
+    runtime.close()
+    store.close()
+
+
+def test_lineage_rejects_ambiguous_duplicate_exact_occurrences(tmp_path):
+    from lockstep.runtime.native_models import (
+        NativeCoordinate,
+        NativeInterruptOccurrence,
+    )
+
+    bundles, binding = _binding(tmp_path, FIXTURES / "parent_direct.recipe.yaml")
+    store = SQLiteStore(tmp_path / "runtime.sqlite")
+    source = NativeCoordinate(
+        binding.thread_id, "checkpoint", "child", "task", "interrupt"
+    )
+
+    class App:
+        def snapshot(self, *, thread_id, subgraphs=False):
+            return NativeSnapshot(values={}, pending=())
+
+        def interrupt_history(self, *, thread_id, checkpoint_ns, snapshot_limit):
+            occurrence = NativeInterruptOccurrence(source, {"protected": True})
+            return (occurrence, occurrence)
+
+        def close(self):
+            pass
+
+    runtime = GraphRuntime(
+        bundle_store=bundles,
+        leases=LeaseStore(store),
+        invocations=InvocationLockStore(tmp_path / "owner-state"),
+        checkpoint_path=tmp_path / "checkpoints.sqlite",
+        app_factory=lambda *_: App(),
+    )
+    runtime.bind(binding)
+
+    assert runtime.interrupt_lineage(binding.public_run_id, source) is None
+    runtime.close()
+    store.close()
+
+
+def test_commitment_guard_serializes_native_commits_and_revalidates_exact_source(
+    tmp_path,
+):
+    from lockstep.runtime.native_models import NativeCoordinate, NativeInterrupt
+
+    bundles, binding = _binding(tmp_path, FIXTURES / "parent_direct.recipe.yaml")
+    store = SQLiteStore(tmp_path / "runtime.sqlite")
+    coordinate = NativeCoordinate(
+        binding.thread_id, "checkpoint", "", "task", "interrupt"
+    )
+
+    class App:
+        def snapshot(self, *, thread_id, subgraphs=False):
+            return NativeSnapshot(
+                values={}, pending=(NativeInterrupt(coordinate, {"effect": True}),)
+            )
+
+        def close(self):
+            pass
+
+    leases = LeaseStore(store)
+    runtime = GraphRuntime(
+        bundle_store=bundles,
+        leases=leases,
+        invocations=InvocationLockStore(tmp_path / "owner-state"),
+        checkpoint_path=tmp_path / "checkpoints.sqlite",
+        app_factory=lambda *_: App(),
+    )
+    runtime.bind(binding)
+
+    with runtime.commitment_guard(binding.public_run_id, coordinate) as guarded:
+        assert guarded.binding == binding
+        assert guarded.interrupt.coordinate == coordinate
+        with pytest.raises(LeaseUnavailable):
+            leases.acquire("invoke", binding.thread_id, "competitor", 60)
+
     runtime.close()
     store.close()

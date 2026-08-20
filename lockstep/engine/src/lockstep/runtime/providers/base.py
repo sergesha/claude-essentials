@@ -6,11 +6,14 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from lockstep.runtime.effects.models import EffectResult
 from lockstep.runtime.native_models import NativeCoordinate
 from lockstep.runtime.payload_limits import bounded_json
+
+if TYPE_CHECKING:
+    from lockstep.runtime.effects.authority import EffectGrant
 
 
 def _hex(value: str, label: str) -> str:
@@ -39,7 +42,11 @@ def _utc(value: datetime | None) -> datetime | None:
 class ScopeBinding:
     """Graph-owned scope authority committed into one runner request."""
 
+    state_key: str
+    producer_effect_id: str
+    producer_coordinate: NativeCoordinate
     scope_digest: str
+    scope_result_digest: str
     runner_binding_digest: str | None
 
 
@@ -59,6 +66,9 @@ class EffectRequest:
     writes: tuple[str, ...]
     deadline_at: datetime | None
     scope_bindings: tuple[ScopeBinding, ...]
+    intent_digest: str
+    grant_digest: str | None
+    workspace_ref: str | None
     request_digest: str
 
     @classmethod
@@ -81,13 +91,24 @@ class EffectRequest:
         scope_bindings: tuple[ScopeBinding, ...] = (),
     ) -> EffectRequest:
         detached_inputs = tuple(
-            (name, bounded_json(value, label=f"effect input {name}"))
+            (
+                _text(name, "effect input name"),
+                bounded_json(value, label=f"effect input {name}"),
+            )
             for name, value in inputs
         )
         deadline = _utc(deadline_at)
         checked_scope_bindings = tuple(
             ScopeBinding(
+                state_key=_text(binding.state_key, "scope state_key"),
+                producer_effect_id=_text(
+                    binding.producer_effect_id, "scope producer_effect_id"
+                ),
+                producer_coordinate=binding.producer_coordinate,
                 scope_digest=_hex(binding.scope_digest, "scope_digest"),
+                scope_result_digest=_hex(
+                    binding.scope_result_digest, "scope_result_digest"
+                ),
                 runner_binding_digest=(
                     None
                     if binding.runner_binding_digest is None
@@ -123,14 +144,25 @@ class EffectRequest:
             "deadline_at": None if deadline is None else deadline.isoformat(),
             "scope_bindings": [
                 {
+                    "state_key": binding.state_key,
+                    "producer_effect_id": binding.producer_effect_id,
+                    "producer_coordinate": {
+                        "thread_id": binding.producer_coordinate.thread_id,
+                        "checkpoint_ns": binding.producer_coordinate.checkpoint_ns,
+                        "checkpoint_id": binding.producer_coordinate.checkpoint_id,
+                        "task_id": binding.producer_coordinate.task_id,
+                        "interrupt_id": binding.producer_coordinate.interrupt_id,
+                    },
                     "scope_digest": binding.scope_digest,
+                    "scope_result_digest": binding.scope_result_digest,
                     "runner_binding_digest": binding.runner_binding_digest,
                 }
                 for binding in checked_scope_bindings
             ],
         }
+        admitted_commitment = bounded_json(commitment, label="aggregate effect request")
         encoded = json.dumps(
-            commitment,
+            admitted_commitment,
             sort_keys=True,
             separators=(",", ":"),
             ensure_ascii=False,
@@ -151,6 +183,50 @@ class EffectRequest:
             writes=writes,
             deadline_at=deadline,
             scope_bindings=checked_scope_bindings,
+            intent_digest=hashlib.sha256(encoded).hexdigest(),
+            grant_digest=None,
+            workspace_ref=None,
+            request_digest=hashlib.sha256(encoded).hexdigest(),
+        )
+
+    def bind_grant(self, grant: EffectGrant) -> EffectRequest:
+        """Materialize this draft as the immutable request for one exact grant."""
+
+        if self.grant_digest is not None:
+            raise ValueError("effect request is already bound to a grant")
+        grant.validate_for(self)
+        commitment = {
+            "schema": "lockstep.effect-request/v1",
+            "intent_digest": self.intent_digest,
+            "grant_digest": grant.digest,
+            "workspace_ref": grant.workspace_ref,
+        }
+        admitted = bounded_json(commitment, label="granted effect request")
+        encoded = json.dumps(
+            admitted,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        return EffectRequest(
+            effect_id=self.effect_id,
+            public_run_id=self.public_run_id,
+            project_identity=self.project_identity,
+            definition_digest=self.definition_digest,
+            coordinate=self.coordinate,
+            descriptor_digest=self.descriptor_digest,
+            effect_kind=self.effect_kind,
+            runner_selector=self.runner_selector,
+            runner_binding_digest=self.runner_binding_digest,
+            required_capabilities=self.required_capabilities,
+            inputs=self.inputs,
+            writes=self.writes,
+            deadline_at=self.deadline_at,
+            scope_bindings=self.scope_bindings,
+            intent_digest=self.intent_digest,
+            grant_digest=grant.digest,
+            workspace_ref=grant.workspace_ref,
             request_digest=hashlib.sha256(encoded).hexdigest(),
         )
 
@@ -162,6 +238,29 @@ class PreparedLaunch:
     runner_binding_digest: str
     launch_ref: str
     workspace_ref: str | None
+
+
+def launch_commitment_digest(request: EffectRequest, launch: PreparedLaunch) -> str:
+    commitment = bounded_json(
+        {
+            "schema": "lockstep.launch-commitment/v1",
+            "effect_id": launch.effect_id,
+            "request_digest": launch.request_digest,
+            "runner_binding_digest": launch.runner_binding_digest,
+            "launch_ref": launch.launch_ref,
+            "workspace_ref": launch.workspace_ref,
+            "grant_digest": request.grant_digest,
+        },
+        label="prepared launch commitment",
+    )
+    encoded = json.dumps(
+        commitment,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -220,13 +319,25 @@ class TerminalSafetyObservation:
 
 class RunnerAdapter(Protocol):
     binding_digest: str
+    required_authorities: tuple[str, ...]
+    reconciliation_boundary: Literal["local_durable_handle"]
 
-    def prepare(self, request: EffectRequest) -> PreparedLaunch: ...
+    def prepare(self, request: EffectRequest) -> PreparedLaunch:
+        """Idempotently recover or create one durable preparation for request."""
+        ...
 
-    def ensure_started(self, launch: PreparedLaunch) -> RunnerObservation: ...
+    def ensure_started(self, launch: PreparedLaunch) -> RunnerObservation:
+        """Idempotently start or adopt this exact durable preparation after restart."""
+        ...
 
-    def inspect(self, effect_id: str) -> RunnerObservation: ...
+    def inspect(self, effect_id: str) -> RunnerObservation:
+        """Observe only an existing local durable handle; never launch/contact remote."""
+        ...
 
-    def cancel(self, effect_id: str) -> RunnerObservation: ...
+    def cancel(self, effect_id: str) -> RunnerObservation:
+        """Signal only an existing local durable handle; never use network/credentials."""
+        ...
 
-    def quiesce(self, effect_id: str) -> TerminalSafetyObservation: ...
+    def quiesce(self, effect_id: str) -> TerminalSafetyObservation:
+        """Prove local quiescence without network, credentials, or a new effect."""
+        ...

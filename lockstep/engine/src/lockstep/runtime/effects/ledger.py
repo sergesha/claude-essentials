@@ -55,6 +55,9 @@ class EffectRecord:
     lease_epoch: int
     runner_binding_digest: str | None
     workspace_ref: str | None
+    request_digest: str | None
+    grant_digest: str | None
+    launch_commitment_digest: str | None
     result_ref: str | None
     fixed_error_code: str | None
     created_at: datetime
@@ -146,6 +149,9 @@ class EffectLedger:
             lease_epoch=int(values["lease_epoch"]),
             runner_binding_digest=values["runner_binding_digest"],
             workspace_ref=values["workspace_ref"],
+            request_digest=values["request_digest"],
+            grant_digest=values["grant_digest"],
+            launch_commitment_digest=values["launch_commitment_digest"],
             result_ref=values["result_ref"],
             fixed_error_code=values["fixed_error_code"],
             created_at=_load(values["created_at"]),
@@ -217,6 +223,8 @@ class EffectLedger:
         deadline_at: datetime | None,
         runner_binding_digest: str | None,
         workspace_ref: str | None,
+        request_digest: str | None = None,
+        grant_digest: str | None = None,
         lease: Lease | None = None,
     ) -> EffectRecord:
         for name in ("thread_id", "checkpoint_id", "task_id", "interrupt_id"):
@@ -226,7 +234,12 @@ class EffectLedger:
         binding = _binding_digest(runner_binding_digest)
         if workspace_ref is not None:
             workspace_ref = _nonempty(workspace_ref, "workspace_ref")
+        request = _binding_digest(request_digest)
+        grant = _binding_digest(grant_digest)
+        if (request is None) != (grant is None):
+            raise ValueError("effect request and grant digests must be bound together")
         deadline = None if deadline_at is None else _utc(deadline_at)
+        now = self._now()
         if isinstance(descriptor, EffectDescriptor):
             if descriptor.kind == "manual" and deadline is not None:
                 raise ValueError("unmanaged manual effect may not bind a deadline")
@@ -236,11 +249,18 @@ class EffectLedger:
                 descriptor.deadline_seconds is not None or descriptor.scope_state_keys
             ) and deadline is None:
                 raise ValueError("bounded effect requires its resolved deadline")
+            if (
+                descriptor.runner is not None
+                and request is None
+                and (deadline is None or deadline > now)
+            ):
+                raise ValueError(
+                    "runnable effect requires exact request and grant commitments"
+                )
         elif descriptor.scope_kind == "call" and binding is None:
             raise ValueError("call scope requires a runner binding")
         effect_id = derive_effect_id(coordinate, descriptor.digest)
         table = self._store.tables.effects
-        now = self._now()
         values = {
             "effect_id": effect_id,
             "thread_id": coordinate.thread_id,
@@ -255,6 +275,9 @@ class EffectLedger:
             "lease_epoch": 0,
             "runner_binding_digest": binding,
             "workspace_ref": workspace_ref,
+            "request_digest": request,
+            "grant_digest": grant,
+            "launch_commitment_digest": None,
             "result_ref": None,
             "fixed_error_code": None,
             "created_at": _dump(now),
@@ -287,6 +310,8 @@ class EffectLedger:
                 expected = {
                     "deadline_at": deadline,
                     "workspace_ref": workspace_ref,
+                    "request_digest": request,
+                    "grant_digest": grant,
                     "effect_kind": descriptor.kind,
                 }
                 if any(
@@ -317,6 +342,7 @@ class EffectLedger:
         lease: Lease | None = None,
         runner_binding_digest: str | None = None,
         workspace_ref: str | None = None,
+        launch_commitment_digest: str | None = None,
         result: EffectResult | ScopeResult | None = None,
         scope_descriptor: ScopeDescriptor | None = None,
     ) -> EffectRecord:
@@ -408,6 +434,14 @@ class EffectLedger:
                 if lease is None:
                     raise StaleEffectLease("a current effect lease is required")
                 self._validate_live_lease(connection, effect_id, lease)
+            if target == "launching" and (
+                current.request_digest is None
+                or current.grant_digest is None
+                or launch_commitment_digest is None
+            ):
+                raise EffectConflict(
+                    "runner launch requires request, grant, and launch commitments"
+                )
             if (
                 target == "sealed"
                 and current.phase in {"launching", "running"}
@@ -430,6 +464,7 @@ class EffectLedger:
                     raise EffectConflict(
                         "effect already has a different prepared workspace"
                     )
+            launch_digest = _binding_digest(launch_commitment_digest)
             revision = current.revision + 1
             now = self._now()
             changes: dict[str, object] = {
@@ -441,6 +476,8 @@ class EffectLedger:
                 changes["lease_epoch"] = lease.epoch
             if target == "launching" and workspace_ref is not None:
                 changes["workspace_ref"] = workspace_ref
+            if target == "launching":
+                changes["launch_commitment_digest"] = launch_digest
             result_json = None
             if result is not None:
                 changes["result_ref"] = getattr(result, "result_ref", None)
@@ -505,6 +542,7 @@ class EffectLedger:
         lease: Lease,
         runner_binding_digest: str,
         workspace_ref: str | None = None,
+        launch_commitment_digest: str | None = None,
     ) -> EffectRecord:
         return self._transition(
             effect_id,
@@ -514,6 +552,7 @@ class EffectLedger:
             lease=lease,
             runner_binding_digest=runner_binding_digest,
             workspace_ref=workspace_ref,
+            launch_commitment_digest=launch_commitment_digest,
         )
 
     def mark_running(

@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import secrets
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from lockstep.runtime.catalog import RunBinding, RunCatalog
+from lockstep.runtime.effects.authority import (
+    EffectAuthorityDenied,
+    EffectAuthorityGate,
+    EffectAuthorityUnavailable,
+    EffectGrant,
+)
 from lockstep.runtime.effects.descriptors import (
     build_scope_result,
     derive_effect_id,
@@ -37,6 +45,7 @@ from lockstep.runtime.providers.base import (
     RunnerObservation,
     ScopeBinding,
     TerminalSafetyObservation,
+    launch_commitment_digest,
 )
 from lockstep.runtime.status import ScenarioStatus, project_status
 
@@ -66,7 +75,7 @@ class _Context:
     scope_result: ScopeResult | None
     request: EffectRequest | None
     runner: RunnerAdapter | None
-    prepared_launch: PreparedLaunch | None
+    grant: EffectGrant | None
 
 
 class EffectCoordinator:
@@ -82,6 +91,7 @@ class EffectCoordinator:
         ledger: EffectLedger,
         leases: LeaseStore,
         runners: Mapping[str, RunnerAdapter],
+        authority: EffectAuthorityGate,
         clock: Callable[[], datetime] | None = None,
         owner_factory: Callable[[], str] | None = None,
         lease_ttl: float = 30.0,
@@ -91,6 +101,10 @@ class EffectCoordinator:
         self._ledger = ledger
         self._leases = leases
         self._runners = dict(runners)
+        self._runner_bindings = {
+            runner.binding_digest: runner for runner in self._runners.values()
+        }
+        self._authority = authority
         self._clock = clock or (lambda: datetime.now(UTC))
         self._owner_factory = owner_factory or (lambda: secrets.token_hex(16))
         self._lease_ttl = lease_ttl
@@ -124,10 +138,14 @@ class EffectCoordinator:
             and self._raw_descriptor(interrupt).get("schema") == "lockstep.effect/v1"
         ]
 
-    @staticmethod
     def _ancestor_results(
-        descriptor: EffectDescriptor | ScopeDescriptor, snapshot: NativeSnapshot
-    ) -> tuple[ScopeResult, ...]:
+        self,
+        run_id: str,
+        binding: RunBinding,
+        descriptor: EffectDescriptor | ScopeDescriptor,
+        snapshot: NativeSnapshot,
+        consumer: NativeInterrupt,
+    ) -> tuple[tuple[ScopeResult, ScopeBinding], ...]:
         keys = (
             descriptor.scope_state_keys
             if isinstance(descriptor, EffectDescriptor)
@@ -139,7 +157,67 @@ class EffectCoordinator:
                 raise CoordinatorLineageError(
                     f"protected descriptor references absent graph state {key!r}"
                 )
-            results.append(parse_scope_result(snapshot.values[key]))
+            result = parse_scope_result(snapshot.values[key])
+            try:
+                producer = self._ledger.get(result.effect_id)
+            except KeyError as exc:
+                raise CoordinatorLineageError(
+                    f"state {key!r} has no ledger-proven scope producer"
+                ) from exc
+            if (
+                producer.effect_kind != "scope"
+                or producer.phase != "delivered"
+                or producer.coordinate.thread_id != binding.thread_id
+                or producer.descriptor_digest != result.scope_digest
+                or producer.result != result
+            ):
+                raise CoordinatorLineageError(
+                    f"state {key!r} is not backed by a delivered scope producer"
+                )
+            proof = self._runtime.interrupt_lineage(run_id, producer.coordinate)
+            if proof is None or proof.disposition != "descended":
+                raise CoordinatorLineageError(
+                    f"scope producer for state {key!r} lacks compatible native lineage"
+                )
+            if not self._runtime.checkpoint_is_ancestor(
+                run_id, producer.coordinate, consumer
+            ):
+                raise CoordinatorLineageError(
+                    f"scope producer for state {key!r} is not an ancestor"
+                )
+            producer_descriptor = parse_effect_descriptor(
+                self._raw_descriptor(
+                    NativeInterrupt(proof.occurrence.coordinate, proof.occurrence.value)
+                )
+            )
+            if (
+                not isinstance(producer_descriptor, ScopeDescriptor)
+                or producer_descriptor.digest != producer.descriptor_digest
+                or producer_descriptor.result_state_key != key
+            ):
+                raise CoordinatorLineageError(
+                    f"scope producer does not own declared result state {key!r}"
+                )
+            result_json = json.dumps(
+                result.to_dict(),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            ).encode("utf-8")
+            results.append(
+                (
+                    result,
+                    ScopeBinding(
+                        state_key=key,
+                        producer_effect_id=producer.effect_id,
+                        producer_coordinate=producer.coordinate,
+                        scope_digest=result.scope_digest,
+                        scope_result_digest=hashlib.sha256(result_json).hexdigest(),
+                        runner_binding_digest=result.runner_binding_digest,
+                    ),
+                )
+            )
         return tuple(results)
 
     @staticmethod
@@ -166,11 +244,30 @@ class EffectCoordinator:
 
     def _runner_for(self, selector: str) -> RunnerAdapter:
         try:
-            return self._runners[selector]
+            runner = self._runners[selector]
         except KeyError as exc:
             raise ProviderContractViolation(
                 f"no trusted runner is bound for selector {selector!r}"
             ) from exc
+        self._check_reconciliation_boundary(runner)
+        return runner
+
+    @staticmethod
+    def _check_reconciliation_boundary(runner: RunnerAdapter) -> None:
+        if runner.reconciliation_boundary != "local_durable_handle":
+            raise ProviderContractViolation(
+                "runner reconciliation must use only a local durable handle"
+            )
+
+    def _runner_for_binding(self, binding_digest: str) -> RunnerAdapter:
+        try:
+            runner = self._runner_bindings[binding_digest]
+        except KeyError as exc:
+            raise ProviderContractViolation(
+                "durably bound runner is unavailable for recovery"
+            ) from exc
+        self._check_reconciliation_boundary(runner)
+        return runner
 
     @staticmethod
     def _check_launch(request: EffectRequest, launch: PreparedLaunch) -> None:
@@ -196,6 +293,10 @@ class EffectCoordinator:
                 raise ProviderContractViolation(
                     f"provider {label} must be a bounded non-empty string"
                 )
+        if launch.workspace_ref != request.workspace_ref:
+            raise ProviderContractViolation(
+                "prepared launch workspace differs from the exact effect grant"
+            )
 
     @staticmethod
     def _closed_result(value: object) -> EffectResult:
@@ -217,13 +318,13 @@ class EffectCoordinator:
 
     @staticmethod
     def _check_observation(
-        request: EffectRequest,
+        binding: EffectRequest | EffectRecord,
         observation: RunnerObservation | TerminalSafetyObservation,
     ) -> None:
         if (
-            observation.effect_id != request.effect_id
-            or observation.request_digest != request.request_digest
-            or observation.runner_binding_digest != request.runner_binding_digest
+            observation.effect_id != binding.effect_id
+            or observation.request_digest != binding.request_digest
+            or observation.runner_binding_digest != binding.runner_binding_digest
         ):
             raise ProviderContractViolation(
                 "runner observation does not match the immutable effect request"
@@ -251,10 +352,14 @@ class EffectCoordinator:
         descriptor: EffectDescriptor | ScopeDescriptor,
         effect_id: str,
         record: EffectRecord | None,
+        resolve_grant: bool,
     ) -> _Context:
         coordinate = interrupt.coordinate
         now = self._now()
-        ancestors = self._ancestor_results(descriptor, snapshot)
+        verified_ancestors = self._ancestor_results(
+            binding.public_run_id, binding, descriptor, snapshot, interrupt
+        )
+        ancestors = tuple(result for result, _scope in verified_ancestors)
         candidates = self._deadline_candidates(descriptor, ancestors, now)
         deadline_at = (
             record.deadline_at
@@ -302,35 +407,35 @@ class EffectCoordinator:
                         scope_result.runner_binding_digest,
                     )
             return _Context(
-                interrupt,
-                descriptor,
-                effect_id,
-                deadline_at,
-                scope_result,
-                None,
-                runner,
-                None,
+                interrupt=interrupt,
+                descriptor=descriptor,
+                effect_id=effect_id,
+                deadline_at=deadline_at,
+                scope_result=scope_result,
+                request=None,
+                runner=runner,
+                grant=None,
             )
 
         if descriptor.runner is None:
             # Manual work has no external runner. Task 7 owns its session/result path.
             return _Context(
-                interrupt,
-                descriptor,
-                effect_id,
-                None,
-                None,
-                None,
-                None,
-                None,
+                interrupt=interrupt,
+                descriptor=descriptor,
+                effect_id=effect_id,
+                deadline_at=None,
+                scope_result=None,
+                request=None,
+                runner=None,
+                grant=None,
             )
-        runner = self._runner_for(descriptor.runner.selector)
-        if record is not None and record.runner_binding_digest != runner.binding_digest:
-            raise ProviderContractViolation(
-                "current runner binding differs from the durable effect intent"
-            )
+        runner = (
+            self._runner_for(descriptor.runner.selector)
+            if record is None
+            else self._runner_for_binding(record.runner_binding_digest)
+        )
         scope_bindings = []
-        for ancestor in ancestors:
+        for ancestor, scope_binding in verified_ancestors:
             if ancestor.scope_kind == "call" and (
                 ancestor.runner_selector != descriptor.runner.selector
                 or ancestor.runner_binding_digest != runner.binding_digest
@@ -338,13 +443,8 @@ class EffectCoordinator:
                 raise ProviderContractViolation(
                     "call scope runner binding does not match the selected adapter"
                 )
-            scope_bindings.append(
-                ScopeBinding(
-                    scope_digest=ancestor.scope_digest,
-                    runner_binding_digest=ancestor.runner_binding_digest,
-                )
-            )
-        request = EffectRequest.build(
+            scope_bindings.append(scope_binding)
+        intent = EffectRequest.build(
             effect_id=effect_id,
             public_run_id=binding.public_run_id,
             project_identity=binding.project_identity,
@@ -363,15 +463,40 @@ class EffectCoordinator:
             deadline_at=deadline_at,
             scope_bindings=tuple(scope_bindings),
         )
+        if not resolve_grant or (deadline_at is not None and deadline_at <= now):
+            return _Context(
+                interrupt=interrupt,
+                descriptor=descriptor,
+                effect_id=effect_id,
+                deadline_at=deadline_at,
+                scope_result=None,
+                request=None,
+                runner=runner,
+                grant=None,
+            )
+        grant = self._authority.resolve(intent)
+        if grant.required_authorities != runner.required_authorities:
+            raise ProviderContractViolation(
+                "effect grant authorities differ from trusted runner requirements"
+            )
+        request = intent.bind_grant(grant)
+        if record is not None and (
+            record.request_digest != request.request_digest
+            or record.grant_digest != grant.digest
+            or record.workspace_ref != grant.workspace_ref
+        ):
+            raise CoordinatorLineageError(
+                "current request or grant differs from durable effect intent"
+            )
         return _Context(
-            interrupt,
-            descriptor,
-            effect_id,
-            deadline_at,
-            None,
-            request,
-            runner,
-            None,
+            interrupt=interrupt,
+            descriptor=descriptor,
+            effect_id=effect_id,
+            deadline_at=deadline_at,
+            scope_result=None,
+            request=request,
+            runner=runner,
+            grant=grant,
         )
 
     def _identity(
@@ -386,11 +511,11 @@ class EffectCoordinator:
             raise CoordinatorLineageError(
                 "interrupt belongs to a foreign native thread"
             )
-        if self._runtime.coordinate_lineage(run_id, coordinate) != "pending":
+        descriptor = parse_effect_descriptor(self._raw_descriptor(interrupt))
+        if self._protected_lineage(run_id, coordinate, descriptor.digest) != "pending":
             raise CoordinatorLineageError(
                 "effect source is not the exact current interrupt"
             )
-        descriptor = parse_effect_descriptor(self._raw_descriptor(interrupt))
         effect_id = derive_effect_id(coordinate, descriptor.digest)
         if record is not None and (
             record.effect_id != effect_id
@@ -401,6 +526,28 @@ class EffectCoordinator:
                 "ledger fact does not match the exact pending descriptor coordinate"
             )
         return descriptor, effect_id
+
+    def _protected_lineage(
+        self, run_id: str, coordinate, descriptor_digest: str
+    ) -> str:
+        proof = self._runtime.interrupt_lineage(run_id, coordinate)
+        if proof is None:
+            return "incompatible"
+        try:
+            descriptor = parse_effect_descriptor(
+                self._raw_descriptor(
+                    NativeInterrupt(proof.occurrence.coordinate, proof.occurrence.value)
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            raise CoordinatorLineageError(
+                "native lineage occurrence is not the protected effect source"
+            ) from exc
+        if descriptor.digest != descriptor_digest:
+            raise CoordinatorLineageError(
+                "native lineage descriptor differs from durable effect source"
+            )
+        return proof.disposition
 
     def _acquire(self, effect_id: str) -> Lease:
         return self._leases.acquire(
@@ -434,11 +581,11 @@ class EffectCoordinator:
         safety: TerminalSafetyObservation,
         *,
         result: EffectResult | None,
+        binding: EffectRequest | EffectRecord,
     ) -> bool:
-        assert context.request is not None
         assert isinstance(context.descriptor, EffectDescriptor)
         assert context.descriptor.runner is not None
-        self._check_observation(context.request, safety)
+        self._check_observation(binding, safety)
         if safety.state == "pending":
             return False
         if safety.state != "proven":
@@ -476,7 +623,9 @@ class EffectCoordinator:
         for missing in (
             item for item in records if item.coordinate not in pending_by_coordinate
         ):
-            lineage = self._runtime.coordinate_lineage(run_id, missing.coordinate)
+            lineage = self._protected_lineage(
+                run_id, missing.coordinate, missing.descriptor_digest
+            )
             if lineage == "descended" and missing.phase in {"sealed", "indeterminate"}:
                 try:
                     lease = self._acquire(missing.effect_id)
@@ -552,14 +701,55 @@ class EffectCoordinator:
                     "busy",
                     None if record is None else record.phase,
                 )
-            context = self._context(
-                binding,
-                snapshot,
-                interrupt,
-                descriptor=descriptor,
-                effect_id=effect_id,
-                record=record,
-            )
+            try:
+                context = self._context(
+                    binding,
+                    snapshot,
+                    interrupt,
+                    descriptor=descriptor,
+                    effect_id=effect_id,
+                    record=record,
+                    resolve_grant=(
+                        record is None
+                        or record.phase == "prepared"
+                        or (
+                            record.phase == "launching"
+                            and (
+                                record.deadline_at is None
+                                or record.deadline_at > self._now()
+                            )
+                        )
+                    ),
+                )
+            except (EffectAuthorityDenied, EffectAuthorityUnavailable):
+                if (
+                    record is None
+                    or record.phase != "launching"
+                    or not isinstance(descriptor, EffectDescriptor)
+                    or descriptor.runner is None
+                ):
+                    raise
+                runner = self._runner_for_binding(record.runner_binding_digest)
+                observation = runner.inspect(record.effect_id)
+                self._check_observation(record, observation)
+                if observation.state == "absent":
+                    return self._report(run_id, record, "authority_blocked")
+                if observation.state == "indeterminate":
+                    indeterminate = self._ledger.mark_indeterminate(
+                        record.effect_id,
+                        expected_revision=record.revision,
+                        lease=lease,
+                    )
+                    return self._report(run_id, indeterminate, "indeterminate")
+                if observation.state not in {"running", "terminal"}:
+                    raise ProviderContractViolation("unknown launch observation state")
+                running = self._ledger.mark_running(
+                    record.effect_id,
+                    expected_revision=record.revision,
+                    lease=lease,
+                    runner_binding_digest=record.runner_binding_digest,
+                )
+                return self._report(run_id, running, "running")
             if record is None:
                 prepared = self._ledger.prepare(
                     context.interrupt.coordinate,
@@ -567,16 +757,20 @@ class EffectCoordinator:
                     deadline_at=context.deadline_at,
                     runner_binding_digest=(
                         None
-                        if context.request is None
-                        else context.request.runner_binding_digest
-                    )
-                    if not isinstance(context.descriptor, ScopeDescriptor)
-                    else (
-                        None
                         if context.runner is None
                         else context.runner.binding_digest
                     ),
-                    workspace_ref=None,
+                    workspace_ref=(
+                        None if context.grant is None else context.grant.workspace_ref
+                    ),
+                    request_digest=(
+                        None
+                        if context.request is None
+                        else context.request.request_digest
+                    ),
+                    grant_digest=(
+                        None if context.grant is None else context.grant.digest
+                    ),
                     lease=lease,
                 )
                 return self._report(run_id, prepared, "prepared")
@@ -592,8 +786,6 @@ class EffectCoordinator:
                         scope_descriptor=context.descriptor,
                     )
                     return self._report(run_id, sealed, "sealed")
-                if context.request is None:
-                    return self._report(run_id, record, "manual_pending")
                 if record.deadline_at is not None and record.deadline_at <= self._now():
                     sealed = self._ledger.seal(
                         record.effect_id,
@@ -602,6 +794,8 @@ class EffectCoordinator:
                         lease=lease,
                     )
                     return self._report(run_id, sealed, "sealed")
+                if context.request is None:
+                    return self._report(run_id, record, "manual_pending")
                 assert context.runner is not None
                 launch = context.runner.prepare(context.request)
                 self._check_launch(context.request, launch)
@@ -611,12 +805,14 @@ class EffectCoordinator:
                     lease=lease,
                     runner_binding_digest=context.request.runner_binding_digest,
                     workspace_ref=launch.workspace_ref,
+                    launch_commitment_digest=launch_commitment_digest(
+                        context.request, launch
+                    ),
                 )
                 return self._report(run_id, launching, "launch_claimed")
 
             if record.phase == "launching":
                 assert context.runner is not None
-                assert context.request is not None
                 if not self._leases.is_current(lease):
                     return self._report(run_id, record, "busy")
                 expired = (
@@ -625,28 +821,80 @@ class EffectCoordinator:
                 if expired:
                     observation = context.runner.inspect(record.effect_id)
                 else:
+                    assert context.request is not None
                     launch = context.runner.prepare(context.request)
                     self._check_launch(context.request, launch)
-                    if launch.workspace_ref != record.workspace_ref:
-                        raise ProviderContractViolation(
-                            "prepared workspace differs from the durable effect intent"
-                        )
-                    current = self._ledger.get(record.effect_id)
-                    if (
-                        current.revision != record.revision
-                        or current.phase != record.phase
-                        or not self._leases.is_current(lease)
+                    if record.launch_commitment_digest != launch_commitment_digest(
+                        context.request, launch
                     ):
-                        return self._report(run_id, current, "busy")
-                    observation = context.runner.ensure_started(launch)
-                self._check_observation(context.request, observation)
+                        raise ProviderContractViolation(
+                            "prepared launch differs from durable launch commitment"
+                        )
+                    with self._runtime.commitment_guard(
+                        run_id, record.coordinate
+                    ) as guarded:
+                        if guarded.binding != binding:
+                            raise CoordinatorLineageError(
+                                "native commitment binding differs from run catalog"
+                            )
+                        guarded_descriptor = parse_effect_descriptor(
+                            self._raw_descriptor(guarded.interrupt)
+                        )
+                        if (
+                            guarded.interrupt.coordinate != record.coordinate
+                            or guarded_descriptor.digest != record.descriptor_digest
+                        ):
+                            raise CoordinatorLineageError(
+                                "native commitment guard observed a changed effect grant"
+                            )
+                        if (
+                            record.deadline_at is not None
+                            and record.deadline_at <= self._now()
+                        ):
+                            return self._report(run_id, record, "deadline_blocked")
+                        guarded_context = self._context(
+                            binding,
+                            guarded.snapshot,
+                            guarded.interrupt,
+                            descriptor=guarded_descriptor,
+                            effect_id=record.effect_id,
+                            record=record,
+                            resolve_grant=True,
+                        )
+                        if (
+                            guarded_context.request is None
+                            or guarded_context.grant is None
+                            or guarded_context.request != context.request
+                            or guarded_context.grant != context.grant
+                        ):
+                            raise CoordinatorLineageError(
+                                "graph-owned effect request changed before commitment"
+                            )
+                        current = self._ledger.get(record.effect_id)
+                        if (
+                            current.revision != record.revision
+                            or current.phase != record.phase
+                            or not self._leases.is_current(lease)
+                        ):
+                            return self._report(run_id, current, "busy")
+                        assert guarded_context.grant is not None
+                        with self._authority.commitment(
+                            guarded_context.grant,
+                            guarded_context.request,
+                            launch,
+                        ):
+                            observation = context.runner.ensure_started(launch)
+                self._check_observation(
+                    context.request if context.request is not None else record,
+                    observation,
+                )
                 if observation.state == "absent" and expired:
                     sealed = self._ledger.seal(
                         record.effect_id,
                         self._timeout_result(record.effect_id),
                         expected_revision=record.revision,
                         lease=lease,
-                        runner_binding_digest=context.request.runner_binding_digest,
+                        runner_binding_digest=record.runner_binding_digest,
                     )
                     return self._report(run_id, sealed, "sealed")
                 if observation.state == "indeterminate":
@@ -662,13 +910,12 @@ class EffectCoordinator:
                     record.effect_id,
                     expected_revision=record.revision,
                     lease=lease,
-                    runner_binding_digest=context.request.runner_binding_digest,
+                    runner_binding_digest=record.runner_binding_digest,
                 )
                 return self._report(run_id, running, "running")
 
             if record.phase == "running":
                 assert context.runner is not None
-                assert context.request is not None
                 expired = (
                     record.deadline_at is not None and record.deadline_at <= self._now()
                 )
@@ -676,20 +923,22 @@ class EffectCoordinator:
                     if not self._leases.is_current(lease):
                         return self._report(run_id, record, "busy")
                     cancelled = context.runner.cancel(record.effect_id)
-                    self._check_observation(context.request, cancelled)
+                    self._check_observation(record, cancelled)
                     safety = context.runner.quiesce(record.effect_id)
-                    if not self._terminal_safety(context, safety, result=None):
+                    if not self._terminal_safety(
+                        context, safety, result=None, binding=record
+                    ):
                         return self._report(run_id, record, "quiescence_pending")
                     sealed = self._ledger.seal(
                         record.effect_id,
                         self._timeout_result(record.effect_id),
                         expected_revision=record.revision,
                         lease=lease,
-                        runner_binding_digest=context.request.runner_binding_digest,
+                        runner_binding_digest=record.runner_binding_digest,
                     )
                     return self._report(run_id, sealed, "sealed")
                 observation = context.runner.inspect(record.effect_id)
-                self._check_observation(context.request, observation)
+                self._check_observation(record, observation)
                 if observation.state == "running":
                     return self._report(run_id, record, "running")
                 if observation.state != "terminal":
@@ -702,14 +951,16 @@ class EffectCoordinator:
                         "provider result targets another effect"
                     )
                 safety = context.runner.quiesce(record.effect_id)
-                if not self._terminal_safety(context, safety, result=result):
+                if not self._terminal_safety(
+                    context, safety, result=result, binding=record
+                ):
                     return self._report(run_id, record, "quiescence_pending")
                 sealed = self._ledger.seal(
                     record.effect_id,
                     result,
                     expected_revision=record.revision,
                     lease=lease,
-                    runner_binding_digest=context.request.runner_binding_digest,
+                    runner_binding_digest=record.runner_binding_digest,
                 )
                 return self._report(run_id, sealed, "sealed")
 
@@ -784,7 +1035,11 @@ class EffectCoordinator:
             )
         for stale_record, _interrupt in deliverable:
             if (
-                self._runtime.coordinate_lineage(run_id, stale_record.coordinate)
+                self._protected_lineage(
+                    run_id,
+                    stale_record.coordinate,
+                    stale_record.descriptor_digest,
+                )
                 != "descended"
             ):
                 raise CoordinatorLineageError(

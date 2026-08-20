@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import secrets
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
 
@@ -16,6 +18,10 @@ from lockstep.runtime.native_models import (
     NativeAppPort,
     NativeCoordinate,
     NativeEvent,
+    NativeHistoryLimitExceeded,
+    NativeInterrupt,
+    NativeInterruptOccurrence,
+    NativeLineageProof,
     NativeSnapshot,
 )
 from lockstep.runtime.recipe_bundles import (
@@ -33,11 +39,17 @@ class RuntimeBindingConflict(RuntimeError):
     """A public run is already bound to a different immutable identity."""
 
 
-class NativeHistoryLimitExceeded(RuntimeError):
-    """Native checkpoint history exceeds the bounded public projection."""
-
-
 MAX_HISTORY_SNAPSHOTS = 1024
+MAX_HISTORY_INTERRUPTS = 4096
+
+
+@dataclass(frozen=True)
+class NativeCommitment:
+    """Exact graph-owned facts observed under native invocation serialization."""
+
+    binding: RunBinding
+    snapshot: NativeSnapshot
+    interrupt: NativeInterrupt
 
 
 class GraphRuntime:
@@ -155,6 +167,41 @@ class GraphRuntime:
         binding, app = self._bound(run_id)
         return app.snapshot(thread_id=binding.thread_id, subgraphs=subgraphs)
 
+    @contextmanager
+    def commitment_guard(
+        self, run_id: str, source: NativeCoordinate
+    ) -> Iterator[NativeCommitment]:
+        """Hold native commit serialization while one exact effect may launch."""
+
+        binding, app = self._bound(run_id)
+        if source.thread_id != binding.thread_id:
+            raise NativeCoordinateRejected(
+                "commitment source belongs to another native thread"
+            )
+        with self._invocations.hold(binding.thread_id):
+            owner = secrets.token_hex(16)
+            lease = self._leases.acquire(
+                "invoke", binding.thread_id, owner, self._lease_ttl
+            )
+            try:
+                if self.binding(run_id) != binding:
+                    raise RuntimeBindingConflict(
+                        "run binding changed before external commitment"
+                    )
+                snapshot = app.snapshot(thread_id=binding.thread_id, subgraphs=True)
+                matches = tuple(
+                    interrupt
+                    for interrupt in snapshot.pending
+                    if interrupt.coordinate == source
+                )
+                if len(matches) != 1:
+                    raise NativeCoordinateRejected(
+                        "commitment source is not the exact current interrupt"
+                    )
+                yield NativeCommitment(binding, snapshot, matches[0])
+            finally:
+                self._leases.release(lease)
+
     def history(self, run_id: str) -> Iterable[NativeSnapshot]:
         binding, app = self._bound(run_id)
         snapshots = []
@@ -172,27 +219,45 @@ class GraphRuntime:
                 close()
         return tuple(snapshots)
 
-    def _lineage_contains(self, run_id: str, source: NativeCoordinate) -> bool:
+    def interrupt_lineage(
+        self, run_id: str, source: NativeCoordinate
+    ) -> NativeLineageProof | None:
+        """Prove one exact occurrence via current or namespace-scoped history."""
+
         binding, app = self._bound(run_id)
-        history = iter(app.history(thread_id=binding.thread_id))
+        if source.thread_id != binding.thread_id:
+            return None
+        current = app.snapshot(thread_id=binding.thread_id, subgraphs=True)
+        current_matches = tuple(
+            interrupt for interrupt in current.pending if interrupt.coordinate == source
+        )
+        if len(current_matches) == 1:
+            interrupt = current_matches[0]
+            return NativeLineageProof(
+                "pending",
+                NativeInterruptOccurrence(interrupt.coordinate, interrupt.value),
+            )
+        if current_matches:
+            return None
+        history = iter(
+            app.interrupt_history(
+                thread_id=binding.thread_id,
+                checkpoint_ns=source.checkpoint_ns,
+                snapshot_limit=MAX_HISTORY_SNAPSHOTS,
+            )
+        )
+        matches: list[NativeInterruptOccurrence] = []
         try:
-            for index, snapshot in enumerate(history):
-                if index >= MAX_HISTORY_SNAPSHOTS:
+            for index, occurrence in enumerate(history):
+                if index >= MAX_HISTORY_INTERRUPTS:
                     raise NativeHistoryLimitExceeded(
                         "native lineage exceeds validation limit"
                     )
-                # Public history collapses a direct-subgraph interrupt into its
-                # parent task coordinate.  Its interrupt ID remains stable,
-                # while checkpoint namespace/task/checkpoint IDs do not.  Exact
-                # full-coordinate membership is enforced on the current snapshot;
-                # history is only descendant evidence in the bound thread.
-                if any(
-                    item.coordinate.thread_id == source.thread_id
-                    and item.coordinate.interrupt_id == source.interrupt_id
-                    for item in snapshot.pending
-                ):
-                    return True
-            return False
+                if occurrence.coordinate == source:
+                    matches.append(occurrence)
+            if len(matches) != 1:
+                return None
+            return NativeLineageProof("descended", matches[0])
         finally:
             close = getattr(history, "close", None)
             if close is not None:
@@ -201,10 +266,45 @@ class GraphRuntime:
     def coordinate_lineage(self, run_id: str, source: NativeCoordinate) -> str:
         """Classify an exact source using only public snapshot/history APIs."""
 
-        current = self.snapshot(run_id, subgraphs=True)
-        if any(item.coordinate == source for item in current.pending):
-            return "pending"
-        return "descended" if self._lineage_contains(run_id, source) else "incompatible"
+        proof = self.interrupt_lineage(run_id, source)
+        return "incompatible" if proof is None else proof.disposition
+
+    def checkpoint_is_ancestor(
+        self,
+        run_id: str,
+        ancestor: NativeCoordinate,
+        descendant: NativeInterrupt,
+    ) -> bool:
+        """Prove producer checkpoint ancestry to one exact current interrupt."""
+
+        binding, app = self._bound(run_id)
+        if (
+            ancestor.thread_id != binding.thread_id
+            or descendant.coordinate.thread_id != binding.thread_id
+        ):
+            return False
+        current = app.snapshot(thread_id=binding.thread_id, subgraphs=True)
+        exact = tuple(
+            item
+            for item in current.pending
+            if item.coordinate == descendant.coordinate
+            and item.value == descendant.value
+        )
+        if len(exact) != 1:
+            return False
+        anchors = dict(exact[0].ancestor_checkpoints)
+        descendant_checkpoint_id = anchors.get(ancestor.checkpoint_ns)
+        if ancestor.checkpoint_ns == descendant.coordinate.checkpoint_ns:
+            descendant_checkpoint_id = descendant.coordinate.checkpoint_id
+        if not descendant_checkpoint_id:
+            return False
+        return app.checkpoint_is_ancestor(
+            thread_id=binding.thread_id,
+            checkpoint_ns=ancestor.checkpoint_ns,
+            ancestor_checkpoint_id=ancestor.checkpoint_id,
+            descendant_checkpoint_id=descendant_checkpoint_id,
+            snapshot_limit=MAX_HISTORY_SNAPSHOTS,
+        )
 
     @staticmethod
     def _same_coordinate(left: NativeCoordinate, right: NativeCoordinate) -> bool:
@@ -244,7 +344,8 @@ class GraphRuntime:
                 raise NativeCoordinateRejected(
                     f"interrupt result is not currently pending: {sorted(unknown)}"
                 )
-            if not self._lineage_contains(run_id, source):
+            proof = self.interrupt_lineage(run_id, source)
+            if proof is None:
                 raise NativeCoordinateRejected(
                     "resume source is absent from native lineage"
                 )

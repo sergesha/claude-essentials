@@ -4,6 +4,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import timedelta
 
+import pytest
+
 from lockstep.runtime.providers.base import RunnerObservation, TerminalSafetyObservation
 
 from .test_coordinator import NOW, _advance_to_running, _result
@@ -153,7 +155,167 @@ def test_lease_expiring_during_prepare_cannot_cross_ensure_started(system) -> No
     assert runner.spawn_count == 0
 
 
+def test_revocation_before_prepare_blocks_provider_contact(system) -> None:
+    from lockstep.runtime.effects.authority import EffectAuthorityDenied
+
+    coordinator, _runtime, runner, _ledger, _store, _coordinate = system
+    coordinator.reconcile("run-1")
+    coordinator._authority.revoke(coordinator._authority.resolve_calls[-1])
+
+    with pytest.raises(EffectAuthorityDenied, match="revoked"):
+        coordinator.reconcile("run-1")
+
+    assert runner.prepare_calls == []
+    assert runner.ensure_started_calls == []
+
+
+def test_revocation_during_prepare_is_serialized_before_ensure_started(system) -> None:
+    from lockstep.runtime.effects.authority import EffectAuthorityDenied
+
+    coordinator, _runtime, runner, _ledger, _store, _coordinate = system
+    coordinator.reconcile("run-1")
+    coordinator.reconcile("run-1")
+    request = runner.prepare_calls[-1]
+    runner.prepare_callbacks.append(
+        lambda: coordinator._authority.revoke(request.intent_digest)
+    )
+
+    with pytest.raises(EffectAuthorityDenied, match="revoked"):
+        coordinator.reconcile("run-1")
+
+    assert runner.ensure_started_calls == []
+    assert runner.spawn_count == 0
+    assert coordinator.reconcile("run-1").action == "authority_blocked"
+    assert runner.inspect_calls
+    assert runner.ensure_started_calls == []
+
+
+def test_revocation_after_start_does_not_block_truthful_inspection(system) -> None:
+    coordinator, _runtime, runner, _ledger, _store, _coordinate = system
+    running, _runner = _advance_to_running(system)
+    request = runner.prepare_calls[-1]
+    coordinator._authority.revoke(request.intent_digest)
+
+    report = coordinator.reconcile("run-1")
+
+    assert report.action == "running"
+    assert runner.inspect_calls == [running.effect_id]
+    assert len(runner.ensure_started_calls) == 1
+
+
+def test_input_mutation_after_durable_intent_rejects_before_provider_contact(
+    system,
+) -> None:
+    from lockstep.runtime.effects.authority import EffectAuthorityDenied
+
+    coordinator, runtime, runner, ledger, _store, _coordinate = system
+    prepared = coordinator.reconcile("run-1")
+    runtime.current = replace(
+        runtime.current,
+        values={"brief": {"task": "mutated after authorization"}},
+    )
+
+    with pytest.raises(EffectAuthorityDenied, match="no exact"):
+        coordinator.reconcile("run-1")
+
+    assert ledger.get(prepared.effect_id).phase == "prepared"
+    assert runner.prepare_calls == []
+    assert runner.ensure_started_calls == []
+
+
+def test_unknown_changed_intent_is_denied_without_ledger_or_provider_contact(
+    system,
+) -> None:
+    from lockstep.runtime.effects.authority import EffectAuthorityDenied
+
+    coordinator, runtime, runner, ledger, _store, _coordinate = system
+    runtime.current = replace(
+        runtime.current,
+        values={"brief": {"task": "not the explicitly granted input"}},
+    )
+
+    with pytest.raises(EffectAuthorityDenied, match="no exact"):
+        coordinator.reconcile("run-1")
+
+    assert ledger.list_nonterminal() == []
+    assert runner.prepare_calls == []
+    assert runner.ensure_started_calls == []
+
+
+def test_native_source_change_during_prepare_cannot_cross_commitment_guard(
+    system,
+) -> None:
+    from lockstep.runtime.graph_runtime import NativeCoordinateRejected
+
+    coordinator, runtime, runner, ledger, _store, coordinate = system
+    coordinator.reconcile("run-1")
+    coordinator.reconcile("run-1")
+
+    def replace_source() -> None:
+        runtime.current = replace(
+            runtime.current,
+            pending=(
+                replace(
+                    runtime.current.pending[0],
+                    coordinate=replace(coordinate, task_id="foreign-task"),
+                ),
+            ),
+        )
+
+    runner.prepare_callbacks.append(replace_source)
+    with pytest.raises(NativeCoordinateRejected, match="exact current"):
+        coordinator.reconcile("run-1")
+
+    assert ledger.list_nonterminal()[0].phase == "launching"
+    assert runner.ensure_started_calls == []
+    assert runner.spawn_count == 0
+
+
+def test_graph_input_change_during_prepare_cannot_cross_commitment_guard(
+    system,
+) -> None:
+    from lockstep.runtime.effects.authority import EffectAuthorityDenied
+
+    coordinator, runtime, runner, ledger, _store, _coordinate = system
+    coordinator.reconcile("run-1")
+    coordinator.reconcile("run-1")
+    runner.prepare_callbacks.append(
+        lambda: setattr(
+            runtime,
+            "current",
+            replace(
+                runtime.current,
+                values={"brief": {"task": "changed during provider preparation"}},
+            ),
+        )
+    )
+
+    with pytest.raises(EffectAuthorityDenied, match="no exact"):
+        coordinator.reconcile("run-1")
+
+    assert ledger.list_nonterminal()[0].phase == "launching"
+    assert runner.ensure_started_calls == []
+    assert runner.spawn_count == 0
+
+
+def test_deadline_crossing_during_prepare_blocks_ensure_started(system) -> None:
+    coordinator, _runtime, runner, ledger, _store, _coordinate = system
+    coordinator.reconcile("run-1")
+    claimed = coordinator.reconcile("run-1")
+    runner.prepare_callbacks.append(
+        lambda: setattr(coordinator, "_clock", lambda: NOW + timedelta(hours=1))
+    )
+
+    report = coordinator.reconcile("run-1")
+
+    assert report.action == "deadline_blocked"
+    assert ledger.get(claimed.effect_id).phase == "launching"
+    assert runner.ensure_started_calls == []
+    assert runner.spawn_count == 0
+
+
 def test_partial_and_batch_delivery_use_only_current_exact_interrupts(system) -> None:
+    from lockstep.runtime.effects.authority import EffectAuthorityDenied
     from lockstep.runtime.effects.descriptors import (
         derive_effect_id,
         parse_effect_descriptor,
@@ -172,6 +334,7 @@ def test_partial_and_batch_delivery_use_only_current_exact_interrupts(system) ->
         expected_revision=first.revision,
         lease=first_lease,
         runner_binding_digest="b" * 64,
+        launch_commitment_digest="f" * 64,
     )
     first = ledger.mark_running(
         first_id,
@@ -202,6 +365,9 @@ def test_partial_and_batch_delivery_use_only_current_exact_interrupts(system) ->
         ),
     )
     runtime.history_coordinates.add(second_coordinate)
+    with pytest.raises(EffectAuthorityDenied, match="no exact"):
+        coordinator.reconcile("run-1")
+    coordinator._authority.authorize(coordinator._authority.resolve_intents[-1])
     second_report = coordinator.reconcile("run-1")
     assert second_report.effect_id == second_id
     assert second_report.action == "prepared"
@@ -212,6 +378,7 @@ def test_partial_and_batch_delivery_use_only_current_exact_interrupts(system) ->
         expected_revision=second.revision,
         lease=second_lease,
         runner_binding_digest="b" * 64,
+        launch_commitment_digest="f" * 64,
     )
     second = ledger.mark_running(
         second_id,

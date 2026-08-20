@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
+
 from lockstep.runtime.native_models import NativeCoordinate
 
 
@@ -57,9 +58,11 @@ def prepare(ledger, *, logical_id: str = "implement", runner: str = "b" * 64):
     return ledger.prepare(
         coordinate,
         descriptor,
-        deadline_at=datetime(2026, 8, 20, 11, tzinfo=timezone.utc),
+        deadline_at=datetime(2026, 8, 20, 11, tzinfo=UTC),
         runner_binding_digest=runner,
         workspace_ref="snapshot:" + "c" * 64,
+        request_digest="d" * 64,
+        grant_digest="e" * 64,
     )
 
 
@@ -85,6 +88,9 @@ def test_effect_table_owns_external_facts_only(ledger) -> None:
         "lease_epoch",
         "runner_binding_digest",
         "workspace_ref",
+        "request_digest",
+        "grant_digest",
+        "launch_commitment_digest",
         "result_ref",
         "fixed_error_code",
         "created_at",
@@ -120,8 +126,9 @@ def test_prepare_is_idempotent_but_rejects_changed_descriptor_or_runner(ledger) 
 
 
 def test_prepare_requires_resolved_deadline_and_runner_bindings(ledger) -> None:
-    from lockstep.runtime.effects.descriptors import parse_effect_descriptor
     from sqlalchemy import func, select
+
+    from lockstep.runtime.effects.descriptors import parse_effect_descriptor
 
     effect_ledger, storage = ledger
     coordinate = NativeCoordinate("thread", "checkpoint", "", "task", "interrupt")
@@ -139,7 +146,7 @@ def test_prepare_requires_resolved_deadline_and_runner_bindings(ledger) -> None:
         effect_ledger.prepare(
             coordinate,
             managed,
-            deadline_at=datetime(2026, 8, 20, 11, tzinfo=timezone.utc),
+            deadline_at=datetime(2026, 8, 20, 11, tzinfo=UTC),
             runner_binding_digest=None,
             workspace_ref=None,
         )
@@ -151,7 +158,7 @@ def test_prepare_requires_resolved_deadline_and_runner_bindings(ledger) -> None:
         effect_ledger.prepare(
             coordinate,
             manual,
-            deadline_at=datetime(2026, 8, 20, 11, tzinfo=timezone.utc),
+            deadline_at=datetime(2026, 8, 20, 11, tzinfo=UTC),
             runner_binding_digest=None,
             workspace_ref=None,
         )
@@ -190,6 +197,7 @@ def test_legal_monotonic_phases_and_cas(ledger) -> None:
         expected_revision=prepared.revision,
         lease=lease,
         runner_binding_digest="b" * 64,
+        launch_commitment_digest="f" * 64,
     )
     with pytest.raises(StaleEffectRevision):
         effect_ledger.mark_running(
@@ -281,7 +289,7 @@ def test_direct_scope_path_and_expired_effect_do_not_launch(ledger) -> None:
         effect_id=prepared.effect_id,
         scope_digest=descriptor.digest,
         scope_kind="parallel",
-        now=datetime(2026, 8, 20, 10, tzinfo=timezone.utc),
+        now=datetime(2026, 8, 20, 10, tzinfo=UTC),
         duration_seconds=None,
         ancestors=(),
     )
@@ -313,6 +321,7 @@ def test_launch_indeterminate_is_the_only_ambiguity_result_and_never_relaunches(
         expected_revision=prepared.revision,
         lease=lease,
         runner_binding_digest="b" * 64,
+        launch_commitment_digest="f" * 64,
     )
     record = effect_ledger.mark_indeterminate(
         prepared.effect_id,
@@ -333,12 +342,13 @@ def test_launch_indeterminate_is_the_only_ambiguity_result_and_never_relaunches(
 
 
 def test_public_seal_can_never_store_launch_indeterminate(ledger) -> None:
+    from sqlalchemy import select
+
     from lockstep.runtime.effects.descriptors import (
         parse_effect_descriptor,
         parse_effect_result,
     )
     from lockstep.runtime.effects.ledger import EffectConflict
-    from sqlalchemy import select
 
     effect_ledger, storage = ledger
 
@@ -370,6 +380,7 @@ def test_public_seal_can_never_store_launch_indeterminate(ledger) -> None:
         expected_revision=prepared.revision,
         lease=lease,
         runner_binding_digest="b" * 64,
+        launch_commitment_digest="f" * 64,
     )
     ambiguous = parse_effect_result(
         {
@@ -417,8 +428,9 @@ def test_public_seal_can_never_store_launch_indeterminate(ledger) -> None:
 
 
 def test_nul_write_rejects_before_ledger_prepare_without_any_fact(ledger) -> None:
-    from lockstep.runtime.effects.descriptors import parse_effect_descriptor
     from sqlalchemy import func, select
+
+    from lockstep.runtime.effects.descriptors import parse_effect_descriptor
 
     effect_ledger, storage = ledger
     value = descriptor_value()
@@ -429,7 +441,7 @@ def test_nul_write_rejects_before_ledger_prepare_without_any_fact(ledger) -> Non
         effect_ledger.prepare(
             NativeCoordinate("thread", "checkpoint", "", "task", "interrupt"),
             descriptor,
-            deadline_at=datetime(2026, 8, 20, 11, tzinfo=timezone.utc),
+            deadline_at=datetime(2026, 8, 20, 11, tzinfo=UTC),
             runner_binding_digest="b" * 64,
             workspace_ref=None,
         )
@@ -463,6 +475,7 @@ def test_seal_is_idempotent_for_same_result_and_conflicts_for_different_result(
         expected_revision=prepared.revision,
         lease=lease,
         runner_binding_digest="b" * 64,
+        launch_commitment_digest="f" * 64,
     )
     running = effect_ledger.mark_running(
         prepared.effect_id,
@@ -505,6 +518,7 @@ def test_concurrent_sqlite_seal_commits_one_exact_result(ledger) -> None:
         expected_revision=prepared.revision,
         lease=lease,
         runner_binding_digest="b" * 64,
+        launch_commitment_digest="f" * 64,
     )
     running = effect_ledger.mark_running(
         prepared.effect_id,
@@ -581,9 +595,11 @@ def test_identical_prepare_adopts_every_existing_effect_phase(ledger) -> None:
         return effect_ledger.prepare(
             coordinate,
             descriptor,
-            deadline_at=datetime(2026, 8, 20, 11, tzinfo=timezone.utc),
+            deadline_at=datetime(2026, 8, 20, 11, tzinfo=UTC),
             runner_binding_digest="b" * 64,
             workspace_ref="snapshot:" + "c" * 64,
+            request_digest="d" * 64,
+            grant_digest="e" * 64,
         )
 
     prepared = prepare_again()
@@ -593,6 +609,7 @@ def test_identical_prepare_adopts_every_existing_effect_phase(ledger) -> None:
         expected_revision=prepared.revision,
         lease=lease,
         runner_binding_digest="b" * 64,
+        launch_commitment_digest="f" * 64,
     )
     assert prepare_again() == launching
     running = effect_ledger.mark_running(
@@ -619,9 +636,11 @@ def test_identical_prepare_adopts_every_existing_effect_phase(ledger) -> None:
         return effect_ledger.prepare(
             second_coordinate,
             descriptor,
-            deadline_at=datetime(2026, 8, 20, 11, tzinfo=timezone.utc),
+            deadline_at=datetime(2026, 8, 20, 11, tzinfo=UTC),
             runner_binding_digest="b" * 64,
             workspace_ref="snapshot:" + "c" * 64,
+            request_digest="d" * 64,
+            grant_digest="e" * 64,
         )
 
     second = prepare_second()
@@ -631,6 +650,7 @@ def test_identical_prepare_adopts_every_existing_effect_phase(ledger) -> None:
         expected_revision=second.revision,
         lease=second_lease,
         runner_binding_digest="b" * 64,
+        launch_commitment_digest="f" * 64,
     )
     indeterminate = effect_ledger.mark_indeterminate(
         second.effect_id,
@@ -687,7 +707,7 @@ def test_expired_effect_lease_cannot_cross_launch_cas(ledger) -> None:
     from lockstep.runtime.leases import LeaseStore
 
     class Clock:
-        now = datetime(2026, 8, 20, 10, tzinfo=timezone.utc)
+        now = datetime(2026, 8, 20, 10, tzinfo=UTC)
 
         def __call__(self):
             return self.now
@@ -715,6 +735,7 @@ def test_expired_effect_lease_cannot_cross_launch_cas(ledger) -> None:
         expected_revision=prepared.revision,
         lease=current,
         runner_binding_digest="b" * 64,
+        launch_commitment_digest="f" * 64,
     )
     assert launching.phase == "launching"
     assert launching.lease_epoch == current.epoch
@@ -736,7 +757,7 @@ def test_ledger_rejects_result_kind_scope_digest_and_scope_runner_mismatch(
         effect_id=ordinary.effect_id,
         scope_digest="a" * 64,
         scope_kind="parallel",
-        now=datetime(2026, 8, 20, 10, tzinfo=timezone.utc),
+        now=datetime(2026, 8, 20, 10, tzinfo=UTC),
         duration_seconds=None,
         ancestors=(),
     )
@@ -771,7 +792,7 @@ def test_ledger_rejects_result_kind_scope_digest_and_scope_runner_mismatch(
         effect_id=prepared.effect_id,
         scope_digest="d" * 64,
         scope_kind="call",
-        now=datetime(2026, 8, 20, 10, tzinfo=timezone.utc),
+        now=datetime(2026, 8, 20, 10, tzinfo=UTC),
         duration_seconds=60,
         ancestors=(),
         runner_selector="codex",
@@ -789,7 +810,7 @@ def test_ledger_rejects_result_kind_scope_digest_and_scope_runner_mismatch(
         effect_id=prepared.effect_id,
         scope_digest=call.digest,
         scope_kind="call",
-        now=datetime(2026, 8, 20, 10, tzinfo=timezone.utc),
+        now=datetime(2026, 8, 20, 10, tzinfo=UTC),
         duration_seconds=60,
         ancestors=(),
         runner_selector="codex",
@@ -807,7 +828,7 @@ def test_ledger_rejects_result_kind_scope_digest_and_scope_runner_mismatch(
         effect_id=prepared.effect_id,
         scope_digest=call.digest,
         scope_kind="call",
-        now=datetime(2026, 8, 20, 10, tzinfo=timezone.utc),
+        now=datetime(2026, 8, 20, 10, tzinfo=UTC),
         duration_seconds=60,
         ancestors=(),
         runner_selector="claude",

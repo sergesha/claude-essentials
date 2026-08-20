@@ -2,8 +2,15 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+from threading import RLock
 
+from lockstep.runtime.effects.authority import (
+    EffectAuthorityDenied,
+    EffectGrant,
+)
 from lockstep.runtime.providers.base import (
     EffectRequest,
     PreparedLaunch,
@@ -15,8 +22,16 @@ from lockstep.runtime.providers.base import (
 class FakeRunner:
     """Deterministic durable-attempt fake; method calls and actual spawns differ."""
 
-    def __init__(self, *, binding_digest: str = "b" * 64) -> None:
+    reconciliation_boundary = "local_durable_handle"
+
+    def __init__(
+        self,
+        *,
+        binding_digest: str = "b" * 64,
+        required_authorities: tuple[str, ...] = ("os_user_execution",),
+    ) -> None:
         self.binding_digest = binding_digest
+        self.required_authorities = required_authorities
         self.prepare_calls: list[EffectRequest] = []
         self.ensure_started_calls: list[PreparedLaunch] = []
         self.inspect_calls: list[str] = []
@@ -61,10 +76,25 @@ class FakeRunner:
         if self.inspect_observations:
             return self.inspect_observations.popleft()
         launch = next(
-            item
-            for item in reversed(self.ensure_started_calls)
-            if item.effect_id == effect_id
+            (
+                item
+                for item in reversed(self.ensure_started_calls)
+                if item.effect_id == effect_id
+            ),
+            None,
         )
+        if launch is None:
+            request = next(
+                item
+                for item in reversed(self.prepare_calls)
+                if item.effect_id == effect_id
+            )
+            return RunnerObservation(
+                effect_id=effect_id,
+                request_digest=request.request_digest,
+                runner_binding_digest=request.runner_binding_digest,
+                state="absent",
+            )
         return RunnerObservation.running_for(launch)
 
     def cancel(self, effect_id: str) -> RunnerObservation:
@@ -100,3 +130,71 @@ class FakeRunner:
 
     def mismatch(self, observation: RunnerObservation) -> RunnerObservation:
         return replace(observation, request_digest="f" * 64)
+
+
+class FakeEffectAuthority:
+    """Explicit deterministic authority; never installed as a production default."""
+
+    def __init__(self, *, clock: Callable[[], datetime] | None = None) -> None:
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self._lock = RLock()
+        self._grants: dict[str, EffectGrant] = {}
+        self._revoked: set[str] = set()
+        self.resolve_calls: list[str] = []
+        self.resolve_intents: list[EffectRequest] = []
+        self.commit_calls: list[str] = []
+
+    def authorize(self, intent: EffectRequest) -> EffectGrant:
+        with self._lock:
+            grant = EffectGrant.build(
+                intent,
+                actor_binding_digest="d" * 64,
+                required_authorities=("os_user_execution",),
+                workspace_ref=f"workspace:{intent.effect_id}",
+                parent_capability_generation=1,
+                grant_generation=1,
+                policy_epoch=1,
+                config_epoch=1,
+                approval_generation=None,
+                expires_at=self._clock() + timedelta(hours=1),
+            )
+            self._grants[intent.intent_digest] = grant
+            self._revoked.discard(intent.intent_digest)
+            return grant
+
+    def resolve(self, intent: EffectRequest) -> EffectGrant:
+        with self._lock:
+            self.resolve_calls.append(intent.intent_digest)
+            self.resolve_intents.append(intent)
+            if intent.intent_digest in self._revoked:
+                raise EffectAuthorityDenied("effect grant is revoked")
+            grant = self._grants.get(intent.intent_digest)
+            if grant is None:
+                raise EffectAuthorityDenied("no exact effect grant is installed")
+            if grant.expires_at <= self._clock():
+                raise EffectAuthorityDenied("effect grant is expired")
+            return grant
+
+    def revoke(self, intent_digest: str) -> None:
+        with self._lock:
+            self._grants.pop(intent_digest, None)
+            self._revoked.add(intent_digest)
+
+    @contextmanager
+    def commitment(self, grant, request, launch):
+        with self._lock:
+            current = self._grants.get(request.intent_digest)
+            if (
+                request.intent_digest in self._revoked
+                or current is None
+                or current.digest != grant.digest
+            ):
+                raise EffectAuthorityDenied("effect grant is revoked or superseded")
+            if (
+                request.grant_digest != grant.digest
+                or launch.workspace_ref != grant.workspace_ref
+                or grant.expires_at <= self._clock()
+            ):
+                raise EffectAuthorityDenied("effect grant commitment is stale")
+            self.commit_calls.append(grant.digest)
+            yield

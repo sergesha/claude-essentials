@@ -165,7 +165,9 @@ from lockstep.recipe.authority import AuthorizedMaterialization
 from lockstep.runtime.native_models import (
     NativeCoordinate,
     NativeEvent,
+    NativeHistoryLimitExceeded,
     NativeInterrupt,
+    NativeInterruptOccurrence,
     NativeSnapshot,
 )
 from lockstep.runtime.owner_state import seal_owner_file
@@ -203,6 +205,15 @@ def _snapshot_config(snapshot: Any) -> tuple[str, str, str]:
     )
 
 
+def _checkpoint_ancestors(snapshot: Any) -> tuple[tuple[str, str], ...]:
+    configurable = (getattr(snapshot, "config", None) or {}).get("configurable", {})
+    ancestors = dict(configurable.get("checkpoint_map") or {})
+    _thread_id, checkpoint_id, checkpoint_ns = _snapshot_config(snapshot)
+    if checkpoint_id:
+        ancestors[checkpoint_ns] = checkpoint_id
+    return tuple(sorted((str(key), str(value)) for key, value in ancestors.items()))
+
+
 def _pending_interrupts(snapshot: Any) -> tuple[NativeInterrupt, ...]:
     pending: list[NativeInterrupt] = []
     seen: set[str] = set()
@@ -233,11 +244,33 @@ def _pending_interrupts(snapshot: Any) -> tuple[NativeInterrupt, ...]:
                             interrupt_id=interrupt_id,
                         ),
                         value=_neutral(getattr(interrupt, "value", None)),
+                        ancestor_checkpoints=_checkpoint_ancestors(current),
                     )
                 )
 
     visit(snapshot)
     return tuple(pending)
+
+
+def _interrupt_occurrences(snapshot: Any) -> tuple[NativeInterruptOccurrence, ...]:
+    """Project exact tasks from one namespace-scoped public history snapshot."""
+
+    thread_id, checkpoint_id, checkpoint_ns = _snapshot_config(snapshot)
+    return tuple(
+        NativeInterruptOccurrence(
+            coordinate=NativeCoordinate(
+                thread_id=thread_id,
+                checkpoint_id=checkpoint_id,
+                checkpoint_ns=checkpoint_ns,
+                task_id=str(getattr(task, "id", "")),
+                interrupt_id=str(getattr(interrupt, "id", "")),
+            ),
+            value=_neutral(getattr(interrupt, "value", None)),
+        )
+        for task in (getattr(snapshot, "tasks", ()) or ())
+        for interrupt in (getattr(task, "interrupts", ()) or ())
+        if str(getattr(task, "id", "")) and str(getattr(interrupt, "id", ""))
+    )
 
 
 def _to_native_snapshot(snapshot: Any) -> NativeSnapshot:
@@ -358,6 +391,71 @@ class NativeApp:
         try:
             for snapshot in self._app.get_state_history(self._config(thread_id)):
                 yield _to_native_snapshot(snapshot)
+        finally:
+            self._seal_sqlite_files()
+
+    def interrupt_history(
+        self, *, thread_id: str, checkpoint_ns: str, snapshot_limit: int
+    ) -> Iterable[NativeInterruptOccurrence]:
+        """Read exact occurrences from the public history of one namespace."""
+
+        self._ensure_open()
+        config = {
+            "configurable": {
+                "thread_id": thread_id,
+                "checkpoint_ns": checkpoint_ns,
+            }
+        }
+        try:
+            for index, snapshot in enumerate(
+                self._app.get_state_history(config, limit=snapshot_limit + 1)
+            ):
+                if index >= snapshot_limit:
+                    raise NativeHistoryLimitExceeded(
+                        "native lineage snapshot scan exceeds validation limit"
+                    )
+                yield from _interrupt_occurrences(snapshot)
+        finally:
+            self._seal_sqlite_files()
+
+    def checkpoint_is_ancestor(
+        self,
+        *,
+        thread_id: str,
+        checkpoint_ns: str,
+        ancestor_checkpoint_id: str,
+        descendant_checkpoint_id: str,
+        snapshot_limit: int,
+    ) -> bool:
+        """Use public namespace history anchored at one exact descendant."""
+
+        self._ensure_open()
+        config = {
+            "configurable": {
+                "thread_id": thread_id,
+                "checkpoint_ns": checkpoint_ns,
+                "checkpoint_id": descendant_checkpoint_id,
+            }
+        }
+        try:
+            current_config = config
+            for _index in range(snapshot_limit):
+                snapshot = self._app.get_state(current_config)
+                current_thread, checkpoint_id, namespace = _snapshot_config(snapshot)
+                if current_thread != thread_id or namespace != checkpoint_ns:
+                    return False
+                if (
+                    namespace == checkpoint_ns
+                    and checkpoint_id == ancestor_checkpoint_id
+                ):
+                    return True
+                parent = getattr(snapshot, "parent_config", None)
+                if not isinstance(parent, dict):
+                    return False
+                current_config = parent
+            raise NativeHistoryLimitExceeded(
+                "native ancestry parent chain exceeds validation limit"
+            )
         finally:
             self._seal_sqlite_files()
 

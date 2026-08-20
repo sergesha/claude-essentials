@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from lockstep.recipe.authority import AuthorizedMaterialization
 
@@ -23,6 +23,25 @@ class NativeCoordinate:
 class NativeInterrupt:
     coordinate: NativeCoordinate
     value: Any
+    ancestor_checkpoints: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass(frozen=True)
+class NativeInterruptOccurrence:
+    """One exact interrupt occurrence projected from public native history."""
+
+    coordinate: NativeCoordinate
+    value: Any
+
+
+@dataclass(frozen=True)
+class NativeLineageProof:
+    disposition: Literal["pending", "descended"]
+    occurrence: NativeInterruptOccurrence
+
+
+class NativeHistoryLimitExceeded(RuntimeError):
+    """A bounded public native-history projection exceeded its work limit."""
 
 
 @dataclass(frozen=True)
@@ -54,9 +73,25 @@ class NativeAppPort(Protocol):
         self, values_or_command: object, *, thread_id: str
     ) -> Iterable[NativeEvent]: ...
 
-    def snapshot(self, *, thread_id: str, subgraphs: bool = False) -> NativeSnapshot: ...
+    def snapshot(
+        self, *, thread_id: str, subgraphs: bool = False
+    ) -> NativeSnapshot: ...
 
     def history(self, *, thread_id: str) -> Iterable[NativeSnapshot]: ...
+
+    def interrupt_history(
+        self, *, thread_id: str, checkpoint_ns: str, snapshot_limit: int
+    ) -> Iterable[NativeInterruptOccurrence]: ...
+
+    def checkpoint_is_ancestor(
+        self,
+        *,
+        thread_id: str,
+        checkpoint_ns: str,
+        ancestor_checkpoint_id: str,
+        descendant_checkpoint_id: str,
+        snapshot_limit: int,
+    ) -> bool: ...
 
     def close(self) -> None: ...
 
