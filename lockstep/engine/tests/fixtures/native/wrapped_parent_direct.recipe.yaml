@@ -3,7 +3,10 @@ name: native-wrapped-parent
 state:
   seed: str
   seen: str
-  answer: str
+  observed_thread_id: str
+  observed_checkpoint_ns: str
+  observed_checkpoint_id: str
+  answer: dict
   phase: str
 nodes:
   child:

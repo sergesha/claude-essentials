@@ -8,6 +8,7 @@ from typing import Any
 
 @dataclass(frozen=True)
 class NativeCoordinate:
+    thread_id: str
     checkpoint_id: str
     checkpoint_ns: str
     task_id: str

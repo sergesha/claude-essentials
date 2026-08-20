@@ -15,7 +15,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import textwrap
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Callable
@@ -37,69 +36,9 @@ _MANIFEST_FIELDS = {
     "files",
 }
 _FILE_FIELDS = {"path", "before_sha256", "after_sha256"}
-_FALLBACK_CAPABILITY_PROBE = textwrap.dedent(
-    r"""
-    import tempfile
-    from pathlib import Path
-
-    from yamlgraph.compile.graph_loader import compile_graph, load_graph_config
-    from yamlgraph.compile.node_otel import _maybe_wrap_otel
-    from yamlgraph.node_factory.subgraph_nodes import _build_child_config
-    from yamlgraph.node_timeout import _maybe_wrap_timeout
-
-    seen = []
-    def node(state, config):
-        seen.append(config)
-        return {"value": state["value"]}
-
-    config = {"configurable": {"thread_id": "probe-parent"}}
-    wrapped = _maybe_wrap_otel(
-        _maybe_wrap_timeout(node, {"timeout": 1}, "probe"), "probe", "python"
-    )
-    assert wrapped({"value": 1}, config) == {"value": 1}
-    assert seen == [config]
-    child_config = _build_child_config(
-        {"configurable": {
-            "thread_id": "probe-parent",
-            "tenant": "kept",
-            "checkpoint_id": "private",
-            "checkpoint_ns": "private",
-            "checkpoint_map": {"private": "private"},
-            "__pregel_send": object(),
-        }},
-        "child",
-    )
-    assert child_config["configurable"] == {
-        "thread_id": "probe-parent:child", "tenant": "kept"
-    }
-
-    child = '''
-    version: "1.0"
-    name: child
-    state: {phase: str}
-    nodes:
-      done: {type: passthrough, output: {phase: complete}}
-    edges:
-      - {from: START, to: done}
-      - {from: done, to: END}
-    '''
-    parent = '''
-    version: "1.0"
-    name: parent
-    state: {phase: str}
-    nodes:
-      child: {type: subgraph, graph: child.yaml, mode: direct}
-    edges:
-      - {from: START, to: child}
-      - {from: child, to: END}
-    '''
-    with tempfile.TemporaryDirectory(prefix="lockstep-yamlgraph-probe-") as raw:
-        root = Path(raw)
-        (root / "child.yaml").write_text(child)
-        (root / "parent.yaml").write_text(parent)
-        app = compile_graph(load_graph_config(root / "parent.yaml")).compile()
-        assert app.invoke({})["phase"] == "complete"
-    """
+_FALLBACK_CAPABILITY_PROBE = (
+    "from lockstep.recipe.yamlgraph_adapter import probe_native_capabilities; "
+    "probe_native_capabilities()"
 )
 
 
@@ -348,9 +287,18 @@ def _atomic_write_from(source: Path, destination: Path) -> None:
 
 
 def _replace_with_rollback(
-    targets: tuple[tuple[dict, Path], ...], staging: Path
+    targets: tuple[tuple[dict, Path], ...],
+    staging: Path,
+    final_state: Callable[[], str],
 ) -> None:
-    originals = {path: path.read_bytes() for _, path in targets}
+    originals: dict[Path, bytes] = {}
+    for item, path in targets:
+        original = path.read_bytes()
+        if _sha256_bytes(original) != item["before_sha256"]:
+            raise DependencyPatchError(
+                f"dependency changed before replacement: {item['path']}"
+            )
+        originals[path] = original
     replaced: list[Path] = []
     try:
         for item, destination in targets:
@@ -365,6 +313,11 @@ def _replace_with_rollback(
                 raise DependencyPatchError(
                     f"patched output changed during replace: {item['path']}"
                 )
+        verified_state = final_state()
+        if verified_state != "fully patched":
+            raise DependencyPatchError(
+                f"dependency patch verification failed after replace: {verified_state}"
+            )
     except Exception as exc:
         restore_errors: list[str] = []
         for destination in reversed(replaced):
@@ -417,11 +370,12 @@ def apply_dependency_patch(
                 raise DependencyPatchError(
                     f"patched output digest mismatch: {item['path']}"
                 )
-        _replace_with_rollback(targets, staging)
+        _replace_with_rollback(
+            targets,
+            staging,
+            lambda: _state(dist, manifest),
+        )
 
-    final_state = _state(dist, manifest)
-    if final_state != "fully patched":
-        raise DependencyPatchError(f"dependency patch verification failed after replace: {final_state}")
     return PatchResult("patched", manifest["distribution"], dist.version)
 
 

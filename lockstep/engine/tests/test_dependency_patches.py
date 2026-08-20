@@ -261,6 +261,26 @@ def test_post_replace_digest_failure_restores_verified_originals(tmp_path, monke
     assert _states(dist) == before
 
 
+def test_final_state_read_failure_restores_verified_originals(tmp_path, monkeypatch):
+    """Final classification must run while the original-byte backups still exist."""
+    _, dist = _copy_official_distribution(tmp_path)
+    before = _states(dist)
+    real_state = dp._state
+    classifications = 0
+
+    def fail_final_classification(distribution, manifest):
+        nonlocal classifications
+        classifications += 1
+        if classifications == 2:
+            raise OSError("simulated final state read failure")
+        return real_state(distribution, manifest)
+
+    monkeypatch.setattr(dp, "_state", fail_final_classification)
+    with pytest.raises(dp.DependencyPatchError, match="final state read failure"):
+        dp.apply_dependency_patch(distribution=dist)
+    assert _states(dist) == before
+
+
 def test_diff_paths_are_contained_and_exactly_match_manifest(tmp_path):
     """A valid digest cannot authorize traversal or an extra file in the diff."""
     _, dist = _copy_official_distribution(tmp_path)
@@ -374,6 +394,19 @@ def test_native_probe_rejects_official_original_and_accepts_patched_copy(tmp_pat
     )
     assert original.returncode != 0
     assert patched.returncode == 0, patched.stderr
+
+
+def test_packaged_probe_fallback_executes_adapter_owned_gate(monkeypatch):
+    """A wheel without the source script must still delegate native imports to the adapter."""
+    real_is_file = Path.is_file
+
+    def hide_source_probe(path):
+        if path.name == "probe_yamlgraph_native.py":
+            return False
+        return real_is_file(path)
+
+    monkeypatch.setattr(Path, "is_file", hide_source_probe)
+    assert dp._default_capability_probe(sys.executable)
 
 
 def test_black_box_uv_run_fails_closed_after_original_or_mixed_sync_state(tmp_path):

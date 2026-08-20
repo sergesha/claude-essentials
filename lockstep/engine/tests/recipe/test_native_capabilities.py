@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 from pathlib import Path
 
 import lockstep.recipe.yamlgraph_adapter as yg
@@ -19,6 +20,15 @@ def _results(snapshot, value_by_message: dict[str, str]) -> dict[str, str]:
         item.coordinate.interrupt_id: value_by_message[item.value]
         for item in snapshot.pending
     }
+
+
+def _native_capture():
+    path = FIXTURES / "native_tools.py"
+    spec = importlib.util.spec_from_file_location("lockstep_native_tools", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.capture
 
 
 def test_direct_child_interrupt_survives_sqlite_restart(tmp_path):
@@ -204,12 +214,28 @@ def test_otel_timeout_wrappers_keep_direct_child_native_across_restart(
     parked = first.invoke({"seed": "kept"}, thread_id="wrapped-parent")
     assert parked.pending[0].coordinate.checkpoint_ns
     coordinate = parked.pending[0].coordinate
+    assert coordinate.thread_id == "wrapped-parent"
+    assert coordinate.checkpoint_id
+    observed = yg.run_wrapped_config_probe(
+        _native_capture(),
+        {"seed": "kept"},
+        thread_id=coordinate.thread_id,
+        checkpoint_ns=coordinate.checkpoint_ns,
+        checkpoint_id=coordinate.checkpoint_id,
+        node_name="observe",
+    )
+    assert observed == {
+        "seen": "kept",
+        "observed_thread_id": "wrapped-parent",
+        "observed_checkpoint_ns": coordinate.checkpoint_ns,
+        "observed_checkpoint_id": coordinate.checkpoint_id,
+    }
     first.close()
 
     restarted = yg.open_native_app(WRAPPED_PARENT_DIRECT, db)
     completed = restarted.resume(
         thread_id="wrapped-parent",
-        results_by_interrupt_id={coordinate.interrupt_id: "yes"},
+        results_by_interrupt_id={coordinate.interrupt_id: observed},
     )
     restarted.close()
 
@@ -219,7 +245,10 @@ def test_otel_timeout_wrappers_keep_direct_child_native_across_restart(
         if span.name == "yamlgraph.node.execute"
     ]
     assert completed.values["seen"] == "kept"
-    assert completed.values["answer"] == "yes"
+    assert completed.values["answer"] == observed
+    assert completed.values["observed_thread_id"] == "wrapped-parent"
+    assert completed.values["observed_checkpoint_ns"] == coordinate.checkpoint_ns
+    assert completed.values["observed_checkpoint_id"] == coordinate.checkpoint_id
     assert "observe" in node_names
     assert "finish" in node_names
     assert "done" in node_names

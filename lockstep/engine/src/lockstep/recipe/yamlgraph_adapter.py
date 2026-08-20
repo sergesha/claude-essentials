@@ -143,7 +143,8 @@ the same `Advance`/`_parse_brief` machinery, fed from `get_state()`.
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterable, Mapping
+import tempfile
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from dataclasses import fields as dataclass_fields, is_dataclass
 from pathlib import Path
@@ -154,7 +155,10 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 from yamlgraph.compile.graph_loader import compile_graph, load_graph_config
+from yamlgraph.compile.node_otel import _maybe_wrap_otel
 from yamlgraph.mermaid_export import parse_route_lines, render_mermaid, render_overlay
+from yamlgraph.node_factory.subgraph_nodes import _build_child_config
+from yamlgraph.node_timeout import _maybe_wrap_timeout
 
 from lockstep.runtime.native_models import (
     NativeCoordinate,
@@ -204,10 +208,12 @@ def _neutral(value: Any) -> Any:
     return str(value)
 
 
-def _snapshot_config(snapshot: Any) -> tuple[str, str]:
+def _snapshot_config(snapshot: Any) -> tuple[str, str, str]:
     configurable = (getattr(snapshot, "config", None) or {}).get("configurable", {})
-    return str(configurable.get("checkpoint_id") or ""), str(
-        configurable.get("checkpoint_ns") or ""
+    return (
+        str(configurable.get("thread_id") or ""),
+        str(configurable.get("checkpoint_id") or ""),
+        str(configurable.get("checkpoint_ns") or ""),
     )
 
 
@@ -216,7 +222,7 @@ def _pending_interrupts(snapshot: Any) -> tuple[NativeInterrupt, ...]:
     seen: set[str] = set()
 
     def visit(current: Any) -> None:
-        checkpoint_id, checkpoint_ns = _snapshot_config(current)
+        thread_id, checkpoint_id, checkpoint_ns = _snapshot_config(current)
         for task in getattr(current, "tasks", ()) or ():
             child = getattr(task, "state", None)
             if hasattr(child, "tasks") and hasattr(child, "config"):
@@ -234,6 +240,7 @@ def _pending_interrupts(snapshot: Any) -> tuple[NativeInterrupt, ...]:
                 pending.append(
                     NativeInterrupt(
                         coordinate=NativeCoordinate(
+                            thread_id=thread_id,
                             checkpoint_id=checkpoint_id,
                             checkpoint_ns=checkpoint_ns,
                             task_id=str(getattr(task, "id", "")),
@@ -248,7 +255,7 @@ def _pending_interrupts(snapshot: Any) -> tuple[NativeInterrupt, ...]:
 
 
 def _to_native_snapshot(snapshot: Any) -> NativeSnapshot:
-    checkpoint_id, checkpoint_ns = _snapshot_config(snapshot)
+    _thread_id, checkpoint_id, checkpoint_ns = _snapshot_config(snapshot)
     return NativeSnapshot(
         values=dict(_neutral(getattr(snapshot, "values", {}) or {})),
         pending=_pending_interrupts(snapshot),
@@ -356,6 +363,174 @@ def open_native_app(recipe_path: Path, db_path: Path | None = None) -> NativeApp
         if connection is not None:
             connection.close()
         raise
+
+
+def run_wrapped_config_probe(
+    node_fn: Callable[..., dict[str, Any]],
+    state: Mapping[str, Any],
+    *,
+    thread_id: str,
+    checkpoint_ns: str,
+    checkpoint_id: str,
+    node_name: str = "config_probe",
+) -> dict[str, Any]:
+    """Run a config-aware callable through yamlgraph's timeout and OTel wrappers.
+
+    The callable and returned mapping are neutral boundary values. Native wrapper
+    types and RunnableConfig remain confined to this adapter.
+    """
+    config = {
+        "configurable": {
+            "thread_id": thread_id,
+            "checkpoint_ns": checkpoint_ns,
+            "checkpoint_id": checkpoint_id,
+        }
+    }
+    wrapped = _maybe_wrap_otel(
+        _maybe_wrap_timeout(node_fn, {"timeout": 1}, node_name),
+        node_name,
+        "python",
+    )
+    result = _neutral(wrapped(dict(state), config))
+    if not isinstance(result, dict):
+        raise RuntimeError("native config probe did not return a mapping")
+    return result
+
+
+_PROBE_CHILD = '''
+version: "1.0"
+name: probe-child
+state: {phase: str, answer: str}
+nodes:
+  prepare: {type: passthrough, output: {phase: waiting}}
+  ask:
+    type: interrupt
+    message: Answer?
+    state_key: question
+    resume_key: answer
+    idempotent: false
+  finish: {type: passthrough, output: {phase: complete}}
+edges:
+  - {from: START, to: prepare}
+  - {from: prepare, to: ask}
+  - {from: ask, to: finish}
+  - {from: finish, to: END}
+'''
+
+_PROBE_DIRECT = '''
+version: "1.0"
+name: probe-direct
+state: {phase: str, answer: str}
+nodes:
+  child: {type: subgraph, graph: child.yaml, mode: direct}
+edges:
+  - {from: START, to: child}
+  - {from: child, to: END}
+'''
+
+_PROBE_INVOKE = '''
+version: "1.0"
+name: probe-invoke
+state: {child_phase: str}
+nodes:
+  child:
+    type: subgraph
+    graph: child.yaml
+    mode: invoke
+    input_mapping: {}
+    output_mapping: {child_phase: phase}
+    interrupt_output_mapping: {child_phase: phase}
+edges:
+  - {from: START, to: child}
+  - {from: child, to: END}
+'''
+
+
+def probe_native_capabilities() -> None:
+    """Raise unless the installed yamlgraph satisfies Lockstep's native gate."""
+
+    def capture(state: dict[str, Any], config: Mapping[str, Any]) -> dict[str, Any]:
+        return {
+            "value": state["value"],
+            "configurable": dict(config.get("configurable") or {}),
+        }
+
+    wrapper_result = run_wrapped_config_probe(
+        capture,
+        {"value": 42},
+        thread_id="probe-parent",
+        checkpoint_ns="probe-namespace",
+        checkpoint_id="probe-checkpoint",
+    )
+    assert wrapper_result == {
+        "value": 42,
+        "configurable": {
+            "thread_id": "probe-parent",
+            "checkpoint_ns": "probe-namespace",
+            "checkpoint_id": "probe-checkpoint",
+        },
+    }
+
+    child_config = _build_child_config(
+        {
+            "configurable": {
+                "thread_id": "probe-parent",
+                "tenant": "kept",
+                "checkpoint_id": "private",
+                "checkpoint_ns": "private",
+                "checkpoint_map": {"private": "private"},
+                "__pregel_send": object(),
+            }
+        },
+        "child",
+    )
+    assert child_config["configurable"] == {
+        "thread_id": "probe-parent:child",
+        "tenant": "kept",
+    }
+
+    with tempfile.TemporaryDirectory(prefix="lockstep-yamlgraph-probe-") as raw:
+        root = Path(raw)
+        child = root / "child.yaml"
+        direct = root / "direct.yaml"
+        invoke = root / "invoke.yaml"
+        database = root / "checkpoints.sqlite"
+        child.write_text(_PROBE_CHILD)
+        direct.write_text(_PROBE_DIRECT)
+        invoke.write_text(_PROBE_INVOKE)
+
+        first = open_native_app(direct, database)
+        parked = first.invoke({}, thread_id="probe-direct")
+        first.close()
+        restarted = open_native_app(direct, database)
+        completed = restarted.resume(
+            thread_id="probe-direct",
+            results_by_interrupt_id={
+                parked.pending[0].coordinate.interrupt_id: "yes"
+            },
+        )
+        restarted.close()
+        assert completed.values["answer"] == "yes"
+        assert completed.pending == ()
+
+        invoke_app = open_native_app(invoke)
+        parked_a = invoke_app.invoke({}, thread_id="probe-a")
+        parked_b = invoke_app.invoke({}, thread_id="probe-b")
+        completed_a = invoke_app.resume(
+            thread_id="probe-a",
+            results_by_interrupt_id={
+                parked_a.pending[0].coordinate.interrupt_id: "a"
+            },
+        )
+        completed_b = invoke_app.resume(
+            thread_id="probe-b",
+            results_by_interrupt_id={
+                parked_b.pending[0].coordinate.interrupt_id: "b"
+            },
+        )
+        invoke_app.close()
+        assert completed_a.pending == ()
+        assert completed_b.pending == ()
 
 
 def _parse_brief(raw: dict) -> StepBrief:

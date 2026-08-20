@@ -3,18 +3,17 @@ name: native-wrapped-child
 state:
   seed: str
   seen: str
-  answer: str
+  observed_thread_id: str
+  observed_checkpoint_ns: str
+  observed_checkpoint_id: str
+  answer: dict
   phase: str
 tools:
-  capture:
+  persist_identity:
     type: python
     path: native_tools.py
-    function: capture
+    function: persist_identity
 nodes:
-  observe:
-    type: python
-    tool: capture
-    timeout: 1
   ask:
     type: interrupt
     message: Wrapped answer?
@@ -22,11 +21,9 @@ nodes:
     resume_key: answer
     idempotent: false
   finish:
-    type: passthrough
-    output:
-      phase: complete
+    type: python
+    tool: persist_identity
 edges:
-  - {from: START, to: observe}
-  - {from: observe, to: ask}
+  - {from: START, to: ask}
   - {from: ask, to: finish}
   - {from: finish, to: END}
