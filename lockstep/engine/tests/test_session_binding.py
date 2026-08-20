@@ -47,6 +47,30 @@ def test_posttool_binds_only_real_native_awaiting_run(tmp_path):
     assert sessions.read_binding(state, run_id)["session_id"] == "session-1"
 
 
+def test_posttool_status_never_refreshes_or_adopts_binding(tmp_path):
+    state, _project, run_id = _run(tmp_path)
+    sessions.touch(state, run_id, "original", 30)
+    path = sessions.binding_path(state, run_id)
+    binding = json.loads(path.read_text())
+    binding["last_seen"] = "2000-01-01T00:00:00+00:00"
+    path.write_text(json.dumps(binding, sort_keys=True))
+    before = path.read_bytes()
+
+    hook_posttool(
+        {
+            "tool_name": "mcp__lockstep__scenario_status",
+            "session_id": "replacement",
+            "tool_input": {"run_id": run_id},
+            "tool_response": {
+                "run_id": run_id,
+                sessions.BINDING_MARKER_KEY: sessions.BINDING_MARKER_VALUE,
+            },
+        },
+        state,
+    )
+    assert path.read_bytes() == before
+
+
 def test_pretool_policy_requires_current_native_run_session(tmp_path, monkeypatch):
     state, project, run_id = _run(tmp_path, monkeypatch)
     sessions.touch(state, run_id, "owner", 30)

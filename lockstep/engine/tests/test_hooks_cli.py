@@ -149,4 +149,4 @@ def test_doctor_reports_stale_session_binding_as_failure(tmp_path, monkeypatch):
     assert ok is False
     assert secret_session not in report
     assert "stale" in report
-    assert "adoptable" in report
+    assert "start a fresh run" in report

@@ -53,6 +53,7 @@ from lockstep.runtime.recipe_bundles import RecipeBundleStore
 from lockstep.runtime.service import (
     preflight_recipe,
     validate_evidence_payload,
+    validate_evidence_shape,
     validate_reason_payload,
     validate_start_input,
 )
@@ -270,6 +271,13 @@ def scenario_dryrun(
     shape checks; command/baseline checks report `skipped (dryrun)` and
     never execute. No catalog entry, checkpoint, or baseline artifact —
     nothing durable, nothing besides shape checks actually runs."""
+    raw_evidence = validate_evidence_shape(evidence)
+    forged = [key for key in raw_evidence if key.startswith("_")]
+    if forged:
+        return {
+            "accepted": False,
+            "errors": [f"reserved evidence key(s) rejected: {sorted(forged)}"],
+        }
     project_root = _project_for_context(ctx)
     _state_dir, recipes_dir = _configured_paths(project_root)
     authorized = preflight_recipe(recipes_dir, recipe)
@@ -279,15 +287,6 @@ def scenario_dryrun(
         brief = _load_step_brief(materialized.source_path, step)
     if brief is None:
         raise ValueError(f"step {step!r} not found in recipe {recipe!r}")
-
-    raw_evidence = evidence or {}
-
-    forged = [k for k in raw_evidence if k.startswith("_")]
-    if forged:
-        return {
-            "accepted": False,
-            "errors": [f"reserved evidence key(s) rejected: {sorted(forged)}"],
-        }
 
     schema = brief.get("evidence_schema")
     schema_errors = evidence_mod.validate_evidence(schema, raw_evidence)

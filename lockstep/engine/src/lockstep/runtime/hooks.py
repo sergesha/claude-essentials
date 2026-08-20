@@ -29,8 +29,8 @@ failure to whatever invoked it.
 Hooks are read-only on engine-owned catalog/checkpoint state and policy files;
 they never mutate a run. Their one own write is the
 session-binding sidecar tree (`bindings/`, `sessions.py`): the PreToolUse
-gate refreshes the owner's liveness stamp, `hook_posttool` binds/adopts on
-lockstep MCP tool touches. Hook death is silent — nothing here observes
+gate refreshes the owner's liveness stamp, and `hook_posttool` binds only a
+newly started run. Status never refreshes or adopts ownership. Hook death is silent — nothing here observes
 it; the engine's evidence gate is the load-bearing layer and does not
 depend on hooks firing.
 """
@@ -170,7 +170,7 @@ def hook_session_start(state_dir: Path, cwd: str) -> str:
             suffix = (
                 ""
                 if sessions.is_live(session_binding, stale_minutes)
-                else " (no live driving session — a scenario_status call on it adopts it)"
+                else " (no live driving session — start a fresh run)"
             )
             if status.status == "awaiting":
                 lines.append(
@@ -251,9 +251,8 @@ def hook_pretool(stdin_json: dict, state_dir: Path) -> tuple[int, str]:
         # exist" (which let any session in on another session's run). The
         # platform delivers session_id in every hook input; a session owns
         # a run iff the run's binding sidecar names it (sessions.py — bound
-        # at scenario_start by hook_posttool, adoptable via a lockstep tool
-        # touch once the driver goes silent). The gate itself NEVER binds
-        # or adopts; on an owned run it refreshes the liveness stamp, so
+        # at scenario_start by hook_posttool). The gate itself NEVER binds
+        # or adopts; on a live owned run it refreshes the liveness stamp, so
         # the owner's real work keeps its own claim alive.
         session_id = stdin_json.get("session_id")
         if not isinstance(session_id, str) or not session_id:
@@ -273,14 +272,12 @@ def hook_pretool(stdin_json: dict, state_dir: Path) -> tuple[int, str]:
             return _deny(
                 f"lockstep policy: run {run_id} of recipe {recipe} is being driven "
                 "by another live session — writes here belong to that session. If it "
-                f"is truly gone it falls silent, and after {stale_minutes:g}m a "
-                f"scenario_status call on {run_id} adopts the run; or scenario_abort "
-                "it and scenario_start a fresh run"
+                f"is truly gone it becomes stale after {stale_minutes:g}m; "
+                "scenario_start a fresh run"
             )
         return _deny(
             f"lockstep policy: run {run_id} of recipe {recipe} has no live driving "
-            f"session — call scenario_status on {run_id} to adopt it, or "
-            "scenario_abort it and scenario_start a fresh run"
+            "session — scenario_start a fresh run"
         )
     except Exception:  # noqa: BLE001 - fail-closed: internal error must never fail-open
         return _deny("lockstep: internal error — failing closed")
@@ -291,12 +288,9 @@ def hook_pretool(stdin_json: dict, state_dir: Path) -> tuple[int, str]:
 # (hooks.json matcher; re-checked here — by name for the known shapes via
 # LOCKSTEP_TOOL_MATCHER, by the server-stamped response marker for any
 # other mcp__ name a user-extended matcher lets through). This is where a
-# run gets BOUND to the session driving it: at scenario_start (run_id read
-# from the tool response) and on every later touch naming the run —
-# scenario_status polls included, so a long-running driver stays visibly
-# live. Adoption (sessions.touch) also lives here and ONLY
-# here: taking over an abandoned run requires deliberately touching it with
-# a lockstep tool, never just writing a file in the project. Pure observer:
+# run gets BOUND to the session driving it only at scenario_start (run_id read
+# from the tool response). Later status/observer calls never refresh or adopt
+# ownership. Pure observer:
 # no output, fail-OPEN on any internal error.
 # ---------------------------------------------------------------------------
 
@@ -412,6 +406,10 @@ def hook_posttool(stdin_json: dict, state_dir: Path) -> None:
         state_dir = Path(state_dir)
         tool_name = str(stdin_json.get("tool_name") or "")
         if not tool_name.startswith("mcp__"):
+            return
+        # Only start creates a binding. Status and other observers never
+        # refresh or silently adopt stale ownership.
+        if not tool_name.endswith("__scenario_start"):
             return
         if _LOCKSTEP_TOOL_RE.fullmatch(tool_name):
             # Known lockstep name shape. The run id comes from what the
@@ -544,8 +542,7 @@ def doctor(state_dir: Path, recipes_dir: Path) -> tuple[bool, str]:
                 "name in the session's tool list (it ends in __scenario_start) and "
                 "add its prefix followed by .* to the PostToolUse matcher in the "
                 "plugin's hooks/hooks.json or your settings hooks — responses are "
-                "marker-verified, no code change needed. Then a scenario_status "
-                f"call on {run_id} binds it",
+                "marker-verified, no code change needed. Then start a fresh run",
             )
         else:
             live = sessions.is_live(binding, _session_stale_minutes())
@@ -554,7 +551,7 @@ def doctor(state_dir: Path, recipes_dir: Path) -> tuple[bool, str]:
                 live,
                 "binding present and live"
                 if live
-                else "binding is stale and adoptable",
+                else "binding is stale; start a fresh run",
             )
 
     lines.append(f"installed version: {__version__}")

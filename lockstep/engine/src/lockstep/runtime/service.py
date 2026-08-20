@@ -6,6 +6,7 @@ import re
 import tempfile
 import uuid
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +19,7 @@ from lockstep.recipe.authority import (
 )
 from lockstep.recipe.loader import RecipeError, RecipeLoader
 from lockstep.recipe.yamlgraph_adapter import open_native_app
-from lockstep.runtime import sessions
+from lockstep.runtime import config, sessions
 from lockstep.runtime.catalog import RunBinding, RunCatalog
 from lockstep.runtime.graph_runtime import (
     GraphRuntime,
@@ -61,14 +62,19 @@ def validate_start_input(input: Mapping[object, object] | None) -> dict[str, Any
 
 
 def validate_evidence_payload(evidence: object) -> dict[str, Any]:
+    value = validate_evidence_shape(evidence)
+    if any(key.startswith("_") for key in value):
+        raise LockstepError("reserved evidence keys are forbidden")
+    return value
+
+
+def validate_evidence_shape(evidence: object) -> dict[str, Any]:
     try:
         value = bounded_json(evidence, label="scenario evidence")
     except PayloadLimitExceeded as exc:
         raise LockstepError(str(exc)) from exc
     if not isinstance(value, dict):
         raise LockstepError("scenario evidence must be a JSON object")
-    if any(key.startswith("_") for key in value):
-        raise LockstepError("reserved evidence keys are forbidden")
     return value
 
 
@@ -205,7 +211,16 @@ class LockstepService:
     ) -> tuple[RunBinding, ScenarioStatus]:
         binding = self._bind_existing(run_id, project)
         snapshot = self.runtime.snapshot(run_id, subgraphs=True)
-        return binding, project_status(binding, snapshot, (), ())
+        status = project_status(binding, snapshot, (), ())
+        if status.status == "awaiting" and status.owner == "worker":
+            session_binding = sessions.read_binding(self.state_dir, run_id)
+            if not sessions.is_live(session_binding, config.session_stale_minutes()):
+                status = replace(
+                    status,
+                    annotations=status.annotations
+                    + (("binding_integrity", "missing_or_stale"),),
+                )
+        return binding, status
 
     def status(self, run_id: str, project: str) -> dict[str, Any]:
         _binding, status = self._snapshot_status(run_id, project)
@@ -247,22 +262,21 @@ class LockstepService:
             raise LockstepError(f"run {run_id} is parked on another step")
         return binding, matches[0]
 
-    def _require_session(self, run_id: str, session_id: str | None) -> None:
-        binding = sessions.read_binding(self.state_dir, run_id)
-        if (
-            binding is None
-            or not isinstance(session_id, str)
-            or not session_id
-            or binding["session_id"] != session_id
-        ):
-            raise LockstepError("worker session binding mismatch")
-
     def require_session(
         self, run_id: str, session_id: str | None, project: str
     ) -> None:
         """Fail closed at an external mutation edge; resume rechecks it too."""
         self._bind_existing(run_id, project)
-        self._require_session(run_id, session_id)
+        try:
+            with sessions.locked_owner(
+                self.state_dir,
+                run_id,
+                session_id,
+                config.session_stale_minutes(),
+            ):
+                pass
+        except PermissionError as exc:
+            raise LockstepError(str(exc)) from exc
 
     def _resume_worker(
         self,
@@ -275,7 +289,12 @@ class LockstepService:
     ) -> dict[str, Any]:
         binding, interrupt = self._worker_interrupt(run_id, step, project)
         try:
-            with sessions.locked_owner(self.state_dir, run_id, session_id):
+            with sessions.locked_owner(
+                self.state_dir,
+                run_id,
+                session_id,
+                config.session_stale_minutes(),
+            ):
                 snapshot = self.runtime.resume(
                     run_id,
                     interrupt.coordinate,

@@ -16,15 +16,13 @@ crash-released advisory lock on the sidecar, published via tmp + `os.replace`):
   `last_seen` on every touch. Ownership never lapses by idleness alone —
   staleness makes a run adoptABLE by someone else; it never evicts an
   owner nobody is competing with.
-- `touch` binds an UNBOUND run to the toucher, and ADOPTS a run whose
-  driver has been silent longer than the liveness window — the
-  crash-recovery door (a resumed conversation carries a NEW session id).
-  Adoption records `adopted_from` so a takeover is provenance, never a
-  silent swap. A run whose driver is live is never rebound (`"foreign"`).
-- The PreToolUse gate only ever calls `refresh_if_owner` — it NEVER
-  binds or adopts. Adoption requires the deliberate lockstep-tool touch
-  (PostToolUse), so a stray Write in the project cannot silently take
-  over an abandoned run; the gate's deny message names that door.
+- `touch` is the explicit bind/adopt primitive. Production hooks invoke it only
+  for `scenario_start`; status/observer calls never refresh or adopt a run.
+  Adoption records `adopted_from` so a future explicit recovery surface can
+  preserve provenance. A run whose driver is live is never rebound (`"foreign"`).
+- The PreToolUse gate only ever calls `refresh_if_owner` — it NEVER binds or
+  adopts. A stray Write or status call cannot silently take over an abandoned
+  run.
 
 A corrupt/unreadable sidecar reads as ABSENT: it cannot be refreshed by
 anyone (so treating it as live would deadlock the run forever) and it
@@ -81,7 +79,7 @@ def read_binding(state_dir: Path, run_id: str) -> dict | None:
 def is_live(binding: dict | None, stale_minutes: float) -> bool:
     """A binding is live while its `last_seen` is within the window. An
     unparsable stamp is NOT live — the owner cannot refresh what cannot
-    be read, so "live forever" would wedge the run; "adoptable" heals."""
+    be read, so "live forever" would wedge the run."""
     if not binding:
         return False
     try:
@@ -112,9 +110,12 @@ def _write(path: Path, data: dict) -> None:
 
 @contextmanager
 def locked_owner(
-    state_dir: Path, run_id: str, session_id: str | None
+    state_dir: Path,
+    run_id: str,
+    session_id: str | None,
+    stale_minutes: float,
 ) -> Iterator[None]:
-    """Hold the binding mutation lock from owner verification through commit."""
+    """Hold a live exact-owner binding from verification through commit."""
     path = binding_path(state_dir, run_id)
     with _binding_lock(path):
         binding = read_binding(state_dir, run_id)
@@ -123,8 +124,9 @@ def locked_owner(
             or not isinstance(session_id, str)
             or not session_id
             or binding["session_id"] != session_id
+            or not is_live(binding, stale_minutes)
         ):
-            raise PermissionError("worker session binding mismatch")
+            raise PermissionError("worker session binding missing, stale, or mismatched")
         yield
 
 

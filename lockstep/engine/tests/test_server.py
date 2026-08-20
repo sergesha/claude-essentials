@@ -266,6 +266,50 @@ def test_oversized_result_controls_leave_native_state_byte_identical(tmp_path, m
     assert after == before
 
 
+def test_stale_binding_is_visible_and_cannot_resume_or_adopt_on_status(
+    tmp_path, monkeypatch
+):
+    project, _recipes = _configure(monkeypatch, tmp_path)
+    run_id = server.scenario_start("native-parent-direct", {}, ctx=_ctx(project))["run_id"]
+    state = tmp_path / "state"
+    sessions.touch(state, run_id, "expired-owner", 30)
+    sidecar = sessions.binding_path(state, run_id)
+    binding = json.loads(sidecar.read_text())
+    binding["last_seen"] = "2000-01-01T00:00:00+00:00"
+    sidecar.write_text(json.dumps(binding, sort_keys=True))
+    before_binding = sidecar.read_bytes()
+
+    status = server.scenario_status(run_id, ctx=_ctx(project, "expired-owner"))
+    assert status["status"] == "awaiting"
+    assert status["binding_integrity"] == "missing_or_stale"
+    assert "expired-owner" not in json.dumps(status)
+    assert sidecar.read_bytes() == before_binding
+
+    before = {
+        path.relative_to(state): path.read_bytes()
+        for path in state.rglob("*")
+        if path.is_file()
+    }
+    operations = (
+        lambda: server.scenario_done(
+            run_id, "answer", {"answer": "yes"}, ctx=_ctx(project, "expired-owner")
+        ),
+        lambda: server.scenario_escalate(
+            run_id, "expired", ctx=_ctx(project, "expired-owner")
+        ),
+        lambda: server.scenario_abort(run_id, ctx=_ctx(project, "expired-owner")),
+    )
+    for operation in operations:
+        with pytest.raises(LockstepError, match="stale"):
+            operation()
+    after = {
+        path.relative_to(state): path.read_bytes()
+        for path in state.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+
+
 def test_validate_recipe_rejects_python_before_import_or_owner_state_mutation(
     tmp_path, monkeypatch
 ):
@@ -320,6 +364,42 @@ def test_dryrun_reads_only_an_authorized_immutable_recipe(tmp_path, monkeypatch)
     with pytest.raises(LockstepError, match="executable authority denied"):
         server.scenario_dryrun("unsafe", "work", {"answer": "yes"}, ctx=_ctx(project))
     assert not (tmp_path / "state").exists()
+
+
+def test_dryrun_bounds_evidence_before_recipe_preflight_or_state(tmp_path, monkeypatch):
+    project, _recipes = _configure(monkeypatch, tmp_path)
+    too_deep = {}
+    cursor = too_deep
+    for _ in range(18):
+        child = {}
+        cursor["next"] = child
+        cursor = child
+
+    for evidence in ({"huge": "x" * 70_000}, too_deep):
+        with pytest.raises(LockstepError):
+            server.scenario_dryrun("missing", "work", evidence, ctx=_ctx(project))
+        assert not (tmp_path / "state").exists()
+
+
+@pytest.mark.parametrize("invalid", [[], "", 0, False])
+def test_dryrun_rejects_falsey_non_object_before_recipe_preflight(
+    tmp_path, monkeypatch, invalid
+):
+    project, _recipes = _configure(monkeypatch, tmp_path)
+    with pytest.raises(LockstepError, match="JSON object"):
+        server.scenario_dryrun("missing", "work", invalid, ctx=_ctx(project))
+    assert not (tmp_path / "state").exists()
+
+
+def test_dryrun_preserves_reserved_evidence_response_contract(tmp_path, monkeypatch):
+    project, _recipes = _configure(monkeypatch, tmp_path)
+    result = server.scenario_dryrun(
+        "missing", "one", {"_forged": True}, ctx=_ctx(project)
+    )
+    assert result == {
+        "accepted": False,
+        "errors": ["reserved evidence key(s) rejected: ['_forged']"],
+    }
 
 
 def test_engine_singleton_closes_old_instance_before_reconfiguration(tmp_path, monkeypatch):
