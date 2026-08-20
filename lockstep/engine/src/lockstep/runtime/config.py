@@ -18,10 +18,6 @@ def policy_dir(state_dir: Path) -> Path:
     return Path(state_dir) / "policy.d"
 
 
-def runs_json_path(state_dir: Path) -> Path:
-    return Path(state_dir) / "runs.json"
-
-
 def session_stale_minutes() -> float:
     try:
         return float(os.environ.get("LOCKSTEP_SESSION_STALE_MINUTES", "30"))

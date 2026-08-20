@@ -231,7 +231,7 @@ def _check_file_matches_hash(check: dict, evidence: dict, ctx: dict) -> list[str
     actual = hashlib.sha256(resolved.read_bytes()).hexdigest()
     if actual != expected:
         return [f"file_matches_hash: hash mismatch for {raw} — "
-                "artifact changed after the subcall pinned it"]
+                "artifact changed after its producer pinned it"]
     return []
 
 

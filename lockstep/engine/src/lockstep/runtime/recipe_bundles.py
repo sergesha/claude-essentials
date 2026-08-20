@@ -273,6 +273,35 @@ class RecipeBundleStore:
         )
         self._limits = limits or RecipeBundleLimits()
 
+    @classmethod
+    def open_readonly(
+        cls,
+        owner_state_dir: str | Path,
+        *,
+        limits: RecipeBundleLimits | None = None,
+    ) -> RecipeBundleStore:
+        """Open existing trusted bundle state without creating any path.
+
+        Hook and diagnostic projections must reuse the same manifest and
+        materialization verification as compilation, but they are observers:
+        a missing directory is an integrity failure, never an invitation to
+        initialize storage.
+        """
+        owner_state = Path(owner_state_dir)
+        verify_owner_directory(owner_state)
+        manifests = owner_state / "recipe-bundles"
+        materialized = owner_state / "recipe-materializations"
+        verify_owner_directory(manifests)
+        verify_owner_directory(materialized)
+
+        store = cls.__new__(cls)
+        store._owner_state = owner_state
+        store._blob_store = None
+        store._manifests = manifests
+        store._materialized = materialized
+        store._limits = limits or RecipeBundleLimits()
+        return store
+
     def manifest_path(self, ref: RecipeBundleRef) -> Path:
         _validate_digest(ref.digest)
         return self._manifests / f"{ref.digest}.json"
@@ -457,6 +486,19 @@ class RecipeBundleStore:
             raise MaterializationError("materialized recipe is incomplete")
         if observed_directories != expected_directories:
             raise MaterializationError("materialized directory layout does not match manifest")
+
+    def read_materialization(self, ref: RecipeBundleRef) -> MaterializedRecipe:
+        """Verify and return an existing immutable materialization read-only."""
+        manifest = self.read_manifest(ref)
+        target = self._materialized / ref.digest
+        if not target.is_dir() or target.is_symlink():
+            raise MaterializationError("immutable recipe materialization is unavailable")
+        self._verify_materialization(target, manifest)
+        return MaterializedRecipe(
+            bundle=ref,
+            directory=target,
+            source_path=target / manifest.root,
+        )
 
     def materialize_for_compile(self, ref: RecipeBundleRef) -> MaterializedRecipe:
         manifest = self.read_manifest(ref)

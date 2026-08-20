@@ -35,7 +35,7 @@ def test_host_manifests_share_identity_version_and_components():
         ),
         "developerName": "sergesha",
         "category": "Developer Tools",
-        "capabilities": ["Skills", "MCP server", "Policy hooks", "Runner subcalls"],
+        "capabilities": ["Skills", "MCP server", "Policy hooks", "Native workflows"],
         "defaultPrompt": [
             "Use lockstep to run the requested workflow and validate its evidence."
         ],
@@ -187,12 +187,6 @@ def test_install_build_and_plugin_enforce_sync_patch_no_sync_order(tmp_path):
         f"run --project {ROOT / 'engine'} --no-sync lockstep-dependency-install",
         f"run --project {ROOT / 'engine'} --no-sync lockstep doctor",
     ]
-
-
-def test_distributed_default_recipe_does_not_pin_a_host_runner():
-    recipe = (ROOT / "recipes/examples/feature-dev-reviewed.recipe.yaml").read_text()
-    assert "runner: claude" not in recipe
-    assert "runner: codex" not in recipe
 
 
 def test_runtime_skill_uses_host_neutral_worker_language():

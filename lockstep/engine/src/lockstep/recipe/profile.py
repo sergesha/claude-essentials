@@ -50,32 +50,6 @@ Rules enforced (errors unless noted):
 - A `tools:` entry whose `module` is not under `lockstep.` is a
   WARNING, not an error (local `tools.py` — last resort, human review).
 
-The subcall triple (spawn -> `_subcall` marker -> poll) is a
-THIRD interrupt class alongside work and escalate interrupts. A
-`{step: _subcall}` marker is exempt from the work-interrupt rules
-(validator pairing, task/exit_criterion/checks) but not from
-`idempotent: false` or the checks:/placeholder scans. Its own rules
-(`_check_subcall_rules`): required `node` (unique, `^[a-z][a-z0-9_-]*$`)
-and verbatim non-empty `prompt`; optional `runner` (`^[a-z][a-z0-9-]*$`),
-positive-int `timeout_minutes`, fractal `scenario` (child recipe must
-exist as `<child_recipes_dir or recipe-dir>/<name>.yaml`) and `artifacts`
-(dot-free names, relative paths covered by the child's `baseline_globs`).
-Triple shape: spawn -> marker is the spawn's single unconditional edge;
-marker -> poll is the marker's single unconditional edge; every edge into
-a spawn comes from a directly-paired validator conditioned exactly
-`verdict_status == '(pass|fail)'` (what the engine's spawn prediction
-keys on) —
-never from START: a start-time spawn would fire on an empty evidence
-channel and bypass the engine's done()-time policy prediction
-(runner/budget/depth), so the profile forbids the shape outright. Every
-poll out-edge is conditioned exactly
-`_subcall_status == '(running|done|error)'` with the 'running' back edge
-to the marker required. Poll back edges are exempt from
-`loop_limits`/`loop_exits` (termination is the runner timeout). Subcall
-recipes must declare `_subcall_status`/`_subcall_envelope` in `state:`;
-every `hash_from` must match
-`_subcall_envelope.artifact_hashes.<declared artifact>`.
-
 Conditional-edge dialect: edges are `{from, to,
 condition}` triples. An edge dict carrying a `conditions:` list (the
 `type: conditional` router shape) is a different, unsupported dialect —
@@ -92,39 +66,9 @@ import yaml
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
 
-from lockstep.runtime.validators import _path_covered
-
 FORBIDDEN_NODE_TYPES = {"llm", "agent", "router", "copilot", "race"}
 BASELINE_CHECK_TYPES = {"fresh", "unchanged", "changed_in", "diff_only"}
 PLACEHOLDER_RE = re.compile(r"\{[A-Za-z_]\w*\}")
-
-# the subcall triple (spawn -> _subcall marker -> poll).
-_RUNNER_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
-_ARTIFACT_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
-# a scenario names a FILE in the recipes dir and the child run_id prefix:
-# no separators, no leading dot (mirrors the engine's own guard).
-_SCENARIO_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")  # no dots: dotted-path resolution
-_SPAWN_EDGE_COND_RE = re.compile(r"^verdict_status == '(pass|fail)'$")
-_POLL_EDGE_COND_RE = re.compile(r"^_subcall_status == '(running|done|error)'$")
-_HASH_FROM_RE = re.compile(r"^_subcall_envelope\.artifact_hashes\.([a-z][a-z0-9_-]*)$")
-
-
-def _is_subcall_marker(message: Any) -> bool:
-    return isinstance(message, dict) and message.get("step") == "_subcall"
-
-
-def subcall_node_kind(node: Any, tools: dict) -> str | None:
-    """Classify by RESOLVED module/function, never by tool NAME: a
-    recipe aliasing `my_spawn: {module: lockstep.runtime.subcalls, function:
-    spawn}` must hit every subcall rule. Shared with Engine._predict_spawn."""
-    if not isinstance(node, dict) or node.get("type") != "python":
-        return None
-    tool_cfg = tools.get(node.get("tool")) if isinstance(tools, dict) else None
-    if not isinstance(tool_cfg, dict) or tool_cfg.get("module") != "lockstep.runtime.subcalls":
-        return None
-    fn = tool_cfg.get("function")
-    return fn if fn in ("spawn", "poll") else None
-
 
 def _is_escalate_marker(message: dict) -> bool:
     if not isinstance(message, dict):
@@ -192,21 +136,9 @@ def _check_loops(
     loop_limits: dict,
     loop_exits: dict,
     errors: list[str],
-    tools: dict | None = None,
 ) -> None:
     seen_sources: set[str] = set()
     for src, tgt in _find_back_edges(edges_by_from):
-        tgt_node = nodes.get(tgt) or {}
-        src_node = nodes.get(src) or {}
-        is_marker = (tgt_node.get("type") == "interrupt"
-                     and _is_subcall_marker(tgt_node.get("message") or {}))
-        # Exempt on the SOURCE, not just the target: the poll loop's
-        # termination is the runner timeout, and only a POLL node has one.
-        # Keyed on the target alone, ANY cycle the DFS happens to enter at
-        # the marker — an ordinary passthrough wired back to it — escapes
-        # loop_limits/loop_exits entirely and runs forever.
-        if is_marker and subcall_node_kind(src_node, tools or {}) == "poll":
-            continue
         if src in seen_sources:
             continue
         seen_sources.add(src)
@@ -293,13 +225,7 @@ def _check_interrupt_node(
     if node.get("idempotent") is not False:
         errors.append(f"interrupt '{name}' must declare idempotent: false")
 
-    # Subcall markers (third interrupt class) are exempt from the work rules
-    # below — task/exit_criterion/>=1 check and validator pairing; their own
-    # rules live in _check_subcall_rules. They are NOT exempt from the
-    # idempotent check above or the checks:/placeholder scan further down —
-    # marker checks are never executed, but a command_from smuggled onto one
-    # must still be refused where v1 scans every interrupt.
-    if not _is_escalate_marker(message) and not _is_subcall_marker(message):
+    if not _is_escalate_marker(message):
         # validator pairing: ALL outgoing edges must target one node, and
         # that node must be the python validator.
         targets = sorted({e.get("to") for e in edges_by_from.get(name, [])})
@@ -349,11 +275,13 @@ def _check_interrupt_node(
                     f"('format: project-path' in evidence_schema, interrupt '{name}')"
                 )
 
-    if any(isinstance(c, dict) and c.get("type") in BASELINE_CHECK_TYPES for c in checks):
-        if not doc.get("baseline_globs"):
-            errors.append(
-                f"baseline_globs must be declared when baseline checks are used (interrupt '{name}')"
-            )
+    if (
+        any(isinstance(c, dict) and c.get("type") in BASELINE_CHECK_TYPES for c in checks)
+        and not doc.get("baseline_globs")
+    ):
+        errors.append(
+            f"baseline_globs must be declared when baseline checks are used (interrupt '{name}')"
+        )
 
     for s in _walk_strings(checks):
         if PLACEHOLDER_RE.search(s):
@@ -380,166 +308,7 @@ def _check_interrupt_node(
                 break
 
 
-def _check_subcall_rules(doc: dict, nodes: dict, edges_by_from: dict,
-                         child_dir: Path, errors: list[str]) -> None:
-    tools = doc.get("tools") or {}
-    markers = {n: cfg for n, cfg in nodes.items()
-               if isinstance(cfg, dict) and cfg.get("type") == "interrupt"
-               and _is_subcall_marker(cfg.get("message") or {})}
-    spawns = {n for n, cfg in nodes.items() if subcall_node_kind(cfg, tools) == "spawn"}
-    polls = {n for n, cfg in nodes.items() if subcall_node_kind(cfg, tools) == "poll"}
-
-    # hash_from is scanned even when the recipe has NO subcall nodes: the
-    # rule is "every hash_from in the recipe", and a hash_from check in a
-    # subcall-free recipe names an artifact nothing can ever declare.
-    hash_names: set[str] = set()
-    for cfg in nodes.values():
-        msg = cfg.get("message") if isinstance(cfg, dict) else None
-        if not isinstance(msg, dict):
-            continue  # a bare-string message is reported by the interrupt rules
-        for check in (msg.get("checks") or []):
-            hf = check.get("hash_from") if isinstance(check, dict) else None
-            if hf is None:
-                continue
-            m = _HASH_FROM_RE.fullmatch(hf) if isinstance(hf, str) else None
-            if m is None:
-                errors.append("hash_from must match "
-                              f"_subcall_envelope.artifact_hashes.<name> (dot-free name): {hf!r}")
-            else:
-                hash_names.add(m.group(1))
-
-    declared_artifacts: set[str] = set()
-    if markers or spawns or polls:
-        state = doc.get("state") or {}
-        if "_subcall_status" not in state or "_subcall_envelope" not in state:
-            errors.append("recipe uses subcalls but does not declare "
-                          "_subcall_status/_subcall_envelope in state:")
-        edges_by_to: dict[str, list[dict]] = {}
-        for src, elist in edges_by_from.items():
-            for e in elist:
-                edges_by_to.setdefault(e.get("to"), []).append(e)
-        # validators DIRECTLY PAIRED with a work interrupt: the single
-        # edge-target of some non-marker, non-escalate interrupt.
-        paired_validators: set[str] = set()
-        for n, cfg in nodes.items():
-            if not isinstance(cfg, dict) or cfg.get("type") != "interrupt":
-                continue
-            msg = cfg.get("message") or {}
-            if _is_escalate_marker(msg) or _is_subcall_marker(msg):
-                continue
-            targets = {e.get("to") for e in edges_by_from.get(n, [])}
-            if len(targets) == 1:
-                paired_validators.add(next(iter(targets)))
-
-        seen_node_ids: set[str] = set()
-        for mname, mcfg in markers.items():
-            msg = mcfg.get("message") or {}
-            node_id = msg.get("node")
-            if not isinstance(node_id, str) or not _ARTIFACT_NAME_RE.fullmatch(node_id or ""):
-                errors.append(f"subcall marker '{mname}': node must match ^[a-z][a-z0-9_-]*$")
-            elif node_id in seen_node_ids:
-                errors.append(f"subcall marker '{mname}': duplicate node id '{node_id}' — "
-                              "workdirs and the single-start claim are keyed on it")
-            else:
-                seen_node_ids.add(node_id)
-            runner = msg.get("runner")
-            if runner is not None and (not isinstance(runner, str)
-                                       or not _RUNNER_NAME_RE.fullmatch(runner)):
-                errors.append(f"subcall marker '{mname}': runner name must match ^[a-z][a-z0-9-]*$")
-            prompt = msg.get("prompt")
-            if not isinstance(prompt, str) or not prompt.strip():
-                errors.append(f"subcall marker '{mname}': prompt is required (non-empty string)")
-            elif PLACEHOLDER_RE.search(prompt):
-                errors.append(f"placeholder found in subcall prompt (marker '{mname}'): "
-                              "prompts are verbatim, vars never reach them")
-            tm = msg.get("timeout_minutes")
-            if tm is not None and (not isinstance(tm, int) or isinstance(tm, bool) or tm <= 0):
-                errors.append(f"subcall marker '{mname}': timeout must be a "
-                              "positive number of minutes")
-            if not any(e.get("from") in spawns for e in edges_by_to.get(mname, [])):
-                errors.append(f"subcall marker '{mname}' has no spawn node feeding it")
-            out = edges_by_from.get(mname, [])
-            if len(out) != 1 or out[0].get("to") not in polls or out[0].get("condition"):
-                errors.append(f"subcall marker '{mname}' has no poll node (exactly one "
-                              "unconditional edge to a subcall poll node required)")
-            scenario = msg.get("scenario")
-            artifacts = msg.get("artifacts")
-            if artifacts is not None and not scenario:
-                errors.append(f"subcall marker '{mname}': artifacts requires scenario "
-                              "(one-shot subcalls pin no project artifacts — the envelope is the artifact)")
-            if scenario is not None and not (
-                isinstance(scenario, str) and _SCENARIO_NAME_RE.fullmatch(scenario)
-            ):
-                errors.append(f"subcall marker '{mname}': scenario name {scenario!r} must be a "
-                              "plain file name (letters, digits, dot, dash, underscore)")
-            elif scenario is not None:
-                child_path = child_dir / f"{scenario}.recipe.yaml"
-                if not child_path.exists():
-                    errors.append(f"fractal child recipe '{scenario}' not found in {child_dir}")
-                else:
-                    child_doc = yaml.safe_load(child_path.read_text()) or {}
-                    child_globs = list(child_doc.get("baseline_globs") or [])
-                    for aname, apath in (artifacts or {}).items():
-                        if not isinstance(aname, str) or not _ARTIFACT_NAME_RE.fullmatch(aname):
-                            errors.append(f"subcall marker '{mname}': artifact name {aname!r} "
-                                          "must match ^[a-z][a-z0-9_-]*$ (no dots)")
-                            continue
-                        declared_artifacts.add(aname)
-                        if (not isinstance(apath, str) or not apath
-                                or apath.startswith("/") or ".." in apath.split("/")):
-                            errors.append(f"subcall marker '{mname}': artifact '{aname}' path "
-                                          "must be a relative project path")
-                            continue
-                        if not _path_covered(apath, child_globs):
-                            errors.append(f"child recipe '{scenario}' baseline_globs do not "
-                                          f"cover artifact '{aname}' ({apath})")
-
-        for pname in sorted(polls):
-            pedges = edges_by_from.get(pname, [])
-            if not any(e.get("to") in markers
-                       and (e.get("condition") or "").strip() == "_subcall_status == 'running'"
-                       for e in pedges):
-                errors.append(f"poll node '{pname}': a back edge to its marker conditioned "
-                              "exactly \"_subcall_status == 'running'\" is required")
-            for e in pedges:
-                cond = (e.get("condition") or "").strip()
-                if not _POLL_EDGE_COND_RE.fullmatch(cond):
-                    errors.append(f"poll node '{pname}': every outgoing edge must be "
-                                  f"conditioned on _subcall_status equality only "
-                                  f"(edge to {e.get('to')!r})")
-
-        for sname in sorted(spawns):
-            s_out = edges_by_from.get(sname, [])
-            if len(s_out) != 1 or s_out[0].get("to") not in markers or s_out[0].get("condition"):
-                errors.append(f"spawn node '{sname}' must have exactly one unconditional "
-                              "edge to its subcall marker")
-            for e in edges_by_to.get(sname, []):
-                src, cond = e.get("from"), (e.get("condition") or "").strip()
-                if src == "START":
-                    # a START -> spawn edge is forbidden.
-                    # It would fire the spawn hook on an EMPTY evidence
-                    # channel (guaranteed error envelope) and bypass the
-                    # engine's done()-time policy prediction — the only
-                    # point where runner/budget/depth are checked.
-                    errors.append(f"spawn node '{sname}' must not be entered from START — "
-                                  "a spawn must follow a validator (a start-time spawn has "
-                                  "no evidence ctx and bypasses subcall policy prediction)")
-                    continue
-                if src not in paired_validators:
-                    errors.append(f"spawn node '{sname}' must be a direct conditional successor "
-                                  f"of a validator or START (edge from {src!r})")
-                if not _SPAWN_EDGE_COND_RE.fullmatch(cond):
-                    errors.append(f"edge into spawn node '{sname}' must be conditioned on "
-                                  "verdict_status equality only")
-
-    for name in sorted(hash_names - declared_artifacts):
-        errors.append(f"hash_from names artifact '{name}' but no subcall marker "
-                      "declares it in artifacts:")
-
-
-def check_recipe_full(
-    path: str | Path, *, child_recipes_dir: str | Path | None = None
-) -> tuple[list[str], list[str]]:
+def check_recipe_full(path: str | Path) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
 
@@ -562,11 +331,9 @@ def check_recipe_full(
     edges_by_from = _build_edges_by_from(raw_edges, errors)
 
     # work-interrupt `step` names must be UNIQUE across the recipe —
-    # `Engine._predict_spawn` and `done(run_id, step, ...)` both key on the
-    # parked step name; a collision makes the prediction read the wrong
-    # validator (an orphan child holding a live credential, or a spawn with
-    # no ctx). Escalate markers (all `escalate`) and subcall markers (all
-    # `_subcall`) share their step by construction and are exempt.
+    # Native resume identifies an exact interrupt coordinate, while the public
+    # scenario_done compatibility surface still names its worker step. Keep
+    # worker step names unique; graph-owned escalate markers are exempt.
     seen_steps: dict[str, str] = {}
     for name, node in nodes.items():
         if not isinstance(node, dict) or node.get("type") != "interrupt":
@@ -574,7 +341,7 @@ def check_recipe_full(
         msg = node.get("message") or {}
         if not isinstance(msg, dict):
             continue  # reported by the interrupt rules
-        if _is_escalate_marker(msg) or _is_subcall_marker(msg):
+        if _is_escalate_marker(msg):
             continue
         step = msg.get("step")
         if not isinstance(step, str) or not step:
@@ -598,14 +365,7 @@ def check_recipe_full(
         doc.get("loop_limits") or {},
         doc.get("loop_exits") or {},
         errors,
-        doc.get("tools") or {},
     )
-
-    # Fractal children resolve beside the checked file by default; the
-    # engine passes its recipes_dir because it profiles a staging copy
-    # inside state_dir/runs/ where "beside the recipe" resolves to nothing.
-    child_dir = Path(child_recipes_dir) if child_recipes_dir else Path(path).parent
-    _check_subcall_rules(doc, nodes, edges_by_from, child_dir, errors)
 
     for tname, tcfg in (doc.get("tools") or {}).items():
         module = tcfg.get("module") if isinstance(tcfg, dict) else None
@@ -618,8 +378,6 @@ def check_recipe_full(
     return errors, warnings
 
 
-def check_recipe(
-    path: str | Path, *, child_recipes_dir: str | Path | None = None
-) -> list[str]:
-    errors, _warnings = check_recipe_full(path, child_recipes_dir=child_recipes_dir)
+def check_recipe(path: str | Path) -> list[str]:
+    errors, _warnings = check_recipe_full(path)
     return errors

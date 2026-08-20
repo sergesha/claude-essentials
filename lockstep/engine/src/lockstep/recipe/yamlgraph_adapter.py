@@ -113,8 +113,8 @@ Checkpointer
 `langgraph.checkpoint.sqlite.SqliteSaver(conn)` does NOT create its tables
 on construction (`sqlite_master` is empty until `.setup()`), and
 yamlgraph's `storage/checkpointer_factory.get_checkpointer()` never calls
-`.setup()` for the `sqlite` type. `legacy_compile_recipe()` below calls it
-explicitly so a fresh db file works on the first `start()`.
+`.setup()` for the `sqlite` type. The native adapter calls it explicitly so
+a fresh database works on the first invocation.
 
 Route log
 ---------
@@ -145,8 +145,8 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field, is_dataclass
 from dataclasses import fields as dataclass_fields
+from dataclasses import is_dataclass
 from pathlib import Path
 from typing import Any, Self, TypedDict
 
@@ -157,7 +157,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
 from yamlgraph.compile.graph_loader import compile_graph, load_graph_config
 from yamlgraph.compile.node_otel import _maybe_wrap_otel
-from yamlgraph.mermaid_export import parse_route_lines, render_mermaid, render_overlay
+from yamlgraph.mermaid_export import render_mermaid
 from yamlgraph.node_factory.subgraph_nodes import _build_child_config
 from yamlgraph.node_timeout import _maybe_wrap_timeout
 
@@ -168,23 +168,7 @@ from lockstep.runtime.native_models import (
     NativeInterrupt,
     NativeSnapshot,
 )
-
-
-@dataclass
-class StepBrief:
-    step: str
-    task: str = ""
-    exit_criterion: str = ""
-    evidence_schema: dict | None = None
-    checks: list[dict] = field(default_factory=list)
-    raw: dict = field(default_factory=dict)
-
-
-@dataclass
-class Advance:
-    done: bool
-    brief: StepBrief | None
-    state: dict
+from lockstep.runtime.owner_state import seal_owner_file
 
 
 def _neutral(value: Any) -> Any:
@@ -266,16 +250,40 @@ def _to_native_snapshot(snapshot: Any) -> NativeSnapshot:
         checkpoint_ns=checkpoint_ns,
         metadata=dict(_neutral(getattr(snapshot, "metadata", {}) or {})),
         created_at=getattr(snapshot, "created_at", None),
+        task_errors=tuple(
+            str(error)
+            for task in (getattr(snapshot, "tasks", ()) or ())
+            if (error := getattr(task, "error", None)) is not None
+        ),
     )
 
 
 class NativeApp:
     """Narrow facade over one compiled yamlgraph/LangGraph application."""
 
-    def __init__(self, app: Any, connection: sqlite3.Connection | None = None) -> None:
+    def __init__(
+        self,
+        app: Any,
+        connection: sqlite3.Connection | None = None,
+        database_path: Path | None = None,
+    ) -> None:
         self._app = app
         self._connection = connection
+        self._database_path = database_path
         self._closed = False
+        self._seal_sqlite_files()
+
+    def _seal_sqlite_files(self) -> None:
+        if self._database_path is None:
+            return
+        for path in (
+            self._database_path,
+            Path(f"{self._database_path}-journal"),
+            Path(f"{self._database_path}-wal"),
+            Path(f"{self._database_path}-shm"),
+        ):
+            if path.exists():
+                seal_owner_file(path, writable=True)
 
     @staticmethod
     def _config(thread_id: str) -> dict[str, dict[str, str]]:
@@ -288,14 +296,20 @@ class NativeApp:
     def invoke(self, values: dict, *, thread_id: str) -> NativeSnapshot:
         self._ensure_open()
         config = self._config(thread_id)
-        self._app.invoke(dict(values), config=config)
-        return _to_native_snapshot(self._app.get_state(config, subgraphs=True))
+        try:
+            self._app.invoke(dict(values), config=config)
+            return _to_native_snapshot(self._app.get_state(config, subgraphs=True))
+        finally:
+            self._seal_sqlite_files()
 
     async def ainvoke(self, values: dict, *, thread_id: str) -> NativeSnapshot:
         self._ensure_open()
         config = self._config(thread_id)
-        await self._app.ainvoke(dict(values), config=config)
-        return _to_native_snapshot(self._app.get_state(config, subgraphs=True))
+        try:
+            await self._app.ainvoke(dict(values), config=config)
+            return _to_native_snapshot(self._app.get_state(config, subgraphs=True))
+        finally:
+            self._seal_sqlite_files()
 
     def resume(
         self,
@@ -307,8 +321,11 @@ class NativeApp:
         if not results_by_interrupt_id:
             raise ValueError("at least one interrupt result is required")
         config = self._config(thread_id)
-        self._app.invoke(Command(resume=dict(results_by_interrupt_id)), config=config)
-        return _to_native_snapshot(self._app.get_state(config, subgraphs=True))
+        try:
+            self._app.invoke(Command(resume=dict(results_by_interrupt_id)), config=config)
+            return _to_native_snapshot(self._app.get_state(config, subgraphs=True))
+        finally:
+            self._seal_sqlite_files()
 
     def stream(
         self,
@@ -317,27 +334,37 @@ class NativeApp:
         thread_id: str,
     ) -> Iterable[NativeEvent]:
         self._ensure_open()
-        for chunk in self._app.stream(
-            values_or_command,
-            config=self._config(thread_id),
-            stream_mode="updates",
-            subgraphs=True,
-        ):
-            yield NativeEvent(mode="updates", data=_neutral(chunk))
+        try:
+            for chunk in self._app.stream(
+                values_or_command,
+                config=self._config(thread_id),
+                stream_mode="updates",
+                subgraphs=True,
+            ):
+                yield NativeEvent(mode="updates", data=_neutral(chunk))
+        finally:
+            self._seal_sqlite_files()
 
     def snapshot(self, *, thread_id: str, subgraphs: bool = False) -> NativeSnapshot:
         self._ensure_open()
-        snapshot = self._app.get_state(self._config(thread_id), subgraphs=subgraphs)
-        return _to_native_snapshot(snapshot)
+        try:
+            snapshot = self._app.get_state(self._config(thread_id), subgraphs=subgraphs)
+            return _to_native_snapshot(snapshot)
+        finally:
+            self._seal_sqlite_files()
 
     def history(self, *, thread_id: str) -> Iterable[NativeSnapshot]:
         self._ensure_open()
-        for snapshot in self._app.get_state_history(self._config(thread_id)):
-            yield _to_native_snapshot(snapshot)
+        try:
+            for snapshot in self._app.get_state_history(self._config(thread_id)):
+                yield _to_native_snapshot(snapshot)
+        finally:
+            self._seal_sqlite_files()
 
     def close(self) -> None:
         if not self._closed and self._connection is not None:
             self._connection.close()
+            self._seal_sqlite_files()
         self._closed = True
 
     def __enter__(self) -> Self:
@@ -360,7 +387,11 @@ def _open_native_path(recipe_path: Path, db_path: Path | None = None) -> NativeA
         checkpointer = SqliteSaver(connection)
         checkpointer.setup()
     try:
-        return NativeApp(graph.compile(checkpointer=checkpointer), connection)
+        return NativeApp(
+            graph.compile(checkpointer=checkpointer),
+            connection,
+            db_path,
+        )
     except BaseException:
         if connection is not None:
             connection.close()
@@ -375,6 +406,25 @@ def open_native_app(
     if not isinstance(recipe, AuthorizedMaterialization):
         raise TypeError("open_native_app requires an AuthorizedMaterialization")
     return _open_native_path(recipe.source_path, db_path)
+
+
+def open_native_app_readonly(
+    recipe: AuthorizedMaterialization,
+    db_path: Path,
+) -> NativeApp:
+    """Open an existing saver for hook/doctor projection without setup writes."""
+    if not isinstance(recipe, AuthorizedMaterialization):
+        raise TypeError("open_native_app_readonly requires an AuthorizedMaterialization")
+    config = load_graph_config(recipe.source_path)
+    graph = compile_graph(config)
+    connection = sqlite3.connect(
+        f"file:{Path(db_path)}?mode=ro&immutable=1", uri=True, check_same_thread=False
+    )
+    try:
+        return NativeApp(graph.compile(checkpointer=SqliteSaver(connection)), connection)
+    except BaseException:
+        connection.close()
+        raise
 
 
 class _InjectedConfigProbeState(TypedDict, total=False):
@@ -544,77 +594,6 @@ def probe_native_capabilities() -> None:
         assert completed_b.pending == ()
 
 
-def _parse_brief(raw: dict) -> StepBrief:
-    return StepBrief(
-        step=raw.get("step", ""),
-        task=raw.get("task", ""),
-        exit_criterion=raw.get("exit_criterion", ""),
-        evidence_schema=raw.get("evidence_schema"),
-        checks=list(raw.get("checks") or []),
-        raw=raw,
-    )
-
-
-def _advance_from_result(result: dict) -> Advance:
-    done = "__interrupt__" not in result
-    raw_brief = None if done else result.get("brief")
-    brief = _parse_brief(raw_brief) if raw_brief is not None else None
-    return Advance(done=done, brief=brief, state=dict(result))
-
-
-def legacy_compile_recipe(recipe_path: Path, db_path: Path | None) -> object:
-    """Legacy Engine-only raw-path compiler; removed by Task 3's cutover.
-
-    Load + compile a recipe YAML, injecting the checkpointer ourselves
-    (the engine, never a recipe `checkpointer:` block, owns persistence). `db_path is None` -> in-memory (MemorySaver); otherwise a
-    sqlite file survivable across fresh `legacy_compile_recipe()` calls (fresh
-    process simulation)."""
-    config = load_graph_config(Path(recipe_path))
-    graph = compile_graph(config)
-    if db_path is None:
-        checkpointer = MemorySaver()
-    else:
-        conn = sqlite3.connect(str(db_path), check_same_thread=False)
-        checkpointer = SqliteSaver(conn)
-        checkpointer.setup()
-    return graph.compile(checkpointer=checkpointer)
-
-
-def start(app, vars: dict, thread_id: str) -> Advance:
-    config = {"configurable": {"thread_id": thread_id}}
-    result = app.invoke(dict(vars), config=config)
-    return _advance_from_result(result)
-
-
-def resume(app, payload: dict, thread_id: str) -> Advance:
-    config = {"configurable": {"thread_id": thread_id}}
-    result = app.invoke(Command(resume=payload), config=config)
-    return _advance_from_result(result)
-
-
-def peek(app, thread_id: str) -> Advance:
-    """Read-only counterpart to `start`/`resume` (see the module
-    docstring): current checkpoint state for `thread_id` via `get_state`,
-    without resuming. `done=True` once `.next` is empty AND the checkpoint
-    holds state; otherwise the parked step's brief, exactly like
-    `start`/`resume`.
-
-    The `values` half is load-bearing: LangGraph answers with an EMPTY
-    snapshot (`values={}`, `next=()`) for a thread_id it has never seen, so
-    "this run is absent from this checkpointer" — a lost or freshly-created
-    sqlite file, a restarted memory-only engine — is otherwise
-    indistinguishable from "reached END", and reconcile would flip a run
-    whose steps never ran to a terminal `done`. A graph that really
-    finished always left values behind."""
-    config = {"configurable": {"thread_id": thread_id}}
-    snapshot = app.get_state(config)
-    values = dict(snapshot.values or {})
-    done = not snapshot.next and bool(values)
-    raw_brief = None if done else values.get("brief")
-    brief = _parse_brief(raw_brief) if raw_brief is not None else None
-    return Advance(done=done, brief=brief, state=values)
-
-
 def _validate_path(recipe_path: Path) -> tuple[bool, str]:
     """Fallback engaged (see module docstring): compile-under-try/except
     IS the validation — the CLI's own `graph validate`/`lint` commands are
@@ -634,21 +613,10 @@ def validate_native(recipe: AuthorizedMaterialization) -> tuple[bool, str]:
     return _validate_path(recipe.source_path)
 
 
-def legacy_validate_recipe(recipe_path: Path) -> tuple[bool, str]:
-    """Legacy Engine/profile-test raw validation; removed by Task 3."""
-    return _validate_path(recipe_path)
-
-
-def cli_mermaid(recipe_path: Path, overlay: Path | None) -> str:
-    with open(Path(recipe_path)) as f:
+def render_native(recipe: AuthorizedMaterialization) -> str:
+    """Render only the immutable authority artifact accepted by native start."""
+    if not isinstance(recipe, AuthorizedMaterialization):
+        raise TypeError("render_native requires an AuthorizedMaterialization")
+    with open(recipe.source_path) as f:
         config = yaml.safe_load(f)
-    if overlay is not None:
-        lines = Path(overlay).read_text().splitlines()
-        route = parse_route_lines(lines)
-        return render_overlay(config, route)
     return render_mermaid(config)
-
-
-def render(recipe_path: Path, overlay: Path | None = None) -> str:
-    """Render a recipe graph through the adapter."""
-    return cli_mermaid(recipe_path, overlay)

@@ -10,7 +10,6 @@ from pathlib import Path
 import pytest
 import yaml
 
-from lockstep.recipe import yamlgraph_adapter as yg
 from lockstep.recipe.profile import check_recipe, check_recipe_full
 
 FIXTURES = Path(__file__).parent / "fixtures" / "recipes"
@@ -37,18 +36,6 @@ MARKERS = {
     "not-idempotent.recipe.yaml": "idempotent",
     # EXTRA: loop_exits -> interrupt directly.
     "loop-exit-direct-to-interrupt.recipe.yaml": "gated through passthrough",
-    # subcall triple rules
-    "subcall-no-poll.recipe.yaml": "poll",
-    "subcall-spawn-not-direct.recipe.yaml": "direct conditional successor",
-    "subcall-undeclared-state.recipe.yaml": "_subcall_status",
-    "subcall-bad-runner-name.recipe.yaml": "runner name",
-    "subcall-infinite-timeout.recipe.yaml": "positive number of minutes",
-    "subcall-spawn-edge-condition.recipe.yaml": "verdict_status equality",
-    "subcall-no-prompt.recipe.yaml": "prompt",
-    # a START -> spawn edge bypasses done()-time policy prediction
-    # and fires with an empty evidence channel — a spawn must follow a
-    # validator.
-    "subcall-start-spawn.recipe.yaml": "must not be entered from START",
     # work-interrupt step names must be unique — spawn prediction and
     # scenario_done key on them; a collision reads the wrong validator.
     "duplicate-step.recipe.yaml": "duplicate step name",
@@ -67,7 +54,7 @@ def test_good_recipes_pass():
 
 
 def test_each_bad_fixture_yields_its_violation():
-    assert len(MARKERS) == 25
+    assert len(MARKERS) == 17
     for fixture, marker in MARKERS.items():
         errors = check_recipe(BAD / fixture)
         assert errors, f"{fixture}: expected errors, got none"
@@ -90,53 +77,11 @@ def test_bad_fixture_count_matches_marker_map():
     assert bad_fixtures == set(MARKERS) | {"local-tools-py.recipe.yaml"}
 
 
-SUB = GOOD / "subcall-one-shot.recipe.yaml"
-
-
-def test_good_subcall_recipe_passes():
-    # errs == [] also proves the marker exemption: this marker has no
-    # task/exit_criterion/checks and no validator pairing — only the
-    # third-interrupt-class exemption lets it pass.
-    assert check_recipe(SUB) == []
-
-
-@pytest.mark.skipif(
-    not (GOOD / "subcall-fractal.recipe.yaml").exists(), reason="fractal fixture absent"
-)
-def test_child_recipes_dir_kwarg_resolves_fractal_children(tmp_path):
-    # Engine.start() profiles a staging copy inside state_dir/runs/ —
-    # "beside the recipe" resolves to nothing there. The kwarg must fix it,
-    # and its ABSENCE must fail (proves the default is really beside-file).
-    staged = tmp_path / "staged.yaml"
-    staged.write_bytes((GOOD / "subcall-fractal.recipe.yaml").read_bytes())
-    assert any("not found" in e for e in check_recipe(staged))
-    assert check_recipe(staged, child_recipes_dir=GOOD) == []
-
-
-def test_example_recipes_pass_profile_and_validate():
+def test_example_recipes_pass_static_profile():
     recipes = sorted(EXAMPLES.glob("*.recipe.yaml"))
     assert recipes, f"no example recipes found under {EXAMPLES}"
     for recipe in recipes:
         assert check_recipe(recipe) == [], f"{recipe.name}: profile errors: {check_recipe(recipe)}"
-        ok, msg = yg.legacy_validate_recipe(recipe)
-        assert ok, f"{recipe.name}: validate failed: {msg}"
-
-
-def test_reviewed_example_declares_channels_and_pins_the_artifact():
-    doc = yaml.safe_load((EXAMPLES / "feature-dev-reviewed.recipe.yaml").read_text())
-    assert {"_subcall_status", "_subcall_envelope"} <= set(doc["state"])
-    markers = [(n.get("message") or {}) for n in doc["nodes"].values()
-               if n.get("type") == "interrupt"
-               and (n.get("message") or {}).get("step") == "_subcall"]
-    assert len(markers) == 1
-    assert markers[0]["scenario"] == "review-gate"
-    assert markers[0]["artifacts"] == {"review": ".lockstep/review.md"}
-    assert "pre-approval" in markers[0]["prompt"]          # the poisoning warning ships in the prompt
-    checks = [c for n in doc["nodes"].values() if n.get("type") == "interrupt"
-              for c in ((n.get("message") or {}).get("checks") or [])]
-    assert any(c.get("type") == "file_matches_hash"
-               and c.get("hash_from") == "_subcall_envelope.artifact_hashes.review"
-               for c in checks)
 
 
 def test_invalid_evidence_schema_is_a_recipe_error():
@@ -144,45 +89,6 @@ def test_invalid_evidence_schema_is_a_recipe_error():
     # scenario_done on that step, so the recipe must not validate ok.
     errors = check_recipe(BAD / "invalid-evidence-schema.recipe.yaml")
     assert any("invalid evidence_schema" in e for e in errors)
-
-
-def test_child_scenario_name_cannot_walk_out_of_the_recipes_dir(tmp_path):
-    # The scenario names the child's pinned snapshot file and its run_id
-    # prefix, so a separator in it places child run state outside the state
-    # dir. Refused where a recipe error belongs.
-    staged = tmp_path / "staged.yaml"
-    doc = yaml.safe_load((GOOD / "subcall-fractal.recipe.yaml").read_text())
-    for node in doc["nodes"].values():
-        msg = node.get("message")
-        if isinstance(msg, dict) and msg.get("scenario"):
-            msg["scenario"] = "../outside/evil"
-    staged.write_text(yaml.safe_dump(doc))
-    errors = check_recipe(staged, child_recipes_dir=GOOD)
-    assert any("scenario name" in e for e in errors)
-
-
-def _fractal_doc():
-    return yaml.safe_load((GOOD / "subcall-one-shot.recipe.yaml").read_text())
-
-
-def test_uncapped_cycle_through_a_subcall_marker_is_refused(tmp_path):
-    # The poll-loop exemption belongs to the POLL node, whose termination
-    # is the runner timeout. Keyed on the marker alone, any cycle the walk
-    # happens to enter at the marker — here a plain passthrough wired back
-    # to it — escapes loop_limits/loop_exits and runs forever.
-    doc = _fractal_doc()
-    doc["nodes"]["fixup"] = {"type": "passthrough", "output": {}}
-    edges = [e for e in doc["edges"]
-             if not (e["from"] == "review_poll" and e.get("condition", "").endswith("'done'"))]
-    edges.append({"from": "review_poll", "to": "fixup",
-                  "condition": "_subcall_status == 'done'"})
-    edges.append({"from": "fixup", "to": "review_wait"})
-    doc["edges"] = edges
-    staged = tmp_path / "staged.yaml"
-    staged.write_text(yaml.safe_dump(doc))
-
-    errors = check_recipe(staged)
-    assert any("fixup" in e and "loop" in e for e in errors), errors
 
 
 @pytest.mark.parametrize("cap", [None, 0, -1, "lots"])

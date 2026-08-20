@@ -20,7 +20,7 @@
       "Skills",
       "MCP server",
       "Policy hooks",
-      "Runner subcalls"
+      "Native workflows"
     ],
     "defaultPrompt": [
       "Use lockstep to run the requested workflow and validate its evidence."

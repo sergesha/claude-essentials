@@ -1,8 +1,8 @@
-"""The FastMCP app — the 11-tool lockstep MCP surface. Delegates
-almost everything to `Engine`; the only logic that lives here is
-`scenario_dryrun` (SHAPE-ONLY — never touches Engine, never
-executes commands) and thin introspection wrappers around the recipes dir
-and `RunIndex`.
+"""The FastMCP app — the 11-tool lockstep MCP surface.
+
+Scenario lifecycle operations delegate to the state-free ``Engine`` facade;
+read-only tools project immutable catalog bindings and native checkpoints.
+``scenario_dryrun`` remains shape-only and never executes commands.
 
 **mcp SDK note:** this repo pins `mcp>=2.0,<3` (the code below imports
 `mcp.server.mcpserver`, which only exists from 2.0 onward — `mcp>=1.0`
@@ -23,29 +23,15 @@ tool call — never at import time, so tests can set the env vars and call
 process cwd; Codex supplies the active workspace in MCP request metadata.
 `scenario_dryrun` uses the same resolved host project for containment checks.
 
-Two small helpers duplicate logic that already lives in `Engine`
-(`_check_path_containment`) and `RunIndex`/`recipes_dir` access
-(`list_runs`/`list_recipes` reach into `Engine._runs`/`Engine._recipes_dir`
-directly — the public `Engine` surface is intentionally just
-start/status/done/escalate/abort/recipe_path/route_log_path; those two
-stores are the underlying persistence the server reads, not new engine
-behavior).
-
-`run_trace`/`render_flow` read `Engine.route_log_path(run_id)`. The
-yamlgraph route-log env-var mechanism documented in `yamlgraph_api.py` is
-still never wired into `engine.py`'s `start`/`resume` calls — instead
-`Engine.done()` appends its own best-effort JSONL transition line to that
-path on every completed transition. A run with no completed transition
-yet still has no file:
-`run_trace` -> `""`, `render_flow` renders with no overlay, honestly.
+The server never owns workflow transitions or a second status vocabulary.
+``run_trace`` reads native checkpoint history and ``render_flow`` compiles
+only an authority-checked immutable recipe materialization.
 """
 
 from __future__ import annotations
 
-import hmac
 import os
 import tempfile
-from dataclasses import asdict
 from pathlib import Path
 
 import yaml
@@ -62,8 +48,14 @@ from lockstep.recipe.authority import (
 from lockstep.recipe.loader import RecipeLoader
 from lockstep.runtime import evidence as evidence_mod
 from lockstep.runtime import sessions, validators
-from lockstep.runtime.engine import Engine, LockstepError
+from lockstep.runtime.engine import Engine
 from lockstep.runtime.recipe_bundles import RecipeBundleStore
+from lockstep.runtime.service import (
+    preflight_recipe,
+    validate_evidence_payload,
+    validate_reason_payload,
+    validate_start_input,
+)
 
 app = FastMCP("lockstep")
 
@@ -101,24 +93,34 @@ def _project_for_context(ctx: Context | None) -> Path:
 def _eng(project: Path | None = None) -> Engine:
     global _engine, _engine_config
     project_root = (project or Path.cwd()).resolve()
-    state_dir = Path(os.environ.get("LOCKSTEP_STATE_DIR") or str(Path.home() / ".lockstep"))
-    recipes_dir = Path(
-        os.environ.get("LOCKSTEP_RECIPES") or str(project_root / ".lockstep" / "recipes")
-    )
-    config = (state_dir.resolve(), recipes_dir.resolve())
+    state_dir, recipes_dir = _configured_paths(project_root)
+    config = (state_dir, recipes_dir)
     if _engine is None or _engine_config != config:
         # `or`, never a get() default — an unset variable the plugin
         # manifest forwards arrives present and EMPTY, and `Path("")` is
         # the cwd, which would put run state inside the project tree.
+        if _engine is not None:
+            _engine.close()
         _engine = Engine(state_dir, recipes_dir)
         _engine_config = config
     return _engine
+
+
+def _configured_paths(project_root: Path) -> tuple[Path, Path]:
+    """Resolve configured paths without constructing persistent services."""
+    state_dir = Path(os.environ.get("LOCKSTEP_STATE_DIR") or str(Path.home() / ".lockstep"))
+    recipes_dir = Path(
+        os.environ.get("LOCKSTEP_RECIPES") or str(project_root / ".lockstep" / "recipes")
+    )
+    return state_dir.resolve(), recipes_dir.resolve()
 
 
 def _reset_engine() -> None:
     """Test-only: drop the lazy singleton so the next `_eng()` call rebuilds
     it from the (possibly just-changed) environment."""
     global _engine, _engine_config
+    if _engine is not None:
+        _engine.close()
     _engine = None
     _engine_config = None
 
@@ -162,31 +164,33 @@ def _load_step_brief(recipe_path: Path, step: str) -> dict | None:
     return None
 
 
-def _assert_origin(run_id: str, project: Path | None = None) -> None:
-    """Origin binding: a run with `parent_run` set was minted for a
-    spawned child session, and only the process carrying that session's
-    credential (the LOCKSTEP_CHILD_RUN + LOCKSTEP_CHILD_NONCE pair
-    `runners.child_env` injected at spawn) may drive it through the three
-    mutating verbs. Read-only tools stay unbound; in-process `Engine` calls
-    bypass this by construction.
+def _assert_origin(
+    run_id: str, session_id: str | None, project: Path | None = None
+) -> None:
+    """Require the current public run's native worker-session binding.
 
-    "Origin binding closes the SANCTIONED MCP surface. It does NOT close
-    same-user OS access: on a multi-user OS a process environment may be
-    reachable by other same-user processes through ordinary OS facilities,
-    and a worker with shell can Bash-launch its own credentialed engine.
-    That is the SAME same-user residual class v1 already carries."
+    Native subgraphs have no public child identity or environment credential.
+    The service verifies the same binding again and holds its mutation lock
+    through resume commit, so this MCP-edge check is an early fail-closed guard
+    rather than authority of its own.
     """
-    record = _eng(project)._runs.get(run_id)
-    if record.parent_run is None:
-        return
-    env_run = os.environ.get("LOCKSTEP_CHILD_RUN")
-    env_nonce = os.environ.get("LOCKSTEP_CHILD_NONCE", "")
-    # ORDER MATTERS: a parented record with a falsy nonce refuses BEFORE any
-    # comparison — compare_digest("", "") matches, and the "" default for
-    # env_nonce is safe ONLY because of this guard.
-    if not record.nonce or env_run != run_id or not hmac.compare_digest(env_nonce, record.nonce):
-        raise LockstepError(
-            "this run belongs to a spawned subcall session; the caller lacks its credential")
+    project_root = (project or Path.cwd()).resolve()
+    _eng(project_root).require_session(run_id, session_id, str(project_root))
+
+
+def _session_for_context(ctx: Context | None) -> str | None:
+    """Read the authenticated session correlation supplied by the MCP edge."""
+    if ctx is None:
+        return None
+    try:
+        meta = ctx.request_context.meta
+    except (AttributeError, ValueError):
+        return None
+    if isinstance(meta, dict):
+        value = meta.get("session_id") or meta.get("x-lockstep-session-id")
+        if isinstance(value, str) and value:
+            return value
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -210,33 +214,50 @@ def scenario_start(recipe: str, vars: dict | None = None, ctx: Context | None = 
     """Start a new run of `recipe`. `run.project` = the server process cwd
  — never an argument here."""
     project = _project_for_context(ctx)
-    return _mark(_eng(project).start(recipe, vars or {}, str(project)))
+    values = validate_start_input(vars)
+    _state_dir, recipes_dir = _configured_paths(project)
+    authorized = preflight_recipe(recipes_dir, recipe)
+    return _mark(
+        _eng(project).start_authorized(recipe, authorized, values, str(project))
+    )
 
 
 @app.tool()
 def scenario_status(run_id: str, ctx: Context | None = None) -> dict:
-    return _mark(_eng(_project_for_context(ctx)).status(run_id))
+    project = _project_for_context(ctx)
+    return _mark(_eng(project).status(run_id, str(project)))
 
 
 @app.tool()
 def scenario_done(run_id: str, step: str, evidence: dict, ctx: Context | None = None) -> dict:
+    checked_evidence = validate_evidence_payload(evidence)
     project = _project_for_context(ctx)
-    _assert_origin(run_id, project)
-    return _mark(_eng(project).done(run_id, step, evidence))
+    session_id = _session_for_context(ctx)
+    _assert_origin(run_id, session_id, project)
+    return _mark(_eng(project).done(
+        run_id, step, checked_evidence, session_id=session_id, project=str(project)
+    ))
 
 
 @app.tool()
 def scenario_escalate(run_id: str, reason: str, ctx: Context | None = None) -> dict:
+    checked_reason = validate_reason_payload(reason)
     project = _project_for_context(ctx)
-    _assert_origin(run_id, project)
-    return _mark(_eng(project).escalate(run_id, reason))
+    session_id = _session_for_context(ctx)
+    _assert_origin(run_id, session_id, project)
+    return _mark(_eng(project).escalate(
+        run_id, checked_reason, session_id=session_id, project=str(project)
+    ))
 
 
 @app.tool()
 def scenario_abort(run_id: str, ctx: Context | None = None) -> dict:
     project = _project_for_context(ctx)
-    _assert_origin(run_id, project)
-    return _mark(_eng(project).abort(run_id))
+    session_id = _session_for_context(ctx)
+    _assert_origin(run_id, session_id, project)
+    return _mark(_eng(project).abort(
+        run_id, session_id=session_id, project=str(project)
+    ))
 
 
 @app.tool()
@@ -247,14 +268,15 @@ def scenario_dryrun(
     rejection, schema validation, and path resolve+containment `done()`
     applies (project root = server cwd, since there is no run). Runs only
     shape checks; command/baseline checks report `skipped (dryrun)` and
-    never execute. No RunIndex entry, no snapshot, no baseline artifact —
+    never execute. No catalog entry, checkpoint, or baseline artifact —
     nothing durable, nothing besides shape checks actually runs."""
     project_root = _project_for_context(ctx)
-    eng = _eng(project_root)
-    recipe_path = eng.recipe_path(recipe)
-    if not recipe_path.exists():
-        raise ValueError(f"recipe not found: {recipe}")
-    brief = _load_step_brief(recipe_path, step)
+    _state_dir, recipes_dir = _configured_paths(project_root)
+    authorized = preflight_recipe(recipes_dir, recipe)
+    with tempfile.TemporaryDirectory(prefix="lockstep-dryrun-") as raw:
+        store = RecipeBundleStore(Path(raw) / "owner-state")
+        materialized = authorized.capture(store).materialize(store)
+        brief = _load_step_brief(materialized.source_path, step)
     if brief is None:
         raise ValueError(f"step {step!r} not found in recipe {recipe!r}")
 
@@ -309,10 +331,8 @@ def scenario_dryrun(
 
 @app.tool()
 def list_recipes(ctx: Context | None = None) -> list[str]:
-    d = Path(
-        _eng(_project_for_context(ctx))._recipes_dir
-    )
-    return sorted(RecipeLoader(d).discover())
+    _state_dir, recipes_dir = _configured_paths(_project_for_context(ctx))
+    return sorted(RecipeLoader(recipes_dir).discover())
 
 
 @app.tool()
@@ -365,36 +385,32 @@ def validate_recipe(path: str, ctx: Context | None = None) -> dict:
 def render_flow(
     recipe: str, run_id: str | None = None, ctx: Context | None = None
 ) -> str:
-    eng = _eng(_project_for_context(ctx))
-    recipe_path = eng.recipe_path(recipe)
-    overlay = None
-    if run_id:
-        route_log = eng.route_log_path(run_id)
-        if route_log.exists():
-            overlay = route_log
-    return yg.render(recipe_path, overlay)
+    _state_dir, recipes_dir = _configured_paths(_project_for_context(ctx))
+    authorized = preflight_recipe(recipes_dir, recipe)
+    with tempfile.TemporaryDirectory(prefix="lockstep-render-") as raw:
+        store = RecipeBundleStore(Path(raw) / "owner-state")
+        materialized = authorized.capture(store).materialize(store)
+        # Native history no longer fabricates a yamlgraph route-log overlay.
+        # ``run_id`` is retained in the public signature for compatibility.
+        del run_id
+        return yg.render_native(materialized)
 
 
 @app.tool()
 def list_runs(
-    project: str | None = None,
     active_only: bool = False,
     ctx: Context | None = None,
 ) -> list[dict]:
-    records = _eng(_project_for_context(ctx))._runs.list(
-        project=project, active_only=active_only
-    )
-    out = []
-    for r in records:
-        d = asdict(r)
-        d.pop("nonce", None)                               # the spawn credential never goes on the wire
-        out.append(d)
-    return out
+    project_root = _project_for_context(ctx)
+    records = _eng(project_root).list_runs(str(project_root))
+    if active_only:
+        records = [item for item in records if item["status"] in {"starting", "awaiting", "running"}]
+    return records
 
 
 @app.tool()
 def run_trace(run_id: str, ctx: Context | None = None) -> str:
-    p = _eng(_project_for_context(ctx)).route_log_path(run_id)
-    if not p.exists():
-        return ""
-    return p.read_text()
+    project = _project_for_context(ctx)
+    return "\n".join(
+        str(item) for item in _eng(project).history(run_id, str(project))
+    )

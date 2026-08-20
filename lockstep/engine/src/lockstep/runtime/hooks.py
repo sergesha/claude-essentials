@@ -26,8 +26,8 @@ block a determined stop (the README says so plainly) — they fail OPEN
 (allow / no context) on internal error: a hook must never look like a
 failure to whatever invoked it.
 
-Hooks are read-only on ENGINE-owned state (`runs.json`, `policy.d/`,
-checkpoints) — they never mutate a run. Their one OWN write is the
+Hooks are read-only on engine-owned catalog/checkpoint state and policy files;
+they never mutate a run. Their one own write is the
 session-binding sidecar tree (`bindings/`, `sessions.py`): the PreToolUse
 gate refreshes the owner's liveness stamp, `hook_posttool` binds/adopts on
 lockstep MCP tool touches. Hook death is silent — nothing here observes
@@ -38,7 +38,6 @@ depend on hooks firing.
 from __future__ import annotations
 
 import hashlib
-import hmac
 import json
 import os
 import re
@@ -47,34 +46,41 @@ from pathlib import Path
 import yaml
 
 from lockstep import __version__
+from lockstep.recipe.loader import RecipeError, RecipeLoader
 from lockstep.runtime import sessions
 from lockstep.runtime.config import (
     policy_dir as _policy_dir,
-    project_matches as _project_matches,
-    recipes_dir as _recipes_dir,
-    runs_json_path as _runs_json_path,
-    session_stale_minutes as _session_stale_minutes,
-    state_dir as _state_dir,
 )
-from lockstep.runtime.runs import ACTIVE_STATUS, RunIndex
+from lockstep.runtime.config import (
+    project_matches as _project_matches,
+)
+from lockstep.runtime.config import (
+    recipes_dir as _recipes_dir,
+)
+from lockstep.runtime.config import (
+    session_stale_minutes as _session_stale_minutes,
+)
+from lockstep.runtime.hook_projection import read_only_statuses
 
 # ---------------------------------------------------------------------------
-# fast path: both runs.json and policy.d/ empty/absent ->
+# fast path: both native catalog and policy.d/ empty/absent ->
 # skip all further work.
 # ---------------------------------------------------------------------------
 
 
 def _fast_path_empty(state_dir: Path) -> bool:
-    runs_path = _runs_json_path(state_dir)
-    runs_empty = True
-    if runs_path.exists():
-        try:
-            runs_empty = not json.loads(runs_path.read_text())
-        except Exception:  # noqa: BLE001 - unreadable/corrupt runs.json: don't fast-path past it
-            runs_empty = False
+    catalog_empty = not (state_dir / "runtime.sqlite").exists()
     policy_dir = _policy_dir(state_dir)
     policy_empty = not policy_dir.exists() or not any(policy_dir.glob("*.yaml"))
-    return runs_empty and policy_empty
+    return catalog_empty and policy_empty
+
+
+def _active_native(state_dir: Path):
+    return tuple(
+        (binding, status)
+        for binding, status in read_only_statuses(state_dir)
+        if status.status in {"starting", "awaiting", "running"}
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -99,43 +105,37 @@ def hook_stop(stdin_json: dict, state_dir: Path, cwd: str) -> tuple[int, str]:
         if stdin_json.get("stop_hook_active"):
             return 0, ""
 
-        idx = RunIndex(state_dir)
-        matches = [r for r in idx.list(active_only=True) if _project_matches(r.project, cwd)]
-        # A run belongs to the session driving it, and the PreToolUse gate
-        # is already scrupulous about that. Blocking every session whose cwd
-        # matches means a second session in the same repo — routine — is
-        # held for work that is not its own, and told to `scenario_abort`
-        # someone else's live run to get out. A run with a LIVE foreign
-        # owner is therefore not this session's to report.
+        matches = [
+            (binding, status)
+            for binding, status in _active_native(state_dir)
+            if _project_matches(binding.project_identity, cwd)
+        ]
         session_id = stdin_json.get("session_id")
         stale_minutes = _session_stale_minutes()
         if isinstance(session_id, str) and session_id:
             matches = [
-                r for r in matches
-                if not _owned_by_another_live_session(state_dir, r.run_id, session_id,
-                                                      stale_minutes)
+                (binding, status)
+                for binding, status in matches
+                if not _owned_by_another_live_session(
+                    state_dir, binding.public_run_id, session_id, stale_minutes
+                )
             ]
         if not matches:
             return 0, ""
 
-        # ONE line per run, not one joined sentence — a run
-        # parked in a subcall must NOT be told to scenario_done (that call
-        # is refused while the subcall is in flight).
         lines = []
-        for r in matches:
-            b = r.brief or {}
-            if b.get("step") == "_subcall":
+        for binding, status in matches:
+            if status.status == "awaiting":
                 lines.append(
-                    f"lockstep: run {r.run_id} — subcall in progress: "
-                    f"{b.get('node')} ({b.get('runner')}) — check scenario_status; "
-                    "done/escalate/abort are refused until the subcall completes."
+                    f"lockstep: active run(s) awaiting a report — "
+                    f"{binding.public_run_id} (step: {status.step}). Report the step "
+                    "via scenario_done with evidence, scenario_escalate if blocked, "
+                    "or scenario_abort to cancel the run."
                 )
             else:
                 lines.append(
-                    f"lockstep: active run(s) awaiting a report — {r.run_id} "
-                    f"(step: {r.step}). Report the step via scenario_done with "
-                    "evidence, scenario_escalate if blocked, or scenario_abort "
-                    "to cancel the run."
+                    f"lockstep: run {binding.public_run_id} is {status.status} under "
+                    "engine ownership — check scenario_status before stopping."
                 )
         return 0, json.dumps({"decision": "block", "reason": " ".join(lines)})
     except Exception:  # noqa: BLE001 - Stop can only delay a turn; fail OPEN on internal error
@@ -154,40 +154,33 @@ def hook_session_start(state_dir: Path, cwd: str) -> str:
 
     try:
         stale_minutes = _session_stale_minutes()
-        idx = RunIndex(state_dir)
-        matches = [r for r in idx.list(active_only=True) if _project_matches(r.project, cwd)]
+        matches = [
+            (binding, status)
+            for binding, status in _active_native(state_dir)
+            if _project_matches(binding.project_identity, cwd)
+        ]
         if not matches:
             return ""
 
-        # a spawned child session inherits LOCKSTEP_CHILD_RUN — mark
-        # that run as THIS session's own, so the child never has to guess
-        # which listed run is its (it also gets the id in the engine
-        # preamble; this is the survives-compaction copy).
-        own_run = os.environ.get("LOCKSTEP_CHILD_RUN")
         lines = []
-        for r in matches:
-            # Liveness hint from the binding sidecar, not RunRecord.updated
-            # (which does not tick during real work): a run whose driver is
-            # silent/absent is adoptable — tell the new session its door.
-            binding = sessions.read_binding(state_dir, r.run_id)
-            suffix = ("" if sessions.is_live(binding, stale_minutes) else
-                      " (no live driving session — a scenario_status call on it adopts it)")
-            if r.run_id == own_run:
-                suffix += (" — THIS SESSION'S OWN child run: your session holds its "
-                           "credential; drive and report it here")
-            b = r.brief or {}
-            if b.get("step") == "_subcall":
-                # name the subcall, never the raw '_subcall'
-                # marker — it is machinery, not a work step.
+        for run_binding, status in matches:
+            session_binding = sessions.read_binding(
+                state_dir, run_binding.public_run_id
+            )
+            suffix = (
+                ""
+                if sessions.is_live(session_binding, stale_minutes)
+                else " (no live driving session — a scenario_status call on it adopts it)"
+            )
+            if status.status == "awaiting":
                 lines.append(
-                    f"lockstep: run {r.run_id} — subcall in progress: "
-                    f"{b.get('node')} ({b.get('runner')}){suffix} "
-                    "— check via scenario_status"
+                    f"lockstep: run {run_binding.public_run_id} awaiting step "
+                    f"{status.step!r}{suffix} — check via scenario_status"
                 )
             else:
                 lines.append(
-                    f"lockstep: run {r.run_id} awaiting step {r.step!r}{suffix} "
-                    "— check via scenario_status"
+                    f"lockstep: run {run_binding.public_run_id} is {status.status} "
+                    f"under {status.owner} ownership{suffix} — check via scenario_status"
                 )
         return "\n".join(lines)
     except Exception:  # noqa: BLE001 - SessionStart cannot block; fail OPEN (no context) on error
@@ -212,32 +205,6 @@ def _deny(reason: str) -> tuple[int, str]:
     )
 
 
-def _child_chain_unlocked(idx: RunIndex, child_run: str, recipe: str, cwd: str) -> bool:
-    """Walk `parent_run` from the session's own run to the root. Unlocked
-    iff every run on the chain is awaiting and the root is a run of the
-    policy recipe in this project. Fail closed: unknown id, cycle, or any
-    terminal ancestor (a cascade that has not reaped this descendant yet
-    must not hold the gate open) all deny. No timestamp check: a parent's
-    `updated` does not tick while its child legitimately works, so age
-    measures nothing here — the credential (LOCKSTEP_CHILD_RUN, held only
-    by the spawned process) plus chain aliveness is the whole predicate."""
-    seen: set[str] = set()
-    try:
-        rec = idx.get(child_run)
-    except KeyError:
-        return False
-    while True:
-        if rec.run_id in seen or rec.status != ACTIVE_STATUS:
-            return False
-        seen.add(rec.run_id)
-        if rec.parent_run is None:
-            return rec.recipe == recipe and _project_matches(rec.project, cwd)
-        try:
-            rec = idx.get(rec.parent_run)
-        except KeyError:
-            return False
-
-
 def hook_pretool(stdin_json: dict, state_dir: Path) -> tuple[int, str]:
     state_dir = Path(state_dir)
     try:
@@ -247,57 +214,35 @@ def hook_pretool(stdin_json: dict, state_dir: Path) -> tuple[int, str]:
             return 0, ""
 
         matching_policy: dict | None = None
+        matching_depth = -1
         for f in sorted(policy_dir.glob("*.yaml")):
             doc = yaml.safe_load(f.read_text()) or {}
             project = doc.get("project")
             if project and _project_matches(project, cwd):
-                matching_policy = doc
-                break
+                depth = len(Path(project).resolve().parts)
+                if depth > matching_depth:
+                    matching_policy = doc
+                    matching_depth = depth
 
         if matching_policy is None:
             return 0, ""
 
         recipe = matching_policy.get("recipe")
-        idx = RunIndex(state_dir)
-        child_run = os.environ.get("LOCKSTEP_CHILD_RUN")
-        if child_run:
-            # a spawned child session (this hook inherits the session's
-            # env, so LOCKSTEP_CHILD_RUN names ITS run) is unlocked only
-            # through its own ancestry — every run on the chain still
-            # awaiting, terminating in an awaiting run of the policy recipe
-            # in this project. A worker-visible awaiting policy run
-            # elsewhere in the project does NOT unlock a child whose own
-            # chain is dead. Session bindings play no part here: the env
-            # credential, held only by the spawned process, already binds
-            # this session to its run more tightly than a sidecar could.
-            #
-            # That credential is the NONCE, and it is the half that must be
-            # checked. A run id is not a secret — SessionStart broadcasts
-            # every active run's id into every session in the project — so
-            # unlocking on LOCKSTEP_CHILD_RUN alone lets any ungated session
-            # re-export a known id and walk in. Same comparison the server's
-            # origin binding makes, including its order guard: an absent
-            # record nonce refuses unconditionally, because
-            # compare_digest("", "") MATCHES.
-            try:
-                record_nonce = idx.get(child_run).nonce
-            except (KeyError, TypeError, ValueError):
-                record_nonce = None
-            env_nonce = os.environ.get("LOCKSTEP_CHILD_NONCE") or ""
-            if not record_nonce or not hmac.compare_digest(str(record_nonce), env_nonce):
-                return _deny(
-                    f"lockstep policy: this session presents child run {child_run} "
-                    "without its spawn credential"
-                )
-            if _child_chain_unlocked(idx, child_run, recipe, cwd):
-                return 0, ""
-            return _deny(
-                f"lockstep policy: this session's child run {child_run} has no "
-                f"awaiting ancestry chain to a run of recipe {recipe}"
-            )
+        recipe_digest = matching_policy.get("recipe_digest")
+        if (
+            not isinstance(recipe, str)
+            or not recipe
+            or not isinstance(recipe_digest, str)
+            or len(recipe_digest) != 64
+        ):
+            return _deny("lockstep policy: configured recipe binding is invalid")
         candidates = [
-            r for r in idx.list(active_only=True)
-            if _project_matches(r.project, cwd) and r.recipe == recipe
+            (binding, status)
+            for binding, status in _active_native(state_dir)
+            if status.status == "awaiting"
+            and Path(binding.project_identity).resolve()
+            == Path(matching_policy["project"]).resolve()
+            and binding.recipe_digest == recipe_digest
         ]
         if not candidates:
             return _deny(f"lockstep policy: start recipe {recipe} via scenario_start first")
@@ -316,22 +261,25 @@ def hook_pretool(stdin_json: dict, state_dir: Path) -> tuple[int, str]:
                 "lockstep policy: hook input carried no session_id — run "
                 "ownership cannot be established; failing closed"
             )
-        for r in candidates:
-            if sessions.refresh_if_owner(state_dir, r.run_id, session_id):
+        for binding, _status in candidates:
+            if sessions.refresh_if_owner(
+                state_dir, binding.public_run_id, session_id
+            ):
                 return 0, ""
         stale_minutes = _session_stale_minutes()
-        r = candidates[0]
-        if sessions.is_live(sessions.read_binding(state_dir, r.run_id), stale_minutes):
+        binding, _status = candidates[0]
+        run_id = binding.public_run_id
+        if sessions.is_live(sessions.read_binding(state_dir, run_id), stale_minutes):
             return _deny(
-                f"lockstep policy: run {r.run_id} of recipe {recipe} is being driven "
+                f"lockstep policy: run {run_id} of recipe {recipe} is being driven "
                 "by another live session — writes here belong to that session. If it "
                 f"is truly gone it falls silent, and after {stale_minutes:g}m a "
-                f"scenario_status call on {r.run_id} adopts the run; or scenario_abort "
+                f"scenario_status call on {run_id} adopts the run; or scenario_abort "
                 "it and scenario_start a fresh run"
             )
         return _deny(
-            f"lockstep policy: run {r.run_id} of recipe {recipe} has no live driving "
-            f"session — call scenario_status on {r.run_id} to adopt it, or "
+            f"lockstep policy: run {run_id} of recipe {recipe} has no live driving "
+            f"session — call scenario_status on {run_id} to adopt it, or "
             "scenario_abort it and scenario_start a fresh run"
         )
     except Exception:  # noqa: BLE001 - fail-closed: internal error must never fail-open
@@ -345,8 +293,8 @@ def hook_pretool(stdin_json: dict, state_dir: Path) -> tuple[int, str]:
 # other mcp__ name a user-extended matcher lets through). This is where a
 # run gets BOUND to the session driving it: at scenario_start (run_id read
 # from the tool response) and on every later touch naming the run —
-# scenario_status polls included, so a parent waiting out a long subcall
-# stays visibly live. Adoption (sessions.touch) also lives here and ONLY
+# scenario_status polls included, so a long-running driver stays visibly
+# live. Adoption (sessions.touch) also lives here and ONLY
 # here: taking over an abandoned run requires deliberately touching it with
 # a lockstep tool, never just writing a file in the project. Pure observer:
 # no output, fail-OPEN on any internal error.
@@ -408,7 +356,7 @@ def _find_marked_run_id(obj, depth: int = 0) -> str | None:
     server-stamped binding marker as a SIBLING key. This is the
     name-agnostic identity predicate for tools whose name is not a known
     lockstep shape: a bare `run_id` anywhere in a foreign tool's response
-    (a file-read surfacing runs.json, an unrelated tool's own run ids)
+    (a file-read surfacing catalog data, an unrelated tool's own run ids)
     proves nothing, and must bind nothing."""
     if depth > 6:
         return None
@@ -485,18 +433,17 @@ def hook_posttool(stdin_json: dict, state_dir: Path) -> None:
         session_id = stdin_json.get("session_id")
         if not isinstance(session_id, str) or not session_id:
             return
-        # Only a real, still-awaiting run is worth a binding — a failed call
-        # (run_id in the input but no such run) or a terminal run binds
-        # nothing. runs.json stays read-only here.
-        idx = RunIndex(state_dir)
-        try:
-            record = idx.get(run_id)
-        except KeyError:
-            return
-        if record.status != ACTIVE_STATUS:
+        # Only a real, still worker-awaiting native run is bindable. Native
+        # children have no public run or credential identity.
+        projected = {
+            binding.public_run_id: status
+            for binding, status in read_only_statuses(state_dir)
+        }
+        status = projected.get(run_id)
+        if status is None or status.status != "awaiting" or status.owner != "worker":
             return
         sessions.touch(state_dir, run_id, session_id, _session_stale_minutes())
-    except Exception:  # noqa: BLE001 - observer hook: never look like a failure
+    except Exception:  # noqa: BLE001, S110 - observer hook must fail open
         pass
 
 
@@ -516,9 +463,21 @@ def _policy_path(state_dir: Path, project: str) -> Path:
 
 def policy_require(state_dir: Path, project: str, recipe: str) -> Path:
     state_dir = Path(state_dir)
+    try:
+        recipe_digest = RecipeLoader(_recipes_dir()).resolve(recipe).definition_sha256
+    except (OSError, RecipeError, ValueError) as exc:
+        raise ValueError(f"cannot bind policy recipe {recipe!r}: {exc}") from exc
     _policy_dir(state_dir).mkdir(parents=True, exist_ok=True)
     path = _policy_path(state_dir, project)
-    path.write_text(yaml.safe_dump({"project": str(Path(project).resolve()), "recipe": recipe}))
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "project": str(Path(project).resolve()),
+                "recipe": recipe,
+                "recipe_digest": recipe_digest,
+            }
+        )
+    )
     return path
 
 
@@ -555,22 +514,29 @@ def doctor(state_dir: Path, recipes_dir: Path) -> tuple[bool, str]:
     check("state dir exists", state_dir.exists(), str(state_dir))
     check("recipes dir exists", recipes_dir.exists(), str(recipes_dir))
 
-    # Binding liveness: every ACTIVE run must have a session-binding
-    # sidecar — it is written by the PostToolUse hook on the very
-    # scenario_start that created the run, so its absence proves the hook
-    # never fired (matcher/tool-name mismatch), the exact silent-lockout
-    # failure this check exists to make loud.
+    # Every worker-awaiting native run must have the PostToolUse-owned
+    # session binding that makes the write gate usable. Engine-owned running
+    # work needs no worker session binding.
     try:
-        active = RunIndex(state_dir).list(active_only=True) if _runs_json_path(state_dir).exists() else []
-    except Exception as exc:  # noqa: BLE001 - unreadable index is itself a finding
+        active = [
+            (binding, status)
+            for binding, status in read_only_statuses(state_dir)
+            if status.status == "awaiting" and status.owner == "worker"
+        ]
+    except Exception:  # noqa: BLE001 - unreadable projection is itself a finding
         active = []
-        check("runs index readable", False, f"{_runs_json_path(state_dir)}: {exc}")
-    for r in active:
-        binding = sessions.read_binding(state_dir, r.run_id)
+        check(
+            "native run projection readable",
+            False,
+            "trusted native state failed read-only verification",
+        )
+    for run_binding, _status in active:
+        run_id = run_binding.public_run_id
+        binding = sessions.read_binding(state_dir, run_id)
         if binding is None:
             check(
-                f"run {r.run_id} has a session binding", False,
-                f"active run (recipe {r.recipe}) with no bindings/{r.run_id}.json: the "
+                f"run {run_id} has a session binding", False,
+                f"worker-awaiting run with no bindings/{run_id}.json: the "
                 "PostToolUse binding hook never fired, so the policy gate denies every "
                 "session, including the one that started the run. The installed "
                 "PostToolUse matcher must match this installation's lockstep tool "
@@ -579,14 +545,16 @@ def doctor(state_dir: Path, recipes_dir: Path) -> tuple[bool, str]:
                 "add its prefix followed by .* to the PostToolUse matcher in the "
                 "plugin's hooks/hooks.json or your settings hooks — responses are "
                 "marker-verified, no code change needed. Then a scenario_status "
-                f"call on {r.run_id} binds it",
+                f"call on {run_id} binds it",
             )
         else:
             live = sessions.is_live(binding, _session_stale_minutes())
             check(
-                f"run {r.run_id} has a session binding", True,
-                f"session {binding['session_id']}"
-                + ("" if live else " (silent past the stale window — adoptable)"),
+                f"run {run_id} has a session binding",
+                live,
+                "binding present and live"
+                if live
+                else "binding is stale and adoptable",
             )
 
     lines.append(f"installed version: {__version__}")

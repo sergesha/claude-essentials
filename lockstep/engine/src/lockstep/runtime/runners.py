@@ -1,4 +1,4 @@
-"""Runner registry: owner-controlled allowlist, absolute paths, budgets.
+"""Runner registry: owner-controlled allowlist, absolute paths, and timeout.
 
 OS-AGNOSTIC: executability is discovered at runtime (``os.access(path,
 os.X_OK)``) — never inferred from platform or location. The engine NEVER
@@ -12,28 +12,17 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 import yaml
 
-DEFAULTS = {"timeout_minutes": 30, "max_subcalls_per_run": 8, "max_fractal_depth": 2}
+DEFAULTS = {"timeout_minutes": 30}
 _BUDGET_KEYS = tuple(DEFAULTS)
 _DRIVERS = frozenset({"claude", "codex"})
 _RUNNER_KEYS = {"driver", "path", "models", *_BUDGET_KEYS}
-# Process essentials only (POSIX + Windows). No SHELL — a `-p` child spawns
-# no interactive shell. LOCKSTEP_RECIPES passes through so a fractal child
-# resolves recipes where its parent did, not against its own cwd.
-# LOCKSTEP_RUNNER passes through so a depth-2 child whose markers rely on
-# the adapter default can still spawn — it is a NAME resolved against the
-# owner's runners.yaml allowlist, never a path, so the allowlist boundary
-# holds regardless of its value.
-_ENV_ALLOWLIST = (
-    "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR", "TEMP", "TMP",
-    "SystemRoot", "COMSPEC", "PATHEXT", "USERPROFILE",
-    "CODEX_HOME", "LOCKSTEP_RECIPES", "LOCKSTEP_RUNNER",
-)
 
 
 class RunnerError(RuntimeError):
@@ -46,8 +35,6 @@ class RunnerSpec:
     path: str
     models: list[str]
     timeout_minutes: int
-    max_subcalls_per_run: int
-    max_fractal_depth: int
     driver: str = "claude"
 
 
@@ -78,7 +65,7 @@ def load_runners(state_dir: Path) -> dict[str, RunnerSpec]:
             # A misspelled budget key would otherwise parse clean and
             # silently fall back to defaults.
             raise RunnerError(f"runner '{name}': unknown key(s) {sorted(unknown)}")
-        # every budget honours runner-body override -> top-level budgets -> default
+        # Timeout honours runner-body override -> top-level budgets -> default.
         limits = {
             k: _as_int(name, k, body.get(k, budgets.get(k, DEFAULTS[k]))) for k in _BUDGET_KEYS
         }
@@ -158,7 +145,7 @@ def assert_state_dir_sane(state_dir: Path, project: Path) -> None:
     if inside:
         raise RunnerError(
             f"state dir {state} lies inside the project tree {proj} — "
-            "the runner allowlist and run index would be agent-writable"
+            "the runner allowlist and native run metadata would be agent-writable"
         )
 
 
@@ -215,17 +202,3 @@ def build_argv(spec: RunnerSpec, prompt: str, model: str | None,
         raise RunnerError(f"runner '{spec.name}': unsupported driver {spec.driver!r}")
     argv += ["--", prompt]
     return argv
-
-
-def child_env(base_env: Mapping[str, str], state_dir: Path,
-              child_run: str | None, nonce: str | None) -> dict[str, str]:
-    if (child_run is None) != (nonce is None):
-        # fail closed: one half of the credential would spawn a child
-        # indistinguishable from an intentional one-shot
-        raise RunnerError("child_run and nonce must be passed together (or neither)")
-    env = {k: base_env[k] for k in _ENV_ALLOWLIST if k in base_env}
-    env["LOCKSTEP_STATE_DIR"] = str(state_dir)
-    if child_run is not None:
-        env["LOCKSTEP_CHILD_RUN"] = child_run
-        env["LOCKSTEP_CHILD_NONCE"] = nonce
-    return env

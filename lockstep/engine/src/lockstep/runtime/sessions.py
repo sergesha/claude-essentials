@@ -1,16 +1,16 @@
 """Session-binding sidecars — WHICH session drives WHICH run.
 
-`RunRecord.updated` cannot answer "is anyone actually driving this run?":
-it does not tick on Write/Edit, on `scenario_status` polls, or while a
-subcall runs — only on step transitions. The hooks can answer it: the
+Native checkpoint timestamps cannot answer "is anyone actually driving this
+run?": they do not tick on Write/Edit or `scenario_status` polls. The hooks
+can answer it: the
 platform delivers `session_id` in every hook input, the PreToolUse gate
 fires on every gated tool call, and every lockstep MCP call fires
 PostToolUse. This module persists that signal as one sidecar per run,
-`<state_dir>/bindings/<run_id>.json` — hook-OWNED state (hooks stay
-read-only on `runs.json`; the engine neither reads nor writes bindings).
+`<state_dir>/bindings/<run_id>.json` — hook-owned state, separate from the
+read-only native workflow projection.
 
-Binding rules (every mutation is a read-modify-write under
-`locking.file_lock` on the sidecar, published via tmp + `os.replace`):
+Binding rules (every mutation is a read-modify-write under the shared
+crash-released advisory lock on the sidecar, published via tmp + `os.replace`):
 
 - The OWNER (the binding names the calling session) refreshes
   `last_seen` on every touch. Ownership never lapses by idleness alone —
@@ -36,10 +36,12 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from lockstep.runtime.locking import file_lock
+from lockstep.runtime.advisory_lock import advisory_file_lock
 
 # The response marker: the MCP server stamps this key into every tool
 # result that names a `run_id` (server._mark), and the PostToolUse hook
@@ -49,7 +51,7 @@ from lockstep.runtime.locking import file_lock
 # under any server/plugin name only needs its shape added to the
 # platform's PostToolUse matcher; the hook code recognizes the response
 # itself. A bare `run_id` in a foreign tool's response (e.g. a file-read
-# surfacing runs.json) carries no marker and binds nothing. Boundary,
+# surfacing catalog data) carries no marker and binds nothing. Boundary,
 # stated honestly: the marker authenticates the response SHAPE, not the
 # server — a tool that deliberately replays a marked lockstep response
 # (and whose name the installed matcher lets through) reads as lockstep;
@@ -63,7 +65,7 @@ def binding_path(state_dir: Path, run_id: str) -> Path:
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def read_binding(state_dir: Path, run_id: str) -> dict | None:
@@ -85,19 +87,45 @@ def is_live(binding: dict | None, stale_minutes: float) -> bool:
     try:
         seen = datetime.fromisoformat(binding.get("last_seen", ""))
         if seen.tzinfo is None:
-            seen = seen.replace(tzinfo=timezone.utc)
+            seen = seen.replace(tzinfo=UTC)
     except (TypeError, ValueError):
         return False
-    return datetime.now(timezone.utc) - seen <= timedelta(minutes=stale_minutes)
+    return datetime.now(UTC) - seen <= timedelta(minutes=stale_minutes)
 
 
 _REFRESH_LOCK_WAIT = 2.0
+
+
+@contextmanager
+def _binding_lock(path: Path, *, timeout: float | None = None) -> Iterator[None]:
+    """Apply the shared kernel mutex to the hook-owned binding namespace."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with advisory_file_lock(Path(f"{path}.lock"), timeout=timeout):
+        yield
 
 
 def _write(path: Path, data: dict) -> None:
     tmp = path.parent / (path.name + ".tmp")
     tmp.write_text(json.dumps(data, indent=2, sort_keys=True))
     os.replace(tmp, path)
+
+
+@contextmanager
+def locked_owner(
+    state_dir: Path, run_id: str, session_id: str | None
+) -> Iterator[None]:
+    """Hold the binding mutation lock from owner verification through commit."""
+    path = binding_path(state_dir, run_id)
+    with _binding_lock(path):
+        binding = read_binding(state_dir, run_id)
+        if (
+            binding is None
+            or not isinstance(session_id, str)
+            or not session_id
+            or binding["session_id"] != session_id
+        ):
+            raise PermissionError("worker session binding mismatch")
+        yield
 
 
 def refresh_if_owner(state_dir: Path, run_id: str, session_id: str) -> bool:
@@ -111,7 +139,7 @@ def refresh_if_owner(state_dir: Path, run_id: str, session_id: str) -> bool:
     # the PreToolUse deny path, and a hook killed at its budget emits no
     # deny at all — the gate fails open. A wedged sidecar lock must cost a
     # moment, never the whole budget.
-    with file_lock(path, timeout=_REFRESH_LOCK_WAIT):
+    with _binding_lock(path, timeout=_REFRESH_LOCK_WAIT):
         b = read_binding(state_dir, run_id)
         if b is None or b["session_id"] != session_id:
             return False                               # re-verified under the lock
@@ -127,7 +155,7 @@ def touch(state_dir: Path, run_id: str, session_id: str, stale_minutes: float) -
     (`"foreign"`). Verdict formed UNDER the sidecar lock, so two racing
     adopters resolve to exactly one owner."""
     path = binding_path(state_dir, run_id)
-    with file_lock(path):
+    with _binding_lock(path):
         b = read_binding(state_dir, run_id)
         now = _now_iso()
         if b is not None and b["session_id"] == session_id:

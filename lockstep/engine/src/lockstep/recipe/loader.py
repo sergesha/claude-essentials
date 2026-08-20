@@ -93,6 +93,11 @@ class RecipeLoader:
             return self._ref_for_path(candidate)
         if str(name_or_path).endswith(_SUFFIX):
             return self._ref_for_path(self._root / candidate)
+        direct = self._root / f"{name_or_path}{_SUFFIX}"
+        if direct.exists() or direct.is_symlink():
+            # Resolve the named authority root without first treating every
+            # transitive ``*.recipe.yaml`` dependency as a public root.
+            return self._ref_for_path(direct)
         try:
             return self.discover()[str(name_or_path)]
         except KeyError as exc:
