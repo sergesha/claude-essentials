@@ -31,27 +31,31 @@ class SnapshotStorageError(RuntimeError):
     pass
 
 
-class FrozenJSONMapping(dict):
-    """JSON-serializable mapping with no mutation surface after construction."""
+class FrozenJSONMapping(Mapping[str, object]):
+    """Immutable mapping composed solely from recursively frozen tuple data."""
 
-    def __init__(self, *args, **kwargs) -> None:
-        if getattr(self, "_sealed", False):
-            raise TypeError("frozen JSON mapping is immutable")
-        dict.__init__(self, *args, **kwargs)
-        self._sealed = True
+    __slots__ = ("_items",)
 
-    @staticmethod
-    def _immutable(*_args, **_kwargs):
-        raise TypeError("frozen JSON mapping is immutable")
+    def __init__(self, values: Mapping[str, object]) -> None:
+        object.__setattr__(self, "_items", tuple(values.items()))
 
-    __setitem__ = _immutable
-    __delitem__ = _immutable
-    clear = _immutable
-    pop = _immutable
-    popitem = _immutable
-    setdefault = _immutable
-    update = _immutable
-    __ior__ = _immutable
+    def __setattr__(self, _name: str, _value: object) -> None:
+        raise AttributeError("frozen JSON mapping is immutable")
+
+    def __getitem__(self, key: str) -> object:
+        for candidate, value in self._items:
+            if candidate == key:
+                return value
+        raise KeyError(key)
+
+    def __iter__(self):
+        return (key for key, _value in self._items)
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+    def __repr__(self) -> str:
+        return repr(dict(self._items))
 
 
 class FrozenJSONSequence(tuple):
@@ -90,13 +94,26 @@ class ProjectSnapshot:
 
 
 def _canonical(data: object) -> bytes:
-    return json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+    return json.dumps(
+        _plain_json(data),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode()
+
+
+def _plain_json(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {key: _plain_json(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain_json(item) for item in value]
+    return value
 
 
 def _freeze_json(value: object) -> object:
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return FrozenJSONMapping({key: _freeze_json(item) for key, item in value.items()})
-    if isinstance(value, list):
+    if isinstance(value, (list, tuple)):
         return FrozenJSONSequence(_freeze_json(item) for item in value)
     return value
 
@@ -183,7 +200,7 @@ class ProjectSnapshotStore:
                 raise UndeclaredSnapshotPath(f"snapshot path {entry.path!r} is not declared")
         if not isinstance(provenance, Mapping) or any(not isinstance(key, str) for key in provenance):
             raise TypeError("snapshot provenance must be a string-keyed mapping")
-        provenance_data = dict(provenance)
+        provenance_data = _freeze_json(provenance)
         try:
             _canonical(provenance_data)
         except (TypeError, ValueError) as exc:

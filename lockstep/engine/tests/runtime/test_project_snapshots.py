@@ -45,6 +45,52 @@ def test_snapshot_provenance_rejects_top_level_mutation(stores):
         provenance["revision"] = "2"
 
 
+def test_snapshot_provenance_is_not_targetable_by_dict_setitem(stores):
+    blob_store, snapshot_store = stores
+    ref = snapshot_store.capture(
+        {"app.py": blob_store.put(b"v1")},
+        declared_paths=["app.py"],
+        provenance={"revision": "1"},
+    )
+    provenance = snapshot_store.read(ref).provenance
+
+    assert not isinstance(provenance, dict)
+    with pytest.raises(TypeError):
+        dict.__setitem__(provenance, "revision", "2")
+    assert provenance == {"revision": "1"}
+
+
+def test_snapshot_provenance_is_not_targetable_by_dict_update(stores):
+    blob_store, snapshot_store = stores
+    ref = snapshot_store.capture(
+        {"app.py": blob_store.put(b"v1")},
+        declared_paths=["app.py"],
+        provenance={"revision": "1"},
+    )
+    provenance = snapshot_store.read(ref).provenance
+
+    assert not isinstance(provenance, dict)
+    with pytest.raises(TypeError):
+        dict.update(provenance, {"revision": "2"})
+    assert provenance == {"revision": "1"}
+
+
+def test_snapshot_provenance_exposes_no_mutable_instance_backing(stores):
+    blob_store, snapshot_store = stores
+    ref = snapshot_store.capture(
+        {"app.py": blob_store.put(b"v1")},
+        declared_paths=["app.py"],
+        provenance={"revision": "1"},
+    )
+    provenance = snapshot_store.read(ref).provenance
+
+    with pytest.raises(TypeError):
+        vars(provenance)
+    with pytest.raises(AttributeError):
+        provenance._sealed = False
+    assert provenance == {"revision": "1"}
+
+
 def test_snapshot_provenance_recursively_freezes_nested_json(stores):
     blob_store, snapshot_store = stores
     original = {
@@ -61,23 +107,33 @@ def test_snapshot_provenance_recursively_freezes_nested_json(stores):
     assert provenance == original
     with pytest.raises(TypeError):
         provenance["source"]["revision"] = "2"
+    assert not isinstance(provenance["source"], dict)
+    with pytest.raises(TypeError):
+        dict.__setitem__(provenance["source"], "revision", "2")
     with pytest.raises((AttributeError, TypeError)):
         provenance["source"]["labels"].append("mutated")
     assert provenance == original
 
 
-def test_snapshot_frozen_provenance_remains_json_serializable(stores):
+def test_snapshot_frozen_provenance_round_trips_deterministically(stores):
     blob_store, snapshot_store = stores
     original = {"source": {"revision": "1", "labels": ["sealed"]}}
+    files = {"app.py": blob_store.put(b"v1")}
     ref = snapshot_store.capture(
-        {"app.py": blob_store.put(b"v1")},
+        files,
         declared_paths=["app.py"],
         provenance=original,
     )
+    snapshot = snapshot_store.read(ref)
 
-    encoded = json.dumps(snapshot_store.read(ref).provenance, sort_keys=True)
+    reused = snapshot_store.capture(
+        files,
+        declared_paths=["app.py"],
+        provenance=snapshot.provenance,
+    )
 
-    assert json.loads(encoded) == original
+    assert reused == ref
+    assert snapshot_store.read(reused).provenance == original
 
 
 def test_snapshot_rejects_undeclared_or_unsafe_paths(stores):
