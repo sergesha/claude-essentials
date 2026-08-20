@@ -144,15 +144,16 @@ from __future__ import annotations
 
 import sqlite3
 import tempfile
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from dataclasses import fields as dataclass_fields, is_dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 import yaml
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
 from yamlgraph.compile.graph_loader import compile_graph, load_graph_config
 from yamlgraph.compile.node_otel import _maybe_wrap_otel
@@ -365,35 +366,53 @@ def open_native_app(recipe_path: Path, db_path: Path | None = None) -> NativeApp
         raise
 
 
-def run_wrapped_config_probe(
-    node_fn: Callable[..., dict[str, Any]],
-    state: Mapping[str, Any],
-    *,
-    thread_id: str,
-    checkpoint_ns: str,
-    checkpoint_id: str,
-    node_name: str = "config_probe",
-) -> dict[str, Any]:
-    """Run a config-aware callable through yamlgraph's timeout and OTel wrappers.
+class _InjectedConfigProbeState(TypedDict, total=False):
+    observed_sentinel: str
 
-    The callable and returned mapping are neutral boundary values. Native wrapper
-    types and RunnableConfig remain confined to this adapter.
+
+def _run_wrapped_injected_config_probe(sentinel: str) -> dict[str, Any]:
+    """Prove a wrapped graph node receives LangGraph's injected config.
+
+    This deliberately small graph exists only for the native dependency gate.
+    The callable observes a value available solely through RunnableConfig, so a
+    successful state update cannot be produced by reconstructing checkpoint
+    coordinates or by calling the wrappers directly.
     """
-    config = {
-        "configurable": {
-            "thread_id": thread_id,
-            "checkpoint_ns": checkpoint_ns,
-            "checkpoint_id": checkpoint_id,
-        }
-    }
+
+    def capture_injected_config(
+        _state: _InjectedConfigProbeState,
+        config: Mapping[str, Any],
+    ) -> _InjectedConfigProbeState:
+        configurable = config.get("configurable") or {}
+        return {"observed_sentinel": str(configurable["lockstep_probe_sentinel"])}
+
+    node_name = "injected_config_probe"
     wrapped = _maybe_wrap_otel(
-        _maybe_wrap_timeout(node_fn, {"timeout": 1}, node_name),
+        _maybe_wrap_timeout(
+            capture_injected_config,
+            {"timeout": 1},
+            node_name,
+        ),
         node_name,
         "python",
     )
-    result = _neutral(wrapped(dict(state), config))
+    builder = StateGraph(_InjectedConfigProbeState)
+    builder.add_node(node_name, wrapped)
+    builder.add_edge(START, node_name)
+    builder.add_edge(node_name, END)
+    result = _neutral(
+        builder.compile().invoke(
+            {},
+            config={
+                "configurable": {
+                    "thread_id": f"lockstep-config-probe-{sentinel}",
+                    "lockstep_probe_sentinel": sentinel,
+                }
+            },
+        )
+    )
     if not isinstance(result, dict):
-        raise RuntimeError("native config probe did not return a mapping")
+        raise RuntimeError("native injected-config probe did not return a mapping")
     return result
 
 
@@ -449,27 +468,8 @@ edges:
 def probe_native_capabilities() -> None:
     """Raise unless the installed yamlgraph satisfies Lockstep's native gate."""
 
-    def capture(state: dict[str, Any], config: Mapping[str, Any]) -> dict[str, Any]:
-        return {
-            "value": state["value"],
-            "configurable": dict(config.get("configurable") or {}),
-        }
-
-    wrapper_result = run_wrapped_config_probe(
-        capture,
-        {"value": 42},
-        thread_id="probe-parent",
-        checkpoint_ns="probe-namespace",
-        checkpoint_id="probe-checkpoint",
-    )
-    assert wrapper_result == {
-        "value": 42,
-        "configurable": {
-            "thread_id": "probe-parent",
-            "checkpoint_ns": "probe-namespace",
-            "checkpoint_id": "probe-checkpoint",
-        },
-    }
+    wrapper_result = _run_wrapped_injected_config_probe("probe-configurable")
+    assert wrapper_result == {"observed_sentinel": "probe-configurable"}
 
     child_config = _build_child_config(
         {
