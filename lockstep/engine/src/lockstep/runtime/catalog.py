@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 
@@ -31,8 +31,8 @@ class RunBinding:
 
 def _iso_utc(value: datetime) -> str:
     if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
-    return value.astimezone(timezone.utc).isoformat()
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(UTC).isoformat()
 
 
 def _canonical_created_at(value: str) -> str:
@@ -48,9 +48,11 @@ def _canonical_created_at(value: str) -> str:
 class RunCatalog:
     """Create and discover immutable run bindings.  There is no update API."""
 
-    def __init__(self, store: SQLiteStore, *, clock: Callable[[], datetime] | None = None) -> None:
+    def __init__(
+        self, store: SQLiteStore, *, clock: Callable[[], datetime] | None = None
+    ) -> None:
         self._store = store
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
 
     @staticmethod
     def _validate(binding: RunBinding) -> None:
@@ -124,6 +126,16 @@ class RunCatalog:
             ).first()
         if row is None:
             raise KeyError(run_id)
+        return self._from_row(row)
+
+    def find_by_thread(self, thread_id: str) -> RunBinding:
+        table = self._store.tables.runs
+        with self._store.read_connection() as connection:
+            row = connection.execute(
+                select(table).where(table.c.thread_id == thread_id)
+            ).first()
+        if row is None:
+            raise KeyError(thread_id)
         return self._from_row(row)
 
     def list(self, project_identity: str) -> list[RunBinding]:

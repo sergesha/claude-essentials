@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Callable
 from dataclasses import replace
 
 from lockstep.runtime.providers.base import (
@@ -27,15 +28,23 @@ class FakeRunner:
         self.inspect_observations: deque[RunnerObservation] = deque()
         self.cancel_observations: deque[RunnerObservation] = deque()
         self.safety_observations: deque[TerminalSafetyObservation] = deque()
+        self.workspace_refs: deque[str | None] = deque()
+        self.prepare_callbacks: deque[Callable[[], object]] = deque()
 
     def prepare(self, request: EffectRequest) -> PreparedLaunch:
         self.prepare_calls.append(request)
+        if self.prepare_callbacks:
+            self.prepare_callbacks.popleft()()
         return PreparedLaunch(
             effect_id=request.effect_id,
             request_digest=request.request_digest,
             runner_binding_digest=request.runner_binding_digest,
             launch_ref=f"launch:{request.effect_id}",
-            workspace_ref=f"workspace:{request.effect_id}",
+            workspace_ref=(
+                self.workspace_refs.popleft()
+                if self.workspace_refs
+                else f"workspace:{request.effect_id}"
+            ),
         )
 
     def ensure_started(self, launch: PreparedLaunch) -> RunnerObservation:
@@ -52,7 +61,9 @@ class FakeRunner:
         if self.inspect_observations:
             return self.inspect_observations.popleft()
         launch = next(
-            item for item in reversed(self.ensure_started_calls) if item.effect_id == effect_id
+            item
+            for item in reversed(self.ensure_started_calls)
+            if item.effect_id == effect_id
         )
         return RunnerObservation.running_for(launch)
 
@@ -61,7 +72,9 @@ class FakeRunner:
         if self.cancel_observations:
             return self.cancel_observations.popleft()
         launch = next(
-            item for item in reversed(self.ensure_started_calls) if item.effect_id == effect_id
+            item
+            for item in reversed(self.ensure_started_calls)
+            if item.effect_id == effect_id
         )
         return RunnerObservation.running_for(launch)
 
@@ -70,7 +83,9 @@ class FakeRunner:
         if self.safety_observations:
             return self.safety_observations.popleft()
         launch = next(
-            item for item in reversed(self.ensure_started_calls) if item.effect_id == effect_id
+            item
+            for item in reversed(self.ensure_started_calls)
+            if item.effect_id == effect_id
         )
         return TerminalSafetyObservation.pending_for(launch)
 

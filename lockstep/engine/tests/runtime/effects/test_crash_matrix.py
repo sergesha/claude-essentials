@@ -4,7 +4,6 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import timedelta
 
-from lockstep.runtime.effects.descriptors import parse_effect_result
 from lockstep.runtime.providers.base import RunnerObservation, TerminalSafetyObservation
 
 from .test_coordinator import NOW, _advance_to_running, _result
@@ -44,6 +43,29 @@ def test_launching_ambiguity_is_sealed_indeterminate_and_never_retried(system) -
     assert runner.spawn_count == 1
 
 
+def test_deadline_after_launch_claim_proves_absence_without_spawning(system) -> None:
+    coordinator, _runtime, runner, ledger, _store, _coordinate = system
+    coordinator.reconcile("run-1")
+    claimed = coordinator.reconcile("run-1")
+    request = runner.prepare_calls[-1]
+    coordinator._clock = lambda: NOW + timedelta(hours=1)
+    runner.inspect_observations.append(
+        RunnerObservation(
+            effect_id=claimed.effect_id,
+            request_digest=request.request_digest,
+            runner_binding_digest=request.runner_binding_digest,
+            state="absent",
+        )
+    )
+
+    report = coordinator.reconcile("run-1")
+
+    assert report.action == "sealed"
+    assert ledger.get(claimed.effect_id).fixed_error_code == "deadline_timeout"
+    assert runner.ensure_started_calls == []
+    assert runner.spawn_count == 0
+
+
 def test_deadline_cancel_requires_matching_terminal_safety_proof(system) -> None:
     coordinator, _runtime, runner, ledger, _store, _coordinate = system
     running, runner = _advance_to_running(system)
@@ -52,7 +74,11 @@ def test_deadline_cancel_requires_matching_terminal_safety_proof(system) -> None
     runner.safety_observations.extend(
         [
             TerminalSafetyObservation.pending_for(launch),
-            TerminalSafetyObservation.proven_for(launch, result_stable=True),
+            TerminalSafetyObservation.proven_for(
+                launch,
+                result_stable=True,
+                rollover_snapshot_ref="snapshot:" + "f" * 64,
+            ),
         ]
     )
 
@@ -79,54 +105,95 @@ def test_concurrent_reconcilers_share_one_durable_launch_claim(system) -> None:
     assert runner.spawn_count == 1
 
 
+def test_busy_effect_lease_blocks_provider_prepare_before_durable_intent(
+    system,
+) -> None:
+    from lockstep.runtime.effects.descriptors import (
+        derive_effect_id,
+        parse_effect_descriptor,
+    )
+    from lockstep.runtime.leases import LeaseStore
+
+    coordinator, runtime, runner, ledger, store, coordinate = system
+    descriptor = parse_effect_descriptor(
+        runtime.current.pending[0].value["lockstep_effect"]
+    )
+    effect_id = derive_effect_id(coordinate, descriptor.digest)
+    leases = LeaseStore(store, clock=lambda: NOW)
+    held = leases.acquire("effect", effect_id, "other-coordinator", 30)
+    try:
+        report = coordinator.reconcile("run-1")
+    finally:
+        leases.release(held)
+
+    assert report.action == "busy"
+    assert ledger.list_nonterminal() == []
+    assert runner.prepare_calls == []
+    assert runner.ensure_started_calls == []
+
+
+def test_lease_expiring_during_prepare_cannot_cross_ensure_started(system) -> None:
+    from lockstep.runtime.leases import LeaseStore
+
+    coordinator, _runtime, runner, ledger, store, _coordinate = system
+    prepared = coordinator.reconcile("run-1")
+    assert coordinator.reconcile("run-1").action == "launch_claimed"
+
+    def advance_lease() -> None:
+        later = LeaseStore(store, clock=lambda: NOW + timedelta(seconds=31))
+        later.acquire("effect", prepared.effect_id, "new-owner", 30)
+
+    runner.prepare_callbacks.append(advance_lease)
+    report = coordinator.reconcile("run-1")
+
+    assert report.action == "busy"
+    assert ledger.get(prepared.effect_id).phase == "launching"
+    assert len(runner.prepare_calls) == 2
+    assert runner.ensure_started_calls == []
+    assert runner.spawn_count == 0
+
+
 def test_partial_and_batch_delivery_use_only_current_exact_interrupts(system) -> None:
-    from lockstep.runtime.effects.coordinator import EffectCoordinator
-    from lockstep.runtime.effects.descriptors import parse_effect_descriptor
+    from lockstep.runtime.effects.descriptors import (
+        derive_effect_id,
+        parse_effect_descriptor,
+    )
     from lockstep.runtime.leases import LeaseStore
     from lockstep.runtime.native_models import NativeCoordinate, NativeInterrupt
 
     coordinator, runtime, _runner, ledger, store, first_coordinate = system
-    first_descriptor = parse_effect_descriptor(runtime.current.pending[0].value["lockstep_effect"])
-    first_id = derive_id = coordinator.reconcile("run-1").effect_id
+    first_id = coordinator.reconcile("run-1").effect_id
     lease_store = LeaseStore(store, clock=lambda: NOW)
     first_lease = lease_store.acquire("effect", first_id, "seal-first", 30)
     first = ledger.get(first_id)
     first_result = _result(first_id, snapshot_ref="snapshot:" + "1" * 64)
+    first = ledger.mark_launching(
+        first_id,
+        expected_revision=first.revision,
+        lease=first_lease,
+        runner_binding_digest="b" * 64,
+    )
+    first = ledger.mark_running(
+        first_id,
+        expected_revision=first.revision,
+        lease=first_lease,
+        runner_binding_digest="b" * 64,
+    )
     first = ledger.seal(
         first_id,
         first_result,
         expected_revision=first.revision,
         lease=first_lease,
-        scope_descriptor=None,
+        runner_binding_digest="b" * 64,
     )
     lease_store.release(first_lease)
 
     second_coordinate = NativeCoordinate("thread-1", "cp-1", "", "task-2", "int-2")
-    second_descriptor = replace(first_descriptor, logical_id="review")
     # Reparse to bind the changed canonical descriptor rather than forge an internal object.
     second_value = dict(runtime.current.pending[0].value["lockstep_effect"])
     second_value["logical_id"] = "review"
     second_descriptor = parse_effect_descriptor(second_value)
-    second_id = __import__(
-        "lockstep.runtime.effects.descriptors", fromlist=["derive_effect_id"]
-    ).derive_effect_id(second_coordinate, second_descriptor.digest)
-    second_lease = lease_store.acquire("effect", second_id, "seal-second", 30)
-    second = ledger.prepare(
-        second_coordinate,
-        second_descriptor,
-        deadline_at=NOW + timedelta(seconds=300),
-        runner_binding_digest="b" * 64,
-        workspace_ref=f"workspace:{second_id}",
-        lease=second_lease,
-    )
-    second_result = _result(second_id, snapshot_ref="snapshot:" + "2" * 64)
-    second = ledger.seal(
-        second_id,
-        second_result,
-        expected_revision=second.revision,
-        lease=second_lease,
-    )
-    lease_store.release(second_lease)
+    second_id = derive_effect_id(second_coordinate, second_descriptor.digest)
     runtime.current = replace(
         runtime.current,
         pending=(
@@ -135,7 +202,32 @@ def test_partial_and_batch_delivery_use_only_current_exact_interrupts(system) ->
         ),
     )
     runtime.history_coordinates.add(second_coordinate)
-
+    second_report = coordinator.reconcile("run-1")
+    assert second_report.effect_id == second_id
+    assert second_report.action == "prepared"
+    second_lease = lease_store.acquire("effect", second_id, "seal-second", 30)
+    second = ledger.get(second_id)
+    second = ledger.mark_launching(
+        second_id,
+        expected_revision=second.revision,
+        lease=second_lease,
+        runner_binding_digest="b" * 64,
+    )
+    second = ledger.mark_running(
+        second_id,
+        expected_revision=second.revision,
+        lease=second_lease,
+        runner_binding_digest="b" * 64,
+    )
+    second_result = _result(second_id, snapshot_ref="snapshot:" + "2" * 64)
+    second = ledger.seal(
+        second_id,
+        second_result,
+        expected_revision=second.revision,
+        lease=second_lease,
+        runner_binding_digest="b" * 64,
+    )
+    lease_store.release(second_lease)
     coordinator.deliver_ready("run-1", interrupt_ids=[first_coordinate.interrupt_id])
     assert ledger.get(first_id).phase == "delivered"
     assert ledger.get(second_id).phase == "sealed"
@@ -147,10 +239,21 @@ def test_partial_and_batch_delivery_use_only_current_exact_interrupts(system) ->
 
 
 def test_overdue_scan_is_bounded_and_nearest_wakeup_is_deterministic(system) -> None:
-    coordinator, _runtime, _runner, _ledger, _store, _coordinate = system
+    coordinator, _runtime, runner, ledger, _store, _coordinate = system
     coordinator.reconcile("run-1")
+    wakeups = []
+
+    def wake(delay: float) -> None:
+        wakeups.append(delay)
+        coordinator._clock = lambda: NOW + timedelta(hours=1)
 
     assert coordinator.next_wakeup_delay(NOW) == 1.0
-    reports = coordinator.reconcile_due(NOW + timedelta(hours=1))
+    reports = coordinator.wait_and_reconcile_due(wake)
+    assert wakeups == [1.0]
     assert len(reports) <= coordinator.MAX_DUE_PER_SCAN
     assert reports[0].run_id == "run-1"
+    assert reports[0].action == "sealed"
+    assert ledger.get(reports[0].effect_id).fixed_error_code == "deadline_timeout"
+    assert runner.ensure_started_calls == []
+    assert coordinator.reconcile_due(NOW + timedelta(hours=1)) == ()
+    assert coordinator.next_wakeup_delay(NOW + timedelta(hours=1)) == 1.0

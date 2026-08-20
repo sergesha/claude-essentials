@@ -125,6 +125,12 @@ class GraphRuntime:
         except KeyError as exc:
             raise KeyError(f"run {run_id!r} is not bound") from exc
 
+    def binding(self, run_id: str) -> RunBinding:
+        """Return the immutable binding used by this compiled native app."""
+
+        binding, _app = self._bound(run_id)
+        return binding
+
     def _invoke(
         self, run_id: str, operation: Callable[[], NativeSnapshot]
     ) -> NativeSnapshot:
@@ -166,9 +172,7 @@ class GraphRuntime:
                 close()
         return tuple(snapshots)
 
-    def _lineage_contains(
-        self, run_id: str, source: NativeCoordinate
-    ) -> bool:
+    def _lineage_contains(self, run_id: str, source: NativeCoordinate) -> bool:
         binding, app = self._bound(run_id)
         history = iter(app.history(thread_id=binding.thread_id))
         try:
@@ -177,6 +181,11 @@ class GraphRuntime:
                     raise NativeHistoryLimitExceeded(
                         "native lineage exceeds validation limit"
                     )
+                # Public history collapses a direct-subgraph interrupt into its
+                # parent task coordinate.  Its interrupt ID remains stable,
+                # while checkpoint namespace/task/checkpoint IDs do not.  Exact
+                # full-coordinate membership is enforced on the current snapshot;
+                # history is only descendant evidence in the bound thread.
                 if any(
                     item.coordinate.thread_id == source.thread_id
                     and item.coordinate.interrupt_id == source.interrupt_id
@@ -188,6 +197,14 @@ class GraphRuntime:
             close = getattr(history, "close", None)
             if close is not None:
                 close()
+
+    def coordinate_lineage(self, run_id: str, source: NativeCoordinate) -> str:
+        """Classify an exact source using only public snapshot/history APIs."""
+
+        current = self.snapshot(run_id, subgraphs=True)
+        if any(item.coordinate == source for item in current.pending):
+            return "pending"
+        return "descended" if self._lineage_contains(run_id, source) else "incompatible"
 
     @staticmethod
     def _same_coordinate(left: NativeCoordinate, right: NativeCoordinate) -> bool:
@@ -204,7 +221,9 @@ class GraphRuntime:
             raise NativeCoordinateRejected("resume source belongs to another thread")
         supplied = set(results_by_interrupt_id)
         if not supplied:
-            raise NativeCoordinateRejected("resume requires at least one interrupt result")
+            raise NativeCoordinateRejected(
+                "resume requires at least one interrupt result"
+            )
 
         def guarded_resume() -> NativeSnapshot:
             # Membership is checked while holding the same invocation lease
@@ -217,14 +236,18 @@ class GraphRuntime:
             }
             observed = current_by_id.get(source.interrupt_id)
             if observed is None or not self._same_coordinate(observed, source):
-                raise NativeCoordinateRejected("resume source is stale or no longer pending")
+                raise NativeCoordinateRejected(
+                    "resume source is stale or no longer pending"
+                )
             unknown = supplied - current_by_id.keys()
             if unknown:
                 raise NativeCoordinateRejected(
                     f"interrupt result is not currently pending: {sorted(unknown)}"
                 )
             if not self._lineage_contains(run_id, source):
-                raise NativeCoordinateRejected("resume source is absent from native lineage")
+                raise NativeCoordinateRejected(
+                    "resume source is absent from native lineage"
+                )
             return app.resume(
                 thread_id=binding.thread_id,
                 results_by_interrupt_id=dict(results_by_interrupt_id),

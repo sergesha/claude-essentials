@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import and_, select, update
 from sqlalchemy.exc import IntegrityError
@@ -66,7 +66,7 @@ class EffectRecord:
 def _utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("timestamp must include a timezone")
-    return value.astimezone(timezone.utc)
+    return value.astimezone(UTC)
 
 
 def _dump(value: datetime) -> str:
@@ -74,11 +74,7 @@ def _dump(value: datetime) -> str:
 
 
 def _load(value: str | None) -> datetime | None:
-    return (
-        None
-        if value is None
-        else datetime.fromisoformat(value).astimezone(timezone.utc)
-    )
+    return None if value is None else datetime.fromisoformat(value).astimezone(UTC)
 
 
 def _nonempty(value: str, label: str) -> str:
@@ -105,7 +101,7 @@ class EffectLedger:
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._store = store
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or (lambda: datetime.now(UTC))
 
     def _now(self) -> datetime:
         return _utc(self._clock())
@@ -178,6 +174,41 @@ class EffectLedger:
             ).all()
             return [self._from_row(connection, row) for row in rows]
 
+    def list_due(self, now: datetime, *, limit: int) -> list[EffectRecord]:
+        if type(limit) is not int or limit <= 0:
+            raise ValueError("due-effect limit must be a positive integer")
+        table = self._store.tables.effects
+        with self._store.read_connection() as connection:
+            rows = connection.execute(
+                select(table)
+                .where(
+                    and_(
+                        table.c.phase.in_(("prepared", "launching", "running")),
+                        table.c.deadline_at.is_not(None),
+                        table.c.deadline_at <= _dump(now),
+                    )
+                )
+                .order_by(table.c.deadline_at, table.c.effect_id)
+                .limit(limit)
+            ).all()
+            return [self._from_row(connection, row) for row in rows]
+
+    def next_deadline(self) -> datetime | None:
+        table = self._store.tables.effects
+        with self._store.read_connection() as connection:
+            row = connection.execute(
+                select(table.c.deadline_at)
+                .where(
+                    and_(
+                        table.c.phase.in_(("prepared", "launching", "running")),
+                        table.c.deadline_at.is_not(None),
+                    )
+                )
+                .order_by(table.c.deadline_at, table.c.effect_id)
+                .limit(1)
+            ).first()
+        return None if row is None else _load(row.deadline_at)
+
     def prepare(
         self,
         coordinate: NativeCoordinate,
@@ -186,6 +217,7 @@ class EffectLedger:
         deadline_at: datetime | None,
         runner_binding_digest: str | None,
         workspace_ref: str | None,
+        lease: Lease | None = None,
     ) -> EffectRecord:
         for name in ("thread_id", "checkpoint_id", "task_id", "interrupt_id"):
             _nonempty(getattr(coordinate, name), name)
@@ -237,6 +269,8 @@ class EffectLedger:
             table.c.interrupt_id == coordinate.interrupt_id,
         )
         with self._store.write_transaction() as connection:
+            if lease is not None:
+                self._validate_live_lease(connection, effect_id, lease)
             existing = connection.execute(
                 select(table).where(coordinate_clause)
             ).first()
@@ -282,6 +316,7 @@ class EffectLedger:
         allowed_sources: set[str],
         lease: Lease | None = None,
         runner_binding_digest: str | None = None,
+        workspace_ref: str | None = None,
         result: EffectResult | ScopeResult | None = None,
         scope_descriptor: ScopeDescriptor | None = None,
     ) -> EffectRecord:
@@ -364,8 +399,10 @@ class EffectLedger:
                 raise IllegalEffectTransition(
                     f"illegal effect phase edge {current.phase} -> {target}"
                 )
-            lease_required = target in {"launching", "running", "indeterminate"} or (
-                target == "sealed" and current.phase in {"launching", "running"}
+            lease_required = (
+                target in {"launching", "running", "indeterminate"}
+                or (target == "sealed" and current.phase in {"launching", "running"})
+                or lease is not None
             )
             if lease_required:
                 if lease is None:
@@ -383,6 +420,16 @@ class EffectLedger:
                     raise EffectConflict(
                         "effect runner binding does not match prepared facts"
                     )
+            if workspace_ref is not None:
+                workspace_ref = _nonempty(workspace_ref, "workspace_ref")
+                if (
+                    target == "launching"
+                    and current.workspace_ref is not None
+                    and current.workspace_ref != workspace_ref
+                ):
+                    raise EffectConflict(
+                        "effect already has a different prepared workspace"
+                    )
             revision = current.revision + 1
             now = self._now()
             changes: dict[str, object] = {
@@ -392,6 +439,8 @@ class EffectLedger:
             }
             if lease is not None:
                 changes["lease_epoch"] = lease.epoch
+            if target == "launching" and workspace_ref is not None:
+                changes["workspace_ref"] = workspace_ref
             result_json = None
             if result is not None:
                 changes["result_ref"] = getattr(result, "result_ref", None)
@@ -455,6 +504,7 @@ class EffectLedger:
         expected_revision: int,
         lease: Lease,
         runner_binding_digest: str,
+        workspace_ref: str | None = None,
     ) -> EffectRecord:
         return self._transition(
             effect_id,
@@ -463,6 +513,7 @@ class EffectLedger:
             allowed_sources={"prepared"},
             lease=lease,
             runner_binding_digest=runner_binding_digest,
+            workspace_ref=workspace_ref,
         )
 
     def mark_running(
@@ -535,7 +586,13 @@ class EffectLedger:
             result=result,
         )
 
-    def mark_delivered(self, effect_id: str, *, expected_revision: int) -> EffectRecord:
+    def mark_delivered(
+        self,
+        effect_id: str,
+        *,
+        expected_revision: int,
+        lease: Lease | None = None,
+    ) -> EffectRecord:
         current = self.get(effect_id)
         if current.phase == "delivered":
             return current
@@ -544,4 +601,5 @@ class EffectLedger:
             expected_revision=expected_revision,
             target="delivered",
             allowed_sources={"sealed", "indeterminate"},
+            lease=lease,
         )
