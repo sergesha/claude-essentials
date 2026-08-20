@@ -14,6 +14,7 @@ from pathlib import Path
 
 from sqlalchemy import (
     Column,
+    ForeignKey,
     Integer,
     MetaData,
     String,
@@ -35,6 +36,8 @@ from lockstep.runtime.owner_state import (
 class RuntimeTables:
     runs: Table
     leases: Table
+    effects: Table
+    effect_observations: Table
 
 
 def _define_tables(metadata: MetaData) -> RuntimeTables:
@@ -59,7 +62,51 @@ def _define_tables(metadata: MetaData) -> RuntimeTables:
         Column("expires_at", String, nullable=False),
         Column("acquired_at", String, nullable=False),
     )
-    return RuntimeTables(runs=runs, leases=leases)
+    effects = Table(
+        "effects",
+        metadata,
+        Column("effect_id", String, primary_key=True),
+        Column("thread_id", String, nullable=False),
+        Column("checkpoint_ns", String, nullable=False),
+        Column("checkpoint_id", String, nullable=False),
+        Column("task_id", String, nullable=False),
+        Column("interrupt_id", String, nullable=False),
+        Column("descriptor_digest", String(64), nullable=False),
+        Column("effect_kind", String, nullable=False),
+        Column("deadline_at", String, nullable=True),
+        Column("phase", String, nullable=False),
+        Column("lease_epoch", Integer, nullable=False),
+        Column("runner_binding_digest", String(64), nullable=True),
+        Column("workspace_ref", String, nullable=True),
+        Column("result_ref", String, nullable=True),
+        Column("fixed_error_code", String, nullable=True),
+        Column("created_at", String, nullable=False),
+        Column("updated_at", String, nullable=False),
+        Column("revision", Integer, nullable=False),
+        UniqueConstraint(
+            "thread_id",
+            "checkpoint_ns",
+            "checkpoint_id",
+            "task_id",
+            "interrupt_id",
+            name="uq_effects_native_coordinate",
+        ),
+    )
+    effect_observations = Table(
+        "effect_observations",
+        metadata,
+        Column("effect_id", String, ForeignKey("effects.effect_id"), primary_key=True),
+        Column("revision", Integer, primary_key=True),
+        Column("phase", String, nullable=False),
+        Column("result_json", String, nullable=True),
+        Column("observed_at", String, nullable=False),
+    )
+    return RuntimeTables(
+        runs=runs,
+        leases=leases,
+        effects=effects,
+        effect_observations=effect_observations,
+    )
 
 
 class SQLiteStore:
