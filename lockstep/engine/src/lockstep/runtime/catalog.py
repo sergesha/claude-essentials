@@ -1,0 +1,120 @@
+"""Immutable run discovery bindings.
+
+Workflow progress is intentionally absent.  Status, current tasks, interrupts,
+and terminal outcome are projections of public LangGraph snapshots.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
+from typing import Callable
+
+from sqlalchemy import select
+
+from lockstep.runtime.storage import SQLiteStore
+
+
+class ImmutableBindingConflict(RuntimeError):
+    """An immutable public-run or thread identity is already bound differently."""
+
+
+@dataclass(frozen=True)
+class RunBinding:
+    public_run_id: str
+    thread_id: str
+    recipe_digest: str
+    recipe_snapshot_ref: str
+    project_identity: str
+    created_at: str | None = None
+
+
+def _iso_utc(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat()
+
+
+class RunCatalog:
+    """Create and discover immutable run bindings.  There is no update API."""
+
+    def __init__(self, store: SQLiteStore, *, clock: Callable[[], datetime] | None = None) -> None:
+        self._store = store
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+
+    @staticmethod
+    def _validate(binding: RunBinding) -> None:
+        for field in (
+            "public_run_id",
+            "thread_id",
+            "recipe_digest",
+            "recipe_snapshot_ref",
+            "project_identity",
+        ):
+            if not getattr(binding, field):
+                raise ValueError(f"{field} must not be empty")
+        digest = binding.recipe_digest
+        if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+            raise ValueError("recipe_digest must be a lowercase SHA-256 digest")
+
+    @staticmethod
+    def _from_row(row) -> RunBinding:
+        return RunBinding(**dict(row._mapping))
+
+    @staticmethod
+    def _same_requested(existing: RunBinding, requested: RunBinding) -> bool:
+        expected = requested
+        if requested.created_at is None:
+            expected = replace(requested, created_at=existing.created_at)
+        return existing == expected
+
+    def create(self, binding: RunBinding) -> RunBinding:
+        self._validate(binding)
+        created_at = binding.created_at or _iso_utc(self._clock())
+        candidate = replace(binding, created_at=created_at)
+        table = self._store.tables.runs
+        with self._store.write_transaction() as connection:
+            rows = connection.execute(
+                select(table).where(
+                    (table.c.public_run_id == binding.public_run_id)
+                    | (table.c.thread_id == binding.thread_id)
+                )
+            ).all()
+            if rows:
+                matches = [self._from_row(row) for row in rows]
+                if len(matches) == 1 and self._same_requested(matches[0], binding):
+                    return matches[0]
+                raise ImmutableBindingConflict(
+                    "public_run_id or thread_id is already bound to different immutable data"
+                )
+            connection.execute(
+                table.insert().values(
+                    public_run_id=candidate.public_run_id,
+                    thread_id=candidate.thread_id,
+                    recipe_digest=candidate.recipe_digest,
+                    recipe_snapshot_ref=candidate.recipe_snapshot_ref,
+                    project_identity=candidate.project_identity,
+                    created_at=candidate.created_at,
+                )
+            )
+        return candidate
+
+    def get(self, run_id: str) -> RunBinding:
+        table = self._store.tables.runs
+        with self._store.engine.connect() as connection:
+            row = connection.execute(
+                select(table).where(table.c.public_run_id == run_id)
+            ).first()
+        if row is None:
+            raise KeyError(run_id)
+        return self._from_row(row)
+
+    def list(self, project_identity: str) -> list[RunBinding]:
+        table = self._store.tables.runs
+        statement = (
+            select(table)
+            .where(table.c.project_identity == project_identity)
+            .order_by(table.c.created_at, table.c.public_run_id)
+        )
+        with self._store.engine.connect() as connection:
+            return [self._from_row(row) for row in connection.execute(statement)]

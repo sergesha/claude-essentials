@@ -9,6 +9,7 @@ dependencies = [
   "mcp>=2.0,<3",
   "jsonschema>=4.21",
   "pyyaml>=6.0",
+  "sqlalchemy>=2.0,<3",
 ]
 
 [project.scripts]
