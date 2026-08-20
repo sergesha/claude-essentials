@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+import errno
 import hashlib
 import json
 import os
@@ -124,6 +125,24 @@ def _read_regular(base: Path, source: Path) -> bytes:
         os.close(descriptor)
 
 
+def _read_manifest_regular(path: Path) -> bytes:
+    if path.is_symlink():
+        raise SymlinkRejected(f"symlink manifest rejected: {path}")
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as exc:
+        if exc.errno == errno.ELOOP or path.is_symlink():
+            raise SymlinkRejected(f"symlink manifest rejected: {path}") from exc
+        raise
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise MaterializationError(f"recipe bundle manifest is not a regular file: {path}")
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            return stream.read()
+    finally:
+        os.close(descriptor)
+
+
 class RecipeBundleStore:
     def __init__(self, owner_state_dir: str | Path, blob_store: BlobStore | None = None) -> None:
         self._owner_state = Path(owner_state_dir)
@@ -179,8 +198,8 @@ class RecipeBundleStore:
         path = self.manifest_path(ref)
         path.parent.mkdir(parents=True, exist_ok=True)
         with file_lock(path, timeout=30.0, stale_after=300.0):
-            if path.exists():
-                if path.read_bytes() != encoded:
+            if path.exists() or path.is_symlink():
+                if _read_manifest_regular(path) != encoded:
                     raise DigestMismatch(f"recipe bundle manifest collision at {ref.digest}")
             else:
                 tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -196,7 +215,7 @@ class RecipeBundleStore:
     def read_manifest(self, ref: RecipeBundleRef) -> RecipeBundleManifest:
         path = self.manifest_path(ref)
         try:
-            encoded = path.read_bytes()
+            encoded = _read_manifest_regular(path)
         except FileNotFoundError as exc:
             raise KeyError(ref.digest) from exc
         observed = hashlib.sha256(encoded).hexdigest()
@@ -241,12 +260,25 @@ class RecipeBundleStore:
 
     def _verify_materialization(self, directory: Path, manifest: RecipeBundleManifest) -> None:
         expected = {entry.path: entry for entry in manifest.files}
+        expected_directories: set[str] = set()
+        for entry in manifest.files:
+            parent = PurePosixPath(entry.path).parent
+            while parent != PurePosixPath("."):
+                expected_directories.add(parent.as_posix())
+                parent = parent.parent
         observed: set[str] = set()
+        observed_directories: set[str] = set()
         for path in directory.rglob("*"):
             if path.is_symlink():
                 raise SymlinkRejected(f"symlink in materialization: {path}")
-            if path.is_file():
-                relative = path.relative_to(directory).as_posix()
+            relative = path.relative_to(directory).as_posix()
+            if path.is_dir():
+                observed_directories.add(relative)
+                if path.stat().st_mode & 0o222:
+                    raise MaterializationError(
+                        f"materialized directory is writable: {relative}"
+                    )
+            elif path.is_file():
                 observed.add(relative)
                 entry = expected.get(relative)
                 if entry is None:
@@ -256,8 +288,14 @@ class RecipeBundleStore:
                     raise DigestMismatch(f"materialized file mismatch: {relative}")
                 if path.stat().st_mode & 0o222:
                     raise MaterializationError(f"materialized file is writable: {relative}")
+            else:
+                raise MaterializationError(f"unexpected materialized entry {relative!r}")
+        if directory.stat().st_mode & 0o222:
+            raise MaterializationError("materialized root directory is writable")
         if observed != set(expected):
             raise MaterializationError("materialized recipe is incomplete")
+        if observed_directories != expected_directories:
+            raise MaterializationError("materialized directory layout does not match manifest")
 
     def materialize_for_compile(self, ref: RecipeBundleRef) -> MaterializedRecipe:
         manifest = self.read_manifest(ref)

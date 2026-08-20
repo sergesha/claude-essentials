@@ -126,6 +126,41 @@ def test_bundle_ref_cannot_escape_owner_state(bundle_store):
         bundle_store.manifest_path(RecipeBundleRef("../escape"))
 
 
+def _replace_manifest_with_symlink(path, outside):
+    path.rename(outside)
+    try:
+        path.symlink_to(outside)
+    except OSError:
+        outside.rename(path)
+        pytest.skip("symlinks unavailable")
+
+
+def test_bundle_read_rejects_symlink_backed_manifest(bundle_store, recipe_tree, tmp_path):
+    from lockstep.runtime.recipe_bundles import SymlinkRejected
+
+    root, _child, _prompt = recipe_tree
+    ref = bundle_store.capture(root, ["child.recipe.yaml"])
+    _replace_manifest_with_symlink(
+        bundle_store.manifest_path(ref), tmp_path / "outside-bundle-manifest.json"
+    )
+
+    with pytest.raises(SymlinkRejected):
+        bundle_store.read_manifest(ref)
+
+
+def test_bundle_reuse_rejects_symlink_backed_manifest(bundle_store, recipe_tree, tmp_path):
+    from lockstep.runtime.recipe_bundles import SymlinkRejected
+
+    root, _child, _prompt = recipe_tree
+    ref = bundle_store.capture(root, ["child.recipe.yaml"])
+    _replace_manifest_with_symlink(
+        bundle_store.manifest_path(ref), tmp_path / "outside-bundle-manifest.json"
+    )
+
+    with pytest.raises(SymlinkRejected):
+        bundle_store.capture(root, ["child.recipe.yaml"])
+
+
 def test_materialization_rejects_symlink_in_existing_tree(bundle_store, recipe_tree):
     from lockstep.runtime.recipe_bundles import SymlinkRejected
 
@@ -138,6 +173,47 @@ def test_materialization_rejects_symlink_in_existing_tree(bundle_store, recipe_t
     child.symlink_to(root)
 
     with pytest.raises(SymlinkRejected):
+        bundle_store.materialize_for_compile(ref)
+
+
+def test_materialization_rejects_writable_existing_root(bundle_store, recipe_tree):
+    from lockstep.runtime.recipe_bundles import MaterializationError
+
+    root, _child, _prompt = recipe_tree
+    ref = bundle_store.capture(root, ["child.recipe.yaml"])
+    materialized = bundle_store.materialize_for_compile(ref)
+    materialized.directory.chmod(0o755)
+
+    with pytest.raises(MaterializationError, match="directory is writable"):
+        bundle_store.materialize_for_compile(ref)
+
+
+def test_materialization_rejects_writable_existing_nested_directory(
+    bundle_store, recipe_tree
+):
+    from lockstep.runtime.recipe_bundles import MaterializationError
+
+    root, _child, _prompt = recipe_tree
+    ref = bundle_store.capture(root, ["prompts/review.md"])
+    materialized = bundle_store.materialize_for_compile(ref)
+    (materialized.directory / "prompts").chmod(0o755)
+
+    with pytest.raises(MaterializationError, match="directory is writable"):
+        bundle_store.materialize_for_compile(ref)
+
+
+def test_materialization_rejects_unexpected_empty_directory(bundle_store, recipe_tree):
+    from lockstep.runtime.recipe_bundles import MaterializationError
+
+    root, _child, _prompt = recipe_tree
+    ref = bundle_store.capture(root, ["child.recipe.yaml"])
+    materialized = bundle_store.materialize_for_compile(ref)
+    materialized.directory.chmod(0o755)
+    (materialized.directory / "unexpected").mkdir()
+    materialized.directory.chmod(0o555)
+    (materialized.directory / "unexpected").chmod(0o555)
+
+    with pytest.raises(MaterializationError, match="directory layout"):
         bundle_store.materialize_for_compile(ref)
 
 

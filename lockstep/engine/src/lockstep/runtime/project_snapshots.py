@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+import errno
 import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
+import stat
 
 from lockstep.runtime.blobs import BlobRef, BlobStore, DigestMismatch
 from lockstep.runtime.locking import file_lock
@@ -23,6 +25,44 @@ class UndeclaredSnapshotPath(ValueError):
 
 class DuplicateSnapshotPath(ValueError):
     pass
+
+
+class SnapshotStorageError(RuntimeError):
+    pass
+
+
+class FrozenJSONMapping(dict):
+    """JSON-serializable mapping with no mutation surface after construction."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        if getattr(self, "_sealed", False):
+            raise TypeError("frozen JSON mapping is immutable")
+        dict.__init__(self, *args, **kwargs)
+        self._sealed = True
+
+    @staticmethod
+    def _immutable(*_args, **_kwargs):
+        raise TypeError("frozen JSON mapping is immutable")
+
+    __setitem__ = _immutable
+    __delitem__ = _immutable
+    clear = _immutable
+    pop = _immutable
+    popitem = _immutable
+    setdefault = _immutable
+    update = _immutable
+    __ior__ = _immutable
+
+
+class FrozenJSONSequence(tuple):
+    """Immutable JSON sequence that retains value equality with decoded lists."""
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, (list, tuple)):
+            return tuple.__eq__(self, tuple(other))
+        return NotImplemented
+
+    __hash__ = tuple.__hash__
 
 
 @dataclass(frozen=True, order=True)
@@ -45,12 +85,20 @@ class ProjectSnapshot:
     ref: ProjectSnapshotRef
     files: tuple[SnapshotFile, ...]
     declared_paths: tuple[str, ...]
-    provenance: dict[str, object]
+    provenance: Mapping[str, object]
     previous: ProjectSnapshotRef | None
 
 
 def _canonical(data: object) -> bytes:
     return json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+
+
+def _freeze_json(value: object) -> object:
+    if isinstance(value, dict):
+        return FrozenJSONMapping({key: _freeze_json(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return FrozenJSONSequence(_freeze_json(item) for item in value)
+    return value
 
 
 def _safe_path(raw: str, *, allow_prefix: bool = False) -> str:
@@ -70,6 +118,24 @@ def _safe_path(raw: str, *, allow_prefix: bool = False) -> str:
 def _validate_digest(digest: str) -> None:
     if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
         raise ValueError("project snapshot reference must be a lowercase SHA-256 digest")
+
+
+def _read_manifest_regular(path: Path) -> bytes:
+    if path.is_symlink():
+        raise SnapshotStorageError(f"snapshot manifest symlink rejected: {path}")
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as exc:
+        if exc.errno == errno.ELOOP or path.is_symlink():
+            raise SnapshotStorageError(f"snapshot manifest symlink rejected: {path}") from exc
+        raise
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise SnapshotStorageError(f"snapshot manifest is not a regular file: {path}")
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            return stream.read()
+    finally:
+        os.close(descriptor)
 
 
 class ProjectSnapshotStore:
@@ -142,8 +208,8 @@ class ProjectSnapshotStore:
         path = self.manifest_path(ref)
         path.parent.mkdir(parents=True, exist_ok=True)
         with file_lock(path, timeout=30.0, stale_after=300.0):
-            if path.exists():
-                if path.read_bytes() != encoded:
+            if path.exists() or path.is_symlink():
+                if _read_manifest_regular(path) != encoded:
                     raise DigestMismatch(f"project snapshot manifest collision at {ref.digest}")
             else:
                 tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
@@ -159,7 +225,7 @@ class ProjectSnapshotStore:
     def read(self, ref: ProjectSnapshotRef) -> ProjectSnapshot:
         path = self.manifest_path(ref)
         try:
-            encoded = path.read_bytes()
+            encoded = _read_manifest_regular(path)
         except FileNotFoundError as exc:
             raise KeyError(ref.digest) from exc
         observed = hashlib.sha256(encoded).hexdigest()
@@ -205,6 +271,6 @@ class ProjectSnapshotStore:
             ref=ref,
             files=entries,
             declared_paths=declarations,
-            provenance=dict(provenance),
+            provenance=_freeze_json(provenance),
             previous=previous,
         )

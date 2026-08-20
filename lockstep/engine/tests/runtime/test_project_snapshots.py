@@ -32,6 +32,54 @@ def test_snapshot_records_declared_paths_blob_refs_and_provenance(stores):
     assert snapshot.provenance == {"provider": "directory", "revision": "r1"}
 
 
+def test_snapshot_provenance_rejects_top_level_mutation(stores):
+    blob_store, snapshot_store = stores
+    ref = snapshot_store.capture(
+        {"app.py": blob_store.put(b"v1")},
+        declared_paths=["app.py"],
+        provenance={"provider": "memory", "revision": "1"},
+    )
+    provenance = snapshot_store.read(ref).provenance
+
+    with pytest.raises(TypeError):
+        provenance["revision"] = "2"
+
+
+def test_snapshot_provenance_recursively_freezes_nested_json(stores):
+    blob_store, snapshot_store = stores
+    original = {
+        "provider": "memory",
+        "source": {"revision": "1", "labels": ["reviewed", "sealed"]},
+    }
+    ref = snapshot_store.capture(
+        {"app.py": blob_store.put(b"v1")},
+        declared_paths=["app.py"],
+        provenance=original,
+    )
+    provenance = snapshot_store.read(ref).provenance
+
+    assert provenance == original
+    with pytest.raises(TypeError):
+        provenance["source"]["revision"] = "2"
+    with pytest.raises((AttributeError, TypeError)):
+        provenance["source"]["labels"].append("mutated")
+    assert provenance == original
+
+
+def test_snapshot_frozen_provenance_remains_json_serializable(stores):
+    blob_store, snapshot_store = stores
+    original = {"source": {"revision": "1", "labels": ["sealed"]}}
+    ref = snapshot_store.capture(
+        {"app.py": blob_store.put(b"v1")},
+        declared_paths=["app.py"],
+        provenance=original,
+    )
+
+    encoded = json.dumps(snapshot_store.read(ref).provenance, sort_keys=True)
+
+    assert json.loads(encoded) == original
+
+
 def test_snapshot_rejects_undeclared_or_unsafe_paths(stores):
     from lockstep.runtime.project_snapshots import UndeclaredSnapshotPath, UnsafeSnapshotPath
 
@@ -135,3 +183,47 @@ def test_snapshot_ref_cannot_escape_owner_state(stores):
     _blob_store, snapshot_store = stores
     with pytest.raises(ValueError):
         snapshot_store.manifest_path(ProjectSnapshotRef("../escape"))
+
+
+def _replace_manifest_with_symlink(path, outside):
+    path.rename(outside)
+    try:
+        path.symlink_to(outside)
+    except OSError:
+        outside.rename(path)
+        pytest.skip("symlinks unavailable")
+
+
+def test_snapshot_read_rejects_symlink_backed_manifest(stores, tmp_path):
+    blob_store, snapshot_store = stores
+    ref = snapshot_store.capture(
+        {"app.py": blob_store.put(b"v1")},
+        declared_paths=["app.py"],
+        provenance={"revision": "1"},
+    )
+    _replace_manifest_with_symlink(
+        snapshot_store.manifest_path(ref), tmp_path / "outside-snapshot-manifest.json"
+    )
+
+    with pytest.raises(RuntimeError, match="symlink"):
+        snapshot_store.read(ref)
+
+
+def test_snapshot_reuse_rejects_symlink_backed_manifest(stores, tmp_path):
+    blob_store, snapshot_store = stores
+    files = {"app.py": blob_store.put(b"v1")}
+    ref = snapshot_store.capture(
+        files,
+        declared_paths=["app.py"],
+        provenance={"revision": "1"},
+    )
+    _replace_manifest_with_symlink(
+        snapshot_store.manifest_path(ref), tmp_path / "outside-snapshot-manifest.json"
+    )
+
+    with pytest.raises(RuntimeError, match="symlink"):
+        snapshot_store.capture(
+            files,
+            declared_paths=["app.py"],
+            provenance={"revision": "1"},
+        )
