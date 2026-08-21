@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import os
+import stat
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from lockstep.runtime.blobs import BlobStore
+from lockstep.runtime.effects.authority import EffectGrant
+from lockstep.runtime.native_models import NativeCoordinate
 from lockstep.runtime.project_snapshots import ProjectSnapshotStore
+from lockstep.runtime.providers.base import EffectRequest
 from lockstep.runtime.providers.workspaces import (
     LocalGitWorkspaceProvider,
     WorkspaceError,
@@ -61,3 +67,147 @@ def test_no_publish_quarantine_never_returns_successor_snapshot(tmp_path: Path) 
     assert proof.rollover_snapshot_ref is None
     assert provider.inspect(lease.workspace_ref).phase == "quarantined"
 
+
+def _pinned_system(tmp_path: Path, *, result_source: str = "exit"):
+    from lockstep.runtime.providers.codex import (
+        CodexInstallationBinding,
+        CodexLaunchDecisionGate,
+        CodexSandboxAttestor,
+    )
+    from lockstep.runtime.providers.pinned import PinnedCommandSpec, PinnedRunnerAdapter
+
+    owner = tmp_path / "owner"
+    blobs = BlobStore(owner)
+    snapshots = ProjectSnapshotStore(owner, blobs)
+    seed = snapshots.capture(
+        {"src/app.py": blobs.put(b"VALUE = 1\n")},
+        declared_paths=("src/",),
+        provenance={"source": "pinned-test"},
+    )
+    executable = tmp_path / "fake-codex"
+    executable.write_text("#!/usr/bin/env python3\nraise SystemExit(0)\n")
+    executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+    codex_home = owner / "codex-home"
+    codex_home.mkdir(mode=0o700)
+    private_tmp = owner / "tmp"
+    private_tmp.mkdir(mode=0o700)
+    binding = CodexInstallationBinding.capture(
+        executable=executable,
+        model="unused-for-pinned",
+        cli_version="0.147.0-test",
+        permission_profile={"sandbox": "workspace-write", "approval": "never"},
+        codex_home=codex_home,
+        environment={
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+            "TMPDIR": str(private_tmp),
+        },
+    )
+    workspaces = LocalGitWorkspaceProvider(owner, snapshots, blobs)
+    adapter = PinnedRunnerAdapter(
+        owner_state_dir=owner,
+        installation=lambda: binding,
+        decision_gate=CodexLaunchDecisionGate(binding.digest, generation=1),
+        workspaces=workspaces,
+        blobs=blobs,
+        sandbox=CodexSandboxAttestor(cli_version=binding.cli_version),
+        permission_profile="lockstep-pinned",
+    )
+    spec = PinnedCommandSpec.build(
+        logical_argv=("python", "-m", "pytest", "-q"),
+        logical_cwd=".",
+        result_source=result_source,
+    )
+    capabilities = ["workspace", "bounded_result", "sandbox"]
+    if result_source != "exit":
+        capabilities.append("result_stability")
+    intent = EffectRequest.build(
+        effect_id="eff_pinned",
+        public_run_id="run-pinned",
+        project_identity="project-pinned",
+        definition_digest="a" * 64,
+        coordinate=NativeCoordinate("thread", "checkpoint", "", "task", "interrupt"),
+        descriptor_digest="b" * 64,
+        effect_kind="pinned",
+        runner_selector="pinned",
+        runner_binding_digest=adapter.binding_digest,
+        required_capabilities=tuple(capabilities),
+        inputs=(
+            ("command", spec.to_dict()),
+            ("snapshot", f"snapshot:{seed.digest}"),
+        ),
+        writes=(),
+        deadline_at=datetime.now(UTC) + timedelta(minutes=2),
+    )
+    grant = EffectGrant.build(
+        intent,
+        actor_binding_digest="c" * 64,
+        required_authorities=("os_user_execution",),
+        workspace_ref=workspaces.workspace_ref_for(intent.effect_id, intent.intent_digest),
+        parent_capability_generation=1,
+        grant_generation=1,
+        policy_epoch=1,
+        config_epoch=1,
+        approval_generation=None,
+        expires_at=datetime.now(UTC) + timedelta(minutes=2),
+    )
+    return adapter, intent.bind_grant(grant), workspaces
+
+
+def test_pinned_prepare_commits_safe_logical_and_exact_codex_sandbox_argv(tmp_path: Path) -> None:
+    adapter, request, workspaces = _pinned_system(tmp_path)
+
+    launch = adapter.prepare(request)
+    record = adapter.launch_record(request.effect_id)
+
+    assert launch == adapter.prepare(request)
+    assert workspaces.inspect(launch.workspace_ref).purpose == "no_publish_operation"
+    assert record.inner_argv == (
+        str(record.executable_path),
+        "sandbox",
+        "--permission-profile",
+        "lockstep-pinned",
+        "--cd",
+        str(record.workspace_path),
+        "--include-managed-config",
+        "--",
+        "python",
+        "-m",
+        "pytest",
+        "-q",
+    )
+    assert record.shell is False
+    assert record.deployment_profile == "local_unsandboxed"
+
+
+def test_pinned_exit_result_quarantines_and_never_publishes_workspace(tmp_path: Path) -> None:
+    adapter, request, workspaces = _pinned_system(tmp_path)
+    launch = adapter.prepare(request)
+    adapter.ensure_started(launch)
+
+    terminal = adapter.wait_terminal(request.effect_id, timeout=10)
+    safety = adapter.quiesce(request.effect_id)
+
+    assert terminal.state == "terminal"
+    assert terminal.result.outcome == "PASS"
+    assert terminal.result.result_ref is None
+    assert terminal.result.snapshot_ref is None
+    assert safety.state == "proven"
+    assert safety.workspace_quarantined is True
+    assert safety.rollover_snapshot_ref is None
+    assert safety.result_stable is False
+    assert workspaces.inspect(launch.workspace_ref).phase == "quarantined"
+
+
+@pytest.mark.parametrize("result_source", ["file", "junit"])
+def test_pinned_file_results_reject_without_real_stability_provider(
+    tmp_path: Path, result_source: str
+) -> None:
+    adapter, request, _workspaces = _pinned_system(
+        tmp_path, result_source=result_source
+    )
+
+    with pytest.raises(Exception, match="stability|exit-only"):
+        adapter.prepare(request)
+    assert adapter.spawn_count == 0
