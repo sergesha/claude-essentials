@@ -181,3 +181,44 @@ def test_custom_template_path_is_rejected_as_a_v2_feature(tmp_path: Path) -> Non
 
     with pytest.raises(ValueError, match="custom template paths are a v2 feature"):
         _templates().install_template(str(custom), "release", tmp_path)
+
+
+def test_compile_failure_before_publish_leaves_no_bundle_destinations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    templates = _templates()
+    monkeypatch.setattr(
+        templates,
+        "_compile_role",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("compile fault")),
+    )
+
+    with pytest.raises(RuntimeError, match="compile fault"):
+        templates.install_template("reviewed-change", "release", tmp_path)
+
+    assert not (tmp_path / ".lockstep/workflows").exists()
+    assert not (tmp_path / ".lockstep/recipes").exists()
+
+
+def test_publish_fault_rolls_back_every_destination_and_next_init_recovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    templates = _templates()
+    real_replace = templates._replace_destination
+    calls = 0
+
+    def fail_second(source, destination):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("publish fault")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(templates, "_replace_destination", fail_second)
+    with pytest.raises(OSError, match="publish fault"):
+        templates.install_template("reviewed-change", "release", tmp_path)
+    assert not any(path.is_file() for path in tmp_path.rglob("*"))
+
+    monkeypatch.setattr(templates, "_replace_destination", real_replace)
+    installed = templates.install_template("reviewed-change", "release", tmp_path)
+    assert all(path.is_file() for path in (*installed.sources, *installed.recipes))

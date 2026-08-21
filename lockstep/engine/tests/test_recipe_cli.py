@@ -209,6 +209,42 @@ def test_generated_start_preflight_mints_canonical_match_proof(
     assert authorized.canonical_match_proof.source_bundle_sha256 == authorized.source_bundle_sha256
 
 
+def test_generated_start_rejects_stale_source_before_runtime_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    source = _write_minimal_workflow(project)
+    assert _run_cli(monkeypatch, capsys, project, "recipe", "compile", "release").returncode == 0
+    source.write_text(source.read_text().replace("terminal recipe", "stale source"))
+
+    with pytest.raises(Exception, match="canonical match|fresh|byte-for-byte"):
+        preflight_recipe(project / ".lockstep/recipes", "release")
+
+
+def test_generated_marker_with_missing_declared_source_is_not_treated_as_manual(
+    tmp_path: Path,
+) -> None:
+    recipes = tmp_path / ".lockstep/recipes"
+    recipes.mkdir(parents=True)
+    (recipes / "forged.recipe.yaml").write_text(
+        "name: forged\n"
+        "x-lockstep-generated:\n"
+        "  schema: lockstep.generated/v1\n"
+        "  compiler_version: '1'\n"
+        "  workflow_version: '1'\n"
+        "  source: ../workflows/missing.workflow.yaml\n"
+        "  source_sha256: " + "a" * 64 + "\n"
+        "nodes: {done: {type: passthrough}}\n"
+        "edges: [{from: START, to: done}, {from: done, to: END}]\n"
+    )
+
+    with pytest.raises(Exception, match="source|generated|canonical"):
+        preflight_recipe(recipes, "forged")
+
+
 def test_complete_manual_yamlgraph_starts_without_a_template(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()

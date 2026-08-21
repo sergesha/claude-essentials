@@ -98,6 +98,70 @@ def test_events_merge_native_and_effect_observations_without_invoking_graph() ->
     assert forbidden_calls == []
 
 
+def test_events_whitelist_fields_and_never_expose_state_or_effect_results() -> None:
+    service = object.__new__(LockstepService)
+    secret = "owner-secret-must-not-cross-observation-boundary"
+    service.runtime = SimpleNamespace(
+        history=lambda _run_id: (
+            SimpleNamespace(
+                checkpoint_id="cp-1",
+                checkpoint_ns="",
+                created_at="2026-08-21T12:00:00+00:00",
+                values={"prompt": secret, "token": secret},
+                pending=(SimpleNamespace(value={"brief": secret}),),
+                next=("verify",),
+                task_errors=(RuntimeError(secret),),
+            ),
+        )
+    )
+    service.effects = SimpleNamespace(
+        list_for_thread=lambda _thread_id: (
+            SimpleNamespace(
+                effect_id="effect-1",
+                effect_kind="verify",
+                phase="sealed",
+                updated_at=datetime(2026, 8, 21, 12, 0, 1, tzinfo=UTC),
+                result={"stdout": secret},
+                request_digest=secret,
+            ),
+        )
+    )
+    service.catalog = SimpleNamespace(
+        get=lambda _run_id: SimpleNamespace(
+            public_run_id="run-1", thread_id="thread-1", project_identity="/project"
+        )
+    )
+
+    result = service.scenario_events("run-1", "/project")
+
+    assert secret not in repr(result)
+    assert set(result[0]) == {
+        "source", "checkpoint_id", "checkpoint_ns", "created_at", "next",
+        "pending_count", "error_count",
+    }
+    assert set(result[1]) == {
+        "source", "effect_id", "effect_kind", "phase", "updated_at",
+    }
+
+
+def test_events_fail_closed_when_observation_count_exceeds_public_bound() -> None:
+    service = object.__new__(LockstepService)
+    item = SimpleNamespace(
+        checkpoint_id="cp", checkpoint_ns="", created_at=None, values={},
+        pending=(), next=(), task_errors=(),
+    )
+    service.runtime = SimpleNamespace(history=lambda _run_id: (item,) * 10_001)
+    service.effects = SimpleNamespace(list_for_thread=lambda _thread_id: ())
+    service.catalog = SimpleNamespace(
+        get=lambda _run_id: SimpleNamespace(
+            public_run_id="run-1", thread_id="thread-1", project_identity="/project"
+        )
+    )
+
+    with pytest.raises(Exception, match="event observations exceed"):
+        service.scenario_events("run-1", "/project")
+
+
 @pytest.mark.parametrize("mode", ["reject", "raise-before", "accept-then-raise"])
 def test_event_delivery_failure_is_non_authoritative(mode: str) -> None:
     events = _events_module()
