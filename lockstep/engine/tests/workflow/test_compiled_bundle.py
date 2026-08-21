@@ -431,7 +431,9 @@ def test_nested_children_emit_complete_transitive_manifest_and_exact_provenance(
     )
     assert len(inner_scope["ancestor_deadline_state_keys"]) == 1
     assert inner_work["scope_state_keys"] == [inner_scope["result_state_key"]]
-    assert inner_scope["ancestor_deadline_state_keys"][0] not in inner_work["scope_state_keys"]
+    assert inner_scope["ancestor_deadline_state_keys"][0] not in inner_work[
+        "scope_state_keys"
+    ]
 
     emitted = tmp_path / "emitted"
     for relative_path, content in parent_result.executable_files.items():

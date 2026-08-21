@@ -288,13 +288,15 @@ def _find_back_edges(edges_by_from: dict[str, list[dict]]) -> list[tuple[str, st
         visited.add(node)
         stack.append(node)
         for e in edges_by_from.get(node, []):
-            to = e.get("to")
-            if to is None or to == "END":
-                continue
-            if to in stack:
-                back_edges.append((node, to))
-            elif to not in visited:
-                dfs(to)
+            raw_targets = e.get("to")
+            targets = raw_targets if isinstance(raw_targets, list) else [raw_targets]
+            for target in targets:
+                if target is None or target == "END":
+                    continue
+                if target in stack:
+                    back_edges.append((node, target))
+                elif target not in visited:
+                    dfs(target)
         stack.pop()
 
     if edges_by_from.get("START"):
@@ -359,21 +361,39 @@ def _check_loops(
         if len(gate_edges) != 1:
             continue
 
-        final_target_name = gate_edges[0].get("to")
-        final_target = nodes.get(final_target_name) if final_target_name else None
-        final_message = final_target.get("message") if isinstance(final_target, dict) else None
-        protected = isinstance(final_message, dict) and "lockstep_effect" in final_message
-        looks_like_escalate = (
-            isinstance(final_message, dict)
-            and final_message.get("step") == "escalate"
+        raw_final_targets = gate_edges[0].get("to")
+        final_targets = (
+            raw_final_targets
+            if isinstance(raw_final_targets, list)
+            else [raw_final_targets]
         )
-        if looks_like_escalate and not (
-            _is_escalate_marker(final_message or {}) or protected
-        ):
-            errors.append(
-                f"escalate marker: loop_exits chain from '{src}' via "
-                f"'{exit_target_name}' does not terminate on a {{step: escalate}} interrupt"
+        for final_target_name in final_targets:
+            final_target = (
+                nodes.get(final_target_name)
+                if isinstance(final_target_name, str) and final_target_name
+                else None
             )
+            final_message = (
+                final_target.get("message")
+                if isinstance(final_target, dict)
+                else None
+            )
+            protected = (
+                isinstance(final_message, dict)
+                and "lockstep_effect" in final_message
+            )
+            looks_like_escalate = (
+                isinstance(final_message, dict)
+                and final_message.get("step") == "escalate"
+            )
+            if looks_like_escalate and not (
+                _is_escalate_marker(final_message or {}) or protected
+            ):
+                errors.append(
+                    f"escalate marker: loop_exits chain from '{src}' via "
+                    f"'{exit_target_name}' does not terminate on a "
+                    "{step: escalate} interrupt"
+                )
 
 
 def _check_interrupt_node(
@@ -431,7 +451,17 @@ def _check_interrupt_node(
     if not _is_escalate_marker(message):
         # validator pairing: ALL outgoing edges must target one node, and
         # that node must be the python validator.
-        targets = sorted({e.get("to") for e in edges_by_from.get(name, [])})
+        targets = sorted(
+            {
+                target
+                for edge in edges_by_from.get(name, [])
+                for target in (
+                    edge.get("to")
+                    if isinstance(edge.get("to"), list)
+                    else [edge.get("to")]
+                )
+            }
+        )
         if not targets:
             errors.append(
                 f"no validator: work interrupt '{name}' has no outgoing edge to a validator node"

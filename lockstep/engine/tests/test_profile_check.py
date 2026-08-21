@@ -214,3 +214,26 @@ def test_manual_native_loop_may_exit_through_ordinary_passthrough_nodes(tmp_path
     )
 
     assert check_recipe(recipe) == []
+
+
+def test_manual_native_loop_exit_gate_may_use_list_fanout(tmp_path):
+    """The list-valued native edge dialect must be total in profile checks."""
+    recipe = tmp_path / "native-loop-fanout.recipe.yaml"
+    recipe.write_text(
+        "name: native-loop-fanout\n"
+        "nodes:\n"
+        "  repeat: {type: passthrough, output: {again: true}}\n"
+        "  exit: {type: passthrough}\n"
+        "  left: {type: passthrough}\n"
+        "  right: {type: passthrough}\n"
+        "edges:\n"
+        "  - {from: START, to: repeat}\n"
+        "  - {from: repeat, to: repeat, condition: 'again == true'}\n"
+        "  - {from: exit, to: [left, right]}\n"
+        "  - {from: left, to: END}\n"
+        "  - {from: right, to: END}\n"
+        "loop_limits: {repeat: 1}\n"
+        "loop_exits: {repeat: exit}\n"
+    )
+
+    assert check_recipe(recipe) == []

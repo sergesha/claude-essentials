@@ -11,7 +11,7 @@ from lockstep.runtime.effects.descriptors import (
     derive_effect_id,
     parse_effect_descriptor,
 )
-from lockstep.runtime.effects.models import ScopeDescriptor
+from lockstep.runtime.effects.models import ScopeDescriptor, ScopeResult
 from lockstep.workflow.compiler import compile_workflow
 from lockstep.workflow.schema import load_workflow, parse_workflow
 from lockstep.workflow.semantics import InMemoryWorkflowCatalog, validate_semantics
@@ -43,14 +43,17 @@ def _compile(tmp_path: Path, *, bounded: bool = False) -> Path:
     return recipe
 
 
-def _result(interrupt, outcome: str = "PASS") -> dict:
+def _result(
+    interrupt, outcome: str = "PASS", *, artifact_ref: str | None = None
+) -> dict:
     descriptor = parse_effect_descriptor(interrupt.value["lockstep_effect"])
+    result_outcome = "ERROR" if outcome == "ABORTED" else outcome
     return {
         "schema": "lockstep.effect-result/v1",
         "effect_id": derive_effect_id(interrupt.coordinate, descriptor.digest),
-        "outcome": outcome,
+        "outcome": result_outcome,
         "result_ref": "blob:" + "a" * 64,
-        "artifact_refs": [],
+        "artifact_refs": [] if artifact_ref is None else [artifact_ref],
         "snapshot_ref": None,
         "diff_ref": None,
         "fixed_error_code": "cancelled" if outcome == "ABORTED" else None,
@@ -117,6 +120,37 @@ def test_compiled_parallel_one_batch_resume_reaches_native_join(tmp_path: Path) 
     assert completed.values["lockstep_outcome"] == "PASS"
 
 
+def test_branch_artifact_refs_remain_bound_to_each_native_result(tmp_path: Path) -> None:
+    """The join may observe results but must not rewrite Task 10 provenance refs."""
+    recipe = _compile(tmp_path)
+    app = yg._open_native_path(recipe)  # noqa: SLF001 - integration oracle
+    parked = app.invoke({}, thread_id="artifact-results")
+    by_logical_id = {
+        parse_effect_descriptor(item.value["lockstep_effect"]).logical_id: item
+        for item in parked.pending
+    }
+    refs = {
+        "security": "artifact:" + "1" * 64,
+        "architecture": "artifact:" + "2" * 64,
+    }
+    completed = app.resume(
+        thread_id="artifact-results",
+        results_by_interrupt_id={
+            item.coordinate.interrupt_id: _result(
+                item, artifact_ref=refs[logical_id]
+            )
+            for logical_id, item in by_logical_id.items()
+        },
+    )
+    app.close()
+
+    assert completed.values["security_result"]["artifact_refs"] == [refs["security"]]
+    assert completed.values["architecture_result"]["artifact_refs"] == [
+        refs["architecture"]
+    ]
+    assert completed.values["gates_result"]["outcome"] == "PASS"
+
+
 def test_branch_failure_waits_for_native_join_and_uses_closed_precedence(
     tmp_path: Path,
 ) -> None:
@@ -146,6 +180,35 @@ def test_branch_failure_waits_for_native_join_and_uses_closed_precedence(
         "value": "error",
     }
     assert completed.values["lockstep_outcome"] == "ERROR"
+
+
+def test_branch_abort_has_precedence_only_after_native_join(tmp_path: Path) -> None:
+    """Cancellation is recorded per branch and dominates only at the barrier."""
+    recipe = _compile(tmp_path)
+    app = yg._open_native_path(recipe)  # noqa: SLF001 - integration oracle
+    parked = app.invoke({}, thread_id="abort-precedence")
+    first, second = parked.pending
+    waiting = app.resume(
+        thread_id="abort-precedence",
+        results_by_interrupt_id={first.coordinate.interrupt_id: _result(first, "ERROR")},
+    )
+    assert [item.coordinate for item in waiting.pending] == [second.coordinate]
+    assert waiting.values.get("gates_result") is None
+
+    completed = app.resume(
+        thread_id="abort-precedence",
+        results_by_interrupt_id={
+            second.coordinate.interrupt_id: _result(second, "ABORTED")
+        },
+    )
+    app.close()
+
+    assert completed.values["gates_result"] == {
+        "outcome": "ERROR",
+        "value": "error",
+        "fixed_error_code": "cancelled",
+    }
+    assert completed.values["lockstep_outcome"] == "ABORTED"
 
 
 def test_bounded_parallel_scope_is_shared_by_all_native_branch_interrupts(
@@ -186,3 +249,33 @@ def test_bounded_parallel_scope_is_shared_by_all_native_branch_interrupts(
         ).scope_state_keys == (scope.result_state_key,)
         for item in branches.pending
     )
+
+
+def test_bounded_parallel_scope_error_bypasses_fanout(tmp_path: Path) -> None:
+    """A cooperative timeout fact may terminate only before branches are spawned."""
+    recipe = _compile(tmp_path, bounded=True)
+    app = yg._open_native_path(recipe)  # noqa: SLF001 - integration oracle
+    scoped = app.invoke({}, thread_id="bounded-timeout")
+    scope_interrupt = scoped.pending[0]
+    scope = parse_effect_descriptor(scope_interrupt.value["lockstep_effect"])
+    assert isinstance(scope, ScopeDescriptor)
+    result = ScopeResult(
+        "lockstep.scope-result/v1",
+        derive_effect_id(scope_interrupt.coordinate, scope.digest),
+        "ERROR",
+        "parallel",
+        scope.digest,
+        fixed_error_code="scope_timeout",
+    )
+    completed = app.resume(
+        thread_id="bounded-timeout",
+        results_by_interrupt_id={
+            scope_interrupt.coordinate.interrupt_id: result.to_dict()
+        },
+    )
+    app.close()
+
+    assert completed.pending == ()
+    assert completed.values["lockstep_outcome"] == "ERROR"
+    assert "security_result" not in completed.values
+    assert "architecture_result" not in completed.values

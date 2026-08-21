@@ -21,6 +21,8 @@ from lockstep.workflow.semantics import (
     ChildArtifactContract,
     ChildWorkflowContract,
     InMemoryWorkflowCatalog,
+    ResolvedCatalog,
+    ResolvedChild,
     validate_semantics,
 )
 
@@ -53,6 +55,24 @@ def _protected(document: dict):
         raw = message.get("lockstep_effect") if isinstance(message, dict) else None
         if isinstance(raw, dict):
             yield name, node, parse_effect_descriptor(raw)
+
+
+def _resolved_child(tmp_path: Path, flow: str) -> tuple[ResolvedCatalog, object]:
+    source = tmp_path / "child.workflow.yaml"
+    source.write_text(
+        "workflow_version: '1'\nname: child\ndescription: nested child\n"
+        "protect: ['**']\nflow:\n" + flow
+    )
+    empty = InMemoryWorkflowCatalog({})
+    child = parse_workflow(load_workflow(source))
+    compiled = compile_workflow(validate_semantics(child, empty), empty)
+    resolved = ResolvedChild(
+        "child",
+        ChildWorkflowContract(("pass", "fail", "error")),
+        child.source_sha256,
+        compiled.as_catalog_bundle(),
+    )
+    return ResolvedCatalog(children={"child": resolved}), compiled
 
 
 def _command_entry(document: dict, argv: list[str]) -> str:
@@ -88,14 +108,30 @@ def test_parallel_is_one_yamlgraph_fanout_and_native_multi_source_join(
     fork = fanouts[0]["from"]
     assert document["nodes"][fork]["type"] == "passthrough"
 
-    join_candidates = [
+    pass_candidates = [
         name for name, node in document["nodes"].items()
         if node.get("output", {}).get("gates_result")
         == {"outcome": "PASS", "value": "pass"}
     ]
+    assert len(pass_candidates) == 1
+    completion_candidates = {
+        edge["from"]
+        for edge in document["edges"]
+        if sum(
+            candidate.get("to") == edge["from"]
+            for candidate in document["edges"]
+        ) == 4
+    }
+    join_candidates = [
+        name for name in document["nodes"]
+        if sum(
+            edge.get("to") == name and edge.get("from") in completion_candidates
+            for edge in document["edges"]
+        ) == 2
+    ]
     assert len(join_candidates) == 1
     join = join_candidates[0]
-    incoming = [edge["from"] for edge in document["edges"] if edge["to"] == join]
+    incoming = [edge["from"] for edge in document["edges"] if edge.get("to") == join]
     assert len(incoming) == 2
     assert len(set(incoming)) == 2
     assert document["state"]["gates_result"] == "dict"
@@ -180,6 +216,52 @@ def test_unbounded_parallel_emits_no_scope_or_timer_metadata(tmp_path: Path) -> 
     assert not ({"timers", "scheduler", "branches", "joins"} & set(document))
 
 
+def test_bounded_parallel_rejects_manual_effect_hidden_in_graph(
+    tmp_path: Path,
+) -> None:
+    """A graph/include boundary may not hide unmanaged work under a deadline."""
+    hidden_manual = (
+        "        one:\n"
+        "          - graph:\n"
+        "              id: hidden\n"
+        "              fragment:\n"
+        "                entry: work\n"
+        "                exits: {pass: passed, fail: failed, error: errored}\n"
+        "                effects: {mode: read-only, writes: []}\n"
+        "              state: {request: dict, result: dict}\n"
+        "              nodes:\n"
+        "                work:\n"
+        "                  type: interrupt\n"
+        "                  state_key: request\n"
+        "                  resume_key: result\n"
+        "                  idempotent: false\n"
+        "                  message:\n"
+        "                    lockstep_effect:\n"
+        "                      schema: lockstep.effect/v1\n"
+        "                      kind: manual\n"
+        "                      logical_id: hidden-work\n"
+        "                      runner: null\n"
+        "                      inputs: {}\n"
+        "                      writes: []\n"
+        "                      artifacts: []\n"
+        "                      deadline_seconds: null\n"
+        "                      scope_state_keys: []\n"
+        "                      result_schema: lockstep.effect-result/v1\n"
+        "                passed: {type: passthrough}\n"
+        "                failed: {type: passthrough}\n"
+        "                errored: {type: passthrough}\n"
+        "              edges:\n"
+        "                - {from: work, to: passed, condition: \"result.outcome == 'PASS'\"}\n"
+        "                - {from: work, to: failed, condition: \"result.outcome == 'FAIL'\"}\n"
+        "                - {from: work, to: errored, condition: \"result.outcome == 'ERROR'\"}\n"
+        "        two:\n"
+        "          - verify: {id: two, command: python -m two}\n"
+    )
+
+    with pytest.raises(ValueError, match="unmanaged manual fragment effects"):
+        _compile(tmp_path, hidden_manual, timeout=5)
+
+
 @pytest.mark.parametrize(
     ("left", "right"),
     [
@@ -224,3 +306,120 @@ def test_parallel_rejects_cross_branch_artifact_destination_overlap(
             workflow,
             InMemoryWorkflowCatalog({"child": child}),
         )
+
+
+def test_parallel_child_verify_inherits_call_scope_and_outer_deadline(
+    tmp_path: Path,
+) -> None:
+    """Specialization may not let an authored verify escape call attenuation."""
+    catalog, _compiled = _resolved_child(
+        tmp_path,
+        "  - verify: {id: child-check, command: python -m child, timeout: 600}\n",
+    )
+    source = tmp_path / "parent.workflow.yaml"
+    source.write_text(
+        "workflow_version: '1'\nname: parent\ndescription: scoped child\n"
+        "protect: ['**']\nflow:\n"
+        "  - parallel:\n      id: reviews\n      join: all\n"
+        "      timeout_minutes: 5\n      branches:\n"
+        "        child:\n          - call: {workflow: child, runner: codex}\n"
+        "        local:\n          - verify: {id: local, command: python -m local}\n"
+    )
+    parent = parse_workflow(load_workflow(source))
+    result = compile_workflow(validate_semantics(parent, catalog), catalog)
+    parent_document = yaml.safe_load(result.recipe_bytes)
+    generated = yaml.safe_load(result.generated_files[0].content)
+    parent_descriptors = [
+        descriptor for _name, _node, descriptor in _protected(parent_document)
+    ]
+    child_descriptors = [
+        descriptor for _name, _node, descriptor in _protected(generated)
+    ]
+    call_scope = next(
+        item for item in parent_descriptors
+        if isinstance(item, ScopeDescriptor) and item.scope_kind == "call"
+    )
+    child_verify = next(
+        item for item in child_descriptors
+        if isinstance(item, EffectDescriptor) and item.kind == "verify"
+    )
+
+    assert child_verify.scope_state_keys == (call_scope.result_state_key,)
+
+
+def test_call_specialization_preserves_child_native_list_fanout(tmp_path: Path) -> None:
+    """Direct-child composition must not scalarize Task 11 topology."""
+    catalog, child_compiled = _resolved_child(
+        tmp_path,
+        "  - parallel:\n      id: child-gates\n      join: all\n"
+        "      branches:\n"
+        "        one:\n          - verify: {id: one, command: python -m one}\n"
+        "        two:\n          - verify: {id: two, command: python -m two}\n",
+    )
+    source = tmp_path / "parent.workflow.yaml"
+    source.write_text(
+        "workflow_version: '1'\nname: parent\ndescription: child fanout\n"
+        "protect: ['**']\nflow:\n"
+        "  - call: {workflow: child, runner: codex}\n"
+    )
+    parent = parse_workflow(load_workflow(source))
+    result = compile_workflow(validate_semantics(parent, catalog), catalog)
+    original = yaml.safe_load(child_compiled.recipe_bytes)
+    generated = yaml.safe_load(result.generated_files[0].content)
+
+    original_targets = next(
+        edge["to"] for edge in original["edges"] if isinstance(edge.get("to"), list)
+    )
+    specialized_targets = next(
+        edge["to"] for edge in generated["edges"] if isinstance(edge.get("to"), list)
+    )
+    assert all(
+        specialized.endswith("." + original)
+        for specialized, original in zip(specialized_targets, original_targets)
+    )
+
+
+def test_parallel_graph_cannot_hide_unsupported_decision_descriptor(
+    tmp_path: Path,
+) -> None:
+    """The top-level DecideIR prohibition must cross the GraphIR boundary."""
+    branches = (
+        "        hidden:\n"
+        "          - graph:\n"
+        "              id: hidden-decision\n"
+        "              fragment:\n"
+        "                entry: decide\n"
+        "                exits: {pass: passed, error: errored}\n"
+        "                effects: {mode: read-only, writes: []}\n"
+        "              state: {request: dict, result: dict}\n"
+        "              nodes:\n"
+        "                decide:\n"
+        "                  type: interrupt\n"
+        "                  state_key: request\n"
+        "                  resume_key: result\n"
+        "                  idempotent: false\n"
+        "                  message:\n"
+        "                    lockstep_effect:\n"
+        "                      schema: lockstep.effect/v1\n"
+        "                      kind: decide\n"
+        "                      logical_id: hidden\n"
+        "                      decision:\n"
+        "                        type: changed-paths\n"
+        "                        since: start\n"
+        "                        cases: [{label: high, paths: ['auth/**']}]\n"
+        "                        default: low\n"
+        "                      inputs:\n"
+        "                        start_snapshot: {runtime_key: run_start_project_snapshot}\n"
+        "                        current_snapshot: {runtime_key: current_project_snapshot}\n"
+        "                      result_schema: lockstep.decision-result/v1\n"
+        "                passed: {type: passthrough}\n"
+        "                errored: {type: passthrough}\n"
+        "              edges:\n"
+        "                - {from: decide, to: passed, condition: \"result.outcome == 'PASS'\"}\n"
+        "                - {from: decide, to: errored, condition: \"result.outcome == 'ERROR'\"}\n"
+        "        local:\n"
+        "          - verify: {id: local, command: python -m local}\n"
+    )
+
+    with pytest.raises(ValueError, match="decision descriptor"):
+        _compile(tmp_path, branches)

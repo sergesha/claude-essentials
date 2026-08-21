@@ -508,7 +508,7 @@ def test_engine_progress_prepares_manual_handoff_before_returning_awaiting() -> 
     class Coordinator:
         calls = 0
 
-        def reconcile(self, run_id):
+        def reconcile_pending(self, run_id):
             assert run_id == "run-1"
             self.calls += 1
             effects.record = SimpleNamespace(
@@ -517,7 +517,7 @@ def test_engine_progress_prepares_manual_handoff_before_returning_awaiting() -> 
                 effect_kind="manual",
                 phase="prepared",
             )
-            return SimpleNamespace(action="prepared")
+            return (SimpleNamespace(action="prepared"),)
 
     service = object.__new__(LockstepService)
     service.effects = effects
@@ -564,12 +564,15 @@ def test_engine_progress_delivers_scope_result_without_status_mutation() -> None
             self.actions = iter(("sealed", "awaiting_delivery"))
             self.deliveries = 0
 
-        def reconcile(self, _run_id):
-            return SimpleNamespace(action=next(self.actions))
+        def reconcile_pending(self, _run_id):
+            return (SimpleNamespace(action=next(self.actions)),)
 
         def deliver_ready(self, _run_id):
             self.deliveries += 1
             state["snapshot"] = completed
+
+        def reconcile_consumed(self, _run_id):
+            return ()
 
     service = object.__new__(LockstepService)
     service.effects = ()
@@ -611,9 +614,9 @@ def test_engine_progress_requeues_a_delivery_held_by_another_owner() -> None:
     class Coordinator:
         calls = 0
 
-        def reconcile(self, _run_id):
+        def reconcile_pending(self, _run_id):
             self.calls += 1
-            return SimpleNamespace(action="awaiting_delivery")
+            return (SimpleNamespace(action="awaiting_delivery"),)
 
         def deliver_ready(self, _run_id):
             return None
@@ -631,6 +634,44 @@ def test_engine_progress_requeues_a_delivery_held_by_another_owner() -> None:
     assert status.status == "running"
     assert service.coordinator.calls == 1
     assert activated == ["run-1"]
+
+
+def test_engine_progress_recovers_capacity_bound_consumed_facts_in_one_sweep() -> None:
+    """Cleanup capacity is independent of the ordinary progress decision budget."""
+    completed = NativeSnapshot(
+        values={"lockstep_outcome": "PASS"}, checkpoint_id="cp-2"
+    )
+    binding = RunBinding("run-1", "thread-1", "a" * 64, "bundle", "/project")
+
+    class Coordinator:
+        def __init__(self):
+            self.calls = 0
+
+        def reconcile_consumed(self, _run_id):
+            self.calls += 1
+            return tuple(
+                SimpleNamespace(action="delivered") for _index in range(128)
+            )
+
+    coordinator = Coordinator()
+    deactivated = []
+    service = object.__new__(LockstepService)
+    service.effects = ()
+    service.leases = ()
+    service.coordinator = coordinator
+    service.runtime = SimpleNamespace(
+        snapshot=lambda *_args, **_kwargs: completed
+    )
+    service._deactivate_effect_run = deactivated.append
+    service._ack_start_if_observable = lambda *_args: None
+
+    status = service._drive_engine_owned(
+        "run-1", binding=binding, snapshot=completed
+    )
+
+    assert status.status == "completed"
+    assert coordinator.calls == 1
+    assert deactivated == ["run-1"]
 
 
 def test_protected_manual_done_uses_coordinator_not_direct_native_resume(

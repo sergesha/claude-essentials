@@ -515,9 +515,17 @@ class LockstepService:
                 if (descriptor := self._protected_interrupt_descriptor(interrupt))
                 is not None
             )
-            if not protected or (
-                status.status == "awaiting" and status.owner == "worker"
-            ):
+            if not protected:
+                cleanup = self.coordinator.reconcile_consumed(run_id)
+                if any(report.action == "busy" for report in cleanup):
+                    self._activate_effect_run(run_id)
+                    return status
+                self._ack_start_if_observable(
+                    current_binding, current_snapshot, protected
+                )
+                self._deactivate_effect_run(run_id)
+                return status
+            if status.status == "awaiting" and status.owner == "worker":
                 self._ack_start_if_observable(
                     current_binding, current_snapshot, protected
                 )
@@ -529,8 +537,9 @@ class LockstepService:
                 for _interrupt, descriptor in protected
             ) and not self._reserve_effect_run(run_id):
                 return status
-            report = self.coordinator.reconcile(run_id)
-            if report.action == "awaiting_delivery":
+            reports = self.coordinator.reconcile_pending(run_id)
+            actions = {report.action for report in reports}
+            if "awaiting_delivery" in actions:
                 self.coordinator.deliver_ready(run_id)
                 delivered_snapshot = self.runtime.snapshot(run_id, subgraphs=True)
                 source_coordinates = {
@@ -565,14 +574,14 @@ class LockstepService:
                 )
                 self._deactivate_effect_run(run_id)
                 return status
-            if report.action not in {
+            if not actions <= {
                 "prepared",
                 "launch_claimed",
                 "sealed",
                 "delivered",
                 "awaiting_delivery",
             }:
-                if report.action in {"running", "quiescence_pending", "busy"}:
+                if actions & {"running", "quiescence_pending", "busy"}:
                     self._activate_effect_run(run_id)
                 else:
                     self._deactivate_effect_run(run_id)

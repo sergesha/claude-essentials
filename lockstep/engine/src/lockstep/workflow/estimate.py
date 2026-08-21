@@ -290,11 +290,15 @@ def estimate_manual_recipe(path: str | Path) -> StructuralEstimate:
     for edge in edges:
         if not isinstance(edge, Mapping):
             continue
-        source_name, target_name = edge.get("from"), edge.get("to")
-        if isinstance(source_name, str) and isinstance(target_name, str):
-            adjacency.setdefault(source_name, set()).add(target_name)
-            if "condition" not in edge:
-                unconditional.setdefault(source_name, set()).add(target_name)
+        source_name, raw_targets = edge.get("from"), edge.get("to")
+        targets = raw_targets if isinstance(raw_targets, list) else [raw_targets]
+        if isinstance(source_name, str):
+            for target_name in targets:
+                if not isinstance(target_name, str):
+                    continue
+                adjacency.setdefault(source_name, set()).add(target_name)
+                if "condition" not in edge:
+                    unconditional.setdefault(source_name, set()).add(target_name)
 
     def reachable(source_name: str, target_name: str) -> bool:
         pending = [source_name]

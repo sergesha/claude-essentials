@@ -206,3 +206,92 @@ def test_status_aggregates_all_pending_effects_without_mutating_them(system) -> 
     assert tuple(ledger.list_nonterminal()) == before
     assert runner.prepare_calls == []
     assert runtime.resume_calls == []
+
+
+def test_stale_pending_sweep_accepts_only_exact_descended_batch_facts(
+    system, monkeypatch
+) -> None:
+    """A concurrent native batch commit must not poison the completion pump."""
+    coordinator, _runtime, runner, ledger, _store, _first = system
+    first_coordinate, second_coordinate = _install_second_effect(system)
+    for _ in range(3):
+        coordinator.reconcile_pending("run-1")
+    records = {record.coordinate: record for record in ledger.list_nonterminal()}
+    launches = {item.effect_id: item for item in runner.ensure_started_calls}
+    for coordinate in (first_coordinate, second_coordinate):
+        record = records[coordinate]
+        result = _result(
+            record.effect_id,
+            snapshot_ref="snapshot:" + ("3" if coordinate == first_coordinate else "4") * 64,
+        )
+        launch = launches[record.effect_id]
+        runner.inspect_observations.append(runner.terminal(launch, result))
+        runner.safety_observations.append(
+            TerminalSafetyObservation.proven_for(
+                launch,
+                rollover_snapshot_ref=result.snapshot_ref,
+                result_stable=True,
+            )
+        )
+    coordinator.reconcile_pending("run-1")
+
+    original = coordinator.reconcile_one
+    raced = False
+
+    def deliver_before_first_exact_reconcile(run_id, coordinate, **kwargs):
+        nonlocal raced
+        if not raced:
+            raced = True
+            coordinator.deliver_ready(run_id)
+        return original(run_id, coordinate, **kwargs)
+
+    monkeypatch.setattr(
+        coordinator, "reconcile_one", deliver_before_first_exact_reconcile
+    )
+
+    reports = coordinator.reconcile_pending("run-1")
+
+    assert [report.action for report in reports] == ["delivered", "delivered"]
+    assert all(
+        ledger.get(records[coordinate].effect_id).phase == "delivered"
+        for coordinate in (first_coordinate, second_coordinate)
+    )
+
+
+def test_batch_commit_crash_recovers_each_descended_sealed_sibling(system) -> None:
+    """Ledger ordering may not decide which exact post-commit fact can recover."""
+    coordinator, runtime, runner, ledger, _store, _first = system
+    first_coordinate, second_coordinate = _install_second_effect(system)
+    for _ in range(3):
+        coordinator.reconcile_pending("run-1")
+    records = {record.coordinate: record for record in ledger.list_nonterminal()}
+    launches = {item.effect_id: item for item in runner.ensure_started_calls}
+    for coordinate in (first_coordinate, second_coordinate):
+        record = records[coordinate]
+        result = _result(
+            record.effect_id,
+            snapshot_ref="snapshot:" + ("5" if coordinate == first_coordinate else "6") * 64,
+        )
+        launch = launches[record.effect_id]
+        runner.inspect_observations.append(runner.terminal(launch, result))
+        runner.safety_observations.append(
+            TerminalSafetyObservation.proven_for(
+                launch,
+                rollover_snapshot_ref=result.snapshot_ref,
+                result_stable=True,
+            )
+        )
+    coordinator.reconcile_pending("run-1")
+    runtime.current = replace(runtime.current, pending=(), checkpoint_id="after-batch")
+
+    reports = [
+        coordinator.reconcile_one(
+            "run-1",
+            coordinate,
+            expected_descriptor_digest=records[coordinate].descriptor_digest,
+        )
+        for coordinate in (second_coordinate, first_coordinate)
+    ]
+
+    assert [report.action for report in reports] == ["delivered", "delivered"]
+    assert runtime.resume_calls == []

@@ -19,6 +19,7 @@ from lockstep.runtime.providers.pinned import PinnedCommandSpec
 PUBLIC_STATUSES = frozenset(
     {"starting", "awaiting", "running", "completed", "escalated", "aborted"}
 )
+MAX_STATUS_PENDING = 128
 
 
 @dataclass(frozen=True)
@@ -77,6 +78,80 @@ def _child_annotations(
     return (("child_run_id", f"child-{digest.hexdigest()}"),)
 
 
+def _parallel_projection(
+    binding: RunBinding, snapshot: NativeSnapshot, effects: object
+) -> ScenarioStatus | None:
+    if len(snapshot.pending) <= 1:
+        return None
+    if len(snapshot.pending) > MAX_STATUS_PENDING:
+        return ScenarioStatus(
+            "running",
+            binding.public_run_id,
+            "engine",
+            "scenario_wait",
+            annotations=(("integrity_error", "pending_task_limit_exceeded"),),
+        )
+    phases: dict[str, int] = {}
+    operations: list[str] = []
+    deadlines: list[str | None] = []
+    engine_owned = False
+    worker_steps: list[str] = []
+    for interrupt in snapshot.pending:
+        raw = _descriptor(interrupt)
+        if raw is None:
+            value = interrupt.value
+            worker_steps.append(
+                str(value.get("step") or "") if isinstance(value, dict) else ""
+            )
+            phases["worker"] = phases.get("worker", 0) + 1
+            deadlines.append(None)
+            continue
+        try:
+            descriptor = parse_effect_descriptor(raw)
+            logical_id = str(getattr(descriptor, "logical_id", ""))
+            effect_id = derive_effect_id(interrupt.coordinate, descriptor.digest)
+            record = effects.get(effect_id)
+            if (
+                record.coordinate != interrupt.coordinate
+                or record.descriptor_digest != descriptor.digest
+            ):
+                raise ValueError("effect record mismatch")
+            phase = record.phase
+            deadline = record.deadline_at
+        except (AttributeError, KeyError, TypeError, ValueError):
+            logical_id = str(raw.get("logical_id") or "")
+            phase = "unregistered"
+            deadline = None
+        operations.append(logical_id)
+        phases[phase] = phases.get(phase, 0) + 1
+        deadlines.append(None if deadline is None else deadline.isoformat())
+        if raw.get("kind") != "manual" or phase != "prepared":
+            engine_owned = True
+    progress = {
+        "pending": len(snapshot.pending),
+        "phases": {key: phases[key] for key in sorted(phases)},
+        "operations": operations,
+        "deadlines": deadlines,
+    }
+    if engine_owned:
+        return ScenarioStatus(
+            "running",
+            binding.public_run_id,
+            "engine",
+            "scenario_wait",
+            annotations=(("parallel_progress", progress),),
+        )
+    step = next((value for value in worker_steps if value), None)
+    return ScenarioStatus(
+        "awaiting",
+        binding.public_run_id,
+        "worker",
+        "edit_then_scenario_done",
+        step=step,
+        annotations=(("parallel_progress", progress),),
+    )
+
+
 def project_status(
     binding: RunBinding,
     snapshot: NativeSnapshot,
@@ -88,6 +163,9 @@ def project_status(
     if snapshot.task_errors:
         return ScenarioStatus("escalated", binding.public_run_id, "engine", None)
     if snapshot.pending:
+        parallel = _parallel_projection(binding, snapshot, effects)
+        if parallel is not None:
+            return parallel
         child_annotations = _child_annotations(binding, snapshot.pending[0])
         descriptor = _descriptor(snapshot.pending[0])
         if descriptor is None:

@@ -496,7 +496,7 @@ class EffectCoordinator:
         )
         scope_bindings = []
         for ancestor, scope_binding in verified_ancestors:
-            if ancestor.scope_kind == "call" and (
+            if ancestor.scope_kind == "call" and descriptor.kind == "managed" and (
                 ancestor.runner_selector != descriptor.runner.selector
                 or ancestor.runner_binding_digest != runner.binding_digest
             ):
@@ -1192,7 +1192,13 @@ class EffectCoordinator:
                 self._leases.release(publication_lease)
         raise CoordinatorLineageError("publication has an impossible ledger phase")
 
-    def reconcile(self, run_id: str) -> ReconcileReport:
+    def reconcile(
+        self,
+        run_id: str,
+        *,
+        coordinate=None,
+        expected_descriptor_digest: str | None = None,
+    ) -> ReconcileReport:
         binding = self._binding(run_id)
         snapshot = self._runtime.snapshot(run_id, subgraphs=True)
         records = self._ledger.list_nonterminal_for_thread(
@@ -1205,13 +1211,16 @@ class EffectCoordinator:
         pending_by_coordinate = {
             interrupt.coordinate: interrupt for interrupt in self._protected(snapshot)
         }
-        for missing in (
+        missing_records = tuple(
             item for item in records if item.coordinate not in pending_by_coordinate
-        ):
+        )
+        for missing in missing_records:
             lineage = self._protected_lineage(
                 run_id, missing.coordinate, missing.descriptor_digest
             )
             if lineage == "descended" and missing.phase in {"sealed", "indeterminate"}:
+                if coordinate is not None and coordinate != missing.coordinate:
+                    continue
                 try:
                     lease = self._acquire(missing.effect_id)
                 except LeaseUnavailable:
@@ -1230,26 +1239,56 @@ class EffectCoordinator:
             )
 
         records_by_coordinate = {item.coordinate: item for item in records}
-        active = [
-            item for item in records if item.phase not in {"sealed", "indeterminate"}
-        ]
-        if active:
-            record = active[0]
-            interrupt = pending_by_coordinate[record.coordinate]
+        if coordinate is not None:
+            try:
+                interrupt = pending_by_coordinate[coordinate]
+            except KeyError as exc:
+                if expected_descriptor_digest is not None:
+                    effect_id = derive_effect_id(
+                        coordinate, expected_descriptor_digest
+                    )
+                    try:
+                        delivered = self._ledger.get(effect_id)
+                    except KeyError:
+                        delivered = None
+                    if (
+                        delivered is not None
+                        and delivered.phase == "delivered"
+                        and delivered.coordinate == coordinate
+                        and delivered.descriptor_digest == expected_descriptor_digest
+                        and self._protected_lineage(
+                            run_id, coordinate, expected_descriptor_digest
+                        )
+                        == "descended"
+                    ):
+                        return self._report(run_id, delivered, "delivered")
+                raise CoordinatorLineageError(
+                    "selected effect coordinate is not exactly pending"
+                ) from exc
+            record = records_by_coordinate.get(coordinate)
         else:
-            unrecorded = [
-                interrupt
-                for coordinate, interrupt in pending_by_coordinate.items()
-                if coordinate not in records_by_coordinate
+            active = [
+                item
+                for item in records
+                if item.phase not in {"sealed", "indeterminate"}
             ]
-            if unrecorded:
-                record = None
-                interrupt = unrecorded[0]
-            elif records:
-                record = records[0]
+            if active:
+                record = active[0]
                 interrupt = pending_by_coordinate[record.coordinate]
             else:
-                return ReconcileReport(run_id, None, "no_effect", None)
+                unrecorded = [
+                    interrupt
+                    for current_coordinate, interrupt in pending_by_coordinate.items()
+                    if current_coordinate not in records_by_coordinate
+                ]
+                if unrecorded:
+                    record = None
+                    interrupt = unrecorded[0]
+                elif records:
+                    record = records[0]
+                    interrupt = pending_by_coordinate[record.coordinate]
+                else:
+                    return ReconcileReport(run_id, None, "no_effect", None)
 
         descriptor, effect_id = self._identity(run_id, binding, interrupt, record)
         try:
@@ -1606,6 +1645,74 @@ class EffectCoordinator:
         finally:
             self._leases.release(lease)
 
+    def reconcile_one(
+        self,
+        run_id: str,
+        coordinate,
+        *,
+        expected_descriptor_digest: str | None = None,
+    ) -> ReconcileReport:
+        """Advance one exact current native interrupt by one monotonic decision."""
+
+        return self.reconcile(
+            run_id,
+            coordinate=coordinate,
+            expected_descriptor_digest=expected_descriptor_digest,
+        )
+
+    def reconcile_pending(self, run_id: str) -> tuple[ReconcileReport, ...]:
+        """Sweep the current native task set once without owning branch progress."""
+
+        binding = self._binding(run_id)
+        snapshot = self._runtime.snapshot(run_id, subgraphs=True)
+        protected = self._protected(snapshot)
+        if len(protected) > self.MAX_DUE_PER_SCAN:
+            raise CoordinatorLineageError(
+                "run exceeds the bounded pending effect capacity"
+            )
+        if any(
+            interrupt.coordinate.thread_id != binding.thread_id
+            for interrupt in protected
+        ):
+            raise CoordinatorLineageError(
+                "pending sweep contains a foreign native thread"
+            )
+        return tuple(
+            self.reconcile_one(
+                run_id,
+                interrupt.coordinate,
+                expected_descriptor_digest=parse_effect_descriptor(
+                    self._raw_descriptor(interrupt)
+                ).digest,
+            )
+            for interrupt in protected
+        )
+
+    def reconcile_consumed(self, run_id: str) -> tuple[ReconcileReport, ...]:
+        """Drain exact post-commit effect facts absent from native pending state."""
+
+        binding = self._binding(run_id)
+        snapshot = self._runtime.snapshot(run_id, subgraphs=True)
+        if self._protected(snapshot):
+            raise CoordinatorLineageError(
+                "consumed-effect recovery requires no protected pending tasks"
+            )
+        records = self._ledger.list_nonterminal_for_thread(
+            binding.thread_id, limit=self.MAX_DUE_PER_SCAN + 1
+        )
+        if len(records) > self.MAX_DUE_PER_SCAN:
+            raise CoordinatorLineageError(
+                "run exceeds the bounded nonterminal effect capacity"
+            )
+        return tuple(
+            self.reconcile_one(
+                run_id,
+                record.coordinate,
+                expected_descriptor_digest=record.descriptor_digest,
+            )
+            for record in records
+        )
+
     def submit_manual(
         self,
         run_id: str,
@@ -1853,6 +1960,13 @@ class EffectCoordinator:
                     )
                 current_deliverable.append((current, interrupt))
 
+            native_order = {
+                interrupt.coordinate: index
+                for index, interrupt in enumerate(self._protected(snapshot))
+            }
+            current_deliverable.sort(
+                key=lambda item: native_order[item[1].coordinate]
+            )
             source = current_deliverable[0][1].coordinate
             results = {
                 interrupt.coordinate.interrupt_id: record.result.to_dict()
@@ -1890,13 +2004,15 @@ class EffectCoordinator:
 
     def reconcile_due(self, now: datetime) -> tuple[ReconcileReport, ...]:
         reports = []
-        seen_runs: set[str] = set()
         for record in self._ledger.list_due(now, limit=self.MAX_DUE_PER_SCAN):
             binding = self._catalog.find_by_thread(record.coordinate.thread_id)
-            if binding.public_run_id in seen_runs:
-                continue
-            seen_runs.add(binding.public_run_id)
-            reports.append(self.reconcile(binding.public_run_id))
+            reports.append(
+                self.reconcile_one(
+                    binding.public_run_id,
+                    record.coordinate,
+                    expected_descriptor_digest=record.descriptor_digest,
+                )
+            )
         return tuple(reports)
 
     def next_wakeup_delay(self, now: datetime) -> float:

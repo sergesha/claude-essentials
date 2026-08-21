@@ -28,6 +28,7 @@ from .ir import (
     EscalateIR,
     GraphIR,
     FragmentIR,
+    ParallelIR,
     StepIR,
     VerifyIR,
 )
@@ -91,6 +92,11 @@ def _specialized_state_key(namespace: str, key: str) -> str:
     return f"child_{digest}"
 
 
+def _edge_targets(edge: dict[str, Any]) -> tuple[Any, ...]:
+    targets = edge.get("to")
+    return tuple(targets) if isinstance(targets, list) else (targets,)
+
+
 def _specialized_fragment_digest(
     original: dict[str, Any],
     specialized: dict[str, Any],
@@ -128,7 +134,7 @@ def _specialized_fragment_digest(
                 if isinstance(edge, dict)
                 and (
                     edge.get("from") in node_names
-                    or edge.get("to") in node_names
+                    or any(target in node_names for target in _edge_targets(edge))
                 )
             ],
         }
@@ -157,7 +163,7 @@ def _specialized_fragment_digest(
                 if isinstance(edge, dict)
                 and (
                     edge.get("from") in mapped_nodes
-                    or edge.get("to") in mapped_nodes
+                    or any(target in mapped_nodes for target in _edge_targets(edge))
                 )
             ],
         }
@@ -365,6 +371,13 @@ class _Builder:
             })
             for outcome in ("PASS", "FAIL", "ERROR", "ABORTED")
         }
+        self.active_scope_state_keys: tuple[str, ...] = ()
+        self.outcome_targets: dict[str, str] = dict(self.terminals)
+        self.capture_aborted_effects = False
+        self.inside_parallel_branch = False
+
+    def outcome_target(self, outcome: str) -> str:
+        return self.outcome_targets[outcome]
 
     def declare_generated_state(self, name: str, state_type: str) -> None:
         """Register an internal channel without ever aliasing public state."""
@@ -390,7 +403,9 @@ class _Builder:
         }
         return name
 
-    def edge(self, source: str, target: str, condition: str | None = None) -> None:
+    def edge(
+        self, source: str, target: str | list[str], condition: str | None = None
+    ) -> None:
         edge: dict[str, Any] = {"from": source, "to": target}
         if condition is not None:
             edge["condition"] = condition
@@ -428,13 +443,34 @@ class _Builder:
             })
             exhausted = self.node(pointer, kind, "exhausted", {"type": "passthrough"})
             self.edge(retry_gate, interrupt, "lockstep_continue == true")
-            self.edge(exhausted, self.terminals["FAIL"])
+            self.edge(exhausted, self.outcome_target("FAIL"))
             self.loop_limits[retry_gate] = retry_limit
             self.loop_exits[retry_gate] = exhausted
             entry = retry_gate
-        self.edge(interrupt, self.terminals["ABORTED"], f"{result_key}.fixed_error_code == 'cancelled'")
-        self.edge(interrupt, self.terminals["ERROR"], f"{result_key}.outcome == 'ERROR'")
-        fail_target = retry_gate or failure_target or self.terminals["FAIL"]
+        if self.capture_aborted_effects:
+            self.edge(
+                interrupt,
+                self.outcome_target("ABORTED"),
+                f"{result_key}.fixed_error_code == 'cancelled'",
+            )
+            self.edge(
+                interrupt,
+                self.outcome_target("ERROR"),
+                f"{result_key}.outcome == 'ERROR' and "
+                f"{result_key}.fixed_error_code != 'cancelled'",
+            )
+        else:
+            self.edge(
+                interrupt,
+                self.outcome_target("ABORTED"),
+                f"{result_key}.fixed_error_code == 'cancelled'",
+            )
+            self.edge(
+                interrupt,
+                self.outcome_target("ERROR"),
+                f"{result_key}.outcome == 'ERROR'",
+            )
+        fail_target = retry_gate or failure_target or self.outcome_target("FAIL")
         self.edge(interrupt, fail_target, f"{result_key}.outcome == 'FAIL'")
         return _Fragment(entry, [_Exit(interrupt, f"{result_key}.outcome == 'PASS'")])
 
@@ -476,7 +512,8 @@ class _Builder:
                 "runner": {"selector": "pinned", "required_capabilities": ["workspace", "bounded_result", "sandbox"]},
                 "inputs": {"command": {"state_key": command_key}, "snapshot": {"runtime_key": "current_project_snapshot"}},
                 "writes": [], "artifacts": [], "deadline_seconds": block.timeout,
-                "scope_state_keys": [], "result_schema": "lockstep.effect-result/v1",
+                "scope_state_keys": list(self.active_scope_state_keys),
+                "result_schema": "lockstep.effect-result/v1",
             }
             effect = self.descriptor_interrupt(pointer, "verify", logical, descriptor, {"step": logical, "lockstep_effect": descriptor}, result_key, retry_limit, failure_target=failure_target)
             self.edge(prepare, effect.entry)
@@ -546,7 +583,7 @@ class _Builder:
             self.connect(acceptance.exits, publication.entry)
             return _Fragment(acceptance.entry, publication.exits)
         if isinstance(block, EscalateIR):
-            return _Fragment(self.terminals["FAIL"], [])
+            return _Fragment(self.outcome_target("FAIL"), [])
         if isinstance(block, ChooseIR):
             result_key = self.outcome_keys.get(block.value, block.value.replace("-", "_") + "_result")
             router = self.node(pointer, "choose", "route", {"type": "passthrough"})
@@ -566,7 +603,148 @@ class _Builder:
             return self.graph(contract, pointer)
         if isinstance(block, CallIR):
             return self.call(contract, pointer)
+        if isinstance(block, ParallelIR):
+            return self.parallel(contract, pointer)
         raise NotImplementedError(f"Task 8 cannot lower {type(block).__name__}")
+
+    def parallel(self, contract: BlockContract, pointer: str) -> _Fragment:
+        block = contract.block
+        if not isinstance(block, ParallelIR):
+            raise TypeError("parallel lowering requires ParallelIR")
+        if block.id is None or block.join != "all":
+            raise ValueError("parallel lowering requires an id and join: all")
+
+        outer_targets = dict(self.outcome_targets)
+        outer_scopes = self.active_scope_state_keys
+        outer_aborted_capture = self.capture_aborted_effects
+        outer_parallel_branch = self.inside_parallel_branch
+        digest = hashlib.sha256(
+            b"lockstep.parallel-scope/v1\0" + pointer.encode("utf-8")
+        ).hexdigest()[:24]
+        scope_fragment: _Fragment | None = None
+        branch_scopes = outer_scopes
+        if block.timeout_minutes is not None:
+            scope_key = f"parallel_{digest}_scope_result"
+            descriptor = {
+                "schema": "lockstep.effect/v1",
+                "kind": "scope",
+                "logical_id": f"parallel-{digest}-scope",
+                "scope_kind": "parallel",
+                "duration_seconds": block.timeout_minutes * 60,
+                "runner_selector": None,
+                "ancestor_deadline_state_keys": list(outer_scopes),
+                "result_state_key": scope_key,
+                "result_schema": "lockstep.scope-result/v1",
+            }
+            scope_fragment = self.descriptor_interrupt(
+                pointer,
+                "parallel",
+                f"parallel-{digest}-scope",
+                descriptor,
+                {"step": block.id, "lockstep_effect": descriptor},
+                scope_key,
+                None,
+            )
+            branch_scopes = (*outer_scopes, scope_key)
+
+        fork = self.node(pointer, "parallel", "fork", {"type": "passthrough"})
+        join = self.node(pointer, "parallel", "join", {"type": "passthrough"})
+        result_key = f"{block.id.replace('-', '_')}_result"
+        self.declare_generated_state(result_key, "dict")
+        self.outcome_keys[block.id] = result_key
+
+        branch_entries: list[str] = []
+        branch_result_keys: list[str] = []
+        try:
+            for branch_name, branch_flow in contract.branches.items():
+                branch_pointer = f"{pointer}/parallel/branches/{branch_name}"
+                branch_key = (
+                    f"parallel_{digest}_{branch_name.replace('-', '_')}_outcome"
+                )
+                self.declare_generated_state(branch_key, "str")
+                branch_result_keys.append(branch_key)
+                completion = self.node(
+                    branch_pointer,
+                    "parallel-branch",
+                    "complete",
+                    {"type": "passthrough"},
+                )
+                setters = {
+                    outcome: self.node(
+                        branch_pointer,
+                        "parallel-branch",
+                        f"set-{outcome.lower()}",
+                        {"type": "passthrough", "output": {branch_key: outcome}},
+                    )
+                    for outcome in ("PASS", "FAIL", "ERROR", "ABORTED")
+                }
+                for setter in setters.values():
+                    self.edge(setter, completion)
+                self.edge(completion, join)
+
+                self.active_scope_state_keys = branch_scopes
+                self.outcome_targets = setters
+                self.capture_aborted_effects = True
+                self.inside_parallel_branch = True
+                fragment = self.flow_contract(branch_flow, branch_pointer)
+                branch_entries.append(fragment.entry)
+                self.connect(fragment.exits, setters["PASS"])
+        finally:
+            self.active_scope_state_keys = outer_scopes
+            self.outcome_targets = outer_targets
+            self.capture_aborted_effects = outer_aborted_capture
+            self.inside_parallel_branch = outer_parallel_branch
+
+        self.edge(fork, branch_entries)
+        if scope_fragment is None:
+            entry = fork
+        else:
+            self.connect(scope_fragment.exits, fork)
+            entry = scope_fragment.entry
+
+        aggregate = {
+            "PASS": {"outcome": "PASS", "value": "pass"},
+            "FAIL": {"outcome": "FAIL", "value": "fail"},
+            "ERROR": {"outcome": "ERROR", "value": "error"},
+            "ABORTED": {
+                "outcome": "ERROR",
+                "value": "error",
+                "fixed_error_code": "cancelled",
+            },
+        }
+        outcomes = {
+            outcome: self.node(
+                pointer,
+                "parallel",
+                f"outcome-{outcome.lower()}",
+                {"type": "passthrough", "output": {result_key: value}},
+            )
+            for outcome, value in aggregate.items()
+        }
+        route = join
+        for precedence in ("ABORTED", "ERROR", "FAIL"):
+            for index, branch_key in enumerate(branch_result_keys):
+                next_route = self.node(
+                    pointer,
+                    "parallel",
+                    f"check-{precedence.lower()}-{index}",
+                    {"type": "passthrough"},
+                )
+                self.edge(
+                    route,
+                    outcomes[precedence],
+                    f"{branch_key} == '{precedence}'",
+                )
+                self.edge(
+                    route,
+                    next_route,
+                    f"{branch_key} != '{precedence}'",
+                )
+                route = next_route
+        self.edge(route, outcomes["PASS"])
+        for outcome in ("FAIL", "ERROR", "ABORTED"):
+            self.edge(outcomes[outcome], outer_targets[outcome])
+        return _Fragment(entry, [_Exit(outcomes["PASS"])])
 
     def call(self, contract: BlockContract, pointer: str) -> _Fragment:
         block = contract.block
@@ -675,7 +853,7 @@ class _Builder:
                 else None
             ),
             "runner_selector": block.runner,
-            "ancestor_deadline_state_keys": [],
+            "ancestor_deadline_state_keys": list(self.active_scope_state_keys),
             "result_state_key": scope_key,
             "result_schema": "lockstep.scope-result/v1",
         }
@@ -943,7 +1121,7 @@ class _Builder:
         for outcome, restore in restorations.items():
             self.edge(post, restore, f"{child_outcome} == '{outcome}'")
             if outcome != "PASS":
-                self.edge(restore, self.terminals[outcome])
+                self.edge(restore, self.outcome_target(outcome))
         return _Fragment(context, [_Exit(restorations["PASS"])])
 
     @staticmethod
@@ -1116,6 +1294,10 @@ class _Builder:
             descriptor = message.get("lockstep_effect") if isinstance(message, dict) else None
             if isinstance(descriptor, dict):
                 descriptor = plain(descriptor)
+                if self.inside_parallel_branch and descriptor.get("kind") == "decide":
+                    raise ValueError(
+                        "parallel child may not hide a decision descriptor"
+                    )
                 matching_artifacts = [
                     item for item in artifact_bindings
                     if key_map.get(item[4], specialized_key(item[4]))
@@ -1145,9 +1327,13 @@ class _Builder:
                     }
                     descriptor["scope_state_keys"] = [scope_key]
                 elif isinstance(descriptor.get("scope_state_keys"), list):
-                    descriptor["scope_state_keys"] = [
-                        key_map.get(key, key) for key in descriptor["scope_state_keys"]
+                    mapped_scopes = [
+                        key_map.get(key, key)
+                        for key in descriptor["scope_state_keys"]
                     ]
+                    descriptor["scope_state_keys"] = (
+                        mapped_scopes if mapped_scopes else [scope_key]
+                    )
                 inputs = descriptor.get("inputs")
                 if isinstance(inputs, dict):
                     for selector in inputs.values():
@@ -1177,10 +1363,17 @@ class _Builder:
         rewritten_edges: list[dict[str, Any]] = []
         for raw_edge in document.get("edges", []):
             edge = plain(raw_edge)
-            for field in ("from", "to"):
-                value = edge.get(field)
-                if value not in {"START", "END"}:
-                    edge[field] = node_map[value]
+            source = edge.get("from")
+            if source not in {"START", "END"}:
+                edge["from"] = node_map[source]
+            targets = edge.get("to")
+            if isinstance(targets, list):
+                edge["to"] = [
+                    target if target in {"START", "END"} else node_map[target]
+                    for target in targets
+                ]
+            elif targets not in {"START", "END"}:
+                edge["to"] = node_map[targets]
             if "condition" in edge:
                 edge["condition"] = rewrite_state_condition(edge["condition"])
             rewritten_edges.append(edge)
@@ -1332,6 +1525,10 @@ class _Builder:
                         self.declare_generated_state(copied[field], "dict")
                     fragment_state_keys.add(copied[field])
                 descriptor = plain(descriptor)
+                if self.inside_parallel_branch and descriptor.get("kind") == "decide":
+                    raise ValueError(
+                        "parallel graph may not hide a decision descriptor"
+                    )
                 logical_id = descriptor.get("logical_id")
                 if isinstance(logical_id, str):
                     descriptor["logical_id"] = qualify_identity(
@@ -1366,6 +1563,21 @@ class _Builder:
                     )
                 if isinstance(message.get("step"), str):
                     message["step"] = qualify_identity("step", message["step"])
+                if self.active_scope_state_keys:
+                    if descriptor.get("kind") == "manual":
+                        raise ValueError(
+                            "unmanaged manual fragment effects cannot enter a bounded scope"
+                        )
+                    if descriptor.get("kind") == "scope":
+                        descriptor["ancestor_deadline_state_keys"] = [
+                            *self.active_scope_state_keys,
+                            *descriptor.get("ancestor_deadline_state_keys", []),
+                        ]
+                    elif isinstance(descriptor.get("scope_state_keys"), list):
+                        descriptor["scope_state_keys"] = [
+                            *self.active_scope_state_keys,
+                            *descriptor["scope_state_keys"],
+                        ]
                 artifact_contract = message.get("artifact_contract")
                 if artifact_contract not in (None, [], {}):
                     raise ValueError(
@@ -1659,9 +1871,9 @@ class _Builder:
         self.edge(entry_gate, qualify(entry))
         self.edge(qualify(exits["pass"]), pass_gate)
         if "fail" in exits:
-            self.edge(qualify(exits["fail"]), self.terminals["FAIL"])
+            self.edge(qualify(exits["fail"]), self.outcome_target("FAIL"))
         if "error" in exits:
-            self.edge(qualify(exits["error"]), self.terminals["ERROR"])
+            self.edge(qualify(exits["error"]), self.outcome_target("ERROR"))
         expansion = canonical_yaml({
             "state": {
                 key: self.state[key]
@@ -1688,7 +1900,7 @@ class _Builder:
             "type": "passthrough", "output": {"lockstep_continue": True}
         })
         exhausted = self.node(pointer, "repeat", "exhausted", {"type": "passthrough"})
-        self.edge(exhausted, self.terminals["FAIL"])
+        self.edge(exhausted, self.outcome_target("FAIL"))
         self.loop_limits[gate] = contract.limit
         self.loop_exits[gate] = exhausted
         blocks = list(contract.body.blocks)

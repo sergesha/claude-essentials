@@ -16,6 +16,12 @@ import shlex
 from typing import Any, Literal, Mapping, Protocol, TypeAlias
 
 from lockstep.runtime.effects.models import PinnedCommandSpec
+from lockstep.runtime.owner_state import StorageLimitExceeded
+from lockstep.runtime.project_paths import (
+    PortablePathError,
+    ProjectTreeLimits,
+    validate_portable_project_paths,
+)
 
 from .diagnostics import Diagnostic, DiagnosticError
 from .ir import (
@@ -479,8 +485,8 @@ class _Validator:
         if not isinstance(block, known_blocks):
             code = "LSP101" if parallel else "LSW120"
             self.fail(code, "unsupported Workflow DSL v1 block", pointer, "remove the unsupported block")
-        if parallel and not isinstance(block, (VerifyIR, DecideIR, ChooseIR, CallIR, GraphIR)):
-            self.fail("LSP101", "block is not permitted in a parallel branch", pointer, "use verify, decide, choose, call, or a read-only graph")
+        if parallel and not isinstance(block, (VerifyIR, ChooseIR, CallIR, GraphIR)):
+            self.fail("LSP101", "block is not permitted in a parallel branch", pointer, "use verify, choose, call, or a read-only graph")
         self.track_id(block, pointer)
         if isinstance(block, StepIR):
             if parallel:
@@ -752,6 +758,7 @@ class _Validator:
         self.handlers(block.on_failure, block.on_error, f"{pointer}/parallel")
         base_artifacts = dict(self.artifacts)
         published_artifacts: dict[str, ArtifactContract] = {}
+        branch_destinations: list[tuple[str, str]] = []
         effects: list[EffectContract] = []
         branch_contracts: dict[str, FlowContract] = {}
         for name, branch in block.branches.items():
@@ -768,7 +775,21 @@ class _Validator:
                 if qualified in published_artifacts:
                     self.fail("LSP102", f"duplicate parallel artifact handle {qualified!r}", f"{pointer}/parallel/branches/{_escape(name)}", "use unique branch/call/export identities")
                 published_artifacts[qualified] = ArtifactContract(qualified, artifact.source, artifact.destination)
+                branch_destinations.append((name, artifact.destination))
             effects.append(branch_flow.effects)
+        try:
+            validate_portable_project_paths(
+                ((destination, "file") for _branch, destination in branch_destinations),
+                limits=ProjectTreeLimits(max_entries=64),
+                label="parallel artifact destinations",
+            )
+        except (PortablePathError, StorageLimitExceeded) as exc:
+            self.fail(
+                "LSP102",
+                f"parallel artifact destinations overlap or alias: {exc}",
+                f"{pointer}/parallel/branches",
+                "use statically non-overlapping portable artifact destinations",
+            )
         self.artifacts = {**base_artifacts, **published_artifacts}
         # Work is isolated while branches run.  Effects become engine-owned
         # publications at join, so no branch write surface is granted here.
