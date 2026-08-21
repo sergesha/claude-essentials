@@ -39,6 +39,7 @@ from lockstep.runtime.graph_runtime import GraphRuntime
 from lockstep.runtime.leases import Lease, LeaseStore, LeaseUnavailable
 from lockstep.runtime.native_models import NativeInterrupt, NativeSnapshot
 from lockstep.runtime.providers.base import (
+    DefinitiveProviderFailure,
     EffectRequest,
     PreparedLaunch,
     RunnerAdapter,
@@ -337,7 +338,9 @@ class EffectCoordinator:
                     "nonterminal runner observation cannot carry a result"
                 )
         elif observation.state == "pending" and (
-            observation.result_stable or observation.rollover_snapshot_ref is not None
+            observation.result_stable
+            or observation.rollover_snapshot_ref is not None
+            or observation.workspace_quarantined
         ):
             raise ProviderContractViolation(
                 "pending terminal-safety observation cannot carry proof fields"
@@ -428,6 +431,13 @@ class EffectCoordinator:
                 request=None,
                 runner=None,
                 grant=None,
+            )
+        if descriptor.artifacts:
+            # Task 10 owns ArtifactRegistry and the provider-neutral artifact
+            # contract. Until that boundary exists, never erase descriptor
+            # requirements while constructing an EffectRequest.
+            raise ProviderContractViolation(
+                "artifact-bearing effects require the ArtifactRegistry boundary"
             )
         runner = (
             self._runner_for(descriptor.runner.selector)
@@ -596,12 +606,25 @@ class EffectCoordinator:
         ):
             raise ProviderContractViolation("required result-stability proof is absent")
         if context.descriptor.kind == "managed":
-            if safety.rollover_snapshot_ref is None:
+            if result is not None and result.snapshot_ref is None:
+                if result.outcome != "ERROR":
+                    raise ProviderContractViolation(
+                        "managed PASS/FAIL requires an exact rollover snapshot"
+                    )
+                if (
+                    safety.rollover_snapshot_ref is None
+                    and not safety.workspace_quarantined
+                ):
+                    raise ProviderContractViolation(
+                        "managed error requires rollover or quarantine proof"
+                    )
+            elif safety.rollover_snapshot_ref is None:
                 raise ProviderContractViolation(
                     "managed completion requires independent snapshot rollover"
                 )
             if (
                 result is not None
+                and result.snapshot_ref is not None
                 and safety.rollover_snapshot_ref != result.snapshot_ref
             ):
                 raise ProviderContractViolation(
@@ -797,7 +820,29 @@ class EffectCoordinator:
                 if context.request is None:
                     return self._report(run_id, record, "manual_pending")
                 assert context.runner is not None
-                launch = context.runner.prepare(context.request)
+                try:
+                    launch = context.runner.prepare(context.request)
+                except DefinitiveProviderFailure as failure:
+                    result = self._closed_result(failure.result)
+                    if (
+                        result.effect_id != record.effect_id
+                        or result.outcome != "ERROR"
+                        or result.result_ref is not None
+                        or result.artifact_refs
+                        or result.snapshot_ref is not None
+                        or result.diff_ref is not None
+                        or result.evidence_refs
+                    ):
+                        raise ProviderContractViolation(
+                            "definitive prelaunch rejection must be a closed ERROR"
+                        ) from failure
+                    sealed = self._ledger.seal(
+                        record.effect_id,
+                        result,
+                        expected_revision=record.revision,
+                        lease=lease,
+                    )
+                    return self._report(run_id, sealed, "sealed")
                 self._check_launch(context.request, launch)
                 launching = self._ledger.mark_launching(
                     record.effect_id,
@@ -925,13 +970,14 @@ class EffectCoordinator:
                     cancelled = context.runner.cancel(record.effect_id)
                     self._check_observation(record, cancelled)
                     safety = context.runner.quiesce(record.effect_id)
+                    timeout_result = self._timeout_result(record.effect_id)
                     if not self._terminal_safety(
-                        context, safety, result=None, binding=record
+                        context, safety, result=timeout_result, binding=record
                     ):
                         return self._report(run_id, record, "quiescence_pending")
                     sealed = self._ledger.seal(
                         record.effect_id,
-                        self._timeout_result(record.effect_id),
+                        timeout_result,
                         expected_revision=record.revision,
                         lease=lease,
                         runner_binding_digest=record.runner_binding_digest,

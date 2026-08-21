@@ -1,9 +1,9 @@
 """Fenced, provider-neutral disposable Git workspaces for managed effects.
 
 The checkout is deliberately not a source of durable workflow truth.  The
-small record beside it is owner-only state and exists solely to bind a
-workspace generation, its cleanup fence, and the immutable snapshot from
-which it was materialized.
+small record beside it is owner-only state and exists solely to bind the
+current workspace revision and the immutable snapshot from which it was
+materialized.
 """
 
 from __future__ import annotations
@@ -13,9 +13,7 @@ import json
 import os
 import shutil
 import stat
-import subprocess
 import tempfile
-import unicodedata
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal
@@ -38,6 +36,11 @@ from lockstep.runtime.owner_state import (
     seal_owner_file,
     verify_owner_file,
 )
+from lockstep.runtime.project_paths import (
+    ProjectTreeLimits,
+    portable_collision_key,
+    validate_portable_project_paths,
+)
 from lockstep.runtime.project_snapshots import ProjectSnapshotRef, ProjectSnapshotStore
 
 
@@ -48,15 +51,7 @@ class WorkspaceError(RuntimeError):
 WorkspacePhase = Literal["materialized", "quarantined", "released"]
 
 
-@dataclass(frozen=True)
-class WorkspaceLimits:
-    max_entries: int = 10_000
-    max_file_bytes: int = 64 * 1024 * 1024
-    max_total_bytes: int = 256 * 1024 * 1024
-
-    def __post_init__(self) -> None:
-        if min(self.max_entries, self.max_file_bytes, self.max_total_bytes) <= 0:
-            raise ValueError("workspace limits must be positive")
+WorkspaceLimits = ProjectTreeLimits
 
 
 @dataclass(frozen=True)
@@ -67,39 +62,13 @@ class WorkspaceLease:
     effect_id: str
     request_digest: str
     input_snapshot_ref: str
-    generation: int
     revision: int
-    cleanup_fence: int
     workspace_path: Path
     declared_writes: tuple[str, ...]
     baseline: FilesystemSnapshot
     vcs_baseline_digest: str
     phase: WorkspacePhase
     rollover_snapshot_ref: str | None = None
-
-
-@dataclass(frozen=True)
-class WorkspaceDeathProof:
-    """Opaque provider-issued binding of process death to a cleanup fence."""
-
-    workspace_ref: str
-    generation: int
-    cleanup_fence: int
-    process_identity: str
-    digest: str
-
-
-@dataclass(frozen=True)
-class WorkspaceRolloverProof:
-    """Proof that a quarantined generation was sealed into a snapshot."""
-
-    workspace_ref: str
-    generation: int
-    revision: int
-    cleanup_fence: int
-    input_snapshot_ref: str
-    snapshot_ref: str
-
 
 def _canonical(value: object) -> bytes:
     return json.dumps(
@@ -139,66 +108,6 @@ def _snapshot_ref(value: str) -> ProjectSnapshotRef:
     if not isinstance(value, str) or not value.startswith("snapshot:"):
         raise WorkspaceError("input snapshot reference must use the snapshot: scheme")
     return ProjectSnapshotRef(_hex(value.removeprefix("snapshot:"), "snapshot reference"))
-
-
-def _collision_key(value: str) -> str:
-    return unicodedata.normalize("NFC", value).casefold()
-
-
-def _windows_alias(value: str) -> bool:
-    stripped = value.rstrip(". ")
-    if stripped != value or not stripped:
-        return True
-    base = stripped.split(".", 1)[0].upper()
-    return base in {"CON", "PRN", "AUX", "NUL", "CLOCK$"} or (
-        len(base) == 4 and base[:3] in {"COM", "LPT"} and base[3] in "123456789"
-    )
-
-
-def _validate_portable_paths(paths: tuple[str, ...]) -> None:
-    """Reject traversal, reserved names, and cross-platform aliases up front."""
-
-    siblings: dict[tuple[str, ...], dict[str, str]] = {}
-    for raw in paths:
-        if (
-            not isinstance(raw, str)
-            or not raw
-            or "\\" in raw
-            or any(character in raw for character in '<>:"|?*')
-            or any(ord(character) < 32 for character in raw)
-        ):
-            raise WorkspaceError(f"unsafe snapshot path {raw!r}")
-        path = PurePosixPath(raw)
-        if path.is_absolute() or path.as_posix() != raw or any(
-            part in {"", ".", ".."} for part in path.parts
-        ):
-            raise WorkspaceError(f"unsafe snapshot traversal path {raw!r}")
-        for index, part in enumerate(path.parts):
-            if _windows_alias(part):
-                raise WorkspaceError(f"unsafe platform alias in snapshot path {raw!r}")
-            if index == 0 and _collision_key(part) == _collision_key(".git"):
-                raise WorkspaceError(f"Git control path is reserved: {raw!r}")
-            parent = tuple(path.parts[:index])
-            seen = siblings.setdefault(parent, {})
-            key = _collision_key(part)
-            previous = seen.get(key)
-            if previous is not None and previous != part:
-                raise WorkspaceError(
-                    f"snapshot path collision between {previous!r} and {part!r}"
-                )
-            seen[key] = part
-
-
-def _validate_portable_file_paths(paths: tuple[str, ...]) -> None:
-    _validate_portable_paths(paths)
-    files = set(paths)
-    for raw in paths:
-        path = PurePosixPath(raw)
-        for parent in path.parents:
-            if parent.as_posix() != "." and parent.as_posix() in files:
-                raise WorkspaceError(
-                    f"snapshot file collides with descendant path {raw!r}"
-                )
 
 
 def _stat_identity(item: os.stat_result) -> tuple[int, int, int, int, int, int]:
@@ -265,11 +174,11 @@ class LocalGitWorkspaceProvider:
         self._root = ensure_owner_directory(self._owner_state, "managed-workspaces")
         self._records = ensure_owner_directory(self._root, "records")
         self._checkouts = ensure_owner_directory(self._root, "checkouts")
+        self._staging = ensure_owner_directory(self._root, "staging")
         self._quarantine = ensure_owner_directory(self._root, "quarantine")
         self._snapshots = snapshots
         self._blobs = blobs
-        self._limits = limits or WorkspaceLimits()
-        self._issued_death_proofs: set[str] = set()
+        self._limits = limits or snapshots.limits
 
     def workspace_ref_for(self, effect_id: str, intent_digest: str) -> str:
         commitment = {
@@ -294,8 +203,22 @@ class LocalGitWorkspaceProvider:
         snapshot_ref = _snapshot_ref(input_snapshot_ref)
         if not isinstance(declared_writes, tuple):
             declared_writes = tuple(declared_writes)
-        if len(declared_writes) > 10_000:
-            raise WorkspaceError("declared writes exceed workspace admission limit")
+        declared_writes = tuple(
+            item.value
+            for item in validate_portable_project_paths(
+                (
+                    (
+                        path,
+                        "prefix"
+                        if isinstance(path, str) and path.endswith("/")
+                        else "file",
+                    )
+                    for path in declared_writes
+                ),
+                limits=self._limits,
+                label="workspace declared write entries",
+            )
+        )
         record_path = self._record_path(key)
         with file_lock(record_path, timeout=30.0, stale_after=300.0):
             if record_path.exists() or record_path.is_symlink():
@@ -318,6 +241,7 @@ class LocalGitWorkspaceProvider:
                     raise WorkspaceError(
                         "quarantined or released workspace is not reusable"
                     )
+                self._preflight_tree_limits(lease.workspace_path)
                 if self._capture(lease.workspace_path) != lease.baseline:
                     raise WorkspaceError(
                         "materialized workspace drifted from its launch baseline"
@@ -330,26 +254,29 @@ class LocalGitWorkspaceProvider:
 
             snapshot_before = self._read_snapshot(snapshot_ref)
             paths = tuple(entry.path for entry in snapshot_before.files)
-            _validate_portable_file_paths(paths)
-            generation = 1
-            checkout = self._checkout_path(key, generation)
-            if checkout.exists() or checkout.is_symlink():
-                raise WorkspaceError("unrecorded workspace checkout already exists")
-            temporary = Path(
-                tempfile.mkdtemp(prefix=f".{key}-", dir=self._checkouts)
+            validate_portable_project_paths(
+                ((path, "file") for path in paths),
+                limits=self._limits,
+                label="workspace snapshot entries",
             )
-            temporary.chmod(0o700)
+            checkout = self._checkout_path(key)
+            if checkout.exists() or checkout.is_symlink():
+                self._discard_recovery_tree(checkout, self._checkouts)
+            temporary = self._staging_path(key)
+            if temporary.exists() or temporary.is_symlink():
+                self._discard_recovery_tree(temporary, self._staging)
+            temporary.mkdir(mode=0o700)
             published = False
             try:
                 for entry in snapshot_before.files:
                     destination = temporary.joinpath(*PurePosixPath(entry.path).parts)
                     destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                    destination.write_bytes(self._blobs.read(entry.blob))
-                    destination.chmod(0o600)
+                    self._write_private_file(destination, self._blobs.read(entry.blob))
                 snapshot_after = self._read_snapshot(snapshot_ref)
                 if snapshot_after != snapshot_before:
                     raise WorkspaceError("input snapshot changed while materializing")
-                self._initialize_git(temporary)
+                self._initialize_git_control(temporary)
+                self._fsync_materialized_tree(temporary)
                 os.rename(temporary, checkout)
                 published = True
                 self._fsync_directory(self._checkouts)
@@ -374,9 +301,7 @@ class LocalGitWorkspaceProvider:
                 effect_id=effect_id,
                 request_digest=request_digest,
                 input_snapshot_ref=input_snapshot_ref,
-                generation=generation,
                 revision=1,
-                cleanup_fence=1,
                 workspace_path=checkout,
                 declared_writes=tuple(declared_writes),
                 baseline=baseline,
@@ -394,49 +319,23 @@ class LocalGitWorkspaceProvider:
     def inspect(self, workspace_ref: str) -> WorkspaceLease:
         return self._read_record(_workspace_digest(workspace_ref))
 
-    def actual_death_proof(
-        self, lease: WorkspaceLease, *, process_identity: str
-    ) -> WorkspaceDeathProof:
-        current = self.inspect(lease.workspace_ref)
-        self._validate_immutable_lease(lease, current)
-        process_identity = _text(process_identity, "process identity")
-        commitment = {
-            "schema": "lockstep.workspace-death/v1",
-            "workspace_ref": current.workspace_ref,
-            "generation": current.generation,
-            "cleanup_fence": current.cleanup_fence,
-            "process_identity": process_identity,
-        }
-        proof = WorkspaceDeathProof(
-            workspace_ref=current.workspace_ref,
-            generation=current.generation,
-            cleanup_fence=current.cleanup_fence,
-            process_identity=process_identity,
-            digest=_digest(commitment),
-        )
-        self._issued_death_proofs.add(proof.digest)
-        return proof
-
     def quarantine_and_rollover(
         self,
         lease: WorkspaceLease,
-        *,
-        actual_death: WorkspaceDeathProof,
-    ) -> WorkspaceRolloverProof:
+    ) -> str:
         key = _workspace_digest(lease.workspace_ref)
         record_path = self._record_path(key)
         with file_lock(record_path, timeout=30.0, stale_after=300.0):
             current = self._read_record(key)
             self._validate_current_lease(lease, current)
-            self._validate_death(current, actual_death)
             stored_snapshot_ref = self._stored_rollover_ref(key)
             if current.phase == "quarantined" and stored_snapshot_ref is not None:
-                return self._rollover_proof(current, stored_snapshot_ref)
+                return stored_snapshot_ref
             if current.phase == "released":
                 raise WorkspaceError("released workspace cannot be rolled over")
 
             if current.phase == "materialized":
-                quarantined_path = self._quarantine_path(key, current.generation)
+                quarantined_path = self._quarantine_path(key)
                 moved = quarantined_path.exists() and not current.workspace_path.exists()
                 if quarantined_path.is_symlink() or (
                     quarantined_path.exists() and not moved
@@ -469,6 +368,7 @@ class LocalGitWorkspaceProvider:
             # Rebind that one value, while requiring every Git control file and
             # ref digest to remain identical.  This also recovers a crash after
             # the durable quarantine record but before baseline rebinding.
+            self._preflight_tree_limits(current.workspace_path)
             relocated = self._capture(current.workspace_path)
             baseline = self._relocated_baseline(current.baseline, relocated)
             if baseline != current.baseline:
@@ -485,6 +385,7 @@ class LocalGitWorkspaceProvider:
                 self._preflight_tree_limits(current.workspace_path)
                 before_copy = self._capture(current.workspace_path)
                 self._validate_output(current, before_copy)
+                self._validate_snapshot_fidelity(before_copy)
                 files = {}
                 copied_bytes = 0
                 for entry in before_copy.entries:
@@ -532,7 +433,6 @@ class LocalGitWorkspaceProvider:
                         "source": "managed-workspace-rollover",
                         "workspace_ref": current.workspace_ref,
                         "request_digest": current.request_digest,
-                        "generation": current.generation,
                     },
                     previous=previous,
                 )
@@ -550,33 +450,23 @@ class LocalGitWorkspaceProvider:
                 }
             )
             self._write_record(current, snapshot_ref_out=result_ref)
-            return self._rollover_proof(current, result_ref)
+            return result_ref
 
     def release(
         self,
         lease: WorkspaceLease,
-        *,
-        actual_death: WorkspaceDeathProof | None,
-        cleanup_fence: int,
     ) -> None:
         key = _workspace_digest(lease.workspace_ref)
         record_path = self._record_path(key)
         with file_lock(record_path, timeout=30.0, stale_after=300.0):
             current = self._read_record(key)
-            self._validate_immutable_lease(lease, current)
-            if cleanup_fence != current.cleanup_fence:
-                raise WorkspaceError("cleanup fence is not the current workspace fence")
-            if actual_death is None:
-                raise WorkspaceError("actual death proof is required before cleanup")
-            self._validate_death(current, actual_death)
+            self._validate_current_lease(lease, current)
             if current.phase == "released":
                 return
+            if current.phase != "quarantined":
+                raise WorkspaceError("only a quarantined workspace can be released")
             path = current.workspace_path
-            expected = (
-                self._checkout_path(key, current.generation)
-                if current.phase == "materialized"
-                else self._quarantine_path(key, current.generation)
-            )
+            expected = self._quarantine_path(key)
             if path != expected or path.is_symlink():
                 raise WorkspaceError("workspace cleanup target failed containment check")
             if path.exists():
@@ -592,11 +482,23 @@ class LocalGitWorkspaceProvider:
     def _record_path(self, key: str) -> Path:
         return self._records / f"{key}.json"
 
-    def _checkout_path(self, key: str, generation: int) -> Path:
-        return self._checkouts / f"{key}-g{generation}"
+    def _checkout_path(self, key: str) -> Path:
+        return self._checkouts / key
 
-    def _quarantine_path(self, key: str, generation: int) -> Path:
-        return self._quarantine / f"{key}-g{generation}"
+    def _staging_path(self, key: str) -> Path:
+        return self._staging / key
+
+    def _quarantine_path(self, key: str) -> Path:
+        return self._quarantine / key
+
+    def _discard_recovery_tree(self, path: Path, parent: Path) -> None:
+        if path.parent != parent or path.is_symlink():
+            raise WorkspaceError("workspace recovery target failed containment check")
+        if path.exists():
+            if not path.is_dir():
+                raise WorkspaceError("workspace recovery target is not a directory")
+            shutil.rmtree(path)
+            self._fsync_directory(parent)
 
     def _read_snapshot(self, ref: ProjectSnapshotRef):
         try:
@@ -677,7 +579,7 @@ class LocalGitWorkspaceProvider:
                         names.append(child.name)
                 seen: dict[str, str] = {}
                 for name in sorted(names):
-                    key = _collision_key(name)
+                    key = portable_collision_key(name)
                     previous = seen.get(key)
                     if previous is not None and previous != name:
                         raise WorkspaceError(
@@ -766,7 +668,14 @@ class LocalGitWorkspaceProvider:
     ) -> None:
         if self._vcs_tree_digest(lease.workspace_path) != lease.vcs_baseline_digest:
             raise WorkspaceError("Git control state changed")
-        _validate_portable_paths(tuple(entry.path for entry in captured.entries))
+        validate_portable_project_paths(
+            (
+                (entry.path, "directory" if entry.kind == "directory" else "file")
+                for entry in captured.entries
+            ),
+            limits=self._limits,
+            label="workspace entries",
+        )
         if any(entry.kind == "symlink" for entry in captured.entries):
             raise WorkspaceError("workspace manifest integrity rejects symlink output")
         try:
@@ -779,6 +688,29 @@ class LocalGitWorkspaceProvider:
             raise WorkspaceError(f"workspace manifest integrity failure: {exc}") from exc
         if comparison.integrity_error:
             raise WorkspaceError("; ".join(comparison.reasons))
+
+    @staticmethod
+    def _validate_snapshot_fidelity(captured: FilesystemSnapshot) -> None:
+        files = tuple(entry.path for entry in captured.entries if entry.kind == "file")
+        executable = next(
+            (
+                entry.path
+                for entry in captured.entries
+                if entry.kind == "file" and entry.executable
+            ),
+            None,
+        )
+        if executable is not None:
+            raise WorkspaceError(
+                f"snapshot fidelity rejects executable output: {executable}"
+            )
+        for entry in captured.entries:
+            if entry.kind == "directory" and not any(
+                path.startswith(entry.path + "/") for path in files
+            ):
+                raise WorkspaceError(
+                    f"snapshot fidelity rejects empty directory: {entry.path}"
+                )
 
     @staticmethod
     def _relocated_baseline(
@@ -810,47 +742,47 @@ class LocalGitWorkspaceProvider:
             raise WorkspaceError("Git control state changed before durable quarantine")
         return FilesystemSnapshot(entries=baseline.entries, git=new_git)
 
-    def _initialize_git(self, workspace: Path) -> None:
-        environment = {
-            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-            "HOME": str(self._root),
-            "GIT_CONFIG_NOSYSTEM": "1",
-            "GIT_CONFIG_GLOBAL": os.devnull,
-            "GIT_AUTHOR_NAME": "Lockstep",
-            "GIT_AUTHOR_EMAIL": "lockstep@invalid",
-            "GIT_COMMITTER_NAME": "Lockstep",
-            "GIT_COMMITTER_EMAIL": "lockstep@invalid",
-            "GIT_AUTHOR_DATE": "2000-01-01T00:00:00+00:00",
-            "GIT_COMMITTER_DATE": "2000-01-01T00:00:00+00:00",
-        }
-        commands = (
-            ("git", "-c", f"core.hooksPath={os.devnull}", "init", "--initial-branch=lockstep"),
-            ("git", "-c", f"core.hooksPath={os.devnull}", "add", "--all", "--"),
-            (
-                "git",
-                "-c",
-                f"core.hooksPath={os.devnull}",
-                "commit",
-                "--no-gpg-sign",
-                "--no-verify",
-                "--allow-empty",
-                "-m",
-                "Lockstep managed workspace baseline",
-            ),
+    def _initialize_git_control(self, workspace: Path) -> None:
+        git = workspace / ".git"
+        directories = (
+            git,
+            git / "hooks",
+            git / "objects",
+            git / "objects/info",
+            git / "objects/pack",
+            git / "refs",
+            git / "refs/heads",
+            git / "refs/tags",
         )
-        for command in commands:
-            try:
-                subprocess.run(
-                    command,
-                    cwd=workspace,
-                    env=environment,
-                    stdin=subprocess.DEVNULL,
-                    capture_output=True,
-                    check=True,
-                    timeout=30,
-                )
-            except (OSError, subprocess.SubprocessError) as exc:
-                raise WorkspaceError("disposable Git workspace initialization failed") from exc
+        for directory in directories:
+            directory.mkdir(mode=0o700)
+        files = {
+            git / "HEAD": b"ref: refs/heads/lockstep\n",
+            git / "config": (
+                b"[core]\n"
+                b"\trepositoryformatversion = 0\n"
+                b"\tfilemode = true\n"
+                b"\tbare = false\n"
+                b"\tlogallrefupdates = true\n"
+            ),
+        }
+        for path, data in files.items():
+            self._write_private_file(path, data)
+
+    @staticmethod
+    def _write_private_file(path: Path, data: bytes) -> None:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+
+    def _fsync_materialized_tree(self, workspace: Path) -> None:
+        directories: list[Path] = []
+        for current, _children, _files in os.walk(workspace, followlinks=False):
+            directories.append(Path(current))
+        for directory in reversed(directories):
+            self._fsync_directory(directory)
 
     def _write_record(
         self, lease: WorkspaceLease, *, snapshot_ref_out: str | None
@@ -862,9 +794,7 @@ class LocalGitWorkspaceProvider:
             "effect_id": lease.effect_id,
             "request_digest": lease.request_digest,
             "input_snapshot_ref": lease.input_snapshot_ref,
-            "generation": lease.generation,
             "revision": lease.revision,
-            "cleanup_fence": lease.cleanup_fence,
             "declared_writes": list(lease.declared_writes),
             "baseline": snapshot_to_data(lease.baseline),
             "vcs_baseline_digest": lease.vcs_baseline_digest,
@@ -897,16 +827,9 @@ class LocalGitWorkspaceProvider:
             workspace_ref = data["workspace_ref"]
             if _workspace_digest(workspace_ref) != key:
                 raise WorkspaceError("workspace lease address mismatch")
-            raw_fences = (
-                data["generation"],
-                data["revision"],
-                data["cleanup_fence"],
-            )
-            if any(type(value) is not int for value in raw_fences):
-                raise WorkspaceError("workspace fence values must be integers")
-            generation, revision, cleanup_fence = raw_fences
-            if min(generation, revision, cleanup_fence) <= 0:
-                raise WorkspaceError("workspace fence values must be positive")
+            revision = data["revision"]
+            if type(revision) is not int or revision <= 0:
+                raise WorkspaceError("workspace revision must be a positive integer")
             phase = data["phase"]
             if phase not in {"materialized", "quarantined", "released"}:
                 raise WorkspaceError("invalid workspace phase")
@@ -916,9 +839,9 @@ class LocalGitWorkspaceProvider:
             ):
                 raise WorkspaceError("invalid workspace declared writes")
             expected_path = (
-                self._checkout_path(key, generation)
+                self._checkout_path(key)
                 if phase == "materialized"
-                else self._quarantine_path(key, generation)
+                else self._quarantine_path(key)
             )
             return WorkspaceLease(
                 workspace_ref=workspace_ref,
@@ -927,9 +850,7 @@ class LocalGitWorkspaceProvider:
                 input_snapshot_ref=(
                     f"snapshot:{_snapshot_ref(data['input_snapshot_ref']).digest}"
                 ),
-                generation=generation,
                 revision=revision,
-                cleanup_fence=cleanup_fence,
                 workspace_path=expected_path,
                 declared_writes=tuple(declared),
                 baseline=snapshot_from_data(data["baseline"]),
@@ -960,77 +881,13 @@ class LocalGitWorkspaceProvider:
             return None
         return f"snapshot:{_snapshot_ref(value).digest}"
 
-    def _validate_immutable_lease(
+    def _validate_current_lease(
         self, supplied: WorkspaceLease, current: WorkspaceLease
     ) -> None:
         if not isinstance(supplied, WorkspaceLease):
             raise WorkspaceError("typed workspace lease is required")
-        supplied_binding = (
-            supplied.workspace_ref,
-            supplied.effect_id,
-            supplied.request_digest,
-            supplied.input_snapshot_ref,
-            supplied.generation,
-            supplied.cleanup_fence,
-            supplied.declared_writes,
-            supplied.baseline,
-            supplied.vcs_baseline_digest,
-        )
-        current_binding = (
-            current.workspace_ref,
-            current.effect_id,
-            current.request_digest,
-            current.input_snapshot_ref,
-            current.generation,
-            current.cleanup_fence,
-            current.declared_writes,
-            current.baseline,
-            current.vcs_baseline_digest,
-        )
-        if supplied_binding != current_binding:
-            raise WorkspaceError("workspace lease does not match the current fence")
-
-    def _validate_current_lease(
-        self, supplied: WorkspaceLease, current: WorkspaceLease
-    ) -> None:
-        self._validate_immutable_lease(supplied, current)
         if supplied != current:
             raise WorkspaceError("workspace lease revision is stale")
-
-    def _validate_death(
-        self, current: WorkspaceLease, proof: WorkspaceDeathProof
-    ) -> None:
-        if not isinstance(proof, WorkspaceDeathProof):
-            raise WorkspaceError("actual death proof is required")
-        commitment = {
-            "schema": "lockstep.workspace-death/v1",
-            "workspace_ref": proof.workspace_ref,
-            "generation": proof.generation,
-            "cleanup_fence": proof.cleanup_fence,
-            "process_identity": proof.process_identity,
-        }
-        expected = _digest(commitment)
-        if (
-            proof.digest != expected
-            or proof.digest not in self._issued_death_proofs
-            or proof.workspace_ref != current.workspace_ref
-            or proof.generation != current.generation
-            or proof.cleanup_fence != current.cleanup_fence
-        ):
-            raise WorkspaceError("actual death proof does not match the current fence")
-
-    @staticmethod
-    def _rollover_proof(
-        lease: WorkspaceLease, snapshot_ref: str
-    ) -> WorkspaceRolloverProof:
-        return WorkspaceRolloverProof(
-            workspace_ref=lease.workspace_ref,
-            generation=lease.generation,
-            revision=lease.revision,
-            cleanup_fence=lease.cleanup_fence,
-            input_snapshot_ref=lease.input_snapshot_ref,
-            snapshot_ref=snapshot_ref,
-        )
 
     @staticmethod
     def _fsync_directory(directory: Path) -> None:

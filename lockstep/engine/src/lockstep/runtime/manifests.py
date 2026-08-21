@@ -7,13 +7,19 @@ state is attested separately: it must not become an implicit write surface.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hashlib
 import os
-from pathlib import Path, PurePosixPath
 import stat
-from typing import Iterable, Literal, Sequence
-import unicodedata
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+from typing import Literal
+
+from lockstep.runtime.project_paths import (
+    PortablePathError,
+    PortableProjectPath,
+    portable_collision_key,
+)
 
 
 class PathContractError(ValueError):
@@ -110,10 +116,6 @@ def _identity(metadata: os.stat_result) -> tuple[int, int, int, int, int, int]:
     )
 
 
-def _collision_key(part: str) -> str:
-    return unicodedata.normalize("NFC", part).casefold()
-
-
 def _check_component_collision(parent: Path, requested: str) -> None:
     """Reject a spelling that aliases an already present sibling.
 
@@ -127,22 +129,12 @@ def _check_component_collision(parent: Path, requested: str) -> None:
         return
     except NotADirectoryError as exc:
         raise PathContractError(f"non-directory ancestor: {parent}") from exc
-    wanted = _collision_key(requested)
+    wanted = portable_collision_key(requested)
     for child in children:
-        if _collision_key(child.name) == wanted and child.name != requested:
+        if portable_collision_key(child.name) == wanted and child.name != requested:
             raise PathContractError(
                 f"path collision for {requested!r} with existing {child.name!r}"
             )
-
-
-def _is_windows_alias(part: str) -> bool:
-    stripped = part.rstrip(". ")
-    if stripped != part or not stripped:
-        return True
-    base = stripped.split(".", 1)[0].upper()
-    return base in {"CON", "PRN", "AUX", "NUL", "CLOCK$"} or (
-        len(base) == 4 and base[:3] in {"COM", "LPT"} and base[3] in "123456789"
-    )
 
 
 @dataclass(frozen=True)
@@ -151,29 +143,21 @@ class ProjectWritePath:
     is_prefix: bool
 
     @classmethod
-    def parse(cls, raw: str, project: Path) -> "ProjectWritePath":
-        if not isinstance(raw, str) or not raw or "\x00" in raw:
-            raise PathContractError("write path must be a non-empty POSIX relative path")
-        if "\\" in raw or ":" in raw or any(char in raw for char in '<>"|?*'):
-            raise PathContractError(f"platform path alias is not allowed: {raw!r}")
-        is_prefix = raw.endswith("/")
-        body = raw[:-1] if is_prefix else raw
-        if not body or body in {".", ".."} or body.startswith("/"):
-            raise PathContractError(f"unsafe write path: {raw!r}")
-        parts = body.split("/")
-        if any(part in {"", ".", ".."} for part in parts):
-            raise PathContractError(f"write path is not normalized: {raw!r}")
-        if any(_is_windows_alias(part) for part in parts):
-            raise PathContractError(f"platform path alias is not allowed: {raw!r}")
-        relative = PurePosixPath(*parts)
-        if _collision_key(relative.parts[0]) == _collision_key(".git"):
-            raise PathContractError(".git is never a project write surface")
+    def parse(cls, raw: str, project: Path) -> ProjectWritePath:
+        try:
+            portable = PortableProjectPath.parse(
+                raw, "prefix" if isinstance(raw, str) and raw.endswith("/") else "file"
+            )
+        except PortablePathError as exc:
+            raise PathContractError(str(exc)) from exc
+        is_prefix = portable.is_prefix
+        relative = portable.relative
 
         root = Path(project).resolve()
         if not root.is_dir():
             raise PathContractError(f"project root is not a directory: {root}")
         current = root
-        for part in parts:
+        for part in relative.parts:
             _check_component_collision(current, part)
             candidate = current / part
             try:
@@ -488,14 +472,18 @@ def capture_project(project: Path, dependencies: Iterable[ProjectWritePath | str
         with os.scandir(directory_fd) as children:
             seen: dict[str, str] = {}
             for child in sorted(children, key=lambda item: item.name):
-                key = _collision_key(child.name)
+                key = portable_collision_key(child.name)
                 if key in seen and seen[key] != child.name:
                     raise PathContractError(
                         f"project entry collision: {seen[key]!r} and {child.name!r}"
                     )
                 seen[key] = child.name
                 rel = f"{rel_prefix}/{child.name}" if rel_prefix else child.name
-                if _collision_key(child.name) == _collision_key(".git") and child.name != ".git":
+                if (
+                    portable_collision_key(child.name)
+                    == portable_collision_key(".git")
+                    and child.name != ".git"
+                ):
                     raise PathContractError(f"reserved .git alias in project: {child.name!r}")
                 if rel == ".git" or rel.startswith(".git/") or _is_dependency(rel, ignored):
                     continue

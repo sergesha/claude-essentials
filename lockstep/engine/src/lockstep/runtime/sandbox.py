@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hashlib
 import json
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol, Sequence
+from typing import Literal, Protocol
 
 
 @dataclass(frozen=True)
@@ -19,6 +20,8 @@ class SandboxPolicy:
     environment: tuple[tuple[str, str], ...]
     denied_vcs_roots: tuple[Path, ...] = ()
     network_allowed: bool = False
+    close_fds: bool = True
+    inherited_fds: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.argv or any(not isinstance(part, str) or not part for part in self.argv):
@@ -28,6 +31,8 @@ class SandboxPolicy:
             if not key or "=" in key or "\x00" in key or "\x00" in value or key in seen:
                 raise ValueError("sandbox policy environment must be a unique sanitized mapping")
             seen.add(key)
+        if not self.close_fds or self.inherited_fds:
+            raise ValueError("managed sandbox must close all inherited file descriptors")
         object.__setattr__(self, "environment", tuple(sorted(self.environment)))
 
     @property
@@ -41,6 +46,8 @@ class SandboxPolicy:
             "argv": list(self.argv),
             "cwd": str(self.cwd.resolve()),
             "environment": list(self.environment),
+            "close_fds": self.close_fds,
+            "inherited_fds": list(self.inherited_fds),
         }
         return hashlib.sha256(json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
@@ -53,6 +60,9 @@ class SandboxAttestation:
     denies_outside_workspace: bool
     denies_vcs_write: bool
     denies_symlink_escape: bool
+    evidence_scope: Literal["requested_mechanics", "enforced_boundary"] = (
+        "enforced_boundary"
+    )
 
 
 @dataclass(frozen=True)
@@ -70,6 +80,10 @@ class SandboxProvider(Protocol):
     ) -> ProcessHandle: ...
 
 
+class SandboxAttestor(Protocol):
+    def preflight(self, policy: SandboxPolicy) -> SandboxAttestation: ...
+
+
 def spawn_verified(
     provider: SandboxProvider,
     policy: SandboxPolicy,
@@ -80,18 +94,44 @@ def spawn_verified(
     """Preflight and verify a provider before any managed process starts."""
     if tuple(argv) != policy.argv:
         raise ValueError("sandbox argv does not match the attested policy")
-    attestation = provider.preflight(policy)
-    if (
-        attestation.policy_digest != policy.digest
-        or not attestation.denies_outside_workspace
-        or not attestation.denies_vcs_write
-        or not attestation.denies_symlink_escape
-    ):
-        raise ValueError("sandbox attestation does not satisfy the required policy")
+    verify_attestation(policy, provider.preflight(policy))
     handle = provider.spawn(policy, argv, stdin=stdin)
     if handle.argv != policy.argv or handle.policy_digest != policy.digest:
         raise ValueError("sandbox process handle does not match the attested policy")
     return handle
+
+
+def verify_attestation(
+    policy: SandboxPolicy,
+    attestation: SandboxAttestation,
+    *,
+    require_enforced: bool = True,
+) -> SandboxAttestation:
+    """Validate one adapter attestation without crossing a process boundary."""
+
+    claims_enforcement = (
+        attestation.denies_outside_workspace
+        and attestation.denies_vcs_write
+        and attestation.denies_symlink_escape
+    )
+    any_enforcement_claim = (
+        attestation.denies_outside_workspace
+        or attestation.denies_vcs_write
+        or attestation.denies_symlink_escape
+    )
+    if attestation.policy_digest != policy.digest:
+        raise ValueError("sandbox attestation does not satisfy the required policy")
+    if attestation.evidence_scope == "enforced_boundary":
+        if not claims_enforcement:
+            raise ValueError("enforced sandbox attestation is incomplete")
+    elif attestation.evidence_scope == "requested_mechanics":
+        if any_enforcement_claim:
+            raise ValueError("requested mechanics may not claim enforced confinement")
+    else:
+        raise ValueError("unknown sandbox attestation evidence scope")
+    if require_enforced and attestation.evidence_scope != "enforced_boundary":
+        raise ValueError("an enforced sandbox boundary is required")
+    return attestation
 
 
 class FakeSandboxProvider:

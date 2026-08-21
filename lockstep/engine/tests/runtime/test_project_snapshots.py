@@ -169,17 +169,15 @@ def test_snapshot_rejects_undeclared_or_unsafe_paths(stores):
 
 
 def test_snapshot_rejects_duplicate_normalized_paths_and_declarations(stores):
-    from lockstep.runtime.project_snapshots import DuplicateSnapshotPath
-
     blob_store, snapshot_store = stores
     blob = blob_store.put(b"content")
-    with pytest.raises(DuplicateSnapshotPath):
+    with pytest.raises(ValueError):
         snapshot_store.capture(
             [("app.py", blob), ("./app.py", blob)],
             declared_paths=["app.py"],
             provenance={"provider": "memory"},
         )
-    with pytest.raises(DuplicateSnapshotPath):
+    with pytest.raises(ValueError):
         snapshot_store.capture(
             [("app.py", blob)],
             declared_paths=["app.py", "./app.py"],
@@ -490,4 +488,66 @@ def test_snapshot_provenance_node_and_scalar_budgets_reject_early(tmp_path):
             {"app.py": blob},
             declared_paths=["app.py"],
             provenance={"source": "too-large"},
+        )
+
+
+@pytest.mark.parametrize("path", ["CON", "src/name:stream"])
+def test_snapshot_rejects_paths_unusable_by_workspace_materialization(tmp_path, path):
+    from lockstep.runtime.blobs import BlobStore
+    from lockstep.runtime.project_snapshots import ProjectSnapshotStore
+
+    owner = tmp_path / "portable-path-state"
+    blobs = BlobStore(owner)
+    store = ProjectSnapshotStore(owner, blobs)
+
+    with pytest.raises(ValueError, match="path|alias|portable"):
+        store.capture(
+            {path: blobs.put(b"content")},
+            declared_paths=[path],
+            provenance={},
+        )
+
+
+@pytest.mark.parametrize(
+    "paths",
+    [
+        ("src/Readme", "src/README"),
+        ("src/\N{LATIN SMALL LETTER E WITH ACUTE}.txt", "src/e\N{COMBINING ACUTE ACCENT}.txt"),
+        ("node", "node/child.txt"),
+    ],
+)
+def test_snapshot_rejects_portable_collisions_and_file_descendants(tmp_path, paths):
+    from lockstep.runtime.blobs import BlobStore
+    from lockstep.runtime.project_snapshots import ProjectSnapshotStore
+
+    owner = tmp_path / "portable-collision-state"
+    blobs = BlobStore(owner)
+    store = ProjectSnapshotStore(owner, blobs)
+    blob = blobs.put(b"content")
+
+    with pytest.raises(ValueError, match="collision|descendant|path"):
+        store.capture(
+            [(path, blob) for path in paths],
+            declared_paths=paths,
+            provenance={},
+        )
+
+
+def test_snapshot_entry_limit_counts_implicit_directories(tmp_path):
+    from lockstep.runtime.blobs import BlobStore
+    from lockstep.runtime.project_snapshots import (
+        ProjectSnapshotStore,
+        SnapshotLimits,
+        StorageLimitExceeded,
+    )
+
+    owner = tmp_path / "tree-entry-limit-state"
+    blobs = BlobStore(owner)
+    store = ProjectSnapshotStore(owner, blobs, limits=SnapshotLimits(max_entries=2))
+
+    with pytest.raises(StorageLimitExceeded, match="entries"):
+        store.capture(
+            {"one/two/file.txt": blobs.put(b"content")},
+            declared_paths=["one/"],
+            provenance={},
         )

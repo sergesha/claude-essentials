@@ -16,6 +16,14 @@ if TYPE_CHECKING:
     from lockstep.runtime.effects.authority import EffectGrant
 
 
+class DefinitiveProviderFailure(RuntimeError):
+    """A bounded provider-neutral rejection that is safe to seal without retry."""
+
+    def __init__(self, result: EffectResult) -> None:
+        self.result = result
+        super().__init__("provider definitively rejected the prepared effect")
+
+
 def _hex(value: str, label: str) -> str:
     if len(value) != 64 or any(
         character not in "0123456789abcdef" for character in value
@@ -289,6 +297,7 @@ class TerminalSafetyObservation:
     state: Literal["pending", "proven"]
     result_stable: bool = False
     rollover_snapshot_ref: str | None = None
+    workspace_quarantined: bool = False
 
     @classmethod
     def pending_for(cls, launch: PreparedLaunch) -> TerminalSafetyObservation:
@@ -306,6 +315,7 @@ class TerminalSafetyObservation:
         *,
         result_stable: bool,
         rollover_snapshot_ref: str | None = None,
+        workspace_quarantined: bool = False,
     ) -> TerminalSafetyObservation:
         return cls(
             launch.effect_id,
@@ -314,6 +324,7 @@ class TerminalSafetyObservation:
             "proven",
             result_stable=result_stable,
             rollover_snapshot_ref=rollover_snapshot_ref,
+            workspace_quarantined=workspace_quarantined,
         )
 
 

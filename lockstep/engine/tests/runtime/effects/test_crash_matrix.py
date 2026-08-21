@@ -5,7 +5,6 @@ from dataclasses import replace
 from datetime import timedelta
 
 import pytest
-
 from lockstep.runtime.providers.base import RunnerObservation, TerminalSafetyObservation
 
 from .test_coordinator import NOW, _advance_to_running, _result
@@ -91,6 +90,23 @@ def test_deadline_cancel_requires_matching_terminal_safety_proof(system) -> None
     assert sealed.fixed_error_code == "deadline_timeout"
     assert runner.cancel_calls == [running.effect_id, running.effect_id]
     assert runner.quiesce_calls == [running.effect_id, running.effect_id]
+
+
+def test_deadline_cancel_accepts_quarantined_rejected_output(system) -> None:
+    coordinator, _runtime, runner, ledger, _store, _coordinate = system
+    running, runner = _advance_to_running(system)
+    launch = runner.ensure_started_calls[0]
+    coordinator._clock = lambda: NOW + timedelta(hours=1)
+    runner.safety_observations.append(
+        TerminalSafetyObservation.proven_for(
+            launch,
+            result_stable=True,
+            workspace_quarantined=True,
+        )
+    )
+
+    assert coordinator.reconcile("run-1").action == "sealed"
+    assert ledger.get(running.effect_id).fixed_error_code == "deadline_timeout"
 
 
 def test_concurrent_reconcilers_share_one_durable_launch_claim(system) -> None:

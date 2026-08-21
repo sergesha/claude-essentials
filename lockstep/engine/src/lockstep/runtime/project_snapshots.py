@@ -10,7 +10,7 @@ import stat
 import tempfile
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from lockstep.runtime.blobs import BlobRef, BlobStore, DigestMismatch
 from lockstep.runtime.locking import file_lock
@@ -23,18 +23,21 @@ from lockstep.runtime.owner_state import (
     take_bounded,
     verify_owner_file,
 )
+from lockstep.runtime.project_paths import (
+    PortablePathCollision,
+    PortablePathError,
+    ProjectTreeLimits,
+    validate_portable_project_paths,
+)
 
-
-class UnsafeSnapshotPath(ValueError):
-    pass
+UnsafeSnapshotPath = PortablePathError
 
 
 class UndeclaredSnapshotPath(ValueError):
     pass
 
 
-class DuplicateSnapshotPath(ValueError):
-    pass
+DuplicateSnapshotPath = PortablePathCollision
 
 
 class SnapshotStorageError(RuntimeError):
@@ -104,10 +107,9 @@ class ProjectSnapshot:
 
 
 @dataclass(frozen=True)
-class SnapshotLimits:
+class SnapshotLimits(ProjectTreeLimits):
     max_files: int = 10_000
     max_declared_paths: int = 10_000
-    max_total_bytes: int = 256 * 1024 * 1024
     max_manifest_bytes: int = 4 * 1024 * 1024
     max_provenance_bytes: int = 256 * 1024
     max_provenance_depth: int = 32
@@ -116,10 +118,10 @@ class SnapshotLimits:
     max_provenance_scalar_bytes: int = 256 * 1024
 
     def __post_init__(self) -> None:
+        super().__post_init__()
         if min(
             self.max_files,
             self.max_declared_paths,
-            self.max_total_bytes,
             self.max_manifest_bytes,
             self.max_provenance_bytes,
             self.max_provenance_depth,
@@ -210,20 +212,6 @@ def _validate_provenance(value: object, limits: SnapshotLimits) -> None:
             )
 
 
-def _safe_path(raw: str, *, allow_prefix: bool = False) -> str:
-    if not raw or "\\" in raw or "\x00" in raw or any(char in raw for char in "*?["):
-        raise UnsafeSnapshotPath(f"unsafe snapshot path {raw!r}")
-    is_prefix = allow_prefix and raw.endswith("/")
-    body = raw[:-1] if is_prefix else raw
-    path = PurePosixPath(body)
-    if path.is_absolute() or any(part == ".." for part in path.parts):
-        raise UnsafeSnapshotPath(f"unsafe snapshot path {raw!r}")
-    normalized = path.as_posix()
-    if normalized in ("", ".") or (path.parts and path.parts[0].endswith(":")):
-        raise UnsafeSnapshotPath(f"unsafe snapshot path {raw!r}")
-    return normalized + ("/" if is_prefix else "")
-
-
 def _validate_digest(digest: str) -> None:
     if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
         raise ValueError("project snapshot reference must be a lowercase SHA-256 digest")
@@ -274,6 +262,10 @@ class ProjectSnapshotStore:
         self._blob_store = blob_store or BlobStore(self._owner_state)
         self._limits = limits or SnapshotLimits()
 
+    @property
+    def limits(self) -> SnapshotLimits:
+        return self._limits
+
     def manifest_path(self, ref: ProjectSnapshotRef) -> Path:
         _validate_digest(ref.digest)
         return self._directory / f"{ref.digest}.json"
@@ -290,35 +282,43 @@ class ProjectSnapshotStore:
         raw_files = take_bounded(
             file_values, self._limits.max_files, "snapshot files"
         )
+        portable_files = validate_portable_project_paths(
+            ((raw_path, "file") for raw_path, _blob in raw_files),
+            limits=self._limits,
+            label="snapshot entries",
+        )
         entries: list[SnapshotFile] = []
-        seen: set[str] = set()
         total_bytes = 0
-        for raw_path, blob in raw_files:
-            path = _safe_path(raw_path)
-            if path in seen:
-                raise DuplicateSnapshotPath(f"duplicate snapshot path {path!r}")
+        for (_raw_path, blob), portable in zip(raw_files, portable_files, strict=True):
             if not isinstance(blob, BlobRef):
                 raise TypeError("project snapshots contain BlobRef values")
+            if blob.size > self._limits.max_file_bytes:
+                raise StorageLimitExceeded(
+                    "snapshot file exceeds "
+                    f"{self._limits.max_file_bytes} byte admission limit"
+                )
             total_bytes += blob.size
             if total_bytes > self._limits.max_total_bytes:
                 raise StorageLimitExceeded(
                     f"snapshot bytes exceed {self._limits.max_total_bytes} admission limit"
                 )
             self._blob_store.read(blob)
-            seen.add(path)
-            entries.append(SnapshotFile(path=path, blob=blob))
+            entries.append(SnapshotFile(path=portable.value, blob=blob))
         entries.sort(key=lambda entry: entry.path)
         raw_declarations = take_bounded(
             declared_paths,
             self._limits.max_declared_paths,
             "snapshot declared paths",
         )
-        normalized_declarations = [
-            _safe_path(path, allow_prefix=True) for path in raw_declarations
-        ]
-        if len(set(normalized_declarations)) != len(normalized_declarations):
-            raise DuplicateSnapshotPath("duplicate declared snapshot path")
-        declarations = tuple(sorted(normalized_declarations))
+        portable_declarations = validate_portable_project_paths(
+            (
+                (path, "prefix" if isinstance(path, str) and path.endswith("/") else "file")
+                for path in raw_declarations
+            ),
+            limits=self._limits,
+            label="snapshot declared path entries",
+        )
+        declarations = tuple(sorted(item.value for item in portable_declarations))
         for entry in entries:
             if not any(
                 entry.path == declaration
@@ -412,16 +412,32 @@ class ProjectSnapshotStore:
                 raise StorageLimitExceeded(
                     "snapshot declared path count exceeds admission limit"
                 )
+            portable_entries = validate_portable_project_paths(
+                ((item["path"], "file") for item in raw_entries),
+                limits=self._limits,
+                label="snapshot entries",
+            )
             entries = tuple(
                 SnapshotFile(
-                    path=_safe_path(item["path"]),
+                    path=portable.value,
                     blob=BlobRef(item["blob"]["sha256"], int(item["blob"]["size"])),
                 )
-                for item in raw_entries
+                for item, portable in zip(raw_entries, portable_entries, strict=True)
             )
-            declarations = tuple(
-                _safe_path(item, allow_prefix=True) for item in raw_declarations
+            portable_declarations = validate_portable_project_paths(
+                (
+                    (
+                        item,
+                        "prefix"
+                        if isinstance(item, str) and item.endswith("/")
+                        else "file",
+                    )
+                    for item in raw_declarations
+                ),
+                limits=self._limits,
+                label="snapshot declared path entries",
             )
+            declarations = tuple(item.value for item in portable_declarations)
             provenance = data["provenance"]
             if not isinstance(provenance, dict):
                 raise TypeError("provenance is not an object")
@@ -437,6 +453,8 @@ class ProjectSnapshotStore:
             raise DuplicateSnapshotPath("duplicate path in project snapshot manifest")
         if sum(entry.blob.size for entry in entries) > self._limits.max_total_bytes:
             raise StorageLimitExceeded("snapshot byte size exceeds admission limit")
+        if any(entry.blob.size > self._limits.max_file_bytes for entry in entries):
+            raise StorageLimitExceeded("snapshot file size exceeds admission limit")
         provenance_encoded = _canonical(provenance)
         if len(provenance_encoded) > self._limits.max_provenance_bytes:
             raise StorageLimitExceeded("snapshot provenance exceeds admission limit")

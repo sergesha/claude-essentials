@@ -6,7 +6,6 @@ from datetime import UTC, datetime, timedelta
 from itertools import count
 
 import pytest
-
 from lockstep.runtime.catalog import RunBinding, RunCatalog
 from lockstep.runtime.effects.descriptors import (
     derive_effect_id,
@@ -24,6 +23,7 @@ from lockstep.runtime.native_models import (
 )
 from lockstep.runtime.providers.base import EffectRequest
 from lockstep.runtime.storage import SQLiteStore
+
 from tests.runtime.providers.fakes import FakeEffectAuthority, FakeRunner
 
 NOW = datetime(2026, 8, 20, 10, tzinfo=UTC)
@@ -329,6 +329,81 @@ def test_parked_interrupt_creates_durable_intent_before_any_spawn(system) -> Non
     assert runner.prepare_calls[0].project_identity == "project-1"
     assert runner.prepare_calls[0].definition_digest == "a" * 64
     assert ledger.get(report.effect_id).workspace_ref is not None
+
+
+def test_artifact_bearing_effect_fails_closed_before_provider_request(system) -> None:
+    from lockstep.runtime.effects.coordinator import ProviderContractViolation
+
+    coordinator, runtime, runner, _ledger, _store, coordinate = system
+    raw = managed_descriptor(
+        artifacts=[
+            {"name": "review", "media_type": "text/markdown", "required": True}
+        ]
+    )
+    runtime.current = replace(
+        runtime.current,
+        pending=(NativeInterrupt(coordinate, {"lockstep_effect": raw}),),
+    )
+
+    with pytest.raises(ProviderContractViolation, match="artifact"):
+        coordinator.reconcile("run-1")
+    assert runner.prepare_calls == []
+
+
+def test_definitive_prepare_rejection_is_durably_sealed(system) -> None:
+    from lockstep.runtime.providers.base import DefinitiveProviderFailure
+
+    coordinator, _runtime, runner, ledger, _store, _coordinate = system
+    prepared = coordinator.reconcile("run-1")
+    rejection = parse_effect_result(
+        {
+            "schema": "lockstep.effect-result/v1",
+            "effect_id": prepared.effect_id,
+            "outcome": "ERROR",
+            "result_ref": None,
+            "artifact_refs": [],
+            "snapshot_ref": None,
+            "diff_ref": None,
+            "fixed_error_code": "prelaunch_failed",
+            "evidence_refs": [],
+        }
+    )
+
+    def reject(_request):
+        raise DefinitiveProviderFailure(rejection)
+
+    runner.prepare = reject
+
+    sealed = coordinator.reconcile("run-1")
+    assert sealed.action == "sealed"
+    assert ledger.get(prepared.effect_id).result == rejection
+
+
+def test_definitive_prepare_rejection_cannot_smuggle_result_refs(system) -> None:
+    from lockstep.runtime.effects.coordinator import ProviderContractViolation
+    from lockstep.runtime.providers.base import DefinitiveProviderFailure
+
+    coordinator, _runtime, runner, _ledger, _store, _coordinate = system
+    prepared = coordinator.reconcile("run-1")
+    rejection = parse_effect_result(
+        {
+            "schema": "lockstep.effect-result/v1",
+            "effect_id": prepared.effect_id,
+            "outcome": "ERROR",
+            "result_ref": "blob:" + "d" * 64,
+            "artifact_refs": [],
+            "snapshot_ref": None,
+            "diff_ref": None,
+            "fixed_error_code": "prelaunch_failed",
+            "evidence_refs": [],
+        }
+    )
+    runner.prepare = lambda _request: (_ for _ in ()).throw(
+        DefinitiveProviderFailure(rejection)
+    )
+
+    with pytest.raises(ProviderContractViolation, match="closed ERROR"):
+        coordinator.reconcile("run-1")
 
 
 def test_launch_is_claimed_before_single_idempotent_spawn(system) -> None:
@@ -821,6 +896,57 @@ def test_terminal_result_waits_for_quiescence_and_managed_rollover(system) -> No
     assert system[3].get(running.effect_id).phase == "running"
     assert system[0].reconcile("run-1").action == "sealed"
     assert system[3].get(running.effect_id).result == result
+
+
+def test_rejected_managed_output_seals_only_with_quarantine_proof(system) -> None:
+    from lockstep.runtime.providers.base import TerminalSafetyObservation
+
+    running, runner = _advance_to_running(system)
+    launch = runner.ensure_started_calls[0]
+    result = parse_effect_result(
+        {
+            "schema": "lockstep.effect-result/v1",
+            "effect_id": running.effect_id,
+            "outcome": "ERROR",
+            "result_ref": None,
+            "artifact_refs": [],
+            "snapshot_ref": None,
+            "diff_ref": None,
+            "fixed_error_code": "writes_invalid",
+            "evidence_refs": [],
+        }
+    )
+    runner.inspect_observations.append(runner.terminal(launch, result))
+    runner.safety_observations.append(
+        TerminalSafetyObservation.proven_for(
+            launch,
+            result_stable=True,
+            workspace_quarantined=True,
+        )
+    )
+
+    assert system[0].reconcile("run-1").action == "sealed"
+    assert system[3].get(running.effect_id).result == result
+
+
+def test_quarantine_proof_cannot_seal_managed_pass_without_snapshot(system) -> None:
+    from lockstep.runtime.effects.coordinator import ProviderContractViolation
+    from lockstep.runtime.providers.base import TerminalSafetyObservation
+
+    running, runner = _advance_to_running(system)
+    launch = runner.ensure_started_calls[0]
+    result = _result(running.effect_id)
+    runner.inspect_observations.append(runner.terminal(launch, result))
+    runner.safety_observations.append(
+        TerminalSafetyObservation.proven_for(
+            launch,
+            result_stable=True,
+            workspace_quarantined=True,
+        )
+    )
+
+    with pytest.raises(ProviderContractViolation, match="PASS/FAIL"):
+        system[0].reconcile("run-1")
 
 
 def test_sealed_result_is_visible_only_after_native_resume_commit(system) -> None:
