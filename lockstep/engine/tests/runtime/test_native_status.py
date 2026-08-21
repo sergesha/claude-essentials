@@ -11,6 +11,7 @@ from lockstep.runtime.native_models import (
     NativeSnapshot,
 )
 from lockstep.runtime.status import project_status
+import pytest
 
 
 def _binding() -> RunBinding:
@@ -32,6 +33,53 @@ def test_status_is_derived_not_catalogued(tmp_path):
         status = project_status(_binding(), _parked(), (), ())
         assert status.status == "awaiting"
         assert "status" not in store.tables.runs.columns
+    finally:
+        store.close()
+
+
+def test_child_correlation_is_opaque_and_contains_no_native_namespace() -> None:
+    coordinate = NativeCoordinate(
+        "thread-1", "checkpoint-secret", "child:namespace-secret",
+        "task-secret", "interrupt-secret",
+    )
+    snapshot = NativeSnapshot(
+        values={}, pending=(NativeInterrupt(coordinate, "Work?"),), next=("work",)
+    )
+
+    projected = project_status(_binding(), snapshot, (), ()).to_dict()
+
+    assert projected["child_run_id"].startswith("child-")
+    assert "namespace-secret" not in projected["child_run_id"]
+    assert "checkpoint-secret" not in projected["child_run_id"]
+
+
+def test_child_correlation_is_stable_but_never_a_public_catalog_run(tmp_path) -> None:
+    from lockstep.runtime.catalog import RunCatalog
+    from lockstep.runtime.storage import SQLiteStore
+
+    first = NativeInterrupt(
+        NativeCoordinate("thread-1", "cp-1", "child:stable-task", "task-a", "int-a"),
+        "Work?",
+    )
+    later = NativeInterrupt(
+        NativeCoordinate("thread-1", "cp-2", "child:stable-task", "task-b", "int-b"),
+        "Work again?",
+    )
+    first_id = project_status(
+        _binding(), NativeSnapshot(values={}, pending=(first,)), (), ()
+    ).to_dict()["child_run_id"]
+    later_id = project_status(
+        _binding(), NativeSnapshot(values={}, pending=(later,)), (), ()
+    ).to_dict()["child_run_id"]
+    assert first_id == later_id
+
+    store = SQLiteStore(tmp_path / "runtime.sqlite")
+    try:
+        catalog = RunCatalog(store)
+        catalog.create(_binding())
+        with pytest.raises(KeyError):
+            catalog.get(first_id)
+        assert [item.public_run_id for item in catalog.list("/project")] == ["run-1"]
     finally:
         store.close()
 

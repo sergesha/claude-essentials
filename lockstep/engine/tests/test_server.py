@@ -25,7 +25,7 @@ def _configure(monkeypatch, tmp_path):
     (recipes / "native-parent-direct.recipe.yaml").write_bytes(
         (FIXTURES / "parent_direct.recipe.yaml").read_bytes()
     )
-    child = (FIXTURES / "child_interrupt.recipe.yaml").read_text()
+    child = (FIXTURES / "worker_child_interrupt.recipe.yaml").read_text()
     (recipes / "child_interrupt.recipe.yaml").write_text(
         child.replace("name: native-child-interrupt", "name: child_interrupt")
     )

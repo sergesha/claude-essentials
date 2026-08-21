@@ -176,6 +176,7 @@ class AuthorizedRecipe:
     definition_sha256: str
     dependency_dag: ValidatedDependencyDAG
     authority_requirements: tuple[AuthorityRequirement, ...]
+    source_bundle_sha256: str
 
     def capture(self, store: RecipeBundleStore) -> AdmittedRecipe:
         """Publish these exact canonical bytes through the DAG-only store seam."""
@@ -245,6 +246,7 @@ class RecipeCandidate:
     definition_sha256: str
     dependency_dag: ValidatedDependencyDAG
     authority_requirements: tuple[AuthorityRequirement, ...]
+    source_bundle_sha256: str
 
     def authorize(self, policy: RecipeAuthorityPolicy) -> AuthorizedRecipe:
         if not isinstance(policy, RecipeAuthorityPolicy):
@@ -270,6 +272,7 @@ class RecipeCandidate:
             definition_sha256=self.definition_sha256,
             dependency_dag=self.dependency_dag,
             authority_requirements=self.authority_requirements,
+            source_bundle_sha256=self.source_bundle_sha256,
         )
 
 
@@ -643,6 +646,30 @@ def _canonical_bytes(document: dict[str, Any]) -> bytes:
         ) from exc
 
 
+def canonical_execution_bytes(
+    source_bytes: bytes,
+    *,
+    logical_path: str,
+    limits: RecipeLimits | None = None,
+) -> bytes:
+    """Return the exact bytes handed from strict ingress to yamlgraph.
+
+    This is the shared compiler/admission representation: emitted YAML stays
+    independently bound by the source bundle digest, while compiler authority
+    is granted only to this closed, finite canonical JSON document.
+    """
+
+    if not isinstance(source_bytes, bytes):
+        raise TypeError("recipe source must be bytes")
+    logical = safe_recipe_relative_path(logical_path)
+    bounded = limits or RecipeLimits()
+    if len(source_bytes) > bounded.max_file_bytes:
+        raise RecipeAuthorityError("recipe source bytes exceed configured admission limit")
+    document = _decode_document(source_bytes, bounded, logical)
+    _profile_document(document, logical)
+    return _canonical_bytes(document)
+
+
 def _resolve_reference(parent: str, raw: object) -> str:
     reference = _require_string(raw, "subgraph path")
     if (
@@ -862,6 +889,7 @@ class StrictRecipeIngress:
         root_fd = open_recipe_source_root(self._source_root)
         active: set[str] = set()
         documents: dict[str, bytes] = {}
+        source_hashes: dict[str, str] = {}
         requirements: list[AuthorityRequirement] = []
         total_bytes = 0
 
@@ -893,6 +921,7 @@ class StrictRecipeIngress:
                     "recipe source bytes exceed configured admission limit"
                 ) from exc
             total_bytes += len(data)
+            source_hashes[logical] = hashlib.sha256(data).hexdigest()
             document = _decode_document(data, self._limits, logical)
             profile = _profile_document(document, logical)
             active.add(logical)
@@ -936,10 +965,19 @@ class StrictRecipeIngress:
             max_files=self._limits.max_files,
             max_dependencies=self._limits.max_files - 1,
         )
+        source_manifest = hashlib.sha256(b"lockstep.compiled-bundle/v1\0")
+        source_manifest.update(root.encode("utf-8"))
+        source_manifest.update(b"\0")
+        for path, sha256 in sorted(source_hashes.items()):
+            source_manifest.update(path.encode("utf-8"))
+            source_manifest.update(b"\0")
+            source_manifest.update(sha256.encode("ascii"))
+            source_manifest.update(b"\0")
         return RecipeCandidate(
             root=root,
             files=files,
             definition_sha256=definition_sha256,
             dependency_dag=dag,
             authority_requirements=tuple(sorted(requirements)),
+            source_bundle_sha256=source_manifest.hexdigest(),
         )

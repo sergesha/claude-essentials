@@ -56,7 +56,9 @@ def test_policy_require_cli_uses_configured_recipe_root_and_exact_digest(
         (FIXTURES / "parent_direct.recipe.yaml").read_bytes()
     )
     child = recipes / "child_interrupt.recipe.yaml"
-    child.write_bytes((FIXTURES / "child_interrupt.recipe.yaml").read_bytes())
+    child.write_bytes(
+        (FIXTURES / "worker_child_interrupt.recipe.yaml").read_bytes()
+    )
     project = tmp_path / "project"
     project.mkdir()
     monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(state))

@@ -24,6 +24,10 @@ class NativeInterrupt:
     coordinate: NativeCoordinate
     value: Any
     ancestor_checkpoints: tuple[tuple[str, str], ...] = ()
+    # Canonical values from the exact checkpoint namespace which owns this
+    # interrupt.  Nested direct subgraphs remain isolated; consumers must not
+    # resolve protected selectors against an unrelated root snapshot.
+    state_values: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -65,7 +69,13 @@ class NativeEvent:
 class NativeAppPort(Protocol):
     def invoke(self, values: dict, *, thread_id: str) -> NativeSnapshot: ...
 
+    async def ainvoke(self, values: dict, *, thread_id: str) -> NativeSnapshot: ...
+
     def resume(
+        self, *, thread_id: str, results_by_interrupt_id: Mapping[str, Any]
+    ) -> NativeSnapshot: ...
+
+    async def aresume(
         self, *, thread_id: str, results_by_interrupt_id: Mapping[str, Any]
     ) -> NativeSnapshot: ...
 

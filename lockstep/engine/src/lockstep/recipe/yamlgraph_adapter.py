@@ -161,7 +161,11 @@ from yamlgraph.mermaid_export import render_mermaid
 from yamlgraph.node_factory.subgraph_nodes import _build_child_config
 from yamlgraph.node_timeout import _maybe_wrap_timeout
 
-from lockstep.recipe.authority import AuthorizedMaterialization
+from lockstep.recipe.authority import (
+    AuthorizedMaterialization,
+    StrictRecipeIngress,
+)
+from lockstep.recipe.profile import CompilerProvenance, check_recipe_full
 from lockstep.runtime.native_models import (
     NativeCoordinate,
     NativeEvent,
@@ -245,6 +249,9 @@ def _pending_interrupts(snapshot: Any) -> tuple[NativeInterrupt, ...]:
                         ),
                         value=_neutral(getattr(interrupt, "value", None)),
                         ancestor_checkpoints=_checkpoint_ancestors(current),
+                        state_values=dict(
+                            _neutral(getattr(current, "values", {}) or {})
+                        ),
                     )
                 )
 
@@ -357,6 +364,25 @@ class NativeApp:
         try:
             self._app.invoke(Command(resume=dict(results_by_interrupt_id)), config=config)
             return _to_native_snapshot(self._app.get_state(config, subgraphs=True))
+        finally:
+            self._seal_sqlite_files()
+
+    async def aresume(
+        self,
+        *,
+        thread_id: str,
+        results_by_interrupt_id: Mapping[str, Any],
+    ) -> NativeSnapshot:
+        self._ensure_open()
+        if not results_by_interrupt_id:
+            raise ValueError("at least one interrupt result is required")
+        config = self._config(thread_id)
+        try:
+            await self._app.ainvoke(
+                Command(resume=dict(results_by_interrupt_id)), config=config
+            )
+            snapshot = await self._app.aget_state(config, subgraphs=True)
+            return _to_native_snapshot(snapshot)
         finally:
             self._seal_sqlite_files()
 
@@ -709,6 +735,51 @@ def validate_native(recipe: AuthorizedMaterialization) -> tuple[bool, str]:
     if not isinstance(recipe, AuthorizedMaterialization):
         raise TypeError("validate_native requires an AuthorizedMaterialization")
     return _validate_path(recipe.source_path)
+
+
+def validate_compiler_bundle(
+    *,
+    root_relative_path: str,
+    execution_files: Mapping[str, bytes],
+    provenance: CompilerProvenance,
+) -> tuple[bool, str]:
+    """Run the final recursive profile and real yamlgraph compilation gates.
+
+    Compiler output is validated in the exact canonical form later admitted by
+    ``StrictRecipeIngress``.  The temporary directory is only a private adapter
+    detail needed because yamlgraph resolves direct subgraphs by relative path.
+    """
+    if not isinstance(provenance, CompilerProvenance):
+        raise TypeError("compiler bundle validation requires exact provenance")
+    if set(execution_files) != {
+        item.relative_path for item in provenance.files
+    }:
+        return False, "compiler bundle file set does not match provenance"
+    with tempfile.TemporaryDirectory(prefix="lockstep-compiler-gate-") as raw:
+        root = Path(raw)
+        for relative_path, content in execution_files.items():
+            target = root / relative_path
+            try:
+                target.resolve().relative_to(root.resolve())
+            except ValueError:
+                return False, "compiler bundle contains a non-contained path"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+        recipe = root / root_relative_path
+        try:
+            candidate = StrictRecipeIngress(root).inspect(root_relative_path)
+        except ValueError as exc:
+            return False, str(exc)
+        admitted_files = {item.path: item.bytes for item in candidate.files}
+        if admitted_files != dict(execution_files):
+            return (
+                False,
+                "strict ingress canonical file set differs from compiler execution files",
+            )
+        errors, _warnings = check_recipe_full(recipe, provenance)
+        if errors:
+            return False, "; ".join(errors)
+        return _validate_path(recipe)
 
 
 def render_native(recipe: AuthorizedMaterialization) -> str:

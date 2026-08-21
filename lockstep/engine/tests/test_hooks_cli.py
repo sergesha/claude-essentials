@@ -23,7 +23,7 @@ def _parked(tmp_path):
         (FIXTURES / "parent_direct.recipe.yaml").read_bytes()
     )
     (recipes / "child_interrupt.recipe.yaml").write_bytes(
-        (FIXTURES / "child_interrupt.recipe.yaml").read_bytes()
+        (FIXTURES / "worker_child_interrupt.recipe.yaml").read_bytes()
     )
     project = tmp_path / "project"
     project.mkdir()

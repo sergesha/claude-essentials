@@ -129,21 +129,36 @@ def preflight_recipe(
     name: str,
     *,
     authority_policy: RecipeAuthorityPolicy | None = None,
+    compiler_provenance: profile.CompilerProvenance | None = None,
 ) -> AuthorizedRecipe:
     """Pure admission/profile boundary: no persistent Lockstep state exists yet."""
     if not _NAME_RE.fullmatch(name or ""):
         raise LockstepError(f"invalid recipe name {name!r}")
     try:
         source = RecipeLoader(Path(recipes_dir).resolve()).resolve(name).path
-        authorized = (
-            StrictRecipeIngress(source.parent)
-            .inspect(source.name)
-            .authorize(authority_policy or RecipeAuthorityPolicy())
+        candidate = StrictRecipeIngress(source.parent).inspect(source.name)
+        if (
+            compiler_provenance is not None
+            and candidate.source_bundle_sha256
+            != compiler_provenance.source_bundle_sha256
+        ):
+            raise RecipeAuthorityError(
+                "compiler provenance does not bind the exact source bundle"
+            )
+        authorized = candidate.authorize(
+            authority_policy or RecipeAuthorityPolicy()
         )
         with tempfile.TemporaryDirectory(prefix="lockstep-preflight-") as raw:
             store = RecipeBundleStore(Path(raw) / "owner-state")
             materialized = authorized.capture(store).materialize(store)
-            errors, _warnings = profile.check_recipe_full(materialized.source_path)
+            if compiler_provenance is None:
+                errors, _warnings = profile.check_recipe_full(
+                    materialized.source_path
+                )
+            else:
+                errors, _warnings = profile.check_recipe_full(
+                    materialized.source_path, provenance=compiler_provenance
+                )
     except (OSError, ValueError, RecipeError, RecipeAuthorityError) as exc:
         raise LockstepError(str(exc)) from exc
     if errors:
@@ -368,12 +383,28 @@ class LockstepService:
             ) from exc
         return binding
 
-    def start(self, recipe: str, input: dict | None, project: str) -> dict[str, Any]:
+    def start(
+        self,
+        recipe: str,
+        input: dict | None,
+        project: str,
+        *,
+        compiler_provenance: profile.CompilerProvenance | None = None,
+    ) -> dict[str, Any]:
         values = validate_start_input(input)
         authorized = preflight_recipe(
-            self.recipes_dir, recipe, authority_policy=self.authority_policy
+            self.recipes_dir,
+            recipe,
+            authority_policy=self.authority_policy,
+            compiler_provenance=compiler_provenance,
         )
-        return self.start_authorized(recipe, authorized, values, project)
+        return self.start_authorized(
+            recipe,
+            authorized,
+            values,
+            project,
+            compiler_provenance=compiler_provenance,
+        )
 
     def start_authorized(
         self,
@@ -381,17 +412,36 @@ class LockstepService:
         authorized: AuthorizedRecipe,
         input: Mapping[str, Any],
         project: str,
+        *,
+        compiler_provenance: profile.CompilerProvenance | None = None,
     ) -> dict[str, Any]:
         values = validate_start_input(input)
-        input_blob = self.blobs.put(self._canonical_start_input(values))
         project_root = Path(project).resolve()
         if self.state_dir == project_root or project_root in self.state_dir.parents:
             raise LockstepError("owner state must be outside the writable project")
-        admitted = authorized.capture(self.bundle_store)
-        materialized = admitted.materialize(self.bundle_store)
-        errors, _warnings = profile.check_recipe_full(materialized.source_path)
+        if (
+            compiler_provenance is not None
+            and authorized.source_bundle_sha256
+            != compiler_provenance.source_bundle_sha256
+        ):
+            raise LockstepError(
+                "compiler provenance does not bind the exact source bundle"
+            )
+        with tempfile.TemporaryDirectory(prefix="lockstep-start-profile-") as raw:
+            staged = Path(raw)
+            for item in authorized.files:
+                target = staged / item.path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(item.bytes)
+            errors, _warnings = profile.check_recipe_full(
+                staged / authorized.root,
+                provenance=compiler_provenance,
+            )
         if errors:
             raise LockstepError("recipe failed Lockstep profile: " + "; ".join(errors))
+        input_blob = self.blobs.put(self._canonical_start_input(values))
+        admitted = authorized.capture(self.bundle_store)
+        materialized = admitted.materialize(self.bundle_store)
 
         run_id = f"{recipe}-{uuid.uuid4().hex}"
         binding = RunBinding(

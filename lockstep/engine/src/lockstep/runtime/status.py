@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 from typing import Any
 
 from lockstep.runtime.catalog import RunBinding
@@ -55,6 +56,27 @@ def _descriptor(interrupt: NativeInterrupt) -> dict[str, Any] | None:
     return descriptor
 
 
+def _child_annotations(
+    binding: RunBinding, interrupt: NativeInterrupt
+) -> tuple[tuple[str, Any], ...]:
+    """Hash the parent public run and stable native subgraph task path only.
+
+    Checkpoint and interrupt occurrence identifiers are deliberately excluded,
+    so one direct child keeps a correlation across pause/resume checkpoints.
+    """
+    coordinate = interrupt.coordinate
+    if not coordinate.checkpoint_ns:
+        return ()
+    digest = hashlib.sha256(b"lockstep.child-correlation/v1\0")
+    for value in (
+        binding.public_run_id,
+        coordinate.checkpoint_ns,
+    ):
+        digest.update(value.encode("utf-8"))
+        digest.update(b"\0")
+    return (("child_run_id", f"child-{digest.hexdigest()}"),)
+
+
 def project_status(
     binding: RunBinding,
     snapshot: NativeSnapshot,
@@ -66,6 +88,7 @@ def project_status(
     if snapshot.task_errors:
         return ScenarioStatus("escalated", binding.public_run_id, "engine", None)
     if snapshot.pending:
+        child_annotations = _child_annotations(binding, snapshot.pending[0])
         descriptor = _descriptor(snapshot.pending[0])
         if descriptor is None:
             value = snapshot.pending[0].value
@@ -76,6 +99,7 @@ def project_status(
                 "worker",
                 "edit_then_scenario_done",
                 step=step,
+                annotations=child_annotations,
             )
         if descriptor.get("kind") == "manual":
             try:
@@ -93,7 +117,9 @@ def project_status(
                     "engine",
                     "scenario_wait",
                     step=str(descriptor.get("logical_id") or "") or None,
-                    annotations=(("manual_handoff", "preparing"),),
+                    annotations=(
+                        ("manual_handoff", "preparing"), *child_annotations
+                    ),
                 )
             if (
                 record.coordinate != snapshot.pending[0].coordinate
@@ -107,7 +133,9 @@ def project_status(
                     "engine",
                     "scenario_wait",
                     step=parsed.logical_id,
-                    annotations=(("manual_handoff", "not_ready"),),
+                    annotations=(
+                        ("manual_handoff", "not_ready"), *child_annotations
+                    ),
                 )
             value = snapshot.pending[0].value
             step = value.get("step") if isinstance(value, dict) else None
@@ -117,6 +145,7 @@ def project_status(
                 "worker",
                 "edit_then_scenario_done",
                 step=step or parsed.logical_id,
+                annotations=child_annotations,
             )
         if descriptor.get("kind") == "pinned":
             try:
@@ -150,6 +179,7 @@ def project_status(
                     "engine",
                     "scenario_wait",
                     step=str(descriptor.get("logical_id") or "") or None,
+                    annotations=child_annotations,
                 )
             gate_execution = {
                 "operation_id": effect_id,
@@ -164,7 +194,7 @@ def project_status(
                 "engine",
                 "scenario_wait",
                 step=parsed.logical_id,
-                annotations=(("gate_execution", gate_execution),),
+                annotations=(("gate_execution", gate_execution), *child_annotations),
             )
         return ScenarioStatus(
             "running",
@@ -172,6 +202,7 @@ def project_status(
             "engine",
             "scenario_wait",
             step=str(descriptor.get("logical_id") or "") or None,
+            annotations=child_annotations,
         )
     if snapshot.next:
         return ScenarioStatus(

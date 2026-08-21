@@ -156,6 +156,11 @@ class EffectCoordinator:
         snapshot: NativeSnapshot,
         consumer: NativeInterrupt,
     ) -> tuple[tuple[ScopeResult, ScopeBinding], ...]:
+        consumer_values = (
+            snapshot.values
+            if consumer.state_values is None
+            else consumer.state_values
+        )
         keys = (
             descriptor.scope_state_keys
             if isinstance(descriptor, EffectDescriptor)
@@ -163,11 +168,11 @@ class EffectCoordinator:
         )
         results = []
         for key in keys:
-            if key not in snapshot.values:
+            if key not in consumer_values:
                 raise CoordinatorLineageError(
                     f"protected descriptor references absent graph state {key!r}"
                 )
-            result = parse_scope_result(snapshot.values[key])
+            result = parse_scope_result(consumer_values[key])
             try:
                 producer = self._ledger.get(result.effect_id)
             except KeyError as exc:
@@ -482,7 +487,14 @@ class EffectCoordinator:
             runner_binding_digest=runner.binding_digest,
             required_capabilities=descriptor.runner.required_capabilities,
             inputs=tuple(
-                (name, snapshot.values[selector.state_key])
+                (
+                    name,
+                    (
+                        snapshot.values
+                        if interrupt.state_values is None
+                        else interrupt.state_values
+                    )[selector.state_key],
+                )
                 for name, selector in descriptor.inputs
             ),
             writes=descriptor.writes,

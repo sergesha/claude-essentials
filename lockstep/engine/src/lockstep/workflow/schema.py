@@ -392,7 +392,30 @@ class _Parser:
         body = self.mapping(item["include_graph"], f"{pointer}/include_graph", "include_graph")
         self.keys(body, f"{pointer}/include_graph", {"id", "path", "on"}, {"id", "path"})
         on = self.include_on(body.get("on"), f"{pointer}/include_graph/on")
-        return GraphIR(self.identifier(body["id"], f"{pointer}/include_graph/id") or "", "include", None, self.string(body["path"], f"{pointer}/include_graph/path", "graph path"), on)
+        authored_on = tuple(body.get("on", {})) if isinstance(body.get("on"), dict) else ()
+        raw_path = self.string(
+            body["path"], f"{pointer}/include_graph/path", "graph path"
+        )
+        candidate = Path(raw_path)
+        if (
+            candidate.is_absolute()
+            or not candidate.parts
+            or any(part in {"", ".", ".."} for part in candidate.parts)
+        ):
+            self.fail(
+                "LSW305",
+                "include_graph path must be a safe relative path",
+                f"{pointer}/include_graph/path",
+                "use a contained relative path without '.' or '..' segments",
+            )
+        return GraphIR(
+            self.identifier(body["id"], f"{pointer}/include_graph/id") or "",
+            "include",
+            None,
+            raw_path,
+            on,
+            authored_on,
+        )
 
     def block_escalate(self, item: dict[str, Any], pointer: str) -> EscalateIR:
         self.keys(item, pointer, {"escalate"})
@@ -437,9 +460,13 @@ class _Parser:
                 self.fail("LSW108", f"include_graph on.{outcome} must be escalate", f"{pointer}/{outcome}", "use escalate or omit the key")
         result = {
             "pass": self.string(on["pass"], f"{pointer}/pass", "include pass handler"),
-            "fail": self.handler(on["fail"], f"{pointer}/fail") if "fail" in on else "escalate",
-            "error": self.handler(on["error"], f"{pointer}/error") if "error" in on else "escalate",
+            **{
+                outcome: self.handler(on[outcome], f"{pointer}/{outcome}")
+                for outcome in ("fail", "error") if outcome in on
+            },
         }
+        result.setdefault("fail", "escalate")
+        result.setdefault("error", "escalate")
         if result["pass"] != "next":
             self.fail("LSW108", "include_graph on.pass must be next", f"{pointer}/pass", "use pass: next")
         return result

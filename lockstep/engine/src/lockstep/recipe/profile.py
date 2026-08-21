@@ -61,8 +61,8 @@ from __future__ import annotations
 import hashlib
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any
+from pathlib import Path, PurePosixPath
+from typing import Any, Mapping
 
 import yaml
 from jsonschema import Draft202012Validator
@@ -92,6 +92,10 @@ class CompilerProvenance:
     context: str
     compiler_version: str
     recipe_sha256: str
+    files: tuple["ProvenanceFile", ...]
+    root_relative_path: str
+    bundle_sha256: str
+    source_bundle_sha256: str
 
     def __init__(
         self,
@@ -99,6 +103,11 @@ class CompilerProvenance:
         *,
         context: str,
         compiler_version: str,
+        root_relative_path: str = "root.recipe.yaml",
+        generated_files: Mapping[str, bytes] | None = None,
+        execution_recipe_bytes: bytes | None = None,
+        execution_generated_files: Mapping[str, bytes] | None = None,
+        source_bundle_sha256: str | None = None,
         _token: object | None = None,
     ) -> None:
         if _token is not _PROVENANCE_FACTORY_TOKEN:
@@ -109,15 +118,81 @@ class CompilerProvenance:
             raise ValueError("unsupported compiler provenance version")
         if not isinstance(recipe_bytes, bytes):
             raise TypeError("compiler provenance recipe bytes must be bytes")
-        object.__setattr__(self, "_recipe_bytes", recipe_bytes)
+        execution_root = execution_recipe_bytes or recipe_bytes
+        if not isinstance(execution_root, bytes):
+            raise TypeError("canonical execution recipe bytes must be bytes")
+        source_generated = dict(generated_files or {})
+        execution_generated = dict(execution_generated_files or source_generated)
+        if set(source_generated) != set(execution_generated):
+            raise ValueError("source and execution provenance file sets differ")
+        object.__setattr__(self, "_recipe_bytes", execution_root)
         object.__setattr__(self, "context", context)
         object.__setattr__(self, "compiler_version", compiler_version)
         object.__setattr__(
-            self, "recipe_sha256", hashlib.sha256(recipe_bytes).hexdigest()
+            self, "recipe_sha256", hashlib.sha256(execution_root).hexdigest()
+        )
+        members = [ProvenanceFile.build(root_relative_path, execution_root, "root")]
+        members.extend(
+            ProvenanceFile.build(path, content, "specialized-child")
+            for path, content in sorted(execution_generated.items())
+        )
+        paths = tuple(item.relative_path for item in members)
+        if len(paths) != len(set(paths)):
+            raise ValueError("compiler provenance contains duplicate file paths")
+        if members[0].relative_path != root_relative_path or members[0].role != "root":
+            raise ValueError("compiler provenance root association is invalid")
+        manifest = hashlib.sha256(b"lockstep.compiler-provenance/v1\0")
+        for item in members:
+            manifest.update(item.relative_path.encode("utf-8"))
+            manifest.update(b"\0")
+            manifest.update(item.sha256.encode("ascii"))
+            manifest.update(b"\0")
+        bundle_sha256 = manifest.hexdigest()
+        object.__setattr__(self, "files", tuple(members))
+        object.__setattr__(self, "root_relative_path", root_relative_path)
+        object.__setattr__(self, "bundle_sha256", bundle_sha256)
+        object.__setattr__(
+            self, "source_bundle_sha256", source_bundle_sha256 or bundle_sha256
         )
 
     def matches(self, recipe_bytes: bytes) -> bool:
         return self._recipe_bytes == recipe_bytes
+
+    def matches_member(self, relative_path: str, recipe_bytes: bytes) -> bool:
+        return any(
+            item.relative_path == relative_path
+            and item.canonical_execution_bytes == recipe_bytes
+            for item in self.files
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ProvenanceFile:
+    relative_path: str
+    canonical_execution_bytes: bytes = field(repr=False)
+    sha256: str
+    role: str
+
+    @classmethod
+    def build(
+        cls, relative_path: str, content: bytes, role: str
+    ) -> "ProvenanceFile":
+        if not isinstance(relative_path, str) or not relative_path:
+            raise ValueError("provenance relative path must be non-empty")
+        path = PurePosixPath(relative_path)
+        if (
+            path.is_absolute()
+            or relative_path != path.as_posix()
+            or any(part in {"", ".", ".."} for part in path.parts)
+        ):
+            raise ValueError("provenance path must be canonical and contained")
+        if not isinstance(content, bytes):
+            raise TypeError("provenance content must be bytes")
+        if role not in {"root", "specialized-child"}:
+            raise ValueError("unsupported provenance file role")
+        return cls(
+            relative_path, content, hashlib.sha256(content).hexdigest(), role
+        )
 
 
 def _create_compiler_provenance(
@@ -125,6 +200,11 @@ def _create_compiler_provenance(
     *,
     context: str,
     compiler_version: str = COMPILER_CONTRACT_VERSION,
+    root_relative_path: str = "root.recipe.yaml",
+    generated_files: Mapping[str, bytes] | None = None,
+    execution_recipe_bytes: bytes | None = None,
+    execution_generated_files: Mapping[str, bytes] | None = None,
+    source_bundle_sha256: str | None = None,
 ) -> CompilerProvenance:
     """Issue an exact-byte compiler capability for trusted internal callers."""
 
@@ -132,6 +212,11 @@ def _create_compiler_provenance(
         recipe_bytes,
         context=context,
         compiler_version=compiler_version,
+        root_relative_path=root_relative_path,
+        generated_files=generated_files,
+        execution_recipe_bytes=execution_recipe_bytes,
+        execution_generated_files=execution_generated_files,
+        source_bundle_sha256=source_bundle_sha256,
         _token=_PROVENANCE_FACTORY_TOKEN,
     )
 
@@ -331,6 +416,13 @@ def _check_interrupt_node(
             errors.append(
                 f"scope descriptor (interrupt '{name}') requires compiler provenance"
             )
+        if (
+            isinstance(descriptor, ScopeDescriptor)
+            and node.get("resume_key") != descriptor.result_state_key
+        ):
+            errors.append(
+                f"scope descriptor (interrupt '{name}') result_state_key must equal resume_key"
+            )
         # Native protected interrupts route directly on their typed result.  The
         # legacy python-validator pairing and evidence brief rules below belong
         # only to ordinary human work interrupts.
@@ -511,7 +603,61 @@ def check_recipe_full(
     path: str | Path,
     provenance: CompilerProvenance | None = None,
 ) -> tuple[list[str], list[str]]:
-    return check_recipe_bytes(Path(path).read_bytes(), provenance)
+    root = Path(path).resolve()
+    errors, warnings = check_recipe_bytes(root.read_bytes(), provenance)
+    visited = {root}
+
+    def inspect_children(current: Path) -> None:
+        try:
+            document = yaml.safe_load(current.read_bytes())
+        except (OSError, yaml.YAMLError):
+            return
+        nodes = document.get("nodes", {}) if isinstance(document, dict) else {}
+        for node in nodes.values() if isinstance(nodes, dict) else ():
+            if not isinstance(node, dict) or node.get("type") != "subgraph":
+                continue
+            graph = node.get("graph")
+            if not isinstance(graph, str):
+                continue
+            child = current.parent / graph
+            try:
+                resolved = child.resolve(strict=True)
+                resolved.relative_to(root.parent)
+            except (OSError, ValueError):
+                errors.append(f"child {graph!r} is not a contained readable recipe")
+                continue
+            if resolved in visited:
+                continue
+            visited.add(resolved)
+            child_bytes = resolved.read_bytes()
+            relative = resolved.relative_to(root.parent).as_posix()
+            child_provenance = None
+            if provenance is not None and provenance.matches_member(relative, child_bytes):
+                child_provenance = _create_compiler_provenance(
+                    child_bytes,
+                    context=provenance.context,
+                    root_relative_path=relative,
+                    source_bundle_sha256=provenance.source_bundle_sha256,
+                )
+            child_errors, child_warnings = check_recipe_bytes(
+                child_bytes, child_provenance
+            )
+            errors.extend(f"child {graph}: {item}" for item in child_errors)
+            warnings.extend(f"child {graph}: {item}" for item in child_warnings)
+            inspect_children(resolved)
+
+    inspect_children(root)
+    if provenance is not None:
+        observed = {
+            provenance.root_relative_path,
+            *(path.relative_to(root.parent).as_posix() for path in visited if path != root),
+        }
+        proven = {item.relative_path for item in provenance.files}
+        if observed != proven:
+            errors.append(
+                "compiler provenance file set does not match the complete reachable recipe DAG"
+            )
+    return errors, warnings
 
 
 def check_recipe(path: str | Path) -> list[str]:
