@@ -100,6 +100,7 @@ class RunnerDescriptor:
 @dataclass(frozen=True)
 class ArtifactDescriptor:
     name: str
+    source_path: str
     media_type: str
     required: bool
 
@@ -144,6 +145,7 @@ class EffectDescriptor:
             "artifacts": [
                 {
                     "name": artifact.name,
+                    "source_path": artifact.source_path,
                     "media_type": artifact.media_type,
                     "required": artifact.required,
                 }

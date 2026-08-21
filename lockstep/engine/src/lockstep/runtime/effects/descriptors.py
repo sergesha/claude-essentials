@@ -211,8 +211,8 @@ def _artifacts(value: object) -> tuple[ArtifactDescriptor, ...]:
             raise TypeError("artifact must be an object")
         _closed(
             item,
-            {"name", "media_type", "required"},
-            {"name", "media_type", "required"},
+            {"name", "source_path", "media_type", "required"},
+            {"name", "source_path", "media_type", "required"},
             "artifact",
         )
         media_type = item["media_type"]
@@ -220,9 +220,16 @@ def _artifacts(value: object) -> tuple[ArtifactDescriptor, ...]:
             raise ValueError("artifact media_type is invalid")
         if type(item["required"]) is not bool:
             raise ValueError("artifact required must be a boolean")
+        try:
+            source_path = _write_path(item["source_path"])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("artifact source_path must be a safe project file") from exc
+        if source_path.endswith("/"):
+            raise ValueError("artifact source_path must be an exact file")
         parsed.append(
             ArtifactDescriptor(
                 _name(item["name"], "artifact name"),
+                source_path,
                 media_type,
                 item["required"],
             )
@@ -296,6 +303,16 @@ def parse_effect_descriptor(
     writes = tuple(_write_path(item) for item in writes_raw)
     if len(set(writes)) != len(writes):
         raise ValueError("writes must not contain duplicates")
+    artifacts = _artifacts(raw["artifacts"])
+    for artifact in artifacts:
+        if artifact.source_path.endswith("/") or not any(
+            artifact.source_path == declared
+            or (declared.endswith("/") and artifact.source_path.startswith(declared))
+            for declared in writes
+        ):
+            raise ValueError(
+                "artifact source_path must be an exact file covered by declared writes"
+            )
     canonical = _canonical(raw)
     parsed = EffectDescriptor(
         schema=raw["schema"],
@@ -304,7 +321,7 @@ def parse_effect_descriptor(
         runner=runner,
         inputs=_inputs(raw["inputs"]),
         writes=writes,
-        artifacts=_artifacts(raw["artifacts"]),
+        artifacts=artifacts,
         deadline_seconds=deadline,
         scope_state_keys=scopes,
         result_schema=raw["result_schema"],

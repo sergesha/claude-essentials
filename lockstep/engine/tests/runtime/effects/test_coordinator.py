@@ -336,7 +336,10 @@ def test_artifact_bearing_effect_fails_closed_before_provider_request(system) ->
 
     coordinator, runtime, runner, _ledger, _store, coordinate = system
     raw = managed_descriptor(
-        artifacts=[{"name": "review", "media_type": "text/markdown", "required": True}]
+        artifacts=[{
+            "name": "review", "source_path": "src/review.md",
+            "media_type": "text/markdown", "required": True,
+        }]
     )
     runtime.current = replace(
         runtime.current,

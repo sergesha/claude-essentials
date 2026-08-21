@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal, Protocol
 
-from lockstep.runtime.effects.models import EffectResult
+from lockstep.runtime.effects.models import ArtifactDescriptor, EffectResult
 from lockstep.runtime.native_models import NativeCoordinate
 from lockstep.runtime.payload_limits import bounded_json
 
@@ -72,6 +72,7 @@ class EffectRequest:
     required_capabilities: tuple[str, ...]
     inputs: tuple[tuple[str, object], ...]
     writes: tuple[str, ...]
+    artifacts: tuple[ArtifactDescriptor, ...]
     deadline_at: datetime | None
     scope_bindings: tuple[ScopeBinding, ...]
     intent_digest: str
@@ -97,6 +98,7 @@ class EffectRequest:
         writes: tuple[str, ...],
         deadline_at: datetime | None,
         scope_bindings: tuple[ScopeBinding, ...] = (),
+        artifacts: tuple[ArtifactDescriptor, ...] = (),
     ) -> EffectRequest:
         detached_inputs = tuple(
             (
@@ -149,6 +151,15 @@ class EffectRequest:
             "required_capabilities": list(required_capabilities),
             "inputs": [[name, value] for name, value in detached_inputs],
             "writes": list(writes),
+            "artifacts": [
+                {
+                    "name": artifact.name,
+                    "source_path": artifact.source_path,
+                    "media_type": artifact.media_type,
+                    "required": artifact.required,
+                }
+                for artifact in artifacts
+            ],
             "deadline_at": None if deadline is None else deadline.isoformat(),
             "scope_bindings": [
                 {
@@ -189,6 +200,7 @@ class EffectRequest:
             required_capabilities=required_capabilities,
             inputs=detached_inputs,
             writes=writes,
+            artifacts=tuple(artifacts),
             deadline_at=deadline,
             scope_bindings=checked_scope_bindings,
             intent_digest=hashlib.sha256(encoded).hexdigest(),
@@ -230,6 +242,7 @@ class EffectRequest:
             required_capabilities=self.required_capabilities,
             inputs=self.inputs,
             writes=self.writes,
+            artifacts=self.artifacts,
             deadline_at=self.deadline_at,
             scope_bindings=self.scope_bindings,
             intent_digest=self.intent_digest,

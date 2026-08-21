@@ -22,13 +22,20 @@ def _registry(tmp_path: Path, files: dict[str, bytes]):
     snapshot = snapshots.capture(
         {path: blobs.put(content) for path, content in files.items()},
         declared_paths=tuple(files),
-        provenance={"kind": "managed-rollover", "effect_id": "producer"},
+        provenance={
+            "source": "managed-workspace-rollover",
+            "request_digest": "f" * 64,
+            "workspace_ref": "workspace:one",
+        },
     )
     registry = ArtifactRegistry(owner, blobs, snapshots)
     refs = registry.register_set(
         public_run_id="run-1",
         project_identity="project-1",
+        definition_digest="d" * 64,
         producer_effect_id="producer",
+        producer_request_digest="f" * 64,
+        workspace_ref="workspace:one",
         producer_coordinate=_coordinate(),
         descriptor_digest="a" * 64,
         snapshot_ref=snapshot,
@@ -39,16 +46,29 @@ def _registry(tmp_path: Path, files: dict[str, bytes]):
     return owner, blobs, registry, refs
 
 
-def _request(refs, destinations):
+def _request(refs, destinations, *, publisher_binding_digest: str):
     from lockstep.runtime.publication import PublicationEntry, PublicationRequest
 
     return PublicationRequest.build(
         effect_id="publish-1",
         public_run_id="run-1",
         project_identity="project-1",
-        coordinate=NativeCoordinate("thread-1", "", "cp-2", "task-2", "interrupt-2"),
+        definition_digest="d" * 64,
+        coordinate=NativeCoordinate(
+            thread_id="thread-1",
+            checkpoint_id="cp-2",
+            checkpoint_ns="",
+            task_id="task-2",
+            interrupt_id="interrupt-2",
+        ),
         descriptor_digest="b" * 64,
         grant_digest="c" * 64,
+        publisher_binding_digest=publisher_binding_digest,
+        consent_ref="consent:one",
+        approval_generation=7,
+        policy_epoch=11,
+        config_epoch=13,
+        parent_capability_generation=17,
         entries=tuple(
             PublicationEntry(artifact_ref=ref, destination=destination)
             for ref, destination in zip(refs, destinations, strict=True)
@@ -63,9 +83,13 @@ def test_publication_prepare_is_side_effect_free_and_apply_is_exact(tmp_path: Pa
     project = tmp_path / "project"
     project.mkdir()
     publisher = ProjectPublisher(owner, project, registry, blobs)
-    handle = publisher.prepare(_request(refs, ("out/one.txt", "out/two.txt")))
+    (project / "out").mkdir()
+    handle = publisher.prepare(_request(
+        refs, ("out/one.txt", "out/two.txt"),
+        publisher_binding_digest=publisher.binding_digest,
+    ))
 
-    assert not (project / "out").exists()
+    assert not (project / "out/one.txt").exists()
     receipt = publisher.apply_or_recover(handle)
 
     assert receipt.phase == "applied"
@@ -84,7 +108,10 @@ def test_publication_recovers_crash_after_each_atomic_replacement(
     project = tmp_path / "project"
     project.mkdir()
     publisher = publication.ProjectPublisher(owner, project, registry, blobs)
-    handle = publisher.prepare(_request(refs, ("one.txt", "two.txt")))
+    handle = publisher.prepare(_request(
+        refs, ("one.txt", "two.txt"),
+        publisher_binding_digest=publisher.binding_digest,
+    ))
 
     def crash(direction: str, index: int) -> None:
         if direction == "apply" and index == crash_after:
@@ -100,17 +127,29 @@ def test_publication_recovers_crash_after_each_atomic_replacement(
     assert (project / "two.txt").read_bytes() == b"TWO"
 
 
-def test_publication_rollback_recovers_after_applied_crash(tmp_path: Path) -> None:
+def test_publication_rollback_recovers_from_partially_applied_journal(tmp_path: Path) -> None:
     import lockstep.runtime.publication as publication
 
-    owner, blobs, registry, refs = _registry(tmp_path, {"new": b"NEW"})
+    owner, blobs, registry, refs = _registry(
+        tmp_path, {"new": b"NEW", "second": b"SECOND"}
+    )
     project = tmp_path / "project"
     project.mkdir()
     target = project / "target.txt"
     target.write_bytes(b"OLD")
     publisher = publication.ProjectPublisher(owner, project, registry, blobs)
-    handle = publisher.prepare(_request(refs, ("target.txt",)))
-    publisher.apply_or_recover(handle)
+    handle = publisher.prepare(_request(
+        refs, ("target.txt", "second.txt"),
+        publisher_binding_digest=publisher.binding_digest,
+    ))
+
+    def apply_crash(direction: str, index: int) -> None:
+        if direction == "apply" and index == 0:
+            raise RuntimeError("apply crash")
+
+    publication._after_replacement = apply_crash
+    with pytest.raises(RuntimeError, match="apply crash"):
+        publisher.apply_or_recover(handle)
 
     def crash(direction: str, index: int) -> None:
         if direction == "rollback" and index == 0:
@@ -125,6 +164,7 @@ def test_publication_rollback_recovers_after_applied_crash(tmp_path: Path) -> No
 
     assert publisher.rollback_or_recover(handle).phase == "rolled_back"
     assert target.read_bytes() == b"OLD"
+    assert not (project / "second.txt").exists()
 
 
 def test_publication_rejects_collisions_git_controls_and_symlink_toctou(tmp_path: Path) -> None:
@@ -135,13 +175,22 @@ def test_publication_rejects_collisions_git_controls_and_symlink_toctou(tmp_path
     project.mkdir()
     publisher = ProjectPublisher(owner, project, registry, blobs)
     with pytest.raises((ValueError, PublicationConflict)):
-        publisher.prepare(_request(refs, ("same.txt", "same.txt")))
+        publisher.prepare(_request(
+            refs, ("same.txt", "same.txt"),
+            publisher_binding_digest=publisher.binding_digest,
+        ))
     with pytest.raises((ValueError, PublicationConflict)):
-        publisher.prepare(_request(refs[:1], (".git/config",)))
+        publisher.prepare(_request(
+            refs[:1], (".git/config",),
+            publisher_binding_digest=publisher.binding_digest,
+        ))
 
     safe = project / "safe"
     safe.mkdir()
-    handle = publisher.prepare(_request(refs[:1], ("safe/out.txt",)))
+    handle = publisher.prepare(_request(
+        refs[:1], ("safe/out.txt",),
+        publisher_binding_digest=publisher.binding_digest,
+    ))
     safe.rmdir()
     safe.symlink_to(tmp_path)
     with pytest.raises(PublicationConflict):
@@ -156,7 +205,9 @@ def test_corrupt_journal_is_preserved_and_fails_closed(tmp_path: Path) -> None:
     project = tmp_path / "project"
     project.mkdir()
     publisher = ProjectPublisher(owner, project, registry, blobs)
-    handle = publisher.prepare(_request(refs, ("one.txt",)))
+    handle = publisher.prepare(_request(
+        refs, ("one.txt",), publisher_binding_digest=publisher.binding_digest
+    ))
     journal = publisher.journal_path(handle)
     journal.chmod(0o600)
     journal.write_bytes(b"{not-json")
@@ -167,4 +218,3 @@ def test_corrupt_journal_is_preserved_and_fails_closed(tmp_path: Path) -> None:
 
     assert journal.read_bytes() == before
     assert not (project / "one.txt").exists()
-

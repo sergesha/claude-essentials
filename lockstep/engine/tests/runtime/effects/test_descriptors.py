@@ -20,7 +20,12 @@ def managed_descriptor(**changes):
         },
         "writes": ["src/", "tests/test_feature.py"],
         "artifacts": [
-            {"name": "review", "media_type": "text/markdown", "required": True}
+            {
+                "name": "review",
+                "source_path": "src/review.md",
+                "media_type": "text/markdown",
+                "required": True,
+            }
         ],
         "deadline_seconds": 1800,
         "scope_state_keys": ["call_scope"],
@@ -39,7 +44,7 @@ def test_descriptor_is_closed_bounded_and_canonical() -> None:
     assert parsed.writes == ("src/", "tests/test_feature.py")
     assert (
         parsed.digest
-        == "fdc7ce032aaa3df0a23c172eac5d4a7bfcd9a276e00f2204bd99d78b4cb6beb6"
+        == "a312435d29a68ce96d141178bff917a8ce3b0a62a08f9407bdd6a20f671a9f8d"
     )
     assert parsed.canonical_json.startswith(b'{"artifacts":')
 
@@ -76,6 +81,21 @@ def test_descriptor_rejects_unknown_dynamic_and_unsafe_authority(change, match) 
 
     with pytest.raises(ValueError, match=match):
         parse_effect_descriptor(managed_descriptor(**change))
+
+
+@pytest.mark.parametrize(
+    "artifact",
+    [
+        {"name": "review", "source_path": "../review.md", "media_type": "text/markdown", "required": True},
+        {"name": "review", "source_path": ".git/config", "media_type": "text/plain", "required": True},
+        {"name": "review", "source_path": "docs/review.md", "media_type": "text/markdown", "required": True},
+    ],
+)
+def test_artifact_source_is_exact_safe_and_covered_by_declared_writes(artifact) -> None:
+    from lockstep.runtime.effects.descriptors import parse_effect_descriptor
+
+    with pytest.raises(ValueError, match="artifact source"):
+        parse_effect_descriptor(managed_descriptor(artifacts=[artifact]))
 
 
 def test_descriptor_rejects_callable_and_bounded_input_before_encoding() -> None:

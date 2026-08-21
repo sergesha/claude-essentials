@@ -34,7 +34,11 @@ def _snapshot(blobs, snapshots, files: dict[str, bytes]):
     return snapshots.capture(
         refs,
         declared_paths=tuple(refs),
-        provenance={"kind": "managed-rollover", "effect_id": "effect-1"},
+        provenance={
+            "source": "managed-workspace-rollover",
+            "request_digest": "f" * 64,
+            "workspace_ref": "workspace:one",
+        },
     )
 
 
@@ -53,7 +57,10 @@ def test_registry_admits_exact_snapshot_bytes_and_immutable_provenance(tmp_path:
     refs = registry.register_set(
         public_run_id="run-1",
         project_identity="project-1",
+        definition_digest="d" * 64,
         producer_effect_id="effect-1",
+        producer_request_digest="f" * 64,
+        workspace_ref="workspace:one",
         producer_coordinate=_coordinate(),
         descriptor_digest="a" * 64,
         snapshot_ref=snapshot,
@@ -67,6 +74,9 @@ def test_registry_admits_exact_snapshot_bytes_and_immutable_provenance(tmp_path:
     assert record.source_snapshot_ref == snapshot
     assert record.producer_coordinate == _coordinate()
     assert record.descriptor_digest == "a" * 64
+    assert record.definition_digest == "d" * 64
+    assert record.producer_request_digest == "f" * 64
+    assert record.workspace_ref == "workspace:one"
     assert record.blob.sha256 == hashlib.sha256(b"Verdict: PASS\n").hexdigest()
     assert blobs.read(record.blob) == b"Verdict: PASS\n"
 
@@ -80,7 +90,10 @@ def test_registry_key_is_exact_coordinate_and_declared_name(tmp_path: Path) -> N
     kwargs = dict(
         public_run_id="run-1",
         project_identity="project-1",
+        definition_digest="d" * 64,
         producer_effect_id="effect-1",
+        producer_request_digest="f" * 64,
+        workspace_ref="workspace:one",
         producer_coordinate=_coordinate(),
         descriptor_digest="a" * 64,
         snapshot_ref=first_snapshot,
@@ -113,14 +126,19 @@ def test_registry_validates_complete_set_before_publishing_any_manifest(tmp_path
         registry.register_set(
             public_run_id="run-1",
             project_identity="project-1",
+            definition_digest="d" * 64,
             producer_effect_id="effect-1",
+            producer_request_digest="f" * 64,
+            workspace_ref="workspace:one",
             producer_coordinate=_coordinate(),
             descriptor_digest="a" * 64,
             snapshot_ref=snapshot,
             declarations=declarations,
         )
 
-    assert registry.list_for_producer("effect-1", _coordinate()) == ()
+    assert registry.list_for_producer(
+        "effect-1", _coordinate(), "a" * 64, ("present", "missing")
+    ) == ()
 
 
 def test_registry_rejects_foreign_snapshot_provenance_and_unsafe_sources(tmp_path: Path) -> None:
@@ -128,29 +146,40 @@ def test_registry_rejects_foreign_snapshot_provenance_and_unsafe_sources(tmp_pat
 
     blobs, snapshots, registry = _stores(tmp_path)
     snapshot = _snapshot(blobs, snapshots, {"review.md": b"ok"})
-    for declaration in (
-        ArtifactDeclaration("review", "../review.md", "text/markdown", True),
-        ArtifactDeclaration("review", ".git/config", "text/plain", True),
-    ):
+    for source in ("../review.md", ".git/config"):
         with pytest.raises((ValueError, ArtifactProvenanceError)):
+            declaration = ArtifactDeclaration(
+                "review", source, "text/markdown", True
+            )
             registry.register_set(
                 public_run_id="run-1",
                 project_identity="project-1",
+                definition_digest="d" * 64,
                 producer_effect_id="effect-1",
+                producer_request_digest="f" * 64,
+                workspace_ref="workspace:one",
                 producer_coordinate=_coordinate(),
                 descriptor_digest="a" * 64,
                 snapshot_ref=snapshot,
                 declarations=(declaration,),
             )
 
+    foreign = snapshots.capture(
+        {"review.md": blobs.put(b"foreign")},
+        declared_paths=("review.md",),
+        provenance={"source": "untrusted-import"},
+    )
     with pytest.raises(ArtifactProvenanceError):
         registry.register_set(
             public_run_id="run-1",
             project_identity="project-1",
+            definition_digest="d" * 64,
             producer_effect_id="other-effect",
+            producer_request_digest="f" * 64,
+            workspace_ref="workspace:one",
             producer_coordinate=_coordinate(),
             descriptor_digest="a" * 64,
-            snapshot_ref=snapshot,
+            snapshot_ref=foreign,
             declarations=(ArtifactDeclaration("review", "review.md", "text/markdown", True),),
         )
 
@@ -171,7 +200,10 @@ def test_registry_enforces_hard_cardinality_and_manifest_limits(tmp_path: Path) 
         registry.register_set(
             public_run_id="run-1",
             project_identity="project-1",
+            definition_digest="d" * 64,
             producer_effect_id="effect-1",
+            producer_request_digest="f" * 64,
+            workspace_ref="workspace:one",
             producer_coordinate=_coordinate(),
             descriptor_digest="a" * 64,
             snapshot_ref=snapshot,
@@ -180,4 +212,3 @@ def test_registry_enforces_hard_cardinality_and_manifest_limits(tmp_path: Path) 
                 ArtifactDeclaration("b", "b", "text/plain", True),
             ),
         )
-
