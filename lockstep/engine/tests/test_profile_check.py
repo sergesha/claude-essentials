@@ -103,3 +103,94 @@ def test_a_loop_limit_that_caps_nothing_is_refused(tmp_path, cap):
 
     errors = check_recipe(staged)
     assert any("positive integer" in e for e in errors), errors
+
+
+def test_manual_recipe_may_use_the_closed_protected_effect_without_generated_authority(
+    tmp_path,
+):
+    recipe = tmp_path / "manual.recipe.yaml"
+    recipe.write_text(
+        "name: manual\n"
+        "state: {edit_result: dict, lockstep_outcome: str}\n"
+        "nodes:\n"
+        "  edit:\n"
+        "    type: interrupt\n"
+        "    state_key: edit_request\n"
+        "    resume_key: edit_result\n"
+        "    idempotent: false\n"
+        "    message:\n"
+        "      lockstep_effect:\n"
+        "        schema: lockstep.effect/v1\n"
+        "        kind: manual\n"
+        "        logical_id: edit\n"
+        "        runner: null\n"
+        "        inputs: {}\n"
+        "        writes: [src/]\n"
+        "        artifacts: []\n"
+        "        deadline_seconds: null\n"
+        "        scope_state_keys: []\n"
+        "        result_schema: lockstep.effect-result/v1\n"
+        "  done: {type: passthrough, output: {lockstep_outcome: PASS}}\n"
+        "  failed: {type: passthrough, output: {lockstep_outcome: FAIL}}\n"
+        "edges:\n"
+        "  - {from: START, to: edit}\n"
+        "  - {from: edit, to: done, condition: \"edit_result.outcome == 'PASS'\"}\n"
+        "  - {from: edit, to: failed, condition: \"edit_result.outcome != 'PASS'\"}\n"
+        "  - {from: done, to: END}\n"
+        "  - {from: failed, to: END}\n"
+    )
+
+    assert check_recipe(recipe) == []
+
+
+def test_project_authored_generated_marker_never_grants_compiler_only_profile(
+    tmp_path,
+):
+    recipe = tmp_path / "forged.recipe.yaml"
+    recipe.write_text(
+        "name: forged\n"
+        "x-lockstep-generated:\n"
+        "  schema: lockstep.generated/v1\n"
+        "  compiler_version: '1'\n"
+        "  workflow_version: '1'\n"
+        "  source: ../workflows/forged.workflow.yaml\n"
+        f"  source_sha256: {'a' * 64}\n"
+        "state: {lockstep_outcome: str}\n"
+        "nodes:\n"
+        "  done: {type: passthrough, output: {lockstep_outcome: PASS}}\n"
+        "edges: [{from: START, to: done}, {from: done, to: END}]\n"
+    )
+
+    errors = check_recipe(recipe)
+
+    assert any("compiler provenance" in error for error in errors)
+
+
+def test_manual_recipe_cannot_smuggle_compiler_only_scope_descriptor(tmp_path):
+    recipe = tmp_path / "manual-scope.recipe.yaml"
+    recipe.write_text(
+        "name: manual-scope\n"
+        "state: {scope_result: dict}\n"
+        "nodes:\n"
+        "  scope:\n"
+        "    type: interrupt\n"
+        "    state_key: scope_request\n"
+        "    resume_key: scope_result\n"
+        "    idempotent: false\n"
+        "    message:\n"
+        "      lockstep_effect:\n"
+        "        schema: lockstep.effect/v1\n"
+        "        kind: scope\n"
+        "        logical_id: scope\n"
+        "        scope_kind: call\n"
+        "        duration_seconds: 60\n"
+        "        runner_selector: codex\n"
+        "        ancestor_deadline_state_keys: []\n"
+        "        result_state_key: scope_result\n"
+        "        result_schema: lockstep.scope-result/v1\n"
+        "edges: [{from: START, to: scope}, {from: scope, to: END}]\n"
+    )
+
+    errors = check_recipe(recipe)
+
+    assert any("scope" in error and "compiler" in error for error in errors)
