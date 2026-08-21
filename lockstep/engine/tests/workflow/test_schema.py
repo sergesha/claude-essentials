@@ -309,8 +309,7 @@ flow:
     workflow: independent-review
     runner: codex
 - accept:
-    artifact: .lockstep/review.md
-    hash_from: review.review
+    artifact_from: review.review
     verdict: PASS
 - parallel:
     id: gates
@@ -333,6 +332,41 @@ flow:
         "AcceptIR", "ParallelIR", "GraphIR", "EscalateIR",
     ]
     assert workflow.flow[8].kind == "inline"
+
+
+@pytest.mark.parametrize("legacy_field", ["writes", "junit"])
+def test_verify_rejects_legacy_file_result_and_write_surfaces(
+    workflow_file: Path, legacy_field: str
+) -> None:
+    value = "[reports/]" if legacy_field == "writes" else "{path: reports/junit.xml}"
+    workflow_file.write_text(
+        BASE
+        + "flow:\n"
+        + "- verify:\n"
+        + "    command: pytest -q\n"
+        + f"    {legacy_field}: {value}\n"
+    )
+
+    error = raises_diagnostic("LSW1", workflow_file)
+
+    assert error.pointer == f"/flow/0/verify/{legacy_field}"
+
+
+def test_accept_rejects_legacy_artifact_plus_hash_from_form(
+    workflow_file: Path,
+) -> None:
+    workflow_file.write_text(
+        BASE
+        + "flow:\n"
+        + "- accept:\n"
+        + "    artifact: review.md\n"
+        + "    hash_from: review.review\n"
+        + "    verdict: PASS\n"
+    )
+
+    error = raises_diagnostic("LSW1", workflow_file)
+
+    assert error.pointer in {"/flow/0/accept/artifact", "/flow/0/accept/hash_from"}
 
 
 @pytest.mark.parametrize(
