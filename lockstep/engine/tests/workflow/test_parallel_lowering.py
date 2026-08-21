@@ -10,12 +10,19 @@ from __future__ import annotations
 from pathlib import Path
 
 import yaml
+import pytest
 
 from lockstep.runtime.effects.descriptors import parse_effect_descriptor
 from lockstep.runtime.effects.models import EffectDescriptor, ScopeDescriptor
+from lockstep.workflow.diagnostics import DiagnosticError
 from lockstep.workflow.compiler import compile_workflow
 from lockstep.workflow.schema import load_workflow, parse_workflow
-from lockstep.workflow.semantics import InMemoryWorkflowCatalog, validate_semantics
+from lockstep.workflow.semantics import (
+    ChildArtifactContract,
+    ChildWorkflowContract,
+    InMemoryWorkflowCatalog,
+    validate_semantics,
+)
 
 
 def _compile(tmp_path: Path, branches: str, *, timeout: int | None = None) -> dict:
@@ -171,3 +178,49 @@ def test_unbounded_parallel_emits_no_scope_or_timer_metadata(tmp_path: Path) -> 
         for _name, _node, descriptor in _protected(document)
     )
     assert not ({"timers", "scheduler", "branches", "joins"} & set(document))
+
+
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [
+        ("reviews/output.md", "reviews/output.md"),
+        ("reviews", "reviews/output.md"),
+        ("Reviews/output.md", "reviews/OUTPUT.md"),
+    ],
+)
+def test_parallel_rejects_cross_branch_artifact_destination_overlap(
+    tmp_path: Path, left: str, right: str
+) -> None:
+    """One branch may not overwrite or alias another branch's publication."""
+    child = ChildWorkflowContract(
+        outcomes=("pass", "fail", "error"),
+        exports={
+            "review": ChildArtifactContract(
+                "review",
+                "review.md",
+                "review",
+                "text/markdown",
+                "produce",
+                "produce_result",
+            )
+        },
+    )
+    source = tmp_path / "parallel.workflow.yaml"
+    source.write_text(
+        "workflow_version: '1'\nname: parallel\n"
+        "description: overlap rejection\nprotect: ['**']\nflow:\n"
+        "  - parallel:\n      id: reviews\n      join: all\n      branches:\n"
+        "        one:\n          - call:\n              id: first\n"
+        "              workflow: child\n              runner: codex\n"
+        f"              artifacts: {{review: {left}}}\n"
+        "        two:\n          - call:\n              id: second\n"
+        "              workflow: child\n              runner: codex\n"
+        f"              artifacts: {{review: {right}}}\n"
+    )
+    workflow = parse_workflow(load_workflow(source))
+
+    with pytest.raises(DiagnosticError, match="parallel artifact destinations"):
+        validate_semantics(
+            workflow,
+            InMemoryWorkflowCatalog({"child": child}),
+        )

@@ -43,17 +43,17 @@ def _compile(tmp_path: Path, *, bounded: bool = False) -> Path:
     return recipe
 
 
-def _pass(interrupt) -> dict:
+def _result(interrupt, outcome: str = "PASS") -> dict:
     descriptor = parse_effect_descriptor(interrupt.value["lockstep_effect"])
     return {
         "schema": "lockstep.effect-result/v1",
         "effect_id": derive_effect_id(interrupt.coordinate, descriptor.digest),
-        "outcome": "PASS",
+        "outcome": outcome,
         "result_ref": "blob:" + "a" * 64,
         "artifact_refs": [],
         "snapshot_ref": None,
         "diff_ref": None,
-        "fixed_error_code": None,
+        "fixed_error_code": "cancelled" if outcome == "ABORTED" else None,
         "evidence_refs": [],
     }
 
@@ -70,7 +70,7 @@ def test_compiled_parallel_partial_resume_restart_and_native_join(
     first_branch = parked.pending[0]
     waiting = first.resume(
         thread_id="partial",
-        results_by_interrupt_id={first_branch.coordinate.interrupt_id: _pass(first_branch)},
+        results_by_interrupt_id={first_branch.coordinate.interrupt_id: _result(first_branch)},
     )
     first.close()
 
@@ -85,7 +85,7 @@ def test_compiled_parallel_partial_resume_restart_and_native_join(
     completed = restarted.resume(
         thread_id="partial",
         results_by_interrupt_id={
-            current.pending[0].coordinate.interrupt_id: _pass(current.pending[0])
+            current.pending[0].coordinate.interrupt_id: _result(current.pending[0])
         },
     )
     restarted.close()
@@ -106,7 +106,7 @@ def test_compiled_parallel_one_batch_resume_reaches_native_join(tmp_path: Path) 
     completed = app.resume(
         thread_id="batch",
         results_by_interrupt_id={
-            item.coordinate.interrupt_id: _pass(item) for item in parked.pending
+            item.coordinate.interrupt_id: _result(item) for item in parked.pending
         },
     )
     app.close()
@@ -115,6 +115,37 @@ def test_compiled_parallel_one_batch_resume_reaches_native_join(tmp_path: Path) 
     assert completed.pending == ()
     assert completed.values["gates_result"]["outcome"] == "PASS"
     assert completed.values["lockstep_outcome"] == "PASS"
+
+
+def test_branch_failure_waits_for_native_join_and_uses_closed_precedence(
+    tmp_path: Path,
+) -> None:
+    """FAIL/ERROR/ABORTED are branch facts; none may cancel a sibling early."""
+    recipe = _compile(tmp_path)
+    app = yg._open_native_path(recipe)  # noqa: SLF001 - integration oracle
+    parked = app.invoke({}, thread_id="failure-join")
+    first, second = parked.pending
+    waiting = app.resume(
+        thread_id="failure-join",
+        results_by_interrupt_id={first.coordinate.interrupt_id: _result(first, "FAIL")},
+    )
+
+    assert [item.coordinate for item in waiting.pending] == [second.coordinate]
+    assert waiting.values.get("lockstep_outcome") is None
+    assert waiting.values.get("gates_result") is None
+
+    completed = app.resume(
+        thread_id="failure-join",
+        results_by_interrupt_id={second.coordinate.interrupt_id: _result(second, "ERROR")},
+    )
+    app.close()
+
+    assert completed.pending == ()
+    assert completed.values["gates_result"] == {
+        "outcome": "ERROR",
+        "value": "error",
+    }
+    assert completed.values["lockstep_outcome"] == "ERROR"
 
 
 def test_bounded_parallel_scope_is_shared_by_all_native_branch_interrupts(
@@ -155,4 +186,3 @@ def test_bounded_parallel_scope_is_shared_by_all_native_branch_interrupts(
         ).scope_state_keys == (scope.result_state_key,)
         for item in branches.pending
     )
-

@@ -8,6 +8,7 @@ from datetime import timedelta
 from lockstep.runtime.effects.descriptors import derive_effect_id, parse_effect_descriptor
 from lockstep.runtime.native_models import NativeCoordinate, NativeInterrupt
 from lockstep.runtime.providers.base import EffectRequest, TerminalSafetyObservation
+from lockstep.runtime.status import project_status
 from tests.runtime.effects.test_coordinator import NOW, _result, managed_descriptor
 
 
@@ -177,3 +178,31 @@ def test_runtime_schema_contains_no_parallel_workflow_authority(system) -> None:
         for name in names
         for forbidden in ("branch", "join", "scheduler", "timer")
     )
+
+
+def test_status_aggregates_all_pending_effects_without_mutating_them(system) -> None:
+    """First-interrupt projection hides sibling progress and can misstate ownership."""
+    coordinator, runtime, runner, ledger, _store, _coordinate = system
+    _install_second_effect(system)
+    coordinator.reconcile_pending("run-1")
+    before = tuple(ledger.list_nonterminal())
+
+    status = project_status(
+        runtime.binding("run-1"), runtime.current, object(), ledger
+    ).to_dict()
+
+    assert status["status"] == "running"
+    assert status["owner"] == "engine"
+    assert status["next_action"] == "scenario_wait"
+    assert status["parallel_progress"] == {
+        "pending": 2,
+        "phases": {"prepared": 2},
+        "operations": ["implement", "implement-two"],
+        "deadlines": [
+            (NOW + timedelta(seconds=300)).isoformat(),
+            (NOW + timedelta(seconds=300)).isoformat(),
+        ],
+    }
+    assert tuple(ledger.list_nonterminal()) == before
+    assert runner.prepare_calls == []
+    assert runtime.resume_calls == []
