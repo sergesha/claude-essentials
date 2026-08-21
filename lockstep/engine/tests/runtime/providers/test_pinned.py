@@ -211,3 +211,22 @@ def test_pinned_file_results_reject_without_real_stability_provider(
     with pytest.raises(Exception, match="stability|exit-only"):
         adapter.prepare(request)
     assert adapter.spawn_count == 0
+
+
+def test_pinned_spawn_failure_is_error_not_command_failure(tmp_path: Path) -> None:
+    adapter, request, _workspaces = _pinned_system(tmp_path)
+    record = adapter.launch_record(adapter.prepare(request).effect_id)
+
+    result = adapter._parse_result(
+        record,
+        {
+            "returncode": 127,
+            "overflow": False,
+            "timed_out": False,
+            "termination_reason": "spawn_failed",
+        },
+        None,
+    )
+
+    assert result.outcome == "ERROR"
+    assert result.fixed_error_code == "runner_failed"
