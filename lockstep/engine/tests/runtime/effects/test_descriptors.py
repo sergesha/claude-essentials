@@ -348,3 +348,62 @@ def test_coordinate_identity_is_domain_separated_and_exact() -> None:
     )
     with pytest.raises(ValueError, match="digest"):
         derive_effect_id(coordinate, "not-a-digest")
+
+
+def test_runtime_input_selector_is_a_closed_owned_union() -> None:
+    from lockstep.runtime.effects.descriptors import parse_effect_descriptor
+    from lockstep.runtime.effects.models import RuntimeInputSelector
+
+    parsed = parse_effect_descriptor(
+        managed_descriptor(inputs={"snapshot": {"runtime_key": "current_project_snapshot"}})
+    )
+    assert parsed.inputs == (("snapshot", RuntimeInputSelector("current_project_snapshot")),)
+    for selector in (
+        {"runtime_key": "caller_snapshot"},
+        {"runtime_key": "current_project_snapshot", "state_key": "shadow"},
+        {"project_snapshot": "current"},
+    ):
+        with pytest.raises(ValueError, match="selector"):
+            parse_effect_descriptor(managed_descriptor(inputs={"snapshot": selector}))
+
+
+def test_decision_and_acceptance_results_are_exact_closed_variants() -> None:
+    from lockstep.runtime.effects.descriptors import (
+        parse_acceptance_result,
+        parse_decision_result,
+        parse_effect_descriptor,
+    )
+
+    decision = parse_effect_descriptor({
+        "schema": "lockstep.effect/v1", "kind": "decide", "logical_id": "risk",
+        "decision": {"type": "changed-paths", "since": "start", "cases": [
+            {"label": "high", "paths": ["auth/**"]}
+        ], "default": "low"},
+        "inputs": {
+            "start_snapshot": {"runtime_key": "run_start_project_snapshot"},
+            "current_snapshot": {"runtime_key": "current_project_snapshot"},
+        },
+        "result_schema": "lockstep.decision-result/v1",
+    })
+    result = parse_decision_result({
+        "schema": "lockstep.decision-result/v1", "effect_id": "effect-1",
+        "outcome": "PASS", "decision_digest": decision.digest, "value": "high",
+    }, descriptor=decision)
+    assert result.value == "high"
+    with pytest.raises(ValueError, match="outside"):
+        parse_decision_result({**result.to_dict(), "value": "injected"}, descriptor=decision)
+    with pytest.raises(ValueError, match="digest"):
+        parse_decision_result(
+            {**result.to_dict(), "decision_digest": "b" * 64}, descriptor=decision
+        )
+
+    accepted = parse_acceptance_result({
+        "schema": "lockstep.acceptance-result/v1", "effect_id": "effect-2",
+        "outcome": "PASS", "artifact_ref": "artifact-review",
+        "artifact_digest": "a" * 64, "consent_ref": "consent-1",
+    })
+    assert accepted.consent_ref == "consent-1"
+    with pytest.raises(ValueError, match="unknown"):
+        parse_acceptance_result({**accepted.to_dict(), "runner": "fake"})
+    with pytest.raises(ValueError, match="non-null"):
+        parse_acceptance_result({**accepted.to_dict(), "consent_ref": None})

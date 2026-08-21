@@ -4,12 +4,91 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import PurePosixPath
 from typing import Any, Literal
+from collections.abc import Mapping
 
 
 @dataclass(frozen=True)
 class StateSelector:
     state_key: str
+
+
+@dataclass(frozen=True)
+class RuntimeInputSelector:
+    runtime_key: Literal["run_start_project_snapshot", "current_project_snapshot"]
+
+
+InputSelector = StateSelector | RuntimeInputSelector
+
+
+@dataclass(frozen=True)
+class PinnedCommandSpec:
+    logical_argv: tuple[str, ...]
+    logical_cwd: str
+    result_source: Literal["exit", "file", "junit"]
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        logical_argv: tuple[str, ...],
+        logical_cwd: str,
+        result_source: Literal["exit", "file", "junit"] = "exit",
+    ) -> "PinnedCommandSpec":
+        if (
+            not isinstance(logical_argv, tuple)
+            or not logical_argv
+            or len(logical_argv) > 128
+            or any(
+                not isinstance(item, str)
+                or not item
+                or "\x00" in item
+                or len(item.encode()) > 4096
+                for item in logical_argv
+            )
+        ):
+            raise ValueError("pinned argv must be a bounded non-empty array")
+        if (
+            not isinstance(logical_cwd, str)
+            or not logical_cwd
+            or "\x00" in logical_cwd
+        ):
+            raise ValueError("pinned cwd must be a bounded relative path")
+        cwd = PurePosixPath(logical_cwd)
+        if cwd.is_absolute() or any(part in {"", ".."} for part in cwd.parts):
+            raise ValueError("pinned cwd must remain inside its workspace")
+        if result_source not in {"exit", "file", "junit"}:
+            raise ValueError("unknown pinned result source")
+        return cls(logical_argv, logical_cwd, result_source)
+
+    @classmethod
+    def parse(cls, value: object) -> "PinnedCommandSpec":
+        if not isinstance(value, Mapping) or set(value) != {
+            "schema",
+            "logical_argv",
+            "logical_cwd",
+            "result_source",
+        }:
+            raise ValueError("invalid closed pinned command spec")
+        if value["schema"] != "lockstep.pinned-command/v1":
+            raise ValueError("unsupported pinned command spec")
+        argv = value["logical_argv"]
+        if not isinstance(argv, list):
+            raise ValueError("pinned argv must be an array")
+        return cls.build(
+            logical_argv=tuple(argv),
+            logical_cwd=value["logical_cwd"],
+            result_source=value["result_source"],
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema": "lockstep.pinned-command/v1",
+            "logical_argv": list(self.logical_argv),
+            "logical_cwd": self.logical_cwd,
+            "result_source": self.result_source,
+        }
 
 
 @dataclass(frozen=True)
@@ -31,7 +110,7 @@ class EffectDescriptor:
     kind: str
     logical_id: str
     runner: RunnerDescriptor | None
-    inputs: tuple[tuple[str, StateSelector], ...]
+    inputs: tuple[tuple[str, InputSelector], ...]
     writes: tuple[str, ...]
     artifacts: tuple[ArtifactDescriptor, ...]
     deadline_seconds: int | None
@@ -54,7 +133,11 @@ class EffectDescriptor:
                 }
             ),
             "inputs": {
-                name: {"state_key": selector.state_key}
+                name: (
+                    {"state_key": selector.state_key}
+                    if isinstance(selector, StateSelector)
+                    else {"runtime_key": selector.runtime_key}
+                )
                 for name, selector in self.inputs
             },
             "writes": list(self.writes),
@@ -96,6 +179,78 @@ class ScopeDescriptor:
             "runner_selector": self.runner_selector,
             "ancestor_deadline_state_keys": list(self.ancestor_deadline_state_keys),
             "result_state_key": self.result_state_key,
+            "result_schema": self.result_schema,
+        }
+
+
+@dataclass(frozen=True)
+class DecisionCase:
+    label: str
+    paths: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class DecisionSpec:
+    decision_type: Literal["changed-paths"]
+    since: Literal["start"]
+    cases: tuple[DecisionCase, ...]
+    default: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "type": self.decision_type,
+            "since": self.since,
+            "cases": [
+                {"label": case.label, "paths": list(case.paths)}
+                for case in self.cases
+            ],
+            "default": self.default,
+        }
+
+
+@dataclass(frozen=True)
+class DecisionDescriptor:
+    schema: str
+    kind: Literal["decide"]
+    logical_id: str
+    decision: DecisionSpec
+    inputs: tuple[tuple[str, RuntimeInputSelector], ...]
+    result_schema: str
+    canonical_json: bytes
+    digest: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema": self.schema,
+            "kind": self.kind,
+            "logical_id": self.logical_id,
+            "decision": self.decision.to_dict(),
+            "inputs": {
+                name: {"runtime_key": selector.runtime_key}
+                for name, selector in self.inputs
+            },
+            "result_schema": self.result_schema,
+        }
+
+
+@dataclass(frozen=True)
+class AcceptDescriptor:
+    schema: str
+    kind: Literal["accept"]
+    logical_id: str
+    artifact_handle: str
+    verdict: Literal["PASS"]
+    result_schema: str
+    canonical_json: bytes
+    digest: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema": self.schema,
+            "kind": self.kind,
+            "logical_id": self.logical_id,
+            "artifact_handle": self.artifact_handle,
+            "verdict": self.verdict,
             "result_schema": self.result_schema,
         }
 
@@ -159,3 +314,46 @@ class ScopeResult:
                 base["runner_selector"] = self.runner_selector
                 base["runner_binding_digest"] = self.runner_binding_digest
         return base
+
+
+@dataclass(frozen=True)
+class DecisionResult:
+    schema: str
+    effect_id: str
+    outcome: Literal["PASS", "ERROR"]
+    decision_digest: str
+    value: str | None = None
+    fixed_error_code: Literal["decision_input_invalid"] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "schema": self.schema,
+            "effect_id": self.effect_id,
+            "outcome": self.outcome,
+            "decision_digest": self.decision_digest,
+        }
+        if self.outcome == "PASS":
+            result["value"] = self.value
+        else:
+            result["fixed_error_code"] = self.fixed_error_code
+        return result
+
+
+@dataclass(frozen=True)
+class AcceptanceResult:
+    schema: str
+    effect_id: str
+    outcome: Literal["PASS"]
+    artifact_ref: str
+    artifact_digest: str
+    consent_ref: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema": self.schema,
+            "effect_id": self.effect_id,
+            "outcome": self.outcome,
+            "artifact_ref": self.artifact_ref,
+            "artifact_digest": self.artifact_digest,
+            "consent_ref": self.consent_ref,
+        }

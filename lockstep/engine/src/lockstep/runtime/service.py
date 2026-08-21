@@ -402,10 +402,13 @@ class LockstepService:
             project_identity=str(project_root),
         )
         try:
-            self.runtime.bind(binding)
             binding, _admission = self.effects.admit_start(
                 self.catalog, binding, input_blob
             )
+            # Catalog admission canonicalizes immutable lineage (including
+            # created_at). Bind only that admitted value so the coordinator
+            # never observes a pre-admission lookalike.
+            self.runtime.bind(binding)
             if not self._reserve_effect_run(run_id):
                 snapshot = self.runtime.snapshot(run_id, subgraphs=True)
                 self.runtime.unbind(run_id)

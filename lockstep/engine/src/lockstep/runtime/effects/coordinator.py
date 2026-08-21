@@ -32,6 +32,7 @@ from lockstep.runtime.effects.ledger import (
 from lockstep.runtime.effects.models import (
     EffectDescriptor,
     EffectResult,
+    RuntimeInputSelector,
     ScopeDescriptor,
     ScopeResult,
 )
@@ -366,6 +367,13 @@ class EffectCoordinator:
         resolve_grant: bool,
     ) -> _Context:
         coordinate = interrupt.coordinate
+        if isinstance(descriptor, EffectDescriptor) and any(
+            isinstance(selector, RuntimeInputSelector)
+            for _name, selector in descriptor.inputs
+        ):
+            raise ProviderContractViolation(
+                "runtime snapshot selectors require the dedicated durable snapshot resolver"
+            )
         now = self._now()
         verified_ancestors = self._ancestor_results(
             binding.public_run_id, binding, descriptor, snapshot, interrupt
@@ -530,6 +538,10 @@ class EffectCoordinator:
                 "interrupt belongs to a foreign native thread"
             )
         descriptor = parse_effect_descriptor(self._raw_descriptor(interrupt))
+        if not isinstance(descriptor, (EffectDescriptor, ScopeDescriptor)):
+            raise ProviderContractViolation(
+                f"{descriptor.kind} execution requires its dedicated trusted runtime boundary"
+            )
         if self._protected_lineage(run_id, coordinate, descriptor.digest) != "pending":
             raise CoordinatorLineageError(
                 "effect source is not the exact current interrupt"

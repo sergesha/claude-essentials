@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Mapping
-from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Literal
 
 from lockstep.runtime.effects.descriptors import parse_effect_result
+from lockstep.runtime.effects.models import PinnedCommandSpec
 from lockstep.runtime.providers.base import EffectRequest
 from lockstep.runtime.providers.codex import (
     CodexInstallationBinding,
@@ -17,73 +16,6 @@ from lockstep.runtime.providers.codex import (
     _canonical,
     _CodexAttemptDriver,
 )
-
-
-@dataclass(frozen=True)
-class PinnedCommandSpec:
-    """Closed compiler-authored command identity safe for public status."""
-
-    logical_argv: tuple[str, ...]
-    logical_cwd: str
-    result_source: Literal["exit", "file", "junit"]
-
-    @classmethod
-    def build(
-        cls,
-        *,
-        logical_argv: tuple[str, ...],
-        logical_cwd: str,
-        result_source: Literal["exit", "file", "junit"] = "exit",
-    ) -> PinnedCommandSpec:
-        if (
-            not isinstance(logical_argv, tuple)
-            or not logical_argv
-            or len(logical_argv) > 128
-            or any(
-                not isinstance(item, str)
-                or not item
-                or "\x00" in item
-                or len(item.encode()) > 4096
-                for item in logical_argv
-            )
-        ):
-            raise CodexProviderError("pinned argv must be a bounded non-empty array")
-        if not isinstance(logical_cwd, str) or not logical_cwd or "\x00" in logical_cwd:
-            raise CodexProviderError("pinned cwd must be a bounded relative path")
-        cwd = PurePosixPath(logical_cwd)
-        if cwd.is_absolute() or any(part in {"", ".."} for part in cwd.parts):
-            raise CodexProviderError("pinned cwd must remain inside its workspace")
-        if result_source not in {"exit", "file", "junit"}:
-            raise CodexProviderError("unknown pinned result source")
-        return cls(logical_argv, logical_cwd, result_source)
-
-    @classmethod
-    def parse(cls, value: object) -> PinnedCommandSpec:
-        if not isinstance(value, Mapping) or set(value) != {
-            "schema",
-            "logical_argv",
-            "logical_cwd",
-            "result_source",
-        }:
-            raise CodexProviderError("invalid closed pinned command spec")
-        if value["schema"] != "lockstep.pinned-command/v1":
-            raise CodexProviderError("unsupported pinned command spec")
-        argv = value["logical_argv"]
-        if not isinstance(argv, list):
-            raise CodexProviderError("pinned argv must be an array")
-        return cls.build(
-            logical_argv=tuple(argv),
-            logical_cwd=value["logical_cwd"],
-            result_source=value["result_source"],
-        )
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "schema": "lockstep.pinned-command/v1",
-            "logical_argv": list(self.logical_argv),
-            "logical_cwd": self.logical_cwd,
-            "result_source": self.result_source,
-        }
 
 
 class _PinnedCodexStrategy(_CodexAttemptDriver):
@@ -123,7 +55,10 @@ class _PinnedCodexStrategy(_CodexAttemptDriver):
         values = dict(request.inputs)
         if set(values) != {"command", "snapshot"}:
             raise CodexProviderError("pinned request has unknown or missing inputs")
-        return PinnedCommandSpec.parse(values["command"])
+        try:
+            return PinnedCommandSpec.parse(values["command"])
+        except (TypeError, ValueError) as exc:
+            raise CodexProviderError("invalid pinned command contract") from exc
 
     def _request_payload(self, request: EffectRequest) -> tuple[bytes, str]:
         spec = self._spec(request)

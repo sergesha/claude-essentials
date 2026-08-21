@@ -11,7 +11,10 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 import re
+import shlex
 from typing import Mapping, Protocol
+
+from lockstep.runtime.effects.models import PinnedCommandSpec
 
 from .diagnostics import Diagnostic, DiagnosticError
 from .ir import (
@@ -241,9 +244,23 @@ class _Validator:
             return BlockContract(block, EffectContract(block.writes), self.retry(retry, f"{pointer}/retry")), {}
         if isinstance(block, VerifyIR):
             self.handlers(block.on_failure, block.on_error, f"{pointer}/verify")
+            try:
+                argv = tuple(shlex.split(block.command))
+                PinnedCommandSpec.build(
+                    logical_argv=argv,
+                    logical_cwd=block.cwd or ".",
+                    result_source="exit",
+                )
+            except (TypeError, ValueError) as exc:
+                self.fail(
+                    "LSW301",
+                    f"verify command contract is invalid: {exc}",
+                    f"{pointer}/verify",
+                    "use a bounded shell-free argv string and safe relative cwd",
+                )
             produced = self.validator_symbol(block, pointer)
             retry = block.retry or self.workflow.defaults.retry
-            return BlockContract(block, EffectContract(block.writes), self.retry(retry, f"{pointer}/verify/retry")), produced
+            return BlockContract(block, EffectContract(), self.retry(retry, f"{pointer}/verify/retry")), produced
         if isinstance(block, DecideIR):
             self.handlers(block.on_failure, block.on_error, f"{pointer}/decide")
             return BlockContract(block, EffectContract(), None), self.decision_symbol(block, pointer)
@@ -312,9 +329,22 @@ class _Validator:
             self.fail("LSW301", "a trusted decision requires an explicit id", f"{pointer}/decide/id", "add a unique decision id")
         cases = using.get("cases")
         default = using.get("default")
-        if not isinstance(cases, Mapping) or not isinstance(default, str) or not default:
+        if (
+            not isinstance(cases, Mapping)
+            or not isinstance(default, str)
+            or not _ID.fullmatch(default)
+        ):
             self.fail("LSW301", "changed-paths requires typed cases and a default", f"{pointer}/decide/using", "provide case labels and a default")
-        values = tuple(str(case) for case in cases) + (default,)
+        for label, paths in cases.items():
+            if (
+                not isinstance(label, str)
+                or not _ID.fullmatch(label)
+                or not isinstance(paths, tuple)
+                or not paths
+                or any(not isinstance(path, str) or not path for path in paths)
+            ):
+                self.fail("LSW301", "changed-paths cases must have logical labels and non-empty path lists", f"{pointer}/decide/using/cases", "use logical labels with at least one path")
+        values = tuple(cases) + (default,)
         if len(set(values)) != len(values):
             self.fail("LSW301", "decision outcome labels must be unique", f"{pointer}/decide/using", "do not repeat the default as a case")
         return {block.id: OutcomeSymbol(block.id, values, OutcomeProvenance.DECISION)}
@@ -458,20 +488,9 @@ class _Validator:
     def accept(self, block: AcceptIR, pointer: str) -> BlockContract:
         if block.verdict != "PASS":
             self.fail("LSW108", "accept verdict must be PASS", f"{pointer}/accept/verdict", "use verdict: PASS")
-        paired = block.artifact is not None and block.hash_from is not None
-        from_handle = block.artifact_from is not None
-        if paired == from_handle or (block.artifact is None) != (block.hash_from is None):
-            self.fail("LSW108", "accept requires artifact plus hash_from, or artifact_from", f"{pointer}/accept", "choose exactly one accept artifact form")
-        values = (block.artifact, block.hash_from) if paired else (block.artifact_from,)
-        if any(not isinstance(value, str) or not value for value in values):
-            self.fail("LSW108", "accept references must be non-empty strings", f"{pointer}/accept", "provide a non-empty artifact reference")
-        if block.hash_from is not None:
-            artifact = self.artifacts.get(block.hash_from)
-            if artifact is None:
-                self.fail("LSW304", "accept.hash_from must reference a resolved call artifact", f"{pointer}/accept/hash_from", "reference <call-id>.<export-handle>")
-            if block.artifact != artifact.destination:
-                self.fail("LSW304", "accept artifact must equal its resolved call destination", f"{pointer}/accept/artifact", "use the fixed destination declared by the call")
-        elif block.artifact_from is not None and block.artifact_from not in self.artifacts:
+        if not isinstance(block.artifact_from, str) or not block.artifact_from:
+            self.fail("LSW108", "accept.artifact_from must be non-empty", f"{pointer}/accept/artifact_from", "provide a resolved artifact handle")
+        if block.artifact_from not in self.artifacts:
             self.fail("LSW304", "accept.artifact_from must reference a resolved parallel artifact", f"{pointer}/accept/artifact_from", "reference a joined qualified artifact handle")
         return BlockContract(block, EffectContract())
 

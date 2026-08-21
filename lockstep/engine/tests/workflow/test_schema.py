@@ -220,6 +220,22 @@ def test_mapping_blocks_reject_outer_fields_instead_of_discarding_them(
 
 
 @pytest.mark.parametrize(
+    ("using", "pointer"),
+    [
+        ("{type: changed-paths, since: start, cases: {'bad label': [src/**]}, default: low}", "/flow/0/decide/using/cases/bad label"),
+        ("{type: changed-paths, since: start, cases: {high: []}, default: low}", "/flow/0/decide/using/cases/high"),
+        ("{type: changed-paths, since: start, cases: {high: [src/**]}, default: 'bad label'}", "/flow/0/decide/using/default"),
+    ],
+)
+def test_decide_schema_matches_the_exact_closed_descriptor_domain(
+    workflow_file: Path, using: str, pointer: str
+) -> None:
+    workflow_file.write_text(BASE + f"flow:\n- decide: {{id: risk, using: {using}}}\n")
+
+    assert raises_diagnostic("LSW1", workflow_file).pointer == pointer
+
+
+@pytest.mark.parametrize(
     ("block", "pointer"),
     [
         ("graph: {fragment: {exits: {pass: done}, effects: {mode: read-only, writes: []}}, nodes: {}, edges: []}", "/flow/0/graph/fragment"),

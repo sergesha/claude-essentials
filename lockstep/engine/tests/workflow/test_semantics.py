@@ -125,8 +125,7 @@ def test_validate_semantics_builds_qualified_call_artifacts_and_effect_contracts
     runner: codex
     artifacts: {review: .lockstep/review.md}
 - accept:
-    artifact: .lockstep/review.md
-    hash_from: review.review
+    artifact_from: review.review
     verdict: PASS
 ''',
     )
@@ -210,7 +209,7 @@ def test_parallel_semantics_rejects_direct_ir_accept_block() -> None:
     workflow = WorkflowIR(
         "1", "release", "Release safely", ("**",),
         (ParallelIR("gates", "all", {
-            "one": (AcceptIR(None, ".lockstep/review.md", "review.review", None, "PASS"),),
+            "one": (AcceptIR(None, "review.review", "PASS"),),
             "two": (),
         }),),
     )
@@ -246,7 +245,7 @@ def test_choose_contract_preserves_nested_branches_and_reconverges(workflow_file
     value: risk
     cases:
       high:
-        - verify: {id: security, command: security-check, retry: {limit: 2, exhausted: escalate}, writes: [.reports/security.txt]}
+        - verify: {id: security, command: security-check, retry: {limit: 2, exhausted: escalate}}
       low:
         - verify: {id: tests, command: pytest -q}
 ''',
@@ -257,7 +256,7 @@ def test_choose_contract_preserves_nested_branches_and_reconverges(workflow_file
 
     assert choose.reconverges is True
     assert choose.branches["high"].blocks[0].retry.total_executions == 2
-    assert choose.effects.writes == (".reports/security.txt",)
+    assert choose.effects.writes == ()
 
 
 @pytest.mark.parametrize(
@@ -271,7 +270,17 @@ def test_choose_rejects_unknown_sources_and_labels(
     value: str, cases: dict[str, tuple], default: tuple, expected_pointer: str
 ) -> None:
     """Permissive routing would turn arbitrary evidence strings into control flow."""
-    prefix = () if value == "unknown" else (DecideIR("risk", {"type": "changed-paths", "since": "start", "cases": {}, "default": "low"}),)
+    prefix = () if value == "unknown" else (
+        DecideIR(
+            "risk",
+            {
+                "type": "changed-paths",
+                "since": "start",
+                "cases": {"high": ["src/**"]},
+                "default": "low",
+            },
+        ),
+    )
     workflow = WorkflowIR("1", "release", "Release safely", ("**",), prefix + (ChooseIR(None, value, cases, default),))
 
     error = semantic_error(workflow)
@@ -389,14 +398,14 @@ def test_parallel_contract_preserves_branch_flow_and_qualified_artifact_handle(w
             runner: codex
             artifacts: {review: review.md}
       lint:
-        - verify: {id: lint, command: ruff check ., writes: [.reports/lint.txt]}
+        - verify: {id: lint, command: ruff check .}
 ''',
     )
 
     validated = validate_semantics(workflow, InMemoryWorkflowCatalog({"independent-review": review_contract()}))
     parallel = validated.flow.blocks[0]
 
-    assert parallel.branches["lint"].effects.writes == (".reports/lint.txt",)
+    assert parallel.branches["lint"].effects.writes == ()
     assert validated.artifacts["gates.security.review.review"].destination == "review.md"
     assert parallel.effects.writes == ()
 
@@ -454,14 +463,14 @@ def test_choose_cannot_reconverge_to_an_artifact_produced_by_only_one_case(
         - call: {id: review, workflow: independent-review, runner: codex, artifacts: {review: .lockstep/review.md}}
       low:
         - verify: {command: pytest -q}
-- accept: {artifact: .lockstep/review.md, hash_from: review.review, verdict: PASS}
+- accept: {artifact_from: review.review, verdict: PASS}
 ''',
     )
 
     error = semantic_error(workflow, InMemoryWorkflowCatalog({"independent-review": review_contract()}))
 
     assert error.code == "LSW304"
-    assert error.pointer == "/flow/2/accept/hash_from"
+    assert error.pointer == "/flow/2/accept/artifact_from"
 
 
 def test_child_contract_requires_terminal_engine_owned_outcomes(workflow_file: Path) -> None:
@@ -535,9 +544,9 @@ def test_direct_ir_semantic_diagnostic_has_no_source_mark() -> None:
         (WorkflowIR("2", "release", "Release safely", ("**",), ()), "/workflow_version"),
         (WorkflowIR("1", "release", "Release safely", ("src/**",), ()), "/protect"),
         (WorkflowIR("1", "release", "Release safely", ("**",), (GraphIR(None, "other"),)), "/flow/0"),
-        (WorkflowIR("1", "release", "Release safely", ("**",), (AcceptIR(None, None, None, None, "FAIL"),)), "/flow/0/accept/verdict"),
-        (WorkflowIR("1", "release", "Release safely", ("**",), (AcceptIR(None, ".lockstep/a.md", "review.review", "review.review", "PASS"),)), "/flow/0/accept"),
-        (WorkflowIR("1", "release", "Release safely", ("**",), (AcceptIR(None, None, "review.review", None, "PASS"),)), "/flow/0/accept"),
+        (WorkflowIR("1", "release", "Release safely", ("**",), (AcceptIR(None, "review.review", "FAIL"),)), "/flow/0/accept/verdict"),
+        (WorkflowIR("1", "release", "Release safely", ("**",), (AcceptIR(None, "", "PASS"),)), "/flow/0/accept/artifact_from"),
+        (WorkflowIR("1", "release", "Release safely", ("**",), (AcceptIR(None, "review.review", "PASS"),)), "/flow/0/accept/artifact_from"),
     ],
 )
 def test_direct_ir_rechecks_v1_document_graph_and_accept_boundaries(workflow: WorkflowIR, pointer: str) -> None:
@@ -545,7 +554,7 @@ def test_direct_ir_rechecks_v1_document_graph_and_accept_boundaries(workflow: Wo
     error = semantic_error(workflow)
 
     assert error.pointer == pointer
-    assert error.code in {"LSW108", "LSW120", "LSW301"}
+    assert error.code in {"LSW108", "LSW120", "LSW301", "LSW304"}
 
 
 @pytest.mark.parametrize("label", ["bad/key", "bad~key"])
@@ -556,7 +565,7 @@ def test_semantic_pointers_escape_dynamic_choose_labels(workflow_file: Path, lab
         f'''\
 - decide:
     id: risk
-    using: {{type: changed-paths, since: start, cases: {{}}, default: low}}
+    using: {{type: changed-paths, since: start, cases: {{high: [src/**]}}, default: low}}
 - choose:
     value: risk
     cases: {{"{label}": [{{escalate: {{}}}}]}}
@@ -604,3 +613,43 @@ print(json.dumps(list(validate_semantics(workflow, catalog).artifacts)))
         "gates.review.child.beta",
         "gates.review.child.gamma",
     ]] * 3
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        VerifyIR("check", "echo '"),
+        VerifyIR("check", "echo ok", cwd="../escape"),
+        VerifyIR("check", "   "),
+        VerifyIR("check", " ".join(["x"] * 129)),
+        VerifyIR("check", "x" * 4097),
+    ],
+)
+def test_verify_direct_ir_must_form_an_exact_pinned_command(block: VerifyIR) -> None:
+    workflow = WorkflowIR("1", "release", "Release safely", ("**",), (block,))
+
+    error = semantic_error(workflow)
+
+    assert error.code == "LSW301"
+    assert error.pointer == "/flow/0/verify"
+
+
+@pytest.mark.parametrize(
+    ("using", "pointer"),
+    [
+        ({"type": "changed-paths", "since": "start", "cases": {"bad label": ["src/**"]}, "default": "low"}, "/flow/0/decide/using/cases"),
+        ({"type": "changed-paths", "since": "start", "cases": {"high": []}, "default": "low"}, "/flow/0/decide/using/cases"),
+        ({"type": "changed-paths", "since": "start", "cases": {"high": ["src/**"]}, "default": "bad label"}, "/flow/0/decide/using"),
+    ],
+)
+def test_decide_direct_ir_must_form_an_exact_closed_descriptor(
+    using: dict[str, object], pointer: str
+) -> None:
+    workflow = WorkflowIR(
+        "1", "release", "Release safely", ("**",), (DecideIR("risk", using),)
+    )
+
+    error = semantic_error(workflow)
+
+    assert error.code == "LSW301"
+    assert error.pointer == pointer

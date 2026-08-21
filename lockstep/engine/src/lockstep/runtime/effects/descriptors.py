@@ -12,10 +12,17 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from lockstep.runtime.effects.models import (
+    AcceptDescriptor,
+    AcceptanceResult,
     ArtifactDescriptor,
+    DecisionCase,
+    DecisionDescriptor,
+    DecisionResult,
+    DecisionSpec,
     EffectDescriptor,
     EffectResult,
     RunnerDescriptor,
+    RuntimeInputSelector,
     ScopeDescriptor,
     ScopeResult,
     StateSelector,
@@ -176,21 +183,22 @@ def _runner(value: object) -> RunnerDescriptor | None:
     return RunnerDescriptor(_name(value["selector"], "runner selector"), capabilities)
 
 
-def _inputs(value: object) -> tuple[tuple[str, StateSelector], ...]:
+def _inputs(value: object) -> tuple[tuple[str, StateSelector | RuntimeInputSelector], ...]:
     if not isinstance(value, dict):
         raise TypeError("inputs must be an object")
-    parsed: list[tuple[str, StateSelector]] = []
+    parsed: list[tuple[str, StateSelector | RuntimeInputSelector]] = []
     for input_name, selector in value.items():
         name = _name(input_name, "input name")
         if not isinstance(selector, dict):
             raise TypeError("input selector must be an object")
-        try:
-            _closed(selector, {"state_key"}, {"state_key"}, "input selector")
-        except ValueError as exc:
-            raise ValueError(f"unknown or invalid state selector: {exc}") from exc
-        parsed.append(
-            (name, StateSelector(_name(selector["state_key"], "state selector")))
-        )
+        if set(selector) == {"state_key"}:
+            parsed.append((name, StateSelector(_name(selector["state_key"], "state selector"))))
+        elif set(selector) == {"runtime_key"} and selector["runtime_key"] in {
+            "run_start_project_snapshot", "current_project_snapshot"
+        }:
+            parsed.append((name, RuntimeInputSelector(selector["runtime_key"])))
+        else:
+            raise ValueError("unknown or invalid input selector")
     return tuple(parsed)
 
 
@@ -229,7 +237,7 @@ def parse_effect_descriptor(
     *,
     expected_digest: str | None = None,
     known_state_keys: AbstractSet[str] | None = None,
-) -> EffectDescriptor | ScopeDescriptor:
+) -> EffectDescriptor | ScopeDescriptor | DecisionDescriptor | AcceptDescriptor:
     raw = _bounded_mapping(value, "effect descriptor")
     if raw.get("schema") != "lockstep.effect/v1":
         raise ValueError("unsupported effect descriptor schema")
@@ -245,6 +253,14 @@ def parse_effect_descriptor(
             known_state_keys,
         )
         return parsed_scope
+    if kind == "decide":
+        parsed_decision = _parse_decision_descriptor(raw)
+        _verify_expected_digest(parsed_decision.digest, expected_digest)
+        return parsed_decision
+    if kind == "accept":
+        parsed_accept = _parse_accept_descriptor(raw)
+        _verify_expected_digest(parsed_accept.digest, expected_digest)
+        return parsed_accept
     if kind not in EFFECT_KINDS:
         raise ValueError("unknown effect kind")
     allowed = {
@@ -298,12 +314,68 @@ def parse_effect_descriptor(
     _verify_expected_digest(parsed.digest, expected_digest)
     _verify_known_state_keys(
         (
-            *(selector.state_key for _name, selector in parsed.inputs),
+            *(selector.state_key for _name, selector in parsed.inputs if isinstance(selector, StateSelector)),
             *parsed.scope_state_keys,
         ),
         known_state_keys,
     )
     return parsed
+
+
+def _parse_decision_descriptor(raw: dict[str, Any]) -> DecisionDescriptor:
+    allowed = {"schema", "kind", "logical_id", "decision", "inputs", "result_schema"}
+    _closed(raw, allowed, allowed, "decision descriptor")
+    decision = raw["decision"]
+    if not isinstance(decision, dict):
+        raise TypeError("decision must be an object")
+    _closed(decision, {"type", "since", "cases", "default"}, {"type", "since", "cases", "default"}, "decision")
+    if decision["type"] != "changed-paths" or decision["since"] != "start":
+        raise ValueError("unsupported decision strategy")
+    cases = decision["cases"]
+    if not isinstance(cases, list):
+        raise TypeError("decision cases must be an array")
+    labels: list[str] = []
+    normalized_cases: list[DecisionCase] = []
+    for case in cases:
+        if not isinstance(case, dict):
+            raise TypeError("decision case must be an object")
+        _closed(case, {"label", "paths"}, {"label", "paths"}, "decision case")
+        label = _name(case["label"], "decision label")
+        paths = _string_list(case["paths"], "decision paths")
+        if not paths:
+            raise ValueError("decision paths must not be empty")
+        labels.append(label)
+        normalized_cases.append(DecisionCase(label, paths))
+    default = _name(decision["default"], "decision default")
+    if len(set((*labels, default))) != len(labels) + 1:
+        raise ValueError("decision labels and default must be unique")
+    inputs = _inputs(raw["inputs"])
+    expected_inputs = {
+        "start_snapshot": "run_start_project_snapshot",
+        "current_snapshot": "current_project_snapshot",
+    }
+    if {name: getattr(selector, "runtime_key", None) for name, selector in inputs} != expected_inputs:
+        raise ValueError("decision inputs must be exact runtime snapshot selectors")
+    if raw["result_schema"] != "lockstep.decision-result/v1":
+        raise ValueError("unsupported decision result_schema")
+    canonical = _canonical(raw)
+    return DecisionDescriptor(
+        raw["schema"], "decide", _name(raw["logical_id"], "logical_id"),
+        DecisionSpec("changed-paths", "start", tuple(normalized_cases), default),
+        tuple((name, selector) for name, selector in inputs if isinstance(selector, RuntimeInputSelector)),
+        raw["result_schema"], canonical, hashlib.sha256(canonical).hexdigest(),
+    )
+
+
+def _parse_accept_descriptor(raw: dict[str, Any]) -> AcceptDescriptor:
+    allowed = {"schema", "kind", "logical_id", "artifact_handle", "verdict", "result_schema"}
+    _closed(raw, allowed, allowed, "accept descriptor")
+    if raw["verdict"] != "PASS":
+        raise ValueError("accept verdict must be PASS")
+    if raw["result_schema"] != "lockstep.acceptance-result/v1":
+        raise ValueError("unsupported accept result_schema")
+    canonical = _canonical(raw)
+    return AcceptDescriptor(raw["schema"], "accept", _name(raw["logical_id"], "logical_id"), _name(raw["artifact_handle"], "artifact_handle"), "PASS", raw["result_schema"], canonical, hashlib.sha256(canonical).hexdigest())
 
 
 def _verify_expected_digest(actual: str, expected: str | None) -> None:
@@ -404,6 +476,61 @@ def parse_effect_result(value: object) -> EffectResult:
         fixed_error_code=fixed_error_code,
         evidence_refs=_string_list(raw["evidence_refs"], "evidence_refs"),
         canonical_json=canonical,
+    )
+
+
+def parse_decision_result(
+    value: object, *, descriptor: DecisionDescriptor | None = None
+) -> DecisionResult:
+    raw = _bounded_mapping(value, "decision result")
+    common = {"schema", "effect_id", "outcome", "decision_digest"}
+    if raw.get("schema") != "lockstep.decision-result/v1":
+        raise ValueError("unsupported decision result schema")
+    decision_digest = _hex_digest(raw.get("decision_digest"), "decision_digest")
+    if descriptor is not None and decision_digest != descriptor.digest:
+        raise ValueError("decision result digest does not match descriptor")
+    outcome = raw.get("outcome")
+    if outcome == "PASS":
+        _closed(raw, common | {"value"}, common | {"value"}, "decision result")
+        label = _name(raw["value"], "decision value")
+        if descriptor is not None:
+            labels = [case.label for case in descriptor.decision.cases]
+            labels.append(descriptor.decision.default)
+            if label not in labels:
+                raise ValueError("decision value is outside the descriptor enum")
+        return DecisionResult(
+            raw["schema"], _name(raw["effect_id"], "effect_id"), "PASS",
+            decision_digest, value=label,
+        )
+    if outcome == "ERROR":
+        _closed(raw, common | {"fixed_error_code"}, common | {"fixed_error_code"}, "decision result")
+        if raw["fixed_error_code"] != "decision_input_invalid":
+            raise ValueError("unknown decision fixed_error_code")
+        return DecisionResult(
+            raw["schema"], _name(raw["effect_id"], "effect_id"), "ERROR",
+            decision_digest,
+            fixed_error_code="decision_input_invalid",
+        )
+    raise ValueError("unknown decision result outcome")
+
+
+def parse_acceptance_result(value: object) -> AcceptanceResult:
+    raw = _bounded_mapping(value, "acceptance result")
+    fields = {
+        "schema", "effect_id", "outcome", "artifact_ref", "artifact_digest", "consent_ref"
+    }
+    _closed(raw, fields, fields, "acceptance result")
+    if raw["schema"] != "lockstep.acceptance-result/v1" or raw["outcome"] != "PASS":
+        raise ValueError("unsupported acceptance result")
+    artifact_ref = _optional_string(raw["artifact_ref"], "artifact_ref")
+    consent_ref = _optional_string(raw["consent_ref"], "consent_ref")
+    if artifact_ref is None or consent_ref is None:
+        raise ValueError("acceptance references must be non-null")
+    return AcceptanceResult(
+        raw["schema"], _name(raw["effect_id"], "effect_id"), "PASS",
+        artifact_ref,
+        _hex_digest(raw["artifact_digest"], "artifact_digest"),
+        consent_ref,
     )
 
 

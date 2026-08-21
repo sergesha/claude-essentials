@@ -194,3 +194,23 @@ def test_manual_recipe_cannot_smuggle_compiler_only_scope_descriptor(tmp_path):
     errors = check_recipe(recipe)
 
     assert any("scope" in error and "compiler" in error for error in errors)
+
+
+def test_manual_native_loop_may_exit_through_ordinary_passthrough_nodes(tmp_path):
+    recipe = tmp_path / "native-loop.recipe.yaml"
+    recipe.write_text(
+        "name: native-loop\n"
+        "nodes:\n"
+        "  repeat: {type: passthrough, output: {again: true}}\n"
+        "  exit: {type: passthrough}\n"
+        "  next: {type: passthrough}\n"
+        "edges:\n"
+        "  - {from: START, to: repeat}\n"
+        "  - {from: repeat, to: repeat, condition: 'again == true'}\n"
+        "  - {from: exit, to: next}\n"
+        "  - {from: next, to: END}\n"
+        "loop_limits: {repeat: 1}\n"
+        "loop_exits: {repeat: exit}\n"
+    )
+
+    assert check_recipe(recipe) == []

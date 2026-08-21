@@ -1,0 +1,28 @@
+workflow_version: "1"
+name: control-flow
+description: Canonical Task 8 control-flow golden
+protect: ["**"]
+flow:
+  - decide:
+      id: risk
+      using:
+        type: changed-paths
+        since: start
+        cases: {high: [auth/**]}
+        default: low
+  - choose:
+      value: risk
+      cases:
+        high:
+          - repeat:
+              id: remediation
+              limit: 2
+              until: focused.passed
+              exhausted: escalate
+              do:
+                - verify:
+                    id: focused
+                    command: pytest -q tests/auth
+                    timeout: 20
+      default:
+        - escalate: {}

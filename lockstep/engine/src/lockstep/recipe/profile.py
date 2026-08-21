@@ -58,7 +58,9 @@ flagged as an invalid edge shape rather than silently parsed.
 
 from __future__ import annotations
 
+import hashlib
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -66,9 +68,94 @@ import yaml
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
 
+from lockstep.runtime.effects.descriptors import parse_effect_descriptor
+from lockstep.runtime.effects.models import ScopeDescriptor
+
 FORBIDDEN_NODE_TYPES = {"llm", "agent", "router", "copilot", "race"}
 BASELINE_CHECK_TYPES = {"fresh", "unchanged", "changed_in", "diff_only"}
 PLACEHOLDER_RE = re.compile(r"\{[A-Za-z_]\w*\}")
+COMPILER_CONTRACT_VERSION = "1"
+_PROVENANCE_CONTEXTS = frozenset({"compiler-output", "canonical-match"})
+_PROVENANCE_FACTORY_TOKEN = object()
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class CompilerProvenance:
+    """In-memory capability binding compiler authority to exact recipe bytes.
+
+    Project YAML cannot construct this capability.  The compiler and canonical
+    freshness verifier use the private factory below after producing or proving
+    the complete byte sequence respectively.
+    """
+
+    _recipe_bytes: bytes = field(repr=False)
+    context: str
+    compiler_version: str
+    recipe_sha256: str
+
+    def __init__(
+        self,
+        recipe_bytes: bytes,
+        *,
+        context: str,
+        compiler_version: str,
+        _token: object | None = None,
+    ) -> None:
+        if _token is not _PROVENANCE_FACTORY_TOKEN:
+            raise TypeError("CompilerProvenance is issued only by the compiler verifier")
+        if context not in _PROVENANCE_CONTEXTS:
+            raise ValueError("unsupported compiler provenance context")
+        if compiler_version != COMPILER_CONTRACT_VERSION:
+            raise ValueError("unsupported compiler provenance version")
+        if not isinstance(recipe_bytes, bytes):
+            raise TypeError("compiler provenance recipe bytes must be bytes")
+        object.__setattr__(self, "_recipe_bytes", recipe_bytes)
+        object.__setattr__(self, "context", context)
+        object.__setattr__(self, "compiler_version", compiler_version)
+        object.__setattr__(
+            self, "recipe_sha256", hashlib.sha256(recipe_bytes).hexdigest()
+        )
+
+    def matches(self, recipe_bytes: bytes) -> bool:
+        return self._recipe_bytes == recipe_bytes
+
+
+def _create_compiler_provenance(
+    recipe_bytes: bytes,
+    *,
+    context: str,
+    compiler_version: str = COMPILER_CONTRACT_VERSION,
+) -> CompilerProvenance:
+    """Issue an exact-byte compiler capability for trusted internal callers."""
+
+    return CompilerProvenance(
+        recipe_bytes,
+        context=context,
+        compiler_version=compiler_version,
+        _token=_PROVENANCE_FACTORY_TOKEN,
+    )
+
+
+def _check_provenance(
+    recipe_bytes: bytes,
+    provenance: CompilerProvenance | None,
+    errors: list[str],
+) -> bool:
+    if provenance is None:
+        return False
+    if not isinstance(provenance, CompilerProvenance):
+        errors.append("compiler provenance capability is invalid")
+        return False
+    if provenance.context not in _PROVENANCE_CONTEXTS:
+        errors.append("compiler provenance context is invalid")
+        return False
+    if provenance.compiler_version != COMPILER_CONTRACT_VERSION:
+        errors.append("compiler provenance version does not match this profile")
+        return False
+    if not provenance.matches(recipe_bytes):
+        errors.append("compiler provenance does not match the exact recipe bytes")
+        return False
+    return True
 
 def _is_escalate_marker(message: dict) -> bool:
     if not isinstance(message, dict):
@@ -137,14 +224,26 @@ def _check_loops(
     loop_exits: dict,
     errors: list[str],
 ) -> None:
+    for source, target_name in loop_exits.items():
+        target = nodes.get(target_name)
+        if isinstance(target, dict) and target.get("type") == "interrupt":
+            errors.append(
+                "loop_exits must be gated through passthrough and may not target "
+                "an interrupt directly — yamlgraph "
+                f"skips interrupt prepare (loop_exits['{source}'] -> '{target_name}')"
+            )
     seen_sources: set[str] = set()
     for src, tgt in _find_back_edges(edges_by_from):
-        if src in seen_sources:
+        # Legacy recipes cap the repeating back-edge source (validator).
+        # Native lowering caps the attempt gate before the protected effect,
+        # which is the back-edge target. Both are real yamlgraph node limits.
+        capped = tgt if tgt in loop_limits else src
+        if capped in seen_sources:
             continue
-        seen_sources.add(src)
+        seen_sources.add(capped)
 
-        cap = loop_limits.get(src)
-        if src not in loop_limits:
+        cap = loop_limits.get(capped)
+        if capped not in loop_limits:
             errors.append(
                 f"loop_limits: node '{src}' loops back to '{tgt}' without a loop_limits cap"
             )
@@ -154,14 +253,14 @@ def _check_loops(
             errors.append(
                 f"loop_limits: node '{src}' cap must be a positive integer, got {cap!r}"
             )
-        if src not in loop_exits:
+        if capped not in loop_exits:
             errors.append(
                 f"loop_exits must target a passthrough gate for looping node '{src}' "
                 "(no loop_exits entry)"
             )
             continue
 
-        exit_target_name = loop_exits[src]
+        exit_target_name = loop_exits[capped]
         exit_target = nodes.get(exit_target_name)
         if exit_target is None:
             errors.append(
@@ -170,30 +269,22 @@ def _check_loops(
             )
             continue
         if exit_target.get("type") == "interrupt":
-            errors.append(
-                "escalate must be gated through passthrough — yamlgraph skips "
-                f"interrupt prepare on loop_exits (loop_exits['{src}'] points "
-                f"directly at interrupt '{exit_target_name}')"
-            )
             continue
-        if exit_target.get("type") != "passthrough":
-            errors.append(
-                f"loop_exits must target a passthrough gate ('{src}' -> "
-                f"'{exit_target_name}' is type {exit_target.get('type')!r})"
-            )
-            continue
-
         gate_edges = edges_by_from.get(exit_target_name, [])
         if len(gate_edges) != 1:
-            errors.append(
-                "loop_exits must target a passthrough gate with exactly one "
-                f"outgoing edge (gate '{exit_target_name}' has {len(gate_edges)})"
-            )
             continue
 
         final_target_name = gate_edges[0].get("to")
         final_target = nodes.get(final_target_name) if final_target_name else None
-        if final_target is None or not _is_escalate_marker(final_target.get("message") or {}):
+        final_message = final_target.get("message") if isinstance(final_target, dict) else None
+        protected = isinstance(final_message, dict) and "lockstep_effect" in final_message
+        looks_like_escalate = (
+            isinstance(final_message, dict)
+            and final_message.get("step") == "escalate"
+        )
+        if looks_like_escalate and not (
+            _is_escalate_marker(final_message or {}) or protected
+        ):
             errors.append(
                 f"escalate marker: loop_exits chain from '{src}' via "
                 f"'{exit_target_name}' does not terminate on a {{step: escalate}} interrupt"
@@ -207,6 +298,8 @@ def _check_interrupt_node(
     nodes: dict[str, dict],
     doc: dict,
     errors: list[str],
+    *,
+    compiler_authorized: bool,
 ) -> None:
     message = node.get("message") or {}
     if not isinstance(message, dict):
@@ -224,6 +317,24 @@ def _check_interrupt_node(
     # idempotent: true reuses whichever payload parked first).
     if node.get("idempotent") is not False:
         errors.append(f"interrupt '{name}' must declare idempotent: false")
+
+    if "lockstep_effect" in message:
+        try:
+            descriptor = parse_effect_descriptor(
+                message["lockstep_effect"],
+                known_state_keys=set(doc.get("state") or {}),
+            )
+        except (TypeError, ValueError) as exc:
+            errors.append(f"invalid lockstep_effect (interrupt '{name}'): {exc}")
+            return
+        if isinstance(descriptor, ScopeDescriptor) and not compiler_authorized:
+            errors.append(
+                f"scope descriptor (interrupt '{name}') requires compiler provenance"
+            )
+        # Native protected interrupts route directly on their typed result.  The
+        # legacy python-validator pairing and evidence brief rules below belong
+        # only to ordinary human work interrupts.
+        return
 
     if not _is_escalate_marker(message):
         # validator pairing: ALL outgoing edges must target one node, and
@@ -308,12 +419,20 @@ def _check_interrupt_node(
                 break
 
 
-def check_recipe_full(path: str | Path) -> tuple[list[str], list[str]]:
+def check_recipe_bytes(
+    recipe_bytes: bytes,
+    provenance: CompilerProvenance | None = None,
+) -> tuple[list[str], list[str]]:
+    if not isinstance(recipe_bytes, bytes):
+        raise TypeError("recipe profile input must be bytes")
     errors: list[str] = []
     warnings: list[str] = []
 
-    with open(path) as f:
-        doc = yaml.safe_load(f) or {}
+    doc = yaml.safe_load(recipe_bytes) or {}
+    compiler_authorized = _check_provenance(recipe_bytes, provenance, errors)
+
+    if "x-lockstep-generated" in doc and not compiler_authorized:
+        errors.append("x-lockstep-generated marker requires compiler provenance")
 
     nodes: dict[str, dict] = doc.get("nodes") or {}
     raw_edges: list = doc.get("edges") or []
@@ -341,6 +460,8 @@ def check_recipe_full(path: str | Path) -> tuple[list[str], list[str]]:
         msg = node.get("message") or {}
         if not isinstance(msg, dict):
             continue  # reported by the interrupt rules
+        if "lockstep_effect" in msg:
+            continue
         if _is_escalate_marker(msg):
             continue
         step = msg.get("step")
@@ -357,7 +478,15 @@ def check_recipe_full(path: str | Path) -> tuple[list[str], list[str]]:
     for name, node in nodes.items():
         if not isinstance(node, dict) or node.get("type") != "interrupt":
             continue
-        _check_interrupt_node(name, node, edges_by_from, nodes, doc, errors)
+        _check_interrupt_node(
+            name,
+            node,
+            edges_by_from,
+            nodes,
+            doc,
+            errors,
+            compiler_authorized=compiler_authorized,
+        )
 
     _check_loops(
         edges_by_from,
@@ -376,6 +505,13 @@ def check_recipe_full(path: str | Path) -> tuple[list[str], list[str]]:
             )
 
     return errors, warnings
+
+
+def check_recipe_full(
+    path: str | Path,
+    provenance: CompilerProvenance | None = None,
+) -> tuple[list[str], list[str]]:
+    return check_recipe_bytes(Path(path).read_bytes(), provenance)
 
 
 def check_recipe(path: str | Path) -> list[str]:

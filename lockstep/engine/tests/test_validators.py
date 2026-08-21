@@ -536,9 +536,9 @@ import hashlib
 
 def _hash_state(art, digest):
     return {"brief": {"checks": [{"type": "file_matches_hash", "path_from": "p",
-                                  "hash_from": "_subcall_envelope.artifact_hashes.review"}]},
+                                  "hash_from": "artifact_digests.review"}]},
             "evidence": {"p": art.name}, "_project": str(art.parent),
-            "_state": {"_subcall_envelope": {"artifact_hashes": {"review": digest}}}}
+            "_state": {"artifact_digests": {"review": digest}}}
 
 
 def test_file_matches_hash_pass_and_fail(tmp_path):

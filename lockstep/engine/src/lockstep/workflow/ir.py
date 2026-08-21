@@ -67,15 +67,9 @@ class VerifyIR:
     command: str
     cwd: str | None = None
     timeout: int | None = None
-    junit: FrozenMapping | None = None
-    writes: tuple[str, ...] = ()
     retry: RetryIR | None = None
     on_failure: str | None = None
     on_error: str | None = None
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "junit", freeze(self.junit) if self.junit is not None else None)
-
 
 @dataclass(frozen=True)
 class DecideIR:
@@ -125,9 +119,7 @@ class CallIR:
 @dataclass(frozen=True)
 class AcceptIR:
     id: str | None
-    artifact: str | None
-    hash_from: str | None
-    artifact_from: str | None
+    artifact_from: str
     verdict: Literal["PASS"]
 
 
@@ -177,6 +169,7 @@ class WorkflowIR:
     defaults: WorkflowDefaultsIR = field(default_factory=WorkflowDefaultsIR)
     source_path: Path | None = None
     source_marks: Mapping[str, SourceLocation] = field(default_factory=dict)
+    source_sha256: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "source_marks", freeze(self.source_marks))

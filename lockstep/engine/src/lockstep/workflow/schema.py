@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 from pathlib import Path
 import re
 from typing import Any, Iterable, Mapping, NoReturn
@@ -39,6 +40,7 @@ class MarkedDocument:
     path: Path
     data: Any
     marks: Mapping[str, SourceMark]
+    source_sha256: str
 
     def mark_for(self, pointer: str) -> SourceMark | None:
         current = pointer
@@ -157,14 +159,18 @@ def _diagnostic_from_yaml(path: Path, exc: Exception) -> DiagnosticError:
 def load_workflow(path: str | Path) -> MarkedDocument:
     source = Path(path)
     try:
-        loader = _MarkedSafeLoader(source.read_text())
+        source_bytes = source.read_bytes()
+        source_sha256 = hashlib.sha256(source_bytes).hexdigest()
+        loader = _MarkedSafeLoader(source_bytes.decode("utf-8"))
         try:
             node = loader.get_single_node()
             if node is None:
-                return MarkedDocument(source, None, {})
+                return MarkedDocument(source, None, {}, source_sha256)
             marks: dict[str, SourceMark] = {}
             _collect_marks(node, "", marks)
-            return MarkedDocument(source, loader.construct_document(node), marks)
+            return MarkedDocument(
+                source, loader.construct_document(node), marks, source_sha256
+            )
         finally:
             loader.dispose()
     except _MarkedYamlError as exc:
@@ -263,7 +269,10 @@ class _Parser:
             if "retry" in defaults:
                 defaults_ir = WorkflowDefaultsIR(self.retry(defaults["retry"], "/defaults/retry"))
         flow = tuple(self.parse_flow(self.sequence(root["flow"], "/flow", "flow"), "/flow"))
-        return WorkflowIR("1", name, description, protect, flow, defaults_ir, self.document.path, self.document.marks)
+        return WorkflowIR(
+            "1", name, description, protect, flow, defaults_ir,
+            self.document.path, self.document.marks, self.document.source_sha256,
+        )
 
     def parse_flow(self, items: list[Any], pointer: str, parallel: bool = False) -> list[BlockIR]:
         blocks: list[BlockIR] = []
@@ -300,8 +309,8 @@ class _Parser:
     def block_verify(self, item: dict[str, Any], pointer: str) -> VerifyIR:
         self.keys(item, pointer, {"verify"})
         body = self.mapping(item["verify"], f"{pointer}/verify", "verify")
-        self.keys(body, f"{pointer}/verify", {"id", "command", "cwd", "timeout", "junit", "writes", "retry", "on_failure", "on_error"}, {"command"})
-        return VerifyIR(self.identifier(body.get("id"), f"{pointer}/verify/id", optional=True), self.string(body["command"], f"{pointer}/verify/command", "command"), self.string(body["cwd"], f"{pointer}/verify/cwd", "cwd") if "cwd" in body else None, self.positive_int(body["timeout"], f"{pointer}/verify/timeout", "timeout") if "timeout" in body else None, self.optional_mapping(body, "junit", f"{pointer}/verify"), self.strings(body.get("writes", []), f"{pointer}/verify/writes", "writes"), self.retry(body["retry"], f"{pointer}/verify/retry") if "retry" in body else None, self.handler(body.get("on_failure"), f"{pointer}/verify/on_failure"), self.handler(body.get("on_error"), f"{pointer}/verify/on_error"))
+        self.keys(body, f"{pointer}/verify", {"id", "command", "cwd", "timeout", "retry", "on_failure", "on_error"}, {"command"})
+        return VerifyIR(self.identifier(body.get("id"), f"{pointer}/verify/id", optional=True), self.string(body["command"], f"{pointer}/verify/command", "command"), self.string(body["cwd"], f"{pointer}/verify/cwd", "cwd") if "cwd" in body else None, self.positive_int(body["timeout"], f"{pointer}/verify/timeout", "timeout") if "timeout" in body else None, self.retry(body["retry"], f"{pointer}/verify/retry") if "retry" in body else None, self.handler(body.get("on_failure"), f"{pointer}/verify/on_failure"), self.handler(body.get("on_error"), f"{pointer}/verify/on_error"))
 
     def block_decide(self, item: dict[str, Any], pointer: str) -> DecideIR:
         self.keys(item, pointer, {"decide"})
@@ -313,9 +322,12 @@ class _Parser:
             self.fail("LSW108", "v1 decide uses changed-paths since start", f"{pointer}/decide/using", "use type: changed-paths and since: start")
         cases = self.mapping(using["cases"], f"{pointer}/decide/using/cases", "decision cases")
         for key, value in cases.items():
-            self.string(key, f"{pointer}/decide/using/cases/{_escape(str(key))}", "case label")
-            self.strings(value, f"{pointer}/decide/using/cases/{_escape(str(key))}", "case paths")
-        self.string(using["default"], f"{pointer}/decide/using/default", "decision default")
+            label_pointer = f"{pointer}/decide/using/cases/{_escape(str(key))}"
+            self.identifier(key, label_pointer, "case label")
+            paths = self.strings(value, label_pointer, "case paths")
+            if not paths:
+                self.fail("LSW108", "decision case paths must not be empty", label_pointer, "declare at least one changed path glob")
+        self.identifier(using["default"], f"{pointer}/decide/using/default", "decision default")
         return DecideIR(self.identifier(body.get("id"), f"{pointer}/decide/id", optional=True), using, self.handler(body.get("on_failure"), f"{pointer}/decide/on_failure"), self.handler(body.get("on_error"), f"{pointer}/decide/on_error"))
 
     def block_choose(self, item: dict[str, Any], pointer: str) -> ChooseIR:
@@ -345,14 +357,10 @@ class _Parser:
     def block_accept(self, item: dict[str, Any], pointer: str) -> AcceptIR:
         self.keys(item, pointer, {"accept"})
         body = self.mapping(item["accept"], f"{pointer}/accept", "accept")
-        self.keys(body, f"{pointer}/accept", {"id", "artifact", "hash_from", "artifact_from", "verdict"}, {"verdict"})
-        paired = "artifact" in body and "hash_from" in body
-        from_handle = "artifact_from" in body
-        if paired == from_handle:
-            self.fail("LSW108", "accept requires artifact plus hash_from, or artifact_from", f"{pointer}/accept", "choose exactly one accept artifact form")
+        self.keys(body, f"{pointer}/accept", {"id", "artifact_from", "verdict"}, {"artifact_from", "verdict"})
         if body["verdict"] != "PASS":
             self.fail("LSW108", "accept verdict must be PASS", f"{pointer}/accept/verdict", "use verdict: PASS")
-        return AcceptIR(self.identifier(body.get("id"), f"{pointer}/accept/id", optional=True), self.string(body["artifact"], f"{pointer}/accept/artifact", "artifact") if paired else None, self.string(body["hash_from"], f"{pointer}/accept/hash_from", "hash_from") if paired else None, self.string(body["artifact_from"], f"{pointer}/accept/artifact_from", "artifact_from") if from_handle else None, "PASS")
+        return AcceptIR(self.identifier(body.get("id"), f"{pointer}/accept/id", optional=True), self.string(body["artifact_from"], f"{pointer}/accept/artifact_from", "artifact_from"), "PASS")
 
     def block_parallel(self, item: dict[str, Any], pointer: str) -> ParallelIR:
         self.keys(item, pointer, {"parallel"})
