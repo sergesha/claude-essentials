@@ -5,6 +5,8 @@ from lockstep.runtime.native_models import (
     NativeSnapshot,
 )
 from lockstep.runtime.status import project_status
+from lockstep.runtime.effects.descriptors import derive_effect_id, parse_effect_descriptor
+from types import SimpleNamespace
 
 
 def _binding() -> RunBinding:
@@ -76,3 +78,65 @@ def test_protected_engine_interrupt_is_not_exposed_as_worker_authority():
     assert status.status == "running"
     assert status.owner == "engine"
     assert status.next_action == "scenario_wait"
+
+
+def test_pinned_status_exposes_only_compiler_logical_command_and_ledger_phase():
+    raw = {
+        "schema": "lockstep.effect/v1",
+        "kind": "pinned",
+        "logical_id": "unit-tests",
+        "runner": {
+            "selector": "pinned",
+            "required_capabilities": ["workspace", "bounded_result", "sandbox"],
+        },
+        "inputs": {
+            "command": {"state_key": "pinned_command"},
+            "snapshot": {"state_key": "snapshot_input"},
+        },
+        "writes": [],
+        "artifacts": [],
+        "deadline_seconds": 60,
+        "scope_state_keys": [],
+        "result_schema": "lockstep.effect-result/v1",
+    }
+    parked = _parked({"lockstep_effect": raw})
+    descriptor = parse_effect_descriptor(raw)
+    effect_id = derive_effect_id(parked.pending[0].coordinate, descriptor.digest)
+
+    class Effects:
+        def get(self, requested):
+            assert requested == effect_id
+            return SimpleNamespace(
+                coordinate=parked.pending[0].coordinate,
+                descriptor_digest=descriptor.digest,
+                effect_kind="pinned",
+                phase="running",
+            )
+
+    snapshot = NativeSnapshot(
+        values={
+            "pinned_command": {
+                "schema": "lockstep.pinned-command/v1",
+                "logical_argv": ["python", "-m", "pytest", "-q"],
+                "logical_cwd": ".",
+                "result_source": "exit",
+            },
+            "snapshot_input": "secret-snapshot-ref",
+        },
+        pending=parked.pending,
+        next=parked.next,
+    )
+
+    public = project_status(_binding(), snapshot, (), Effects()).to_dict()
+
+    assert public["gate_execution"] == {
+        "operation_id": effect_id,
+        "execution_class": "pinned-validator",
+        "logical_argv": ["python", "-m", "pytest", "-q"],
+        "logical_cwd": ".",
+        "phase": "running",
+    }
+    rendered = repr(public)
+    assert "secret-snapshot-ref" not in rendered
+    assert "workspace_path" not in rendered
+    assert "environment" not in rendered
