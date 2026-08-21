@@ -144,7 +144,9 @@ def _pinned_system(tmp_path: Path, *, result_source: str = "exit"):
         intent,
         actor_binding_digest="c" * 64,
         required_authorities=("os_user_execution",),
-        workspace_ref=workspaces.workspace_ref_for(intent.effect_id, intent.intent_digest),
+        workspace_ref=workspaces.workspace_ref_for(
+            intent.effect_id, intent.intent_digest
+        ),
         parent_capability_generation=1,
         grant_generation=1,
         policy_epoch=1,
@@ -155,7 +157,9 @@ def _pinned_system(tmp_path: Path, *, result_source: str = "exit"):
     return adapter, intent.bind_grant(grant), workspaces
 
 
-def test_pinned_prepare_commits_safe_logical_and_exact_codex_sandbox_argv(tmp_path: Path) -> None:
+def test_pinned_prepare_commits_safe_logical_and_exact_codex_sandbox_argv(
+    tmp_path: Path,
+) -> None:
     adapter, request, workspaces = _pinned_system(tmp_path)
 
     launch = adapter.prepare(request)
@@ -181,7 +185,9 @@ def test_pinned_prepare_commits_safe_logical_and_exact_codex_sandbox_argv(tmp_pa
     assert record.deployment_profile == "local_unsandboxed"
 
 
-def test_pinned_exit_result_quarantines_and_never_publishes_workspace(tmp_path: Path) -> None:
+def test_pinned_exit_result_quarantines_and_never_publishes_workspace(
+    tmp_path: Path,
+) -> None:
     adapter, request, workspaces = _pinned_system(tmp_path)
     launch = adapter.prepare(request)
     adapter.ensure_started(launch)

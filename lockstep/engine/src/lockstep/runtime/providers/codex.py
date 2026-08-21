@@ -61,13 +61,16 @@ class CodexCaptureLimits:
     max_retained_attempts: int = 1_000
 
     def __post_init__(self) -> None:
-        if min(
-            self.max_stdout_bytes,
-            self.max_stderr_bytes,
-            self.max_json_records,
-            self.max_result_bytes,
-            self.max_retained_attempts,
-        ) <= 0:
+        if (
+            min(
+                self.max_stdout_bytes,
+                self.max_stderr_bytes,
+                self.max_json_records,
+                self.max_result_bytes,
+                self.max_retained_attempts,
+            )
+            <= 0
+        ):
             raise ValueError("Codex capture limits must be positive")
 
 
@@ -133,7 +136,9 @@ def _managed_argv(
     """Construct the sole Codex-specific launch authority from bound values."""
 
     if not executable.is_absolute() or not workspace.is_absolute():
-        raise CodexProviderError("managed Codex executable and workspace must be absolute")
+        raise CodexProviderError(
+            "managed Codex executable and workspace must be absolute"
+        )
     if not model or "\x00" in model:
         raise CodexProviderError("managed Codex model must be explicit")
     permissions = dict(permission_profile)
@@ -190,7 +195,9 @@ class CodexInstallationBinding:
         resolved = supplied.resolve(strict=True)
         info = resolved.stat()
         if not stat.S_ISREG(info.st_mode) or not os.access(resolved, os.X_OK):
-            raise CodexProviderError("Codex executable must be an executable regular file")
+            raise CodexProviderError(
+                "Codex executable must be an executable regular file"
+            )
         if not model or not cli_version:
             raise CodexProviderError("Codex model and CLI version must be explicit")
         if (
@@ -276,7 +283,10 @@ class CodexInstallationBinding:
         )
         if identity != expected:
             raise CodexProviderError("Codex executable identity changed")
-        if _credential_identity(self.codex_home / "auth.json") != self.credential_identity_digest:
+        if (
+            _credential_identity(self.codex_home / "auth.json")
+            != self.credential_identity_digest
+        ):
             raise CodexProviderError("Codex credential identity changed")
 
 
@@ -326,19 +336,34 @@ class CodexSandboxAttestor:
 
     def preflight(self, policy: SandboxPolicy) -> SandboxAttestation:
         argv = policy.argv
-        required = {
+        adjacent = set(pairwise(argv))
+        managed = {
             ("--ask-for-approval", "never"),
             ("--sandbox", "workspace-write"),
-        }
-        adjacent = set(pairwise(argv))
+        }.issubset(adjacent)
+        pinned = (
+            len(argv) >= 9
+            and argv[1] == "sandbox"
+            and ("--permission-profile", argv[3]) in adjacent
+            and ("--cd", str(policy.cwd)) in adjacent
+            and "--include-managed-config" in argv
+            and "--" in argv
+        )
         if (
-            not required.issubset(adjacent)
-            or policy.cwd != policy.write_root
+            not (managed or pinned)
+            or (managed and policy.cwd != policy.write_root)
+            or (
+                pinned
+                and policy.cwd != policy.write_root
+                and policy.write_root not in policy.cwd.parents
+            )
             or policy.denied_vcs_roots != (policy.write_root / ".git",)
             or not policy.close_fds
             or policy.inherited_fds
         ):
-            raise CodexProviderError("Codex sandbox policy is not the audited managed profile")
+            raise CodexProviderError(
+                "Codex sandbox policy is not the audited managed profile"
+            )
         return SandboxAttestation(
             provider_id="codex-cli-requested-mechanics",
             provider_version=self._cli_version,
@@ -357,6 +382,9 @@ class CodexLaunchRecord:
     runner_binding_digest: str
     workspace_ref: str
     workspace_path: Path
+    workspace_purpose: Literal["managed_output", "no_publish_operation"]
+    execution_class: Literal["managed-agent", "pinned-command"]
+    cwd: Path
     executable_path: Path
     executable_identity_digest: str
     inner_argv: tuple[str, ...]
@@ -378,9 +406,17 @@ def _attestation_digest(attestation: SandboxAttestation) -> str:
     return hashlib.sha256(_canonical(asdict(attestation))).hexdigest()
 
 
-class CodexRunnerAdapter:
+class _CodexAttemptDriver:
     required_authorities = ("os_user_execution",)
     reconciliation_boundary = "local_durable_handle"
+    effect_kind = "managed"
+    required_capabilities = frozenset(
+        {"workspace", "bounded_result", "sandbox", "network", "credentials"}
+    )
+    workspace_purpose: Literal["managed_output", "no_publish_operation"] = (
+        "managed_output"
+    )
+    execution_class: Literal["managed-agent", "pinned-command"] = "managed-agent"
 
     def __init__(
         self,
@@ -435,7 +471,7 @@ class CodexRunnerAdapter:
             denied_vcs_roots=(record.workspace_path / ".git",),
             network_allowed=True,
             argv=record.inner_argv,
-            cwd=record.workspace_path,
+            cwd=record.cwd,
             environment=record.environment,
             close_fds=True,
             inherited_fds=(),
@@ -458,6 +494,9 @@ class CodexRunnerAdapter:
             "runner_binding_digest": record.runner_binding_digest,
             "workspace_ref": record.workspace_ref,
             "workspace_path": str(record.workspace_path),
+            "workspace_purpose": record.workspace_purpose,
+            "execution_class": record.execution_class,
+            "cwd": str(record.cwd),
             "executable_path": str(record.executable_path),
             "executable_identity_digest": record.executable_identity_digest,
             "inner_argv": list(record.inner_argv),
@@ -479,15 +518,14 @@ class CodexRunnerAdapter:
         if path.exists() or path.is_symlink():
             verify_owner_file(path)
             if path.read_bytes() != data:
-                raise CodexProviderError(f"immutable Codex record mismatch: {path.name}")
+                raise CodexProviderError(
+                    f"immutable Codex record mismatch: {path.name}"
+                )
             return
         try:
             descriptor = os.open(
                 path,
-                os.O_WRONLY
-                | os.O_CREAT
-                | os.O_EXCL
-                | getattr(os, "O_NOFOLLOW", 0),
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
                 0o600,
             )
         except FileExistsError:
@@ -517,12 +555,21 @@ class CodexRunnerAdapter:
             raw = json.loads(path.read_bytes())
             if raw["schema"] != "lockstep.codex-launch/v1":
                 raise ValueError
-            return CodexLaunchRecord(
+            workspace_purpose = raw.get("workspace_purpose", "managed_output")
+            if workspace_purpose not in {"managed_output", "no_publish_operation"}:
+                raise ValueError
+            execution_class = raw.get("execution_class", "managed-agent")
+            if execution_class not in {"managed-agent", "pinned-command"}:
+                raise ValueError
+            record = CodexLaunchRecord(
                 effect_id=raw["effect_id"],
                 request_digest=raw["request_digest"],
                 runner_binding_digest=raw["runner_binding_digest"],
                 workspace_ref=raw["workspace_ref"],
                 workspace_path=Path(raw["workspace_path"]),
+                workspace_purpose=workspace_purpose,
+                execution_class=execution_class,
+                cwd=Path(raw.get("cwd", raw["workspace_path"])),
                 executable_path=Path(raw["executable_path"]),
                 executable_identity_digest=raw["executable_identity_digest"],
                 inner_argv=tuple(raw["inner_argv"]),
@@ -535,18 +582,32 @@ class CodexRunnerAdapter:
                 deadline_at=datetime.fromisoformat(raw["deadline_at"]).astimezone(UTC),
                 launch_ref=raw["launch_ref"],
             )
-        except (FileNotFoundError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            if (
+                record.execution_class != self.execution_class
+                or record.runner_binding_digest != self.binding_digest
+            ):
+                raise ValueError
+            return record
+        except (
+            FileNotFoundError,
+            KeyError,
+            TypeError,
+            ValueError,
+            json.JSONDecodeError,
+        ) as exc:
             raise CodexProviderError("invalid or missing Codex launch record") from exc
 
     def launch_record(self, effect_id: str) -> CodexLaunchRecord:
         return self._load_record(effect_id)
 
     def _recover_prepared_launch(
-        self, record: CodexLaunchRecord, *, brief: str
+        self, record: CodexLaunchRecord, *, stdin_bytes: bytes
     ) -> None:
         directory = self._directory(record.effect_id)
         state_path = directory / "state.json"
-        if (directory / "terminal.json").exists() or (directory / "result.json").exists():
+        if (directory / "terminal.json").exists() or (
+            directory / "result.json"
+        ).exists():
             return
         if state_path.exists() or state_path.is_symlink():
             verify_owner_file(state_path)
@@ -568,32 +629,58 @@ class CodexRunnerAdapter:
                 (directory / name).exists() or (directory / name).is_symlink()
                 for name in possible_launch
             ):
-                raise CodexProviderError("partial Codex launch cannot be recovered safely")
-        self._write_once(directory / "stdin.bin", brief.encode())
+                raise CodexProviderError(
+                    "partial Codex launch cannot be recovered safely"
+                )
+        self._write_once(directory / "stdin.bin", stdin_bytes)
         if not state_path.exists():
             self._atomic_json(
                 state_path,
                 {"schema": "lockstep.codex-state/v1", "phase": "prepared"},
             )
 
-    def prepare(self, request: EffectRequest) -> PreparedLaunch:
-        if request.grant_digest is None or request.workspace_ref is None:
-            raise CodexProviderError("Codex request requires an exact grant and workspace")
-        if request.effect_kind != "managed":
-            raise CodexProviderError("Codex adapter accepts only managed effects")
-        if request.runner_binding_digest != self.binding_digest:
-            raise CodexProviderError("Codex request uses a different runner binding")
-        if request.deadline_at is None or request.deadline_at <= self._clock():
-            raise CodexProviderError("Codex request deadline has expired")
-        required = {"workspace", "bounded_result", "sandbox", "network", "credentials"}
-        if not required.issubset(request.required_capabilities):
-            raise CodexProviderError("Codex request lacks required managed capabilities")
-        self._admit_attempt(request.effect_id)
-        directory = self._directory(request.effect_id)
+    def _request_payload(self, request: EffectRequest) -> tuple[bytes, str]:
         brief = self._input(request, "brief")
         snapshot_ref = self._input(request, "snapshot")
         if not isinstance(brief, str) or not isinstance(snapshot_ref, str):
             raise CodexProviderError("Codex brief and snapshot inputs must be strings")
+        return brief.encode(), snapshot_ref
+
+    def _inner_argv(
+        self,
+        binding: CodexInstallationBinding,
+        workspace: Path,
+        request: EffectRequest,
+    ) -> tuple[str, ...]:
+        return _managed_argv(
+            binding.executable_path,
+            model=binding.model,
+            workspace=workspace,
+            permission_profile=binding.permission_profile,
+        )
+
+    def _execution_cwd(self, workspace: Path, request: EffectRequest) -> Path:
+        del request
+        return workspace
+
+    def prepare(self, request: EffectRequest) -> PreparedLaunch:
+        if request.grant_digest is None or request.workspace_ref is None:
+            raise CodexProviderError(
+                "Codex request requires an exact grant and workspace"
+            )
+        if request.effect_kind != self.effect_kind:
+            raise CodexProviderError(
+                f"Codex adapter accepts only {self.effect_kind} effects"
+            )
+        if request.runner_binding_digest != self.binding_digest:
+            raise CodexProviderError("Codex request uses a different runner binding")
+        if request.deadline_at is None or request.deadline_at <= self._clock():
+            raise CodexProviderError("Codex request deadline has expired")
+        if not self.required_capabilities.issubset(request.required_capabilities):
+            raise CodexProviderError("Codex request lacks required runner capabilities")
+        self._admit_attempt(request.effect_id)
+        directory = self._directory(request.effect_id)
+        stdin_bytes, snapshot_ref = self._request_payload(request)
         launch_path = directory / "launch.json"
         if launch_path.exists():
             record = self._load_record(request.effect_id)
@@ -601,9 +688,11 @@ class CodexRunnerAdapter:
                 record.request_digest != request.request_digest
                 or record.runner_binding_digest != request.runner_binding_digest
                 or record.workspace_ref != request.workspace_ref
+                or record.execution_class != self.execution_class
+                or record.workspace_purpose != self.workspace_purpose
             ):
                 raise CodexProviderError("same effect has a different prepared launch")
-            self._recover_prepared_launch(record, brief=brief)
+            self._recover_prepared_launch(record, stdin_bytes=stdin_bytes)
             return PreparedLaunch(
                 record.effect_id,
                 record.request_digest,
@@ -618,6 +707,7 @@ class CodexRunnerAdapter:
             workspace_ref=request.workspace_ref,
             input_snapshot_ref=snapshot_ref,
             declared_writes=request.writes,
+            purpose=self.workspace_purpose,
         )
         try:
             self._assert_no_project_control_surfaces(workspace.workspace_path)
@@ -636,25 +726,28 @@ class CodexRunnerAdapter:
             ) from exc
         binding = self._installation()
         if binding != self._binding:
-            raise CodexProviderError("Codex installation binding changed before preparation")
+            raise CodexProviderError(
+                "Codex installation binding changed before preparation"
+            )
         binding.revalidate()
-        if binding.executable_path == workspace.workspace_path or workspace.workspace_path in binding.executable_path.parents:
+        if (
+            binding.executable_path == workspace.workspace_path
+            or workspace.workspace_path in binding.executable_path.parents
+        ):
             raise CodexProviderError("Codex executable may not reside in its workspace")
         environment = dict(binding.environment)
         environment["CODEX_HOME"] = str(binding.codex_home)
         environment["HOME"] = str(binding.codex_home)
-        inner_argv = _managed_argv(
-            binding.executable_path,
-            model=binding.model,
-            workspace=workspace.workspace_path,
-            permission_profile=binding.permission_profile,
-        )
+        inner_argv = self._inner_argv(binding, workspace.workspace_path, request)
         provisional = CodexLaunchRecord(
             effect_id=request.effect_id,
             request_digest=request.request_digest,
             runner_binding_digest=request.runner_binding_digest,
             workspace_ref=request.workspace_ref,
             workspace_path=workspace.workspace_path,
+            workspace_purpose=self.workspace_purpose,
+            execution_class=self.execution_class,
+            cwd=self._execution_cwd(workspace.workspace_path, request),
             executable_path=binding.executable_path,
             executable_identity_digest=binding.digest,
             inner_argv=inner_argv,
@@ -687,8 +780,11 @@ class CodexRunnerAdapter:
             }
         )
         self._write_once(launch_path, _canonical(self._record_data(record)))
-        self._write_once(directory / "stdin.bin", brief.encode())
-        self._atomic_json(directory / "state.json", {"schema": "lockstep.codex-state/v1", "phase": "prepared"})
+        self._write_once(directory / "stdin.bin", stdin_bytes)
+        self._atomic_json(
+            directory / "state.json",
+            {"schema": "lockstep.codex-state/v1", "phase": "prepared"},
+        )
         return PreparedLaunch(
             record.effect_id,
             record.request_digest,
@@ -711,7 +807,7 @@ class CodexRunnerAdapter:
         body = {
             "schema": "lockstep.codex-supervisor/v1",
             "argv": list(record.inner_argv),
-            "cwd": str(record.workspace_path),
+            "cwd": str(record.cwd),
             "environment": dict(record.environment),
             "executable_identity": {
                 "device": self._binding.executable_device,
@@ -739,7 +835,9 @@ class CodexRunnerAdapter:
         self._write_once(path, encoded)
         return path, hashlib.sha256(encoded).hexdigest()
 
-    def _validate_launch(self, launch: PreparedLaunch, record: CodexLaunchRecord) -> None:
+    def _validate_launch(
+        self, launch: PreparedLaunch, record: CodexLaunchRecord
+    ) -> None:
         if (
             launch.effect_id != record.effect_id
             or launch.request_digest != record.request_digest
@@ -747,7 +845,9 @@ class CodexRunnerAdapter:
             or launch.launch_ref != record.launch_ref
             or launch.workspace_ref != record.workspace_ref
         ):
-            raise CodexProviderError("prepared launch does not match Codex launch record")
+            raise CodexProviderError(
+                "prepared launch does not match Codex launch record"
+            )
 
     def _supervisor_ready(self, record: CodexLaunchRecord) -> int | None:
         path = self._directory(record.effect_id) / "supervisor-ready.json"
@@ -772,9 +872,7 @@ class CodexRunnerAdapter:
         try:
             descriptor = os.open(
                 path,
-                os.O_RDWR
-                | getattr(os, "O_CLOEXEC", 0)
-                | getattr(os, "O_NOFOLLOW", 0),
+                os.O_RDWR | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
             )
         except OSError:
             return False
@@ -810,7 +908,10 @@ class CodexRunnerAdapter:
         if self._clock() >= record.deadline_at:
             raise CodexProviderError("Codex launch deadline has expired")
         binding = self._installation()
-        if binding != self._binding or binding.digest != record.executable_identity_digest:
+        if (
+            binding != self._binding
+            or binding.digest != record.executable_identity_digest
+        ):
             raise CodexProviderError("Codex installation binding changed before launch")
         binding.revalidate()
         policy = self._policy(record)
@@ -832,7 +933,9 @@ class CodexRunnerAdapter:
                 binding.digest, record.launcher_decision_generation
             ):
                 if self._clock() >= record.deadline_at:
-                    raise CodexProviderError("Codex launch deadline expired at commitment")
+                    raise CodexProviderError(
+                        "Codex launch deadline expired at commitment"
+                    )
                 current_binding = self._installation()
                 if current_binding != binding:
                     raise CodexProviderError(
@@ -866,11 +969,15 @@ class CodexRunnerAdapter:
                         start_new_session=True,
                     )
                 except OSError as exc:
-                    raise CodexProviderError("Codex supervisor was not started") from exc
+                    raise CodexProviderError(
+                        "Codex supervisor was not started"
+                    ) from exc
                 self.spawn_count += 1
-                ready_deadline = min(time.monotonic() + 5, time.monotonic() + max(
-                    0.0, (record.deadline_at - self._clock()).total_seconds()
-                ))
+                ready_deadline = min(
+                    time.monotonic() + 5,
+                    time.monotonic()
+                    + max(0.0, (record.deadline_at - self._clock()).total_seconds()),
+                )
                 ready_pid = self._supervisor_ready(record)
                 while ready_pid is None and time.monotonic() < ready_deadline:
                     if process.poll() is not None:
@@ -915,8 +1022,25 @@ class CodexRunnerAdapter:
             "stderr_size",
             "stderr_sha256",
         }
-        if not isinstance(raw, dict) or set(raw) != required or raw["schema"] != "lockstep.codex-terminal/v1":
+        allowed = required | {"termination_reason"}
+        if (
+            not isinstance(raw, dict)
+            or not required.issubset(raw)
+            or not set(raw).issubset(allowed)
+            or raw["schema"] != "lockstep.codex-terminal/v1"
+        ):
             raise CodexProviderError("invalid Codex terminal receipt")
+        reason = raw.get("termination_reason", "exited")
+        if reason not in {
+            "exited",
+            "cancelled",
+            "deadline",
+            "output_overflow",
+            "spawn_failed",
+            "stdin_failed",
+        }:
+            raise CodexProviderError("invalid Codex terminal disposition")
+        raw["termination_reason"] = reason
         return raw
 
     def _error_result(self, effect_id: str, code: str):
@@ -952,7 +1076,14 @@ class CodexRunnerAdapter:
                 raise CodexProviderError("Codex spool path became a symlink")
             path.unlink(missing_ok=True)
 
-    def _parse_result(self, record: CodexLaunchRecord, receipt: dict[str, object], snapshot_ref: str):
+    def _parse_result(
+        self,
+        record: CodexLaunchRecord,
+        receipt: dict[str, object],
+        snapshot_ref: str | None,
+    ):
+        if snapshot_ref is None:
+            raise CodexProviderError("managed result requires a rollover snapshot")
         directory = self._directory(record.effect_id)
         stdout = (directory / "stdout.bin").read_bytes()
         stderr = (directory / "stderr.bin").read_bytes()
@@ -986,7 +1117,10 @@ class CodexRunnerAdapter:
                     final_message = event["item"]["text"]
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError):
             return self._error_result(record.effect_id, "result_invalid")
-        if final_message is None or len(final_message.encode()) > self._limits.max_result_bytes:
+        if (
+            final_message is None
+            or len(final_message.encode()) > self._limits.max_result_bytes
+        ):
             return self._error_result(record.effect_id, "result_invalid")
         blob = self._blobs.put(final_message.encode())
         return parse_effect_result(
@@ -1003,7 +1137,16 @@ class CodexRunnerAdapter:
             }
         )
 
-    def _terminal(self, record: CodexLaunchRecord, receipt: dict[str, object]) -> RunnerObservation:
+    def _finalize_workspace(self, record: CodexLaunchRecord) -> str | None:
+        workspace = self._workspaces.inspect(record.workspace_ref)
+        if record.workspace_purpose == "no_publish_operation":
+            self._workspaces.quarantine_no_publish(workspace)
+            return None
+        return self._workspaces.quarantine_and_rollover(workspace)
+
+    def _terminal(
+        self, record: CodexLaunchRecord, receipt: dict[str, object]
+    ) -> RunnerObservation:
         if not receipt["quiescent"]:
             return RunnerObservation(
                 record.effect_id,
@@ -1015,9 +1158,8 @@ class CodexRunnerAdapter:
         with file_lock(directory / "finalize", timeout=30, stale_after=300):
             stored = self._stored_result(record)
             if stored is None:
-                workspace = self._workspaces.inspect(record.workspace_ref)
                 try:
-                    snapshot_ref = self._workspaces.quarantine_and_rollover(workspace)
+                    snapshot_ref = self._finalize_workspace(record)
                 except WorkspaceError:
                     workspace = self._workspaces.inspect(record.workspace_ref)
                     if workspace.phase != "quarantined":
@@ -1030,7 +1172,7 @@ class CodexRunnerAdapter:
                     _canonical(stored.to_dict()),
                 )
             workspace = self._workspaces.inspect(record.workspace_ref)
-            if (
+            if record.workspace_purpose == "managed_output" and (
                 workspace.phase == "quarantined"
                 and workspace.rollover_snapshot_ref is not None
             ):
@@ -1115,10 +1257,10 @@ class CodexRunnerAdapter:
         rollover = workspace.rollover_snapshot_ref
         quarantined = workspace.phase == "quarantined" and rollover is None
         if rollover is None and not quarantined:
-            raise WorkspaceError("managed workspace has no rollover proof")
+            raise WorkspaceError("workspace has no terminal-safety proof")
         return TerminalSafetyObservation.proven_for(
             launch,
-            result_stable=True,
+            result_stable=record.workspace_purpose == "managed_output",
             rollover_snapshot_ref=rollover,
             workspace_quarantined=quarantined,
         )
@@ -1131,3 +1273,51 @@ class CodexRunnerAdapter:
                 return observation
             time.sleep(0.02)
         raise TimeoutError(f"Codex attempt {effect_id} did not become terminal")
+
+
+class CodexRunnerAdapter:
+    """Managed Codex strategy delegated to the shared durable attempt driver."""
+
+    required_authorities = _CodexAttemptDriver.required_authorities
+    reconciliation_boundary = _CodexAttemptDriver.reconciliation_boundary
+
+    def __init__(self, **kwargs) -> None:
+        self._driver = _CodexAttemptDriver(**kwargs)
+
+    @property
+    def binding_digest(self) -> str:
+        return self._driver.binding_digest
+
+    @property
+    def spawn_count(self) -> int:
+        return self._driver.spawn_count
+
+    def prepare(self, request: EffectRequest) -> PreparedLaunch:
+        return self._driver.prepare(request)
+
+    def ensure_started(self, launch: PreparedLaunch) -> RunnerObservation:
+        return self._driver.ensure_started(launch)
+
+    def inspect(self, effect_id: str) -> RunnerObservation:
+        return self._driver.inspect(effect_id)
+
+    lookup = inspect
+
+    def cancel(self, effect_id: str) -> RunnerObservation:
+        return self._driver.cancel(effect_id)
+
+    def quiesce(self, effect_id: str) -> TerminalSafetyObservation:
+        return self._driver.quiesce(effect_id)
+
+    def __getattr__(self, name: str):
+        # Compatibility for provider diagnostics and the Task 6 white-box
+        # conformance tests; execution authority stays in the private driver.
+        return getattr(self._driver, name)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if name == "_driver" or "_driver" not in self.__dict__:
+            object.__setattr__(self, name, value)
+        elif hasattr(self._driver, name):
+            setattr(self._driver, name, value)
+        else:
+            object.__setattr__(self, name, value)

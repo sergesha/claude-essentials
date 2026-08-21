@@ -38,6 +38,7 @@ class RuntimeTables:
     leases: Table
     effects: Table
     effect_observations: Table
+    effect_dispatch_watches: Table
 
 
 def _define_tables(metadata: MetaData) -> RuntimeTables:
@@ -104,11 +105,25 @@ def _define_tables(metadata: MetaData) -> RuntimeTables:
         Column("result_json", String, nullable=True),
         Column("observed_at", String, nullable=False),
     )
+    effect_dispatch_watches = Table(
+        "effect_dispatch_watches",
+        metadata,
+        Column(
+            "public_run_id",
+            String,
+            ForeignKey("runs.public_run_id"),
+            primary_key=True,
+        ),
+        Column("input_blob_sha256", String(64), nullable=False),
+        Column("input_blob_size", Integer, nullable=False),
+        Column("admitted_at", String, nullable=False),
+    )
     return RuntimeTables(
         runs=runs,
         leases=leases,
         effects=effects,
         effect_observations=effect_observations,
+        effect_dispatch_watches=effect_dispatch_watches,
     )
 
 

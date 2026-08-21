@@ -89,7 +89,13 @@ def _read_identity(path: Path) -> tuple[os.stat_result, str]:
         while chunk := os.read(descriptor, 1024 * 1024):
             digest.update(chunk)
         after = os.fstat(descriptor)
-        identity = (before.st_dev, before.st_ino, before.st_mode, before.st_size, before.st_mtime_ns)
+        identity = (
+            before.st_dev,
+            before.st_ino,
+            before.st_mode,
+            before.st_size,
+            before.st_mtime_ns,
+        )
         if identity != (
             after.st_dev,
             after.st_ino,
@@ -206,6 +212,7 @@ def _publish_terminal(
     overflow: bool,
     timed_out: bool,
     quiescent: bool,
+    termination_reason: str,
 ) -> None:
     paths = (Path(str(spec["stdout"])), Path(str(spec["stderr"])))
     for output in paths:
@@ -221,6 +228,7 @@ def _publish_terminal(
             "overflow": overflow,
             "timed_out": timed_out,
             "quiescent": quiescent,
+            "termination_reason": termination_reason,
             "stdout_size": len(stdout),
             "stdout_sha256": hashlib.sha256(stdout).hexdigest(),
             "stderr_size": len(stderr),
@@ -238,7 +246,10 @@ def run(path: Path, expected_digest: str) -> int:
         or not argv
         or any(not isinstance(item, str) or not item for item in argv)
         or not isinstance(environment, dict)
-        or any(not isinstance(key, str) or not isinstance(value, str) for key, value in environment.items())
+        or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in environment.items()
+        )
     ):
         raise ValueError("invalid supervisor argv or environment")
     alive_descriptor = os.open(
@@ -259,6 +270,7 @@ def run(path: Path, expected_digest: str) -> int:
                 overflow=False,
                 timed_out=False,
                 quiescent=True,
+                termination_reason="cancelled",
             )
             os.close(alive_descriptor)
             return 0
@@ -269,6 +281,7 @@ def run(path: Path, expected_digest: str) -> int:
                 overflow=False,
                 timed_out=True,
                 quiescent=True,
+                termination_reason="deadline",
             )
             os.close(alive_descriptor)
             return 0
@@ -283,6 +296,7 @@ def run(path: Path, expected_digest: str) -> int:
                 overflow=False,
                 timed_out=True,
                 quiescent=True,
+                termination_reason="deadline",
             )
             os.close(alive_descriptor)
             return 0
@@ -293,6 +307,7 @@ def run(path: Path, expected_digest: str) -> int:
                 overflow=False,
                 timed_out=False,
                 quiescent=True,
+                termination_reason="cancelled",
             )
             os.close(alive_descriptor)
             return 0
@@ -314,14 +329,23 @@ def run(path: Path, expected_digest: str) -> int:
             overflow=False,
             timed_out=False,
             quiescent=True,
+            termination_reason="spawn_failed",
         )
         os.close(alive_descriptor)
         return 0
     _atomic_json(
         Path(str(spec["started"])),
-        {"schema": "lockstep.codex-started/v1", "pid": process.pid, "pgid": process.pid},
+        {
+            "schema": "lockstep.codex-started/v1",
+            "pid": process.pid,
+            "pgid": process.pid,
+        },
     )
-    assert process.stdin is not None and process.stdout is not None and process.stderr is not None
+    assert (
+        process.stdin is not None
+        and process.stdout is not None
+        and process.stderr is not None
+    )
     stdin_failed = False
     try:
         process.stdin.write(stdin_bytes)
@@ -336,11 +360,21 @@ def run(path: Path, expected_digest: str) -> int:
     readers = (
         Thread(
             target=_capture,
-            args=(process.stdout, Path(str(spec["stdout"])), int(spec["max_stdout_bytes"]), overflow),
+            args=(
+                process.stdout,
+                Path(str(spec["stdout"])),
+                int(spec["max_stdout_bytes"]),
+                overflow,
+            ),
         ),
         Thread(
             target=_capture,
-            args=(process.stderr, Path(str(spec["stderr"])), int(spec["max_stderr_bytes"]), overflow),
+            args=(
+                process.stderr,
+                Path(str(spec["stderr"])),
+                int(spec["max_stderr_bytes"]),
+                overflow,
+            ),
         ),
     )
     for reader in readers:
@@ -371,6 +405,17 @@ def run(path: Path, expected_digest: str) -> int:
         overflow=overflow.is_set(),
         timed_out=timed_out,
         quiescent=True,
+        termination_reason=(
+            "stdin_failed"
+            if stdin_failed
+            else "output_overflow"
+            if overflow.is_set()
+            else "cancelled"
+            if cancel.is_file()
+            else "deadline"
+            if timed_out
+            else "exited"
+        ),
     )
     os.close(alive_descriptor)
     return 0

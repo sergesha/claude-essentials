@@ -81,6 +81,12 @@ class RunCatalog:
         return existing == expected
 
     def create(self, binding: RunBinding) -> RunBinding:
+        with self._store.write_transaction() as connection:
+            return self.create_in_transaction(connection, binding)
+
+    def create_in_transaction(self, connection, binding: RunBinding) -> RunBinding:
+        """Create through an owner transaction shared with a start admission."""
+
         self._validate(binding)
         requested = (
             replace(binding, created_at=_canonical_created_at(binding.created_at))
@@ -92,30 +98,29 @@ class RunCatalog:
             created_at=requested.created_at or _iso_utc(self._clock()),
         )
         table = self._store.tables.runs
-        with self._store.write_transaction() as connection:
-            rows = connection.execute(
-                select(table).where(
-                    (table.c.public_run_id == binding.public_run_id)
-                    | (table.c.thread_id == binding.thread_id)
-                )
-            ).all()
-            if rows:
-                matches = [self._from_row(row) for row in rows]
-                if len(matches) == 1 and self._same_requested(matches[0], requested):
-                    return matches[0]
-                raise ImmutableBindingConflict(
-                    "public_run_id or thread_id is already bound to different immutable data"
-                )
-            connection.execute(
-                table.insert().values(
-                    public_run_id=candidate.public_run_id,
-                    thread_id=candidate.thread_id,
-                    recipe_digest=candidate.recipe_digest,
-                    recipe_snapshot_ref=candidate.recipe_snapshot_ref,
-                    project_identity=candidate.project_identity,
-                    created_at=candidate.created_at,
-                )
+        rows = connection.execute(
+            select(table).where(
+                (table.c.public_run_id == binding.public_run_id)
+                | (table.c.thread_id == binding.thread_id)
             )
+        ).all()
+        if rows:
+            matches = [self._from_row(row) for row in rows]
+            if len(matches) == 1 and self._same_requested(matches[0], requested):
+                return matches[0]
+            raise ImmutableBindingConflict(
+                "public_run_id or thread_id is already bound to different immutable data"
+            )
+        connection.execute(
+            table.insert().values(
+                public_run_id=candidate.public_run_id,
+                thread_id=candidate.thread_id,
+                recipe_digest=candidate.recipe_digest,
+                recipe_snapshot_ref=candidate.recipe_snapshot_ref,
+                project_identity=candidate.project_identity,
+                created_at=candidate.created_at,
+            )
+        )
         return candidate
 
     def get(self, run_id: str) -> RunBinding:

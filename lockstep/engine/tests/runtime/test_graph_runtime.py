@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -88,6 +89,60 @@ def test_fresh_start_restart_history_and_live_source_deletion(tmp_path):
     assert proof.occurrence.coordinate == coordinate
     assert proof.occurrence.value == parked.pending[0].value
     restarted.close()
+    store.close()
+
+
+def test_ensure_started_serializes_two_recoverers_and_never_replays_input(tmp_path):
+    bundles, binding = _binding(tmp_path, FIXTURES / "parent_direct.recipe.yaml")
+    store = SQLiteStore(tmp_path / "runtime.sqlite")
+    leases = LeaseStore(store)
+    state = {"snapshot": NativeSnapshot(values={}), "invocations": 0}
+
+    class App:
+        def snapshot(self, *, thread_id, subgraphs=False):
+            assert thread_id == binding.thread_id
+            assert subgraphs is True
+            return state["snapshot"]
+
+        def invoke(self, values, *, thread_id):
+            assert thread_id == binding.thread_id
+            state["invocations"] += 1
+            state["snapshot"] = NativeSnapshot(
+                values=dict(values), checkpoint_id="committed"
+            )
+            return state["snapshot"]
+
+        def close(self):
+            pass
+
+    app = App()
+
+    def runtime():
+        candidate = GraphRuntime(
+            bundle_store=bundles,
+            leases=leases,
+            invocations=InvocationLockStore(tmp_path / "owner-state"),
+            checkpoint_path=tmp_path / "checkpoints.sqlite",
+            app_factory=lambda *_: app,
+        )
+        candidate.bind(binding)
+        return candidate
+
+    first = runtime()
+    second = runtime()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        snapshots = tuple(
+            pool.map(
+                lambda item: item[0].ensure_started(binding.public_run_id, item[1]),
+                ((first, {"winner": 1}), (second, {"winner": 2})),
+            )
+        )
+
+    assert state["invocations"] == 1
+    assert snapshots[0].checkpoint_id == snapshots[1].checkpoint_id == "committed"
+    assert snapshots[0].values == snapshots[1].values
+    first.close()
+    second.close()
     store.close()
 
 

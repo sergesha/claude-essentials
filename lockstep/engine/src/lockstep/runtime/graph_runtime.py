@@ -158,10 +158,30 @@ class GraphRuntime:
                 self._leases.release(lease)
 
     def start(self, run_id: str, input: dict) -> NativeSnapshot:
+        return self.ensure_started(run_id, input)
+
+    def ensure_started(self, run_id: str, input: dict) -> NativeSnapshot:
+        """Deliver one admitted initial command, or adopt its committed checkpoint."""
+
         binding, app = self._bound(run_id)
-        return self._invoke(
-            run_id, lambda: app.invoke(dict(input), thread_id=binding.thread_id)
-        )
+
+        def snapshot_then_start() -> NativeSnapshot:
+            current = app.snapshot(thread_id=binding.thread_id, subgraphs=True)
+            if current.checkpoint_id:
+                return current
+            if (
+                current.values
+                or current.pending
+                or current.next
+                or current.task_errors
+                or current.created_at is not None
+            ):
+                raise RuntimeError(
+                    "native start state is present without a checkpoint identity"
+                )
+            return app.invoke(dict(input), thread_id=binding.thread_id)
+
+        return self._invoke(run_id, snapshot_then_start)
 
     def snapshot(self, run_id: str, *, subgraphs: bool = False) -> NativeSnapshot:
         binding, app = self._bound(run_id)

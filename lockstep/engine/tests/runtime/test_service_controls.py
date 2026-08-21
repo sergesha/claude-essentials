@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import threading
+from collections import deque
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -35,6 +38,174 @@ def test_scenario_status_is_an_explicit_read_only_public_control() -> None:
         "owner": "engine",
         "next_action": "scenario_wait",
     }
+
+
+def test_engine_effect_queue_has_a_hard_admission_ceiling() -> None:
+    service = object.__new__(LockstepService)
+    service._active_effect_runs = set()
+    service._queued_effect_runs = set()
+    service._active_effect_queue = deque()
+    service._active_effect_lock = threading.Lock()
+    service._pump_wakeup = threading.Event()
+
+    for index in range(service._MAX_ACTIVE_EFFECT_RUNS):
+        service._activate_effect_run(f"run-{index}")
+
+    service._activate_effect_run("one-too-many")
+
+    assert len(service._active_effect_runs) == service._MAX_ACTIVE_EFFECT_RUNS
+    assert len(service._active_effect_queue) == service._MAX_ACTIVE_EFFECT_RUNS
+    assert "one-too-many" not in service._active_effect_runs
+
+
+def test_startup_recovery_discovers_native_start_commit_before_ledger_prepare() -> None:
+    from lockstep.runtime.blobs import BlobRef
+    from lockstep.runtime.effects.ledger import EffectDispatchWatch
+
+    binding = RunBinding("run-1", "thread-1", "a" * 64, "bundle", "/project")
+    driven = []
+    bound = []
+    unbound = []
+    service = object.__new__(LockstepService)
+    watch = EffectDispatchWatch(
+        "run-1", BlobRef("b" * 64, 2), datetime(2026, 8, 20, tzinfo=UTC)
+    )
+    service.effects = SimpleNamespace(
+        list_dispatch_watches=lambda **_kwargs: (watch,),
+        list_recovery_threads=lambda **_kwargs: (),
+    )
+    service.catalog = SimpleNamespace(
+        get=lambda _run_id: binding,
+        find_by_thread=lambda _thread_id: pytest.fail("ledger unexpectedly populated"),
+    )
+    service.blobs = SimpleNamespace(read=lambda _ref: b"{}")
+    service.runtime = SimpleNamespace(
+        bind=bound.append,
+        unbind=unbound.append,
+        ensure_started=lambda _run_id, _values: SimpleNamespace(),
+    )
+    service._active_effect_runs = set()
+    service._queued_effect_runs = set()
+    service._active_effect_lock = threading.Lock()
+    service._recovery_thread_cursor = None
+
+    def drive(run_id, **_kwargs):
+        driven.append(run_id)
+        service._deactivate_effect_run(run_id)
+
+    service._drive_engine_owned = drive
+
+    service._recover_engine_effects()
+
+    assert bound == [binding]
+    assert driven == ["run-1"]
+    assert unbound == ["run-1"]
+
+
+def test_start_recovery_defers_before_native_commit_when_active_batch_is_full() -> None:
+    from lockstep.runtime.blobs import BlobRef
+    from lockstep.runtime.effects.ledger import EffectDispatchWatch
+
+    binding = RunBinding("deferred", "thread-deferred", "a" * 64, "bundle", "/p")
+    watch = EffectDispatchWatch(
+        "deferred", BlobRef("b" * 64, 2), datetime(2026, 8, 20, tzinfo=UTC)
+    )
+    service = object.__new__(LockstepService)
+    service.effects = SimpleNamespace(list_dispatch_watches=lambda **_kwargs: (watch,))
+    service.catalog = SimpleNamespace(get=lambda _run_id: binding)
+    service.blobs = SimpleNamespace(
+        read=lambda _ref: pytest.fail("capacity rejection consumed start input")
+    )
+    service.runtime = SimpleNamespace(
+        bind=lambda _binding: pytest.fail("capacity rejection bound native app"),
+        ensure_started=lambda *_args: pytest.fail("capacity rejection invoked native"),
+    )
+    service._active_effect_runs = {
+        f"run-{index}" for index in range(service._MAX_ACTIVE_EFFECT_RUNS)
+    }
+    service._queued_effect_runs = set(service._active_effect_runs)
+    service._active_effect_lock = threading.Lock()
+    service._pump_wakeup = threading.Event()
+
+    service._recover_start_admissions()
+
+    assert "deferred" not in service._active_effect_runs
+    assert not service._pump_wakeup.is_set()
+
+
+def test_effect_recovery_defers_before_reconcile_when_active_batch_is_full() -> None:
+    coordinate = NativeCoordinate("thread-pinned", "cp-1", "", "task-1", "int-1")
+    interrupt = NativeInterrupt(
+        coordinate,
+        {
+            "lockstep_effect": {
+                "schema": "lockstep.effect/v1",
+                "kind": "pinned",
+                "logical_id": "tests",
+                "runner": {
+                    "selector": "pinned",
+                    "required_capabilities": [
+                        "workspace",
+                        "bounded_result",
+                        "sandbox",
+                    ],
+                },
+                "inputs": {
+                    "command": {"state_key": "command"},
+                    "snapshot": {"state_key": "snapshot"},
+                },
+                "writes": [],
+                "artifacts": [],
+                "deadline_seconds": 60,
+                "scope_state_keys": [],
+                "result_schema": "lockstep.effect-result/v1",
+            }
+        },
+    )
+    snapshot = NativeSnapshot(values={}, pending=(interrupt,), checkpoint_id="cp-1")
+    binding = RunBinding("run-pinned", "thread-pinned", "a" * 64, "bundle", "/project")
+    service = object.__new__(LockstepService)
+    service.effects = SimpleNamespace(
+        get=lambda _effect_id: (_ for _ in ()).throw(KeyError())
+    )
+    service.leases = ()
+    service.runtime = SimpleNamespace(snapshot=lambda *_args, **_kwargs: snapshot)
+    service.coordinator = SimpleNamespace(
+        reconcile=lambda _run_id: pytest.fail("capacity deferral reconciled effect")
+    )
+    service._active_effect_runs = {
+        f"run-{index}" for index in range(service._MAX_ACTIVE_EFFECT_RUNS)
+    }
+    service._active_effect_lock = threading.Lock()
+
+    status = service._drive_engine_owned(
+        "run-pinned", binding=binding, snapshot=snapshot
+    )
+
+    assert status.status == "running"
+    assert "run-pinned" not in service._active_effect_runs
+
+
+def test_effect_recovery_cursor_does_not_skip_a_capacity_deferred_run() -> None:
+    binding = RunBinding("deferred", "thread-deferred", "a" * 64, "bundle", "/p")
+    service = object.__new__(LockstepService)
+    service.effects = SimpleNamespace(
+        list_recovery_threads=lambda **_kwargs: ("thread-deferred",)
+    )
+    service.catalog = SimpleNamespace(find_by_thread=lambda _thread_id: binding)
+    service.runtime = SimpleNamespace(
+        bind=lambda _binding: pytest.fail("capacity-deferred effect was bound")
+    )
+    service._active_effect_runs = {
+        f"run-{index}" for index in range(service._MAX_ACTIVE_EFFECT_RUNS)
+    }
+    service._active_effect_lock = threading.Lock()
+    service._recovery_thread_cursor = None
+
+    service._recover_effect_batch()
+
+    assert service._recovery_thread_cursor is None
+    assert "deferred" not in service._active_effect_runs
 
 
 @pytest.mark.parametrize("timeout", [0, 61, True, "1"])
@@ -180,6 +351,8 @@ def test_engine_progress_prepares_manual_handoff_before_returning_awaiting() -> 
     service.leases = ()
     service.coordinator = Coordinator()
     service.runtime = SimpleNamespace(snapshot=lambda *_args, **_kwargs: snapshot)
+    service._deactivate_effect_run = lambda _run_id: None
+    service._ack_start_if_observable = lambda *_args: None
 
     status = service._drive_engine_owned("run-1", binding=binding, snapshot=snapshot)
 
@@ -232,11 +405,59 @@ def test_engine_progress_delivers_scope_result_without_status_mutation() -> None
     service.runtime = SimpleNamespace(
         snapshot=lambda *_args, **_kwargs: state["snapshot"]
     )
+    service._deactivate_effect_run = lambda _run_id: None
+    service._ack_start_if_observable = lambda *_args: None
 
     status = service._drive_engine_owned("run-1", binding=binding, snapshot=pending)
 
     assert status.status == "completed"
     assert service.coordinator.deliveries == 1
+
+
+def test_engine_progress_requeues_a_delivery_held_by_another_owner() -> None:
+    coordinate = NativeCoordinate("thread-1", "cp-1", "", "task-1", "int-1")
+    interrupt = NativeInterrupt(
+        coordinate,
+        {
+            "lockstep_effect": {
+                "schema": "lockstep.effect/v1",
+                "kind": "scope",
+                "logical_id": "child-scope",
+                "scope_kind": "call",
+                "duration_seconds": 60,
+                "runner_selector": "codex",
+                "ancestor_deadline_state_keys": [],
+                "result_state_key": "child_scope_result",
+                "result_schema": "lockstep.scope-result/v1",
+            }
+        },
+    )
+    pending = NativeSnapshot(values={}, pending=(interrupt,), checkpoint_id="cp-1")
+    binding = RunBinding("run-1", "thread-1", "a" * 64, "bundle", "/project")
+
+    class Coordinator:
+        calls = 0
+
+        def reconcile(self, _run_id):
+            self.calls += 1
+            return SimpleNamespace(action="awaiting_delivery")
+
+        def deliver_ready(self, _run_id):
+            return None
+
+    activated = []
+    service = object.__new__(LockstepService)
+    service.effects = ()
+    service.leases = ()
+    service.coordinator = Coordinator()
+    service.runtime = SimpleNamespace(snapshot=lambda *_args, **_kwargs: pending)
+    service._activate_effect_run = activated.append
+
+    status = service._drive_engine_owned("run-1", binding=binding, snapshot=pending)
+
+    assert status.status == "running"
+    assert service.coordinator.calls == 1
+    assert activated == ["run-1"]
 
 
 def test_protected_manual_done_uses_coordinator_not_direct_native_resume(

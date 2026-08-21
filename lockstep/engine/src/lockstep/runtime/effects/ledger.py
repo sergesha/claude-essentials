@@ -7,9 +7,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import and_, select, update
+from sqlalchemy import and_, delete, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
+from lockstep.runtime.blobs import BlobRef
+from lockstep.runtime.catalog import RunBinding, RunCatalog
 from lockstep.runtime.effects.descriptors import (
     derive_effect_id,
     parse_effect_result,
@@ -42,6 +44,15 @@ class IllegalEffectTransition(RuntimeError):
 
 class StaleEffectLease(RuntimeError):
     """The supplied effect lease is not the current live fence."""
+
+
+@dataclass(frozen=True)
+class EffectDispatchWatch:
+    """A process-neutral discovery outbox, never workflow status or authority."""
+
+    public_run_id: str
+    input_blob: BlobRef
+    admitted_at: datetime
 
 
 @dataclass(frozen=True)
@@ -109,6 +120,89 @@ class EffectLedger:
     def _now(self) -> datetime:
         return _utc(self._clock())
 
+    def admit_start(
+        self,
+        catalog: RunCatalog,
+        binding: RunBinding,
+        input_blob: BlobRef,
+    ) -> tuple[RunBinding, EffectDispatchWatch]:
+        """Atomically bind a run and record its immutable initial command."""
+
+        if catalog._store is not self._store:
+            raise ValueError("catalog and effect ledger must share one owner store")
+        if (
+            not isinstance(input_blob, BlobRef)
+            or input_blob.size < 0
+            or input_blob.size > 64 * 1024 * 1024
+        ):
+            raise ValueError("start input blob reference is invalid")
+        _binding_digest(input_blob.sha256)
+        table = self._store.tables.effect_dispatch_watches
+        admitted_at = self._now()
+        with self._store.write_transaction() as connection:
+            admitted_binding = catalog.create_in_transaction(connection, binding)
+            row = connection.execute(
+                select(table).where(table.c.public_run_id == binding.public_run_id)
+            ).first()
+            if row is not None:
+                observed_at = _load(row.admitted_at)
+                assert observed_at is not None
+                existing = EffectDispatchWatch(
+                    row.public_run_id,
+                    BlobRef(row.input_blob_sha256, int(row.input_blob_size)),
+                    observed_at,
+                )
+                if existing.input_blob != input_blob:
+                    raise EffectConflict(
+                        "start admission is already bound to another input"
+                    )
+                return admitted_binding, existing
+            connection.execute(
+                table.insert().values(
+                    public_run_id=admitted_binding.public_run_id,
+                    input_blob_sha256=input_blob.sha256,
+                    input_blob_size=input_blob.size,
+                    admitted_at=_dump(admitted_at),
+                )
+            )
+        return admitted_binding, EffectDispatchWatch(
+            admitted_binding.public_run_id, input_blob, admitted_at
+        )
+
+    def list_dispatch_watches(self, *, limit: int) -> tuple[EffectDispatchWatch, ...]:
+        if type(limit) is not int or limit <= 0 or limit > 1_000:
+            raise ValueError("dispatch-watch limit must be an integer from 1 to 1000")
+        table = self._store.tables.effect_dispatch_watches
+        with self._store.read_connection() as connection:
+            rows = connection.execute(
+                select(table)
+                .order_by(table.c.admitted_at, table.c.public_run_id)
+                .limit(limit)
+            ).all()
+        result = []
+        for row in rows:
+            admitted_at = _load(row.admitted_at)
+            assert admitted_at is not None
+            result.append(
+                EffectDispatchWatch(
+                    row.public_run_id,
+                    BlobRef(row.input_blob_sha256, int(row.input_blob_size)),
+                    admitted_at,
+                )
+            )
+        return tuple(result)
+
+    def acknowledge_dispatch_watch(self, public_run_id: str) -> bool:
+        """Acknowledge only after the native snapshot is terminal."""
+
+        _nonempty(public_run_id, "dispatch public_run_id")
+        table = self._store.tables.effect_dispatch_watches
+        with self._store.write_transaction() as connection:
+            result = connection.execute(
+                delete(table).where(table.c.public_run_id == public_run_id)
+            )
+        return result.rowcount == 1
+
     def _result_for(
         self, connection, effect_id: str
     ) -> EffectResult | ScopeResult | None:
@@ -170,15 +264,70 @@ class EffectLedger:
                 raise KeyError(effect_id)
             return self._from_row(connection, row)
 
-    def list_nonterminal(self) -> list[EffectRecord]:
+    def list_nonterminal(self, *, limit: int | None = None) -> list[EffectRecord]:
+        if limit is not None and (type(limit) is not int or limit <= 0):
+            raise ValueError("nonterminal-effect limit must be a positive integer")
+        table = self._store.tables.effects
+        statement = (
+            select(table)
+            .where(table.c.phase.not_in({"delivered"}))
+            .order_by(table.c.deadline_at, table.c.effect_id)
+        )
+        if limit is not None:
+            statement = statement.limit(limit)
+        with self._store.read_connection() as connection:
+            rows = connection.execute(statement).all()
+            return [self._from_row(connection, row) for row in rows]
+
+    def list_nonterminal_for_thread(
+        self, thread_id: str, *, limit: int
+    ) -> list[EffectRecord]:
+        if not thread_id:
+            raise ValueError("effect thread_id must not be empty")
+        if type(limit) is not int or limit <= 0:
+            raise ValueError("nonterminal-effect limit must be a positive integer")
         table = self._store.tables.effects
         with self._store.read_connection() as connection:
             rows = connection.execute(
                 select(table)
-                .where(table.c.phase.not_in({"delivered"}))
+                .where(
+                    and_(
+                        table.c.thread_id == thread_id,
+                        table.c.phase.not_in({"delivered"}),
+                    )
+                )
                 .order_by(table.c.deadline_at, table.c.effect_id)
+                .limit(limit)
             ).all()
             return [self._from_row(connection, row) for row in rows]
+
+    def list_recovery_threads(
+        self, *, limit: int, after_thread_id: str | None = None
+    ) -> tuple[str, ...]:
+        """Return a hard-bounded owner recovery queue, excluding parked humans."""
+
+        if type(limit) is not int or limit <= 0:
+            raise ValueError("recovery-effect limit must be a positive integer")
+        table = self._store.tables.effects
+        condition = and_(
+            table.c.phase.not_in({"delivered"}),
+            or_(
+                table.c.effect_kind != "manual",
+                table.c.phase != "prepared",
+            ),
+        )
+        if after_thread_id is not None:
+            _nonempty(after_thread_id, "recovery cursor")
+            condition = and_(condition, table.c.thread_id > after_thread_id)
+        with self._store.read_connection() as connection:
+            rows = connection.execute(
+                select(table.c.thread_id)
+                .where(condition)
+                .distinct()
+                .order_by(table.c.thread_id)
+                .limit(limit)
+            ).all()
+        return tuple(row.thread_id for row in rows)
 
     def list_due(self, now: datetime, *, limit: int) -> list[EffectRecord]:
         if type(limit) is not int or limit <= 0:

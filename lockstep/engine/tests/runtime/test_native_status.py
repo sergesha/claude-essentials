@@ -1,12 +1,16 @@
+from types import SimpleNamespace
+
 from lockstep.runtime.catalog import RunBinding
+from lockstep.runtime.effects.descriptors import (
+    derive_effect_id,
+    parse_effect_descriptor,
+)
 from lockstep.runtime.native_models import (
     NativeCoordinate,
     NativeInterrupt,
     NativeSnapshot,
 )
 from lockstep.runtime.status import project_status
-from lockstep.runtime.effects.descriptors import derive_effect_id, parse_effect_descriptor
-from types import SimpleNamespace
 
 
 def _binding() -> RunBinding:
@@ -15,7 +19,9 @@ def _binding() -> RunBinding:
 
 def _parked(value: object = "Work?") -> NativeSnapshot:
     coordinate = NativeCoordinate("thread-1", "cp-1", "", "task-1", "int-1")
-    return NativeSnapshot(values={}, pending=(NativeInterrupt(coordinate, value),), next=("work",))
+    return NativeSnapshot(
+        values={}, pending=(NativeInterrupt(coordinate, value),), next=("work",)
+    )
 
 
 def test_status_is_derived_not_catalogued(tmp_path):
@@ -32,22 +38,39 @@ def test_status_is_derived_not_catalogued(tmp_path):
 
 def test_status_maps_native_outcomes_and_active_engine_work():
     binding = _binding()
-    assert project_status(binding, NativeSnapshot(values={}), (), ()).status == "starting"
-    assert project_status(
-        binding, NativeSnapshot(values={}, next=("node",)), (), ()
-    ).status == "running"
-    assert project_status(
-        binding, NativeSnapshot(values={"lockstep_outcome": "PASS"}), (), ()
-    ).status == "completed"
-    assert project_status(
-        binding, NativeSnapshot(values={"lockstep_outcome": "FAIL"}), (), ()
-    ).status == "escalated"
-    assert project_status(
-        binding, NativeSnapshot(values={"lockstep_outcome": "ERROR"}), (), ()
-    ).status == "escalated"
-    assert project_status(
-        binding, NativeSnapshot(values={"lockstep_outcome": "ABORTED"}), (), ()
-    ).status == "aborted"
+    assert (
+        project_status(binding, NativeSnapshot(values={}), (), ()).status == "starting"
+    )
+    assert (
+        project_status(
+            binding, NativeSnapshot(values={}, next=("node",)), (), ()
+        ).status
+        == "running"
+    )
+    assert (
+        project_status(
+            binding, NativeSnapshot(values={"lockstep_outcome": "PASS"}), (), ()
+        ).status
+        == "completed"
+    )
+    assert (
+        project_status(
+            binding, NativeSnapshot(values={"lockstep_outcome": "FAIL"}), (), ()
+        ).status
+        == "escalated"
+    )
+    assert (
+        project_status(
+            binding, NativeSnapshot(values={"lockstep_outcome": "ERROR"}), (), ()
+        ).status
+        == "escalated"
+    )
+    assert (
+        project_status(
+            binding, NativeSnapshot(values={"lockstep_outcome": "ABORTED"}), (), ()
+        ).status
+        == "aborted"
+    )
 
 
 def test_untrusted_outcome_cannot_override_active_native_coordinates():

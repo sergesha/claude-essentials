@@ -49,6 +49,7 @@ class WorkspaceError(RuntimeError):
 
 
 WorkspacePhase = Literal["materialized", "quarantined", "released"]
+WorkspacePurpose = Literal["managed_output", "no_publish_operation"]
 
 
 WorkspaceLimits = ProjectTreeLimits
@@ -65,10 +66,20 @@ class WorkspaceLease:
     revision: int
     workspace_path: Path
     declared_writes: tuple[str, ...]
+    purpose: WorkspacePurpose
     baseline: FilesystemSnapshot
     vcs_baseline_digest: str
     phase: WorkspacePhase
     rollover_snapshot_ref: str | None = None
+
+
+@dataclass(frozen=True)
+class NoPublishProof:
+    workspace_ref: str
+    purpose: Literal["no_publish_operation"]
+    workspace_quarantined: bool
+    rollover_snapshot_ref: None = None
+
 
 def _canonical(value: object) -> bytes:
     return json.dumps(
@@ -85,8 +96,10 @@ def _digest(value: object) -> str:
 
 
 def _hex(value: str, label: str) -> str:
-    if not isinstance(value, str) or len(value) != 64 or any(
-        character not in "0123456789abcdef" for character in value
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
     ):
         raise WorkspaceError(f"{label} must be a lowercase SHA-256 digest")
     return value
@@ -107,7 +120,9 @@ def _workspace_digest(workspace_ref: str) -> str:
 def _snapshot_ref(value: str) -> ProjectSnapshotRef:
     if not isinstance(value, str) or not value.startswith("snapshot:"):
         raise WorkspaceError("input snapshot reference must use the snapshot: scheme")
-    return ProjectSnapshotRef(_hex(value.removeprefix("snapshot:"), "snapshot reference"))
+    return ProjectSnapshotRef(
+        _hex(value.removeprefix("snapshot:"), "snapshot reference")
+    )
 
 
 def _stat_identity(item: os.stat_result) -> tuple[int, int, int, int, int, int]:
@@ -196,11 +211,14 @@ class LocalGitWorkspaceProvider:
         workspace_ref: str,
         input_snapshot_ref: str,
         declared_writes: tuple[str, ...],
+        purpose: WorkspacePurpose = "managed_output",
     ) -> WorkspaceLease:
         effect_id = _text(effect_id, "effect_id")
         request_digest = _hex(request_digest, "request digest")
         key = _workspace_digest(workspace_ref)
         snapshot_ref = _snapshot_ref(input_snapshot_ref)
+        if purpose not in {"managed_output", "no_publish_operation"}:
+            raise WorkspaceError("unknown workspace purpose")
         if not isinstance(declared_writes, tuple):
             declared_writes = tuple(declared_writes)
         declared_writes = tuple(
@@ -228,15 +246,19 @@ class LocalGitWorkspaceProvider:
                     request_digest,
                     input_snapshot_ref,
                     tuple(declared_writes),
+                    purpose,
                 )
                 observed = (
                     lease.effect_id,
                     lease.request_digest,
                     lease.input_snapshot_ref,
                     lease.declared_writes,
+                    lease.purpose,
                 )
                 if observed != expected:
-                    raise WorkspaceError("workspace reference is bound to another request")
+                    raise WorkspaceError(
+                        "workspace reference is bound to another request"
+                    )
                 if lease.phase != "materialized":
                     raise WorkspaceError(
                         "quarantined or released workspace is not reusable"
@@ -246,7 +268,10 @@ class LocalGitWorkspaceProvider:
                     raise WorkspaceError(
                         "materialized workspace drifted from its launch baseline"
                     )
-                if self._vcs_tree_digest(lease.workspace_path) != lease.vcs_baseline_digest:
+                if (
+                    self._vcs_tree_digest(lease.workspace_path)
+                    != lease.vcs_baseline_digest
+                ):
                     raise WorkspaceError(
                         "materialized workspace Git control state drifted"
                     )
@@ -294,7 +319,9 @@ class LocalGitWorkspaceProvider:
                     shutil.rmtree(checkout)
                 if isinstance(exc, WorkspaceError):
                     raise
-                raise WorkspaceError(f"workspace materialization failed: {exc}") from exc
+                raise WorkspaceError(
+                    f"workspace materialization failed: {exc}"
+                ) from exc
 
             lease = WorkspaceLease(
                 workspace_ref=workspace_ref,
@@ -304,6 +331,7 @@ class LocalGitWorkspaceProvider:
                 revision=1,
                 workspace_path=checkout,
                 declared_writes=tuple(declared_writes),
+                purpose=purpose,
                 baseline=baseline,
                 vcs_baseline_digest=vcs_baseline_digest,
                 phase="materialized",
@@ -328,6 +356,8 @@ class LocalGitWorkspaceProvider:
         with file_lock(record_path, timeout=30.0, stale_after=300.0):
             current = self._read_record(key)
             self._validate_current_lease(lease, current)
+            if current.purpose != "managed_output":
+                raise WorkspaceError("no-publish workspace cannot be rolled over")
             stored_snapshot_ref = self._stored_rollover_ref(key)
             if current.phase == "quarantined" and stored_snapshot_ref is not None:
                 return stored_snapshot_ref
@@ -336,11 +366,15 @@ class LocalGitWorkspaceProvider:
 
             if current.phase == "materialized":
                 quarantined_path = self._quarantine_path(key)
-                moved = quarantined_path.exists() and not current.workspace_path.exists()
+                moved = (
+                    quarantined_path.exists() and not current.workspace_path.exists()
+                )
                 if quarantined_path.is_symlink() or (
                     quarantined_path.exists() and not moved
                 ):
-                    raise WorkspaceError("workspace quarantine destination already exists")
+                    raise WorkspaceError(
+                        "workspace quarantine destination already exists"
+                    )
                 if not moved:
                     try:
                         os.rename(current.workspace_path, quarantined_path)
@@ -415,7 +449,10 @@ class LocalGitWorkspaceProvider:
                     raise WorkspaceError(
                         "workspace changed during consistent before/copy/after capture"
                     )
-                if self._vcs_tree_digest(current.workspace_path) != current.vcs_baseline_digest:
+                if (
+                    self._vcs_tree_digest(current.workspace_path)
+                    != current.vcs_baseline_digest
+                ):
                     raise WorkspaceError(
                         "Git control state changed during rollover capture"
                     )
@@ -439,7 +476,9 @@ class LocalGitWorkspaceProvider:
             except Exception as exc:
                 if isinstance(exc, WorkspaceError):
                     raise
-                raise WorkspaceError(f"workspace manifest integrity failure: {exc}") from exc
+                raise WorkspaceError(
+                    f"workspace manifest integrity failure: {exc}"
+                ) from exc
 
             result_ref = f"snapshot:{rolled.digest}"
             current = WorkspaceLease(
@@ -451,6 +490,59 @@ class LocalGitWorkspaceProvider:
             )
             self._write_record(current, snapshot_ref_out=result_ref)
             return result_ref
+
+    def quarantine_no_publish(self, lease: WorkspaceLease) -> NoPublishProof:
+        """Fence an operation workspace against publication and reuse.
+
+        The process adapter proves quiescence separately.  This transition only
+        makes the already committed no-publish purpose durable at the filesystem
+        boundary; it intentionally does not inspect or snapshot operation output.
+        """
+
+        key = _workspace_digest(lease.workspace_ref)
+        record_path = self._record_path(key)
+        with file_lock(record_path, timeout=30.0, stale_after=300.0):
+            current = self._read_record(key)
+            self._validate_current_lease(lease, current)
+            if current.purpose != "no_publish_operation":
+                raise WorkspaceError("managed-output workspace requires rollover")
+            if current.phase == "released":
+                raise WorkspaceError("released workspace cannot be quarantined")
+            if current.phase == "materialized":
+                quarantined_path = self._quarantine_path(key)
+                moved = (
+                    quarantined_path.exists() and not current.workspace_path.exists()
+                )
+                if quarantined_path.is_symlink() or (
+                    quarantined_path.exists() and not moved
+                ):
+                    raise WorkspaceError(
+                        "workspace quarantine destination already exists"
+                    )
+                if not moved:
+                    try:
+                        os.rename(current.workspace_path, quarantined_path)
+                        self._fsync_directory(self._checkouts)
+                        self._fsync_directory(self._quarantine)
+                    except OSError as exc:
+                        raise WorkspaceError(
+                            "workspace could not be durably quarantined"
+                        ) from exc
+                current = WorkspaceLease(
+                    **{
+                        **current.__dict__,
+                        "revision": current.revision + 1,
+                        "workspace_path": quarantined_path,
+                        "phase": "quarantined",
+                        "rollover_snapshot_ref": None,
+                    }
+                )
+                self._write_record(current, snapshot_ref_out=None)
+            return NoPublishProof(
+                workspace_ref=current.workspace_ref,
+                purpose="no_publish_operation",
+                workspace_quarantined=True,
+            )
 
     def release(
         self,
@@ -468,12 +560,18 @@ class LocalGitWorkspaceProvider:
             path = current.workspace_path
             expected = self._quarantine_path(key)
             if path != expected or path.is_symlink():
-                raise WorkspaceError("workspace cleanup target failed containment check")
+                raise WorkspaceError(
+                    "workspace cleanup target failed containment check"
+                )
             if path.exists():
                 shutil.rmtree(path)
                 self._fsync_directory(path.parent)
             released = WorkspaceLease(
-                **{**current.__dict__, "revision": current.revision + 1, "phase": "released"}
+                **{
+                    **current.__dict__,
+                    "revision": current.revision + 1,
+                    "phase": "released",
+                }
             )
             self._write_record(
                 released, snapshot_ref_out=self._stored_rollover_ref(key)
@@ -504,13 +602,17 @@ class LocalGitWorkspaceProvider:
         try:
             return self._snapshots.read(ref)
         except Exception as exc:
-            raise WorkspaceError(f"input snapshot cannot be verified: {ref.digest}") from exc
+            raise WorkspaceError(
+                f"input snapshot cannot be verified: {ref.digest}"
+            ) from exc
 
     def _capture(self, workspace: Path) -> FilesystemSnapshot:
         try:
             return capture_project(workspace)
         except (OSError, PathContractError) as exc:
-            raise WorkspaceError(f"workspace manifest integrity failure: {exc}") from exc
+            raise WorkspaceError(
+                f"workspace manifest integrity failure: {exc}"
+            ) from exc
 
     def _preflight_tree_limits(self, workspace: Path) -> None:
         """Bound a quiescent tree before hashing or allocating file contents."""
@@ -601,8 +703,10 @@ class LocalGitWorkspaceProvider:
                             raise WorkspaceError(
                                 "Git control file exceeds admission limit"
                             )
-                        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(
-                            os, "O_NOFOLLOW", 0
+                        flags = (
+                            os.O_RDONLY
+                            | getattr(os, "O_CLOEXEC", 0)
+                            | getattr(os, "O_NOFOLLOW", 0)
                         )
                         descriptor = os.open(path, flags)
                         try:
@@ -641,13 +745,9 @@ class LocalGitWorkspaceProvider:
                             f"special file in Git control state: {rel}"
                         )
                 if _stat_identity(directory.lstat()) != _stat_identity(expected):
-                    raise WorkspaceError(
-                        "Git control directory changed while hashing"
-                    )
+                    raise WorkspaceError("Git control directory changed while hashing")
             except OSError as exc:
-                raise WorkspaceError(
-                    "Git control state changed while hashing"
-                ) from exc
+                raise WorkspaceError("Git control state changed while hashing") from exc
 
         walk(root, "", root_metadata)
         return digest.hexdigest()
@@ -659,7 +759,9 @@ class LocalGitWorkspaceProvider:
         expected = tuple((entry.path, entry.blob.sha256) for entry in snapshot.files)
         observed = tuple((entry.path, entry.sha256) for entry in entries)
         if observed != expected:
-            raise WorkspaceError("materialized workspace does not match the exact input snapshot")
+            raise WorkspaceError(
+                "materialized workspace does not match the exact input snapshot"
+            )
         if baseline.git is None:
             raise WorkspaceError("materialized workspace lacks Git attestation")
 
@@ -685,7 +787,9 @@ class LocalGitWorkspaceProvider:
             )
             comparison = compare_effect(lease.baseline, captured, allowed, "pass")
         except PathContractError as exc:
-            raise WorkspaceError(f"workspace manifest integrity failure: {exc}") from exc
+            raise WorkspaceError(
+                f"workspace manifest integrity failure: {exc}"
+            ) from exc
         if comparison.integrity_error:
             raise WorkspaceError("; ".join(comparison.reasons))
 
@@ -796,6 +900,7 @@ class LocalGitWorkspaceProvider:
             "input_snapshot_ref": lease.input_snapshot_ref,
             "revision": lease.revision,
             "declared_writes": list(lease.declared_writes),
+            "purpose": lease.purpose,
             "baseline": snapshot_to_data(lease.baseline),
             "vcs_baseline_digest": lease.vcs_baseline_digest,
             "phase": lease.phase,
@@ -803,7 +908,9 @@ class LocalGitWorkspaceProvider:
         }
         encoded = _canonical(data)
         path = self._record_path(key)
-        descriptor, raw_temporary = tempfile.mkstemp(prefix=f".{key}.", dir=self._records)
+        descriptor, raw_temporary = tempfile.mkstemp(
+            prefix=f".{key}.", dir=self._records
+        )
         temporary = Path(raw_temporary)
         try:
             with os.fdopen(descriptor, "wb") as stream:
@@ -822,7 +929,10 @@ class LocalGitWorkspaceProvider:
         try:
             verify_owner_file(path)
             data = json.loads(path.read_bytes())
-            if not isinstance(data, dict) or data.get("schema") != "lockstep.workspace-lease/v1":
+            if (
+                not isinstance(data, dict)
+                or data.get("schema") != "lockstep.workspace-lease/v1"
+            ):
                 raise WorkspaceError("invalid workspace lease record")
             workspace_ref = data["workspace_ref"]
             if _workspace_digest(workspace_ref) != key:
@@ -833,6 +943,9 @@ class LocalGitWorkspaceProvider:
             phase = data["phase"]
             if phase not in {"materialized", "quarantined", "released"}:
                 raise WorkspaceError("invalid workspace phase")
+            purpose = data.get("purpose", "managed_output")
+            if purpose not in {"managed_output", "no_publish_operation"}:
+                raise WorkspaceError("invalid workspace purpose")
             declared = data["declared_writes"]
             if not isinstance(declared, list) or not all(
                 isinstance(item, str) for item in declared
@@ -853,6 +966,7 @@ class LocalGitWorkspaceProvider:
                 revision=revision,
                 workspace_path=expected_path,
                 declared_writes=tuple(declared),
+                purpose=purpose,
                 baseline=snapshot_from_data(data["baseline"]),
                 vcs_baseline_digest=_hex(
                     data["vcs_baseline_digest"], "VCS baseline digest"
@@ -866,7 +980,13 @@ class LocalGitWorkspaceProvider:
             )
         except FileNotFoundError as exc:
             raise KeyError(f"workspace:{key}") from exc
-        except (InsecureStatePath, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        except (
+            InsecureStatePath,
+            KeyError,
+            TypeError,
+            ValueError,
+            json.JSONDecodeError,
+        ) as exc:
             raise WorkspaceError("invalid or insecure workspace lease record") from exc
 
     def _stored_rollover_ref(self, key: str) -> str | None:

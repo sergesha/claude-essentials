@@ -110,6 +110,65 @@ def test_effect_table_owns_external_facts_only(ledger) -> None:
     }
 
 
+def test_dispatch_watch_is_atomic_idempotent_and_not_status(ledger) -> None:
+    from lockstep.runtime.blobs import BlobRef
+    from lockstep.runtime.catalog import RunBinding, RunCatalog
+
+    effect_ledger, storage = ledger
+    catalog = RunCatalog(storage)
+    binding = RunBinding(
+        "run-1", "thread-1", "a" * 64, "bundle:" + "b" * 64, "/project"
+    )
+    first_binding, first = effect_ledger.admit_start(
+        catalog, binding, BlobRef("c" * 64, 2)
+    )
+    assert first_binding.public_run_id == "run-1"
+    assert first.public_run_id == "run-1"
+    assert effect_ledger.admit_start(catalog, binding, BlobRef("c" * 64, 2)) == (
+        first_binding,
+        first,
+    )
+
+    assert effect_ledger.list_dispatch_watches(limit=2) == (first,)
+    assert effect_ledger.acknowledge_dispatch_watch("run-1") is True
+    assert effect_ledger.list_dispatch_watches(limit=2) == ()
+    assert set(storage.tables.effect_dispatch_watches.c.keys()) == {
+        "public_run_id",
+        "input_blob_sha256",
+        "input_blob_size",
+        "admitted_at",
+    }
+
+
+def test_dispatch_watch_limit_is_a_batch_not_a_correctness_cap(ledger) -> None:
+    from lockstep.runtime.blobs import BlobRef
+    from lockstep.runtime.catalog import RunBinding, RunCatalog
+
+    effect_ledger, storage = ledger
+    catalog = RunCatalog(storage)
+    input_blob = BlobRef("c" * 64, 2)
+    for index in range(129):
+        effect_ledger.admit_start(
+            catalog,
+            RunBinding(
+                f"run-{index:03}",
+                f"thread-{index:03}",
+                "a" * 64,
+                "bundle:" + "b" * 64,
+                "/project",
+            ),
+            input_blob,
+        )
+
+    first_batch = effect_ledger.list_dispatch_watches(limit=128)
+    assert len(first_batch) == 128
+    for watch in first_batch:
+        effect_ledger.acknowledge_dispatch_watch(watch.public_run_id)
+    assert tuple(
+        watch.public_run_id for watch in effect_ledger.list_dispatch_watches(limit=128)
+    ) == ("run-128",)
+
+
 def test_prepare_is_idempotent_but_rejects_changed_descriptor_or_runner(ledger) -> None:
     from lockstep.runtime.effects.ledger import EffectConflict
 

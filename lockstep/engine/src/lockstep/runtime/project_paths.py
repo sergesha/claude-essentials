@@ -26,9 +26,18 @@ class ProjectTreeLimits:
     max_entries: int = 10_000
     max_file_bytes: int = 64 * 1024 * 1024
     max_total_bytes: int = 256 * 1024 * 1024
+    max_depth: int = 256
 
     def __post_init__(self) -> None:
-        if min(self.max_entries, self.max_file_bytes, self.max_total_bytes) <= 0:
+        if (
+            min(
+                self.max_entries,
+                self.max_file_bytes,
+                self.max_total_bytes,
+                self.max_depth,
+            )
+            <= 0
+        ):
             raise ValueError("project tree limits must be positive")
 
 
@@ -106,7 +115,9 @@ def validate_portable_project_paths(
     for item in parsed:
         normalized = item.relative.as_posix()
         if normalized in explicit:
-            raise PortablePathCollision(f"duplicate portable project path {item.value!r}")
+            raise PortablePathCollision(
+                f"duplicate portable project path {item.value!r}"
+            )
         explicit[normalized] = item
         for index, part in enumerate(item.relative.parts):
             parent = tuple(item.relative.parts[:index])

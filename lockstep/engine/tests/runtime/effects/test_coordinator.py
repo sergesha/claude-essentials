@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 from itertools import count
 
 import pytest
+
 from lockstep.runtime.catalog import RunBinding, RunCatalog
 from lockstep.runtime.effects.descriptors import (
     derive_effect_id,
@@ -23,7 +24,6 @@ from lockstep.runtime.native_models import (
 )
 from lockstep.runtime.providers.base import EffectRequest
 from lockstep.runtime.storage import SQLiteStore
-
 from tests.runtime.providers.fakes import FakeEffectAuthority, FakeRunner
 
 NOW = datetime(2026, 8, 20, 10, tzinfo=UTC)
@@ -336,9 +336,7 @@ def test_artifact_bearing_effect_fails_closed_before_provider_request(system) ->
 
     coordinator, runtime, runner, _ledger, _store, coordinate = system
     raw = managed_descriptor(
-        artifacts=[
-            {"name": "review", "media_type": "text/markdown", "required": True}
-        ]
+        artifacts=[{"name": "review", "media_type": "text/markdown", "required": True}]
     )
     runtime.current = replace(
         runtime.current,
@@ -973,6 +971,38 @@ def test_sealed_result_is_visible_only_after_native_resume_commit(system) -> Non
     status = system[0].deliver_ready("run-1")
     assert status.run_id == "run-1"
     assert system[1].resume_calls[0][2] == {system[5].interrupt_id: result.to_dict()}
+    assert system[3].get(running.effect_id).phase == "delivered"
+
+
+def test_concurrent_delivery_owner_cannot_repeat_native_resume(system) -> None:
+    from lockstep.runtime.leases import LeaseStore
+    from lockstep.runtime.providers.base import TerminalSafetyObservation
+
+    running, runner = _advance_to_running(system)
+    launch = runner.ensure_started_calls[0]
+    result = _result(running.effect_id, snapshot_ref="snapshot:" + "e" * 64)
+    runner.inspect_observations.append(runner.terminal(launch, result))
+    runner.safety_observations.append(
+        TerminalSafetyObservation.proven_for(
+            launch, rollover_snapshot_ref=result.snapshot_ref, result_stable=True
+        )
+    )
+    assert system[0].reconcile("run-1").action == "sealed"
+
+    competing_leases = LeaseStore(system[4], clock=lambda: NOW)
+    competing = competing_leases.acquire(
+        "effect", running.effect_id, "competing-delivery", 30
+    )
+    try:
+        status = system[0].deliver_ready("run-1")
+    finally:
+        competing_leases.release(competing)
+
+    assert status.status == "running"
+    assert status.owner == "engine"
+    assert system[1].resume_calls == []
+    system[0].deliver_ready("run-1")
+    assert len(system[1].resume_calls) == 1
     assert system[3].get(running.effect_id).phase == "delivered"
 
 

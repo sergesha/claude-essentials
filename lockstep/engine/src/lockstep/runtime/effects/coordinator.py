@@ -48,6 +48,12 @@ from lockstep.runtime.providers.base import (
     TerminalSafetyObservation,
     launch_commitment_digest,
 )
+from lockstep.runtime.providers.manual import (
+    ManualHandoff,
+    ManualProvider,
+    ManualProviderError,
+    ManualSubmission,
+)
 from lockstep.runtime.status import ScenarioStatus, project_status
 
 
@@ -93,6 +99,7 @@ class EffectCoordinator:
         leases: LeaseStore,
         runners: Mapping[str, RunnerAdapter],
         authority: EffectAuthorityGate,
+        manual: ManualProvider | None = None,
         clock: Callable[[], datetime] | None = None,
         owner_factory: Callable[[], str] | None = None,
         lease_ttl: float = 30.0,
@@ -106,6 +113,7 @@ class EffectCoordinator:
             runner.binding_digest: runner for runner in self._runners.values()
         }
         self._authority = authority
+        self._manual = manual
         self._clock = clock or (lambda: datetime.now(UTC))
         self._owner_factory = owner_factory or (lambda: secrets.token_hex(16))
         self._lease_ttl = lease_ttl
@@ -569,6 +577,34 @@ class EffectCoordinator:
     ) -> ReconcileReport:
         return ReconcileReport(run_id, record.effect_id, action, record.phase)
 
+    def _manual_handoff(
+        self,
+        binding: RunBinding,
+        interrupt: NativeInterrupt,
+        descriptor: EffectDescriptor,
+    ) -> ManualHandoff:
+        if self._manual is None:
+            raise ProviderContractViolation("manual provider is unavailable")
+        if descriptor.kind != "manual" or descriptor.runner is not None:
+            raise ProviderContractViolation("manual handoff requires a manual effect")
+        try:
+            handoff = self._manual.prepare_handoff(binding, interrupt, descriptor)
+        except ManualProviderError as exc:
+            raise ProviderContractViolation(str(exc)) from exc
+        if (
+            handoff.effect_id
+            != derive_effect_id(interrupt.coordinate, descriptor.digest)
+            or handoff.public_run_id != binding.public_run_id
+            or handoff.project_identity != binding.project_identity
+            or handoff.coordinate != interrupt.coordinate
+            or handoff.descriptor_digest != descriptor.digest
+            or handoff.writes != descriptor.writes
+        ):
+            raise ProviderContractViolation(
+                "manual handoff differs from the exact protected interrupt"
+            )
+        return handoff
+
     @staticmethod
     def _timeout_result(effect_id: str) -> EffectResult:
         return parse_effect_result(
@@ -635,11 +671,13 @@ class EffectCoordinator:
     def reconcile(self, run_id: str) -> ReconcileReport:
         binding = self._binding(run_id)
         snapshot = self._runtime.snapshot(run_id, subgraphs=True)
-        records = [
-            record
-            for record in self._ledger.list_nonterminal()
-            if record.coordinate.thread_id == binding.thread_id
-        ]
+        records = self._ledger.list_nonterminal_for_thread(
+            binding.thread_id, limit=self.MAX_DUE_PER_SCAN + 1
+        )
+        if len(records) > self.MAX_DUE_PER_SCAN:
+            raise CoordinatorLineageError(
+                "run exceeds the bounded nonterminal effect capacity"
+            )
         pending_by_coordinate = {
             interrupt.coordinate: interrupt for interrupt in self._protected(snapshot)
         }
@@ -774,6 +812,11 @@ class EffectCoordinator:
                 )
                 return self._report(run_id, running, "running")
             if record is None:
+                if (
+                    isinstance(context.descriptor, EffectDescriptor)
+                    and context.descriptor.kind == "manual"
+                ):
+                    self._manual_handoff(binding, context.interrupt, context.descriptor)
                 prepared = self._ledger.prepare(
                     context.interrupt.coordinate,
                     context.descriptor,
@@ -818,6 +861,8 @@ class EffectCoordinator:
                     )
                     return self._report(run_id, sealed, "sealed")
                 if context.request is None:
+                    assert context.descriptor.kind == "manual"
+                    self._manual_handoff(binding, context.interrupt, context.descriptor)
                     return self._report(run_id, record, "manual_pending")
                 assert context.runner is not None
                 try:
@@ -1019,6 +1064,88 @@ class EffectCoordinator:
         finally:
             self._leases.release(lease)
 
+    def submit_manual(
+        self,
+        run_id: str,
+        source,
+        submission: ManualSubmission,
+    ) -> ScenarioStatus:
+        """Seal one protected manual result, then use ordinary native delivery."""
+
+        if not isinstance(submission, ManualSubmission):
+            raise ProviderContractViolation("closed ManualSubmission is required")
+        binding = self._binding(run_id)
+        snapshot = self._runtime.snapshot(run_id, subgraphs=True)
+        matches = tuple(
+            interrupt
+            for interrupt in self._protected(snapshot)
+            if interrupt.coordinate == source
+        )
+        if len(matches) != 1:
+            raise CoordinatorLineageError(
+                "manual source is not the exact current protected interrupt"
+            )
+        interrupt = matches[0]
+        descriptor, effect_id = self._identity(run_id, binding, interrupt, None)
+        if not isinstance(descriptor, EffectDescriptor) or descriptor.kind != "manual":
+            raise ProviderContractViolation(
+                "worker submission targets an engine effect"
+            )
+        try:
+            record = self._ledger.get(effect_id)
+        except KeyError as exc:
+            raise CoordinatorLineageError(
+                "manual handoff was not prepared before worker submission"
+            ) from exc
+        self._identity(run_id, binding, interrupt, record)
+        if record.phase != "prepared":
+            raise CoordinatorLineageError("manual effect is not awaiting one result")
+        lease = self._acquire(effect_id)
+        try:
+            with self._runtime.commitment_guard(run_id, source) as guarded:
+                if guarded.binding != binding or guarded.interrupt.coordinate != source:
+                    raise CoordinatorLineageError(
+                        "manual source changed before result commitment"
+                    )
+                guarded_descriptor = parse_effect_descriptor(
+                    self._raw_descriptor(guarded.interrupt)
+                )
+                if (
+                    not isinstance(guarded_descriptor, EffectDescriptor)
+                    or guarded_descriptor.kind != "manual"
+                    or guarded_descriptor.digest != record.descriptor_digest
+                ):
+                    raise CoordinatorLineageError(
+                        "manual descriptor changed before result commitment"
+                    )
+                handoff = self._manual_handoff(
+                    binding, guarded.interrupt, guarded_descriptor
+                )
+                current = self._ledger.get(effect_id)
+                if (
+                    current.revision != record.revision
+                    or current.phase != "prepared"
+                    or not self._leases.is_current(lease)
+                ):
+                    raise StaleEffectRevision(
+                        "manual effect changed before result commitment"
+                    )
+                assert self._manual is not None
+                result = self._closed_result(self._manual.complete(handoff, submission))
+                if result.effect_id != effect_id:
+                    raise ProviderContractViolation(
+                        "manual result targets another effect"
+                    )
+                self._ledger.seal(
+                    effect_id,
+                    result,
+                    expected_revision=current.revision,
+                    lease=lease,
+                )
+        finally:
+            self._leases.release(lease)
+        return self.deliver_ready(run_id, [source.interrupt_id])
+
     def deliver_ready(
         self, run_id: str, interrupt_ids: Sequence[str] | None = None
     ) -> ScenarioStatus:
@@ -1067,39 +1194,66 @@ class EffectCoordinator:
                 deliverable.append((record, interrupt))
         if not deliverable:
             return project_status(binding, snapshot, self._leases, self._ledger)
-        source = deliverable[0][1].coordinate
-        results = {
-            interrupt.coordinate.interrupt_id: record.result.to_dict()
-            for record, interrupt in deliverable
-        }
-        committed = self._runtime.resume(run_id, source, results)
-        if any(
-            pending.coordinate.interrupt_id in results for pending in committed.pending
-        ):
-            raise CoordinatorLineageError(
-                "native resume returned without consuming the exact delivered interrupts"
-            )
-        for stale_record, _interrupt in deliverable:
-            if (
-                self._protected_lineage(
-                    run_id,
-                    stale_record.coordinate,
-                    stale_record.descriptor_digest,
-                )
-                != "descended"
+        held: dict[str, Lease] = {}
+        current_deliverable: list[tuple[EffectRecord, NativeInterrupt]] = []
+        try:
+            for stale_record, interrupt in sorted(
+                deliverable, key=lambda item: item[0].effect_id
+            ):
+                try:
+                    held[stale_record.effect_id] = self._acquire(stale_record.effect_id)
+                except LeaseUnavailable:
+                    current_snapshot = self._runtime.snapshot(run_id, subgraphs=True)
+                    return project_status(
+                        binding, current_snapshot, self._leases, self._ledger
+                    )
+                current = self._ledger.get(stale_record.effect_id)
+                if (
+                    current.revision != stale_record.revision
+                    or current.phase not in {"sealed", "indeterminate"}
+                    or current.coordinate != interrupt.coordinate
+                    or current.descriptor_digest != stale_record.descriptor_digest
+                    or current.result is None
+                    or not self._leases.is_current(held[current.effect_id])
+                ):
+                    current_snapshot = self._runtime.snapshot(run_id, subgraphs=True)
+                    return project_status(
+                        binding, current_snapshot, self._leases, self._ledger
+                    )
+                current_deliverable.append((current, interrupt))
+
+            source = current_deliverable[0][1].coordinate
+            results = {
+                interrupt.coordinate.interrupt_id: record.result.to_dict()
+                for record, interrupt in current_deliverable
+            }
+            committed = self._runtime.resume(run_id, source, results)
+            if any(
+                pending.coordinate.interrupt_id in results
+                for pending in committed.pending
             ):
                 raise CoordinatorLineageError(
-                    "native commit does not descend from the delivered source interrupt"
+                    "native resume returned without consuming the exact delivered interrupts"
                 )
-            current = self._ledger.get(stale_record.effect_id)
-            lease = self._acquire(current.effect_id)
-            try:
+            for current, _interrupt in current_deliverable:
+                if (
+                    self._protected_lineage(
+                        run_id,
+                        current.coordinate,
+                        current.descriptor_digest,
+                    )
+                    != "descended"
+                ):
+                    raise CoordinatorLineageError(
+                        "native commit does not descend from the delivered source interrupt"
+                    )
                 self._ledger.mark_delivered(
                     current.effect_id,
                     expected_revision=current.revision,
-                    lease=lease,
+                    lease=held[current.effect_id],
                 )
-            finally:
+        finally:
+            for lease in reversed(tuple(held.values())):
                 self._leases.release(lease)
         return project_status(binding, committed, self._leases, self._ledger)
 
