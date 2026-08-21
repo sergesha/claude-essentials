@@ -70,3 +70,71 @@ def test_engine_has_no_workflow_state_fields(tmp_path):
     engine = Engine(tmp_path / "state", _recipes(tmp_path))
     assert set(engine.__dict__) == {"_service"}
     engine.close()
+
+
+def test_manual_protected_recipe_resumes_after_service_restart(tmp_path):
+    state = tmp_path / "state"
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "src").mkdir()
+    recipes = tmp_path / "recipes"
+    recipes.mkdir()
+    (recipes / "protected-manual.recipe.yaml").write_text(
+        "version: '1.0'\n"
+        "name: protected-manual\n"
+        "state: {edit_result: dict, lockstep_outcome: str}\n"
+        "nodes:\n"
+        "  edit:\n"
+        "    type: interrupt\n"
+        "    state_key: edit_request\n"
+        "    resume_key: edit_result\n"
+        "    idempotent: false\n"
+        "    message:\n"
+        "      step: edit\n"
+        "      task: Edit the project\n"
+        "      exit_criterion: The edit is complete\n"
+        "      evidence_schema: {type: object}\n"
+        "      artifact_contract: []\n"
+        "      lockstep_effect:\n"
+        "        schema: lockstep.effect/v1\n"
+        "        kind: manual\n"
+        "        logical_id: edit\n"
+        "        runner: null\n"
+        "        inputs: {}\n"
+        "        writes: [src/]\n"
+        "        artifacts: []\n"
+        "        deadline_seconds: null\n"
+        "        scope_state_keys: []\n"
+        "        result_schema: lockstep.effect-result/v1\n"
+        "  pass: {type: passthrough, output: {lockstep_outcome: PASS}}\n"
+        "  fail: {type: passthrough, output: {lockstep_outcome: FAIL}}\n"
+        "  error: {type: passthrough, output: {lockstep_outcome: ERROR}}\n"
+        "edges:\n"
+        "  - {from: START, to: edit}\n"
+        "  - {from: edit, to: pass, condition: \"edit_result.outcome == 'PASS'\"}\n"
+        "  - {from: edit, to: fail, condition: \"edit_result.outcome == 'FAIL'\"}\n"
+        "  - {from: edit, to: error, condition: \"edit_result.outcome == 'ERROR'\"}\n"
+        "  - {from: pass, to: END}\n"
+        "  - {from: fail, to: END}\n"
+        "  - {from: error, to: END}\n"
+    )
+    first = Engine(state, recipes)
+    started = first.start("protected-manual", {}, str(project))
+    assert started["status"] == "awaiting"
+    assert started["step"] == "edit"
+    run_id = started["run_id"]
+    sessions.touch(state, run_id, "session-1", 30)
+    first.close()
+
+    restarted = Engine(state, recipes)
+    completed = restarted.scenario_done(
+        run_id,
+        "edit",
+        {"reviewed": True},
+        session_id="session-1",
+        project=str(project),
+    )
+
+    assert completed["status"] == "completed"
+    assert restarted.status(run_id, str(project))["status"] == "completed"
+    restarted.close()

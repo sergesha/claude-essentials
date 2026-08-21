@@ -19,13 +19,13 @@ EXPECTED_FIELDS = {
     "maximum_child_calls",
     "peak_parallel_branches",
     "peak_parallel_subcalls",
-    "maximum_runner_timeout_seconds",
+    "maximum_configured_runner_timeout_seconds",
     "generated_node_count",
     "expanded_fragment_count",
     "controlled_time",
-    "end_to_end_wall_time",
-    "tokens",
-    "money",
+    "end_to_end_time",
+    "token_estimate",
+    "money_estimate",
 }
 
 
@@ -79,21 +79,28 @@ def test_estimate_has_the_exact_closed_normative_schema_and_honest_unknowns(
     assert data["maximum_child_calls"] == 1
     assert data["peak_parallel_branches"] == 0
     assert data["peak_parallel_subcalls"] == 0
-    assert data["maximum_runner_timeout_seconds"] == 60
+    assert data["maximum_configured_runner_timeout_seconds"] == 60
     assert data["generated_node_count"] > 0
     assert data["expanded_fragment_count"] == 0
-    assert data["controlled_time"]["available"] is False
-    assert "child call 'review' has no timeout" in data["controlled_time"][
-        "unavailable_reasons"
-    ]
-    assert data["end_to_end_wall_time"] == {
-        "available": False,
-        "reason": "human and external-agent completion time is unbounded",
+    assert set(data["controlled_time"]) == {
+        "status",
+        "value",
+        "unit",
+        "formula",
+        "reasons",
+        "assumptions",
     }
-    assert data["tokens"]["available"] is False
-    assert data["money"]["available"] is False
-    assert "upper_bound" not in data["tokens"]
-    assert "upper_bound" not in data["money"]
+    assert data["controlled_time"]["status"] == "unavailable"
+    assert data["controlled_time"]["value"] is None
+    assert "child call 'review' has no timeout" in data["controlled_time"][
+        "reasons"
+    ]
+    assert data["end_to_end_time"]["status"] == "unbounded"
+    assert data["end_to_end_time"]["value"] is None
+    assert data["token_estimate"]["status"] == "unavailable"
+    assert data["money_estimate"]["status"] == "unavailable"
+    assert data["token_estimate"]["value"] is None
+    assert data["money_estimate"]["value"] is None
 
 
 def test_manual_estimate_uses_only_closed_recipe_facts(tmp_path: Path) -> None:
@@ -128,5 +135,5 @@ def test_manual_estimate_uses_only_closed_recipe_facts(tmp_path: Path) -> None:
     assert data["user_work_steps"] == 1
     assert data["maximum_validator_submissions"] == 1
     assert data["generated_node_count"] == 1
-    assert data["tokens"]["available"] is False
-    assert data["money"]["available"] is False
+    assert data["token_estimate"]["status"] == "unavailable"
+    assert data["money_estimate"]["status"] == "unavailable"

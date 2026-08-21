@@ -9,7 +9,7 @@ from lockstep.runtime.effects.descriptors import parse_effect_descriptor
 from lockstep.runtime.effects.models import EffectDescriptor
 from lockstep.workflow.compiler import compile_workflow
 from lockstep.workflow.schema import load_workflow, parse_workflow
-from lockstep.workflow.semantics import InMemoryWorkflowCatalog
+from lockstep.workflow.semantics import InMemoryWorkflowCatalog, validate_semantics
 
 
 def _parse(tmp_path: Path, flow: str):
@@ -34,11 +34,17 @@ def test_compile_is_byte_identical_and_binds_the_exact_source(tmp_path: Path) ->
     )
     catalog = InMemoryWorkflowCatalog({})
 
-    first = compile_workflow(workflow, catalog)
-    second = compile_workflow(workflow, catalog)
+    validated = validate_semantics(workflow, catalog)
+    first = compile_workflow(validated, catalog)
+    second = compile_workflow(validated, catalog)
 
     assert first == second
-    assert first.digest == hashlib.sha256(first.recipe_bytes).hexdigest()
+    assert first.recipe_sha256 == hashlib.sha256(first.recipe_bytes).hexdigest()
+    assert first.source_map_sha256 == hashlib.sha256(first.source_map_bytes).hexdigest()
+    assert first.dependency_manifest_sha256 == hashlib.sha256(
+        first.dependency_manifest_bytes
+    ).hexdigest()
+    assert first.compilation_digest != first.recipe_sha256
     assert first.recipe_bytes.endswith(b"\n")
     assert first.source_map_bytes.endswith(b"\n")
     document = yaml.safe_load(first.recipe_bytes)
@@ -66,7 +72,10 @@ def test_step_lowers_to_an_exact_native_manual_effect_and_graph_terminal(
     )
 
     document = yaml.safe_load(
-        compile_workflow(workflow, InMemoryWorkflowCatalog({})).recipe_bytes
+        compile_workflow(
+            validate_semantics(workflow, InMemoryWorkflowCatalog({})),
+            InMemoryWorkflowCatalog({}),
+        ).recipe_bytes
     )
 
     interrupts = {
@@ -106,13 +115,15 @@ def test_source_bytes_not_only_parsed_values_participate_in_freshness(
         tmp_path,
         "  - escalate: {}\n",
     )
-    first_result = compile_workflow(first, InMemoryWorkflowCatalog({}))
+    catalog = InMemoryWorkflowCatalog({})
+    first_result = compile_workflow(validate_semantics(first, catalog), catalog)
     source = tmp_path / "review.workflow.yaml"
     source.write_text(source.read_text().replace("description:", "description:  "))
     second = parse_workflow(load_workflow(source))
 
-    second_result = compile_workflow(second, InMemoryWorkflowCatalog({}))
+    second_result = compile_workflow(validate_semantics(second, catalog), catalog)
 
     assert first.source_sha256 != second.source_sha256
     assert first_result.recipe_bytes != second_result.recipe_bytes
-    assert first_result.digest != second_result.digest
+    assert first_result.recipe_sha256 != second_result.recipe_sha256
+    assert first_result.compilation_digest != second_result.compilation_digest

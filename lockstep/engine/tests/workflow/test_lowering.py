@@ -7,7 +7,7 @@ import yaml
 from lockstep.runtime.effects.descriptors import parse_effect_descriptor
 from lockstep.workflow.compiler import compile_workflow
 from lockstep.workflow.schema import load_workflow, parse_workflow
-from lockstep.workflow.semantics import InMemoryWorkflowCatalog
+from lockstep.workflow.semantics import InMemoryWorkflowCatalog, validate_semantics
 
 
 def _compile(tmp_path: Path, flow: str, defaults: str = "") -> dict:
@@ -21,8 +21,9 @@ def _compile(tmp_path: Path, flow: str, defaults: str = "") -> dict:
         f"flow:\n{flow}"
     )
     workflow = parse_workflow(load_workflow(source))
+    catalog = InMemoryWorkflowCatalog({})
     return yaml.safe_load(
-        compile_workflow(workflow, InMemoryWorkflowCatalog({})).recipe_bytes
+        compile_workflow(validate_semantics(workflow, catalog), catalog).recipe_bytes
     )
 
 
@@ -76,7 +77,7 @@ def test_sequence_and_retry_are_native_edges_with_a_bounded_attempt_gate(
             "schema": "lockstep.pinned-command/v1",
             "logical_argv": ["pytest", "-q"],
             "logical_cwd": ".",
-            "result_mode": "exit",
+            "result_source": "exit",
         }
         for node in document["nodes"].values()
     )
