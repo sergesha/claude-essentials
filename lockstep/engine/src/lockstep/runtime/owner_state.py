@@ -67,6 +67,18 @@ def initialize_owner_state(path: str | Path) -> Path:
     return root
 
 
+def fsync_owner_directory(path: Path) -> None:
+    """Make a completed owner-state namespace mutation directory-durable."""
+
+    verify_owner_directory(path)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def ensure_owner_directory(root: Path, relative: str | PurePath) -> Path:
     """Create and verify each descendant below an already verified state root."""
 
@@ -87,6 +99,9 @@ def ensure_owner_directory(root: Path, relative: str | PurePath) -> Path:
                 # below rejects links, foreign ownership, or insecure modes.
                 pass
             verify_owner_directory(current)
+            # The directory itself can be synced by later leaf publication,
+            # but its name is durable only after syncing the verified parent.
+            fsync_owner_directory(current.parent)
     return current
 
 

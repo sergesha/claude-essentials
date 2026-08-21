@@ -26,6 +26,7 @@ from lockstep.runtime.owner_state import (
     InsecureStatePath,
     StorageLimitExceeded,
     ensure_owner_directory,
+    fsync_owner_directory,
     initialize_owner_state,
     seal_owner_file,
     take_bounded,
@@ -118,6 +119,7 @@ class ArtifactRecord:
     media_type: str
     blob: BlobRef
     source_snapshot_ref: ProjectSnapshotRef
+    producer_set_digest: str
 
 
 @dataclass(frozen=True)
@@ -223,6 +225,7 @@ class ArtifactRegistry:
         self._owner_state = initialize_owner_state(owner_state_dir)
         self._manifests = ensure_owner_directory(self._owner_state, "artifacts/manifests")
         self._keys = ensure_owner_directory(self._owner_state, "artifacts/producer-keys")
+        self._sets = ensure_owner_directory(self._owner_state, "artifacts/producer-sets")
         self._blobs = blob_store
         self._snapshots = snapshot_store
         self._limits = limits or ArtifactLimits()
@@ -260,6 +263,28 @@ class ArtifactRegistry:
         digest = self._key_digest(effect_id, coordinate, descriptor_digest, name)
         return self._keys / f"{digest}.json"
 
+    def _set_digest(
+        self,
+        effect_id: str,
+        coordinate: NativeCoordinate,
+        descriptor_digest: str,
+    ) -> str:
+        return hashlib.sha256(
+            _canonical(
+                {
+                    "schema": "lockstep.artifact-producer-set/v1",
+                    "effect_id": _text(effect_id, "producer effect_id"),
+                    "coordinate": _coordinate_data(coordinate),
+                    "descriptor_digest": _digest(
+                        descriptor_digest, "descriptor digest"
+                    ),
+                }
+            )
+        ).hexdigest()
+
+    def _set_path(self, digest: str) -> Path:
+        return self._sets / f"{_digest(digest, 'producer set digest')}.json"
+
     def _preflight_immutable(
         self, path: Path, encoded: bytes, *, collision: str
     ) -> None:
@@ -274,23 +299,29 @@ class ArtifactRegistry:
         if len(encoded) > self._limits.max_manifest_bytes:
             raise StorageLimitExceeded("artifact manifest exceeds admission limit")
         with file_lock(path, timeout=30.0, stale_after=300.0):
-            if path.exists() or path.is_symlink():
-                existing = _read_regular(path, max_bytes=self._limits.max_manifest_bytes)
-                if existing != encoded:
-                    raise ArtifactCollision(collision)
-                return
-            fd, raw_tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-            tmp = Path(raw_tmp)
-            try:
-                with os.fdopen(fd, "wb") as stream:
-                    stream.write(encoded)
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                seal_owner_file(tmp, writable=False)
-                os.replace(tmp, path)
-            finally:
-                if tmp.exists():
-                    tmp.unlink()
+            self._publish_immutable_locked(path, encoded, collision=collision)
+
+    def _publish_immutable_locked(
+        self, path: Path, encoded: bytes, *, collision: str
+    ) -> None:
+        if path.exists() or path.is_symlink():
+            existing = _read_regular(path, max_bytes=self._limits.max_manifest_bytes)
+            if existing != encoded:
+                raise ArtifactCollision(collision)
+            return
+        fd, raw_tmp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        tmp = Path(raw_tmp)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(encoded)
+                stream.flush()
+                os.fsync(stream.fileno())
+            seal_owner_file(tmp, writable=False)
+            os.replace(tmp, path)
+            fsync_owner_directory(path.parent)
+        finally:
+            if tmp.exists():
+                tmp.unlink()
 
     def register_set(
         self,
@@ -315,6 +346,40 @@ class ArtifactRegistry:
             raise TypeError("artifact declarations must be closed values")
         if len({item.name for item in values}) != len(values):
             raise ArtifactCollision("artifact declarations contain duplicate names")
+        set_digest = self._set_digest(
+            producer_effect_id, producer_coordinate, descriptor_digest
+        )
+        set_lock = self._set_path(set_digest)
+        with file_lock(set_lock, timeout=30.0, stale_after=300.0):
+            return self._register_set_locked(
+                public_run_id=public_run_id,
+                project_identity=project_identity,
+                definition_digest=definition_digest,
+                producer_effect_id=producer_effect_id,
+                producer_request_digest=producer_request_digest,
+                workspace_ref=workspace_ref,
+                producer_coordinate=producer_coordinate,
+                descriptor_digest=descriptor_digest,
+                snapshot_ref=snapshot_ref,
+                values=values,
+                set_digest=set_digest,
+            )
+
+    def _register_set_locked(
+        self,
+        *,
+        public_run_id: str,
+        project_identity: str,
+        definition_digest: str,
+        producer_effect_id: str,
+        producer_request_digest: str,
+        workspace_ref: str,
+        producer_coordinate: NativeCoordinate,
+        descriptor_digest: str,
+        snapshot_ref: ProjectSnapshotRef,
+        values: tuple[ArtifactDeclaration, ...],
+        set_digest: str,
+    ) -> tuple[ArtifactRef, ...]:
         snapshot = self._snapshots.read(snapshot_ref)
         if snapshot.provenance.get("source") != "managed-workspace-rollover":
             raise ArtifactProvenanceError(
@@ -329,6 +394,7 @@ class ArtifactRegistry:
             )
         by_path = {item.path: item.blob for item in snapshot.files}
         prepared: list[tuple[ArtifactRef, bytes, Path, bytes]] = []
+        committed_items: list[dict[str, str]] = []
         for declaration in values:
             blob = by_path.get(declaration.source_path)
             if blob is None:
@@ -355,6 +421,7 @@ class ArtifactRegistry:
                 "media_type": declaration.media_type,
                 "blob": {"sha256": blob.sha256, "size": blob.size},
                 "source_snapshot_ref": snapshot_ref.digest,
+                "producer_set_digest": set_digest,
             }
             encoded = _canonical(data)
             ref = ArtifactRef(hashlib.sha256(encoded).hexdigest())
@@ -374,6 +441,18 @@ class ArtifactRegistry:
                     key_data,
                 )
             )
+            committed_items.append(
+                {"name": declaration.name, "artifact_ref": str(ref)}
+            )
+        set_data = _canonical(
+            {
+                "schema": "lockstep.artifact-producer-set-commit/v1",
+                "effect_id": producer_effect_id,
+                "coordinate": _coordinate_data(producer_coordinate),
+                "descriptor_digest": descriptor_digest,
+                "artifacts": committed_items,
+            }
+        )
         # The complete set, including every existing producer-key collision, is
         # checked before the first immutable name is published.
         for ref, encoded, key_path, key_data in prepared:
@@ -387,6 +466,11 @@ class ArtifactRegistry:
                 encoded,
                 collision="artifact manifest digest collision",
             )
+        self._preflight_immutable(
+            self._set_path(set_digest),
+            set_data,
+            collision="artifact producer set is already bound differently",
+        )
         for ref, encoded, key_path, key_data in prepared:
             self._publish_immutable(
                 key_path,
@@ -398,6 +482,13 @@ class ArtifactRegistry:
                 encoded,
                 collision="artifact manifest digest collision",
             )
+        # This marker is the only visibility boundary. A crash before it may
+        # leave immutable blobs/keys, but they remain unreachable garbage.
+        self._publish_immutable_locked(
+            self._set_path(set_digest),
+            set_data,
+            collision="artifact producer set is already bound differently",
+        )
         return tuple(item[0] for item in prepared)
 
     def read(self, ref: ArtifactRef | str) -> ArtifactRecord:
@@ -416,6 +507,7 @@ class ArtifactRegistry:
                 "producer_effect_id", "producer_request_digest", "workspace_ref",
                 "producer_coordinate", "descriptor_digest", "declared_name",
                 "source_path", "media_type", "blob", "source_snapshot_ref",
+                "producer_set_digest",
             }
             if not isinstance(data, dict) or set(data) != fields:
                 raise ValueError
@@ -451,12 +543,56 @@ class ArtifactRegistry:
                 declaration.media_type,
                 blob,
                 snapshot_ref,
+                _digest(data["producer_set_digest"], "producer set digest"),
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             raise ArtifactError("invalid immutable artifact manifest") from exc
         self._snapshots.read(record.source_snapshot_ref)
         self._blobs.read(record.blob)
+        committed = self._read_committed_set(record.producer_set_digest)
+        if not any(
+            item["name"] == record.declared_name
+            and item["artifact_ref"] == str(record.ref)
+            for item in committed["artifacts"]
+        ):
+            raise ArtifactProvenanceError(
+                "artifact is absent from its committed producer set"
+            )
         return record
+
+    def _read_committed_set(self, digest: str) -> dict[str, object]:
+        try:
+            encoded = _read_regular(
+                self._set_path(digest), max_bytes=self._limits.max_manifest_bytes
+            )
+        except FileNotFoundError as exc:
+            raise KeyError(f"uncommitted artifact producer set: {digest}") from exc
+        try:
+            data = json.loads(encoded)
+            if not isinstance(data, dict) or set(data) != {
+                "schema", "effect_id", "coordinate", "descriptor_digest", "artifacts"
+            }:
+                raise ValueError
+            if data["schema"] != "lockstep.artifact-producer-set-commit/v1":
+                raise ValueError
+            effect_id = _text(data["effect_id"], "producer effect_id")
+            coordinate = _coordinate_from_data(data["coordinate"])
+            descriptor_digest = _digest(
+                data["descriptor_digest"], "descriptor digest"
+            )
+            if self._set_digest(effect_id, coordinate, descriptor_digest) != digest:
+                raise ValueError
+            artifacts = data["artifacts"]
+            if not isinstance(artifacts, list) or len(artifacts) > self._limits.max_artifacts_per_set:
+                raise ValueError
+            for item in artifacts:
+                if not isinstance(item, dict) or set(item) != {"name", "artifact_ref"}:
+                    raise ValueError
+                _text(item["name"], "declared artifact name")
+                ArtifactRef.parse(item["artifact_ref"])
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ArtifactError("invalid artifact producer set") from exc
+        return data
 
     def list_for_producer(
         self,
@@ -471,6 +607,17 @@ class ArtifactRegistry:
             self._limits.max_artifacts_per_set,
             "artifact lookup names",
         )
+        set_digest = self._set_digest(effect_id, coordinate, descriptor_digest)
+        try:
+            committed = self._read_committed_set(set_digest)
+        except KeyError:
+            return ()
+        committed_names = tuple(item["name"] for item in committed["artifacts"])
+        if tuple(names) != committed_names:
+            # Exact bounded lookup may request a declared subset, but never
+            # interpret a partial on-disk set as committed.
+            if any(name not in committed_names for name in names):
+                return ()
         for name in names:
             path = self._key_path(effect_id, coordinate, descriptor_digest, name)
             if not path.exists() and not path.is_symlink():

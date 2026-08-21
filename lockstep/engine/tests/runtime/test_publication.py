@@ -62,6 +62,7 @@ def _request(refs, destinations, *, publisher_binding_digest: str):
             interrupt_id="interrupt-2",
         ),
         descriptor_digest="b" * 64,
+        authority_request_digest="e" * 64,
         grant_digest="c" * 64,
         publisher_binding_digest=publisher_binding_digest,
         consent_ref="consent:one",
@@ -74,6 +75,22 @@ def _request(refs, destinations, *, publisher_binding_digest: str):
             for ref, destination in zip(refs, destinations, strict=True)
         ),
     )
+
+
+def _finish_apply(publisher, handle):
+    for _ in range(2 * 32 + 2):
+        receipt = publisher.apply_or_recover(handle)
+        if receipt.phase == "applied":
+            return receipt
+    raise AssertionError("publication did not converge within its hard bound")
+
+
+def _finish_rollback(publisher, handle):
+    for _ in range(2 * 32 + 2):
+        receipt = publisher.rollback_or_recover(handle)
+        if receipt.phase == "rolled_back":
+            return receipt
+    raise AssertionError("rollback did not converge within its hard bound")
 
 
 def test_publication_prepare_is_side_effect_free_and_apply_is_exact(tmp_path: Path) -> None:
@@ -90,7 +107,7 @@ def test_publication_prepare_is_side_effect_free_and_apply_is_exact(tmp_path: Pa
     ))
 
     assert not (project / "out/one.txt").exists()
-    receipt = publisher.apply_or_recover(handle)
+    receipt = _finish_apply(publisher, handle)
 
     assert receipt.phase == "applied"
     assert (project / "out/one.txt").read_bytes() == b"ONE"
@@ -119,10 +136,10 @@ def test_publication_recovers_crash_after_each_atomic_replacement(
 
     monkeypatch.setattr(publication, "_after_replacement", crash)
     with pytest.raises(RuntimeError, match="simulated crash"):
-        publisher.apply_or_recover(handle)
+        _finish_apply(publisher, handle)
     monkeypatch.setattr(publication, "_after_replacement", lambda *_args: None)
 
-    assert publisher.apply_or_recover(handle).phase == "applied"
+    assert _finish_apply(publisher, handle).phase == "applied"
     assert (project / "one.txt").read_bytes() == b"ONE"
     assert (project / "two.txt").read_bytes() == b"TWO"
 
@@ -149,7 +166,7 @@ def test_publication_rollback_recovers_from_partially_applied_journal(tmp_path: 
 
     publication._after_replacement = apply_crash
     with pytest.raises(RuntimeError, match="apply crash"):
-        publisher.apply_or_recover(handle)
+        _finish_apply(publisher, handle)
 
     def crash(direction: str, index: int) -> None:
         if direction == "rollback" and index == 0:
@@ -158,11 +175,11 @@ def test_publication_rollback_recovers_from_partially_applied_journal(tmp_path: 
     publication._after_replacement = crash
     try:
         with pytest.raises(RuntimeError, match="simulated crash"):
-            publisher.rollback_or_recover(handle)
+            _finish_rollback(publisher, handle)
     finally:
         publication._after_replacement = lambda *_args: None
 
-    assert publisher.rollback_or_recover(handle).phase == "rolled_back"
+    assert _finish_rollback(publisher, handle).phase == "rolled_back"
     assert target.read_bytes() == b"OLD"
     assert not (project / "second.txt").exists()
 
@@ -194,7 +211,7 @@ def test_publication_rejects_collisions_git_controls_and_symlink_toctou(tmp_path
     safe.rmdir()
     safe.symlink_to(tmp_path)
     with pytest.raises(PublicationConflict):
-        publisher.apply_or_recover(handle)
+        _finish_apply(publisher, handle)
     assert not (tmp_path / "out.txt").exists()
 
 
@@ -214,7 +231,183 @@ def test_corrupt_journal_is_preserved_and_fails_closed(tmp_path: Path) -> None:
     before = journal.read_bytes()
 
     with pytest.raises(PublicationJournalError):
-        publisher.apply_or_recover(handle)
+        _finish_apply(publisher, handle)
 
     assert journal.read_bytes() == before
     assert not (project / "one.txt").exists()
+
+
+def test_publication_rejects_aggregate_bytes_before_journal_or_replacement(
+    tmp_path: Path,
+) -> None:
+    from lockstep.runtime.owner_state import StorageLimitExceeded
+    from lockstep.runtime.publication import PublicationLimits, ProjectPublisher
+
+    owner, blobs, registry, refs = _registry(tmp_path, {"one": b"ONE", "two": b"TWO"})
+    project = tmp_path / "project"
+    project.mkdir()
+    publisher = ProjectPublisher(
+        owner,
+        project,
+        registry,
+        blobs,
+        limits=PublicationLimits(max_total_bytes=5),
+    )
+
+    with pytest.raises(StorageLimitExceeded, match="aggregate"):
+        publisher.prepare(
+            _request(
+                refs,
+                ("one.txt", "two.txt"),
+                publisher_binding_digest=publisher.binding_digest,
+            )
+        )
+    assert not tuple((owner / "publications" / publisher.binding_digest / "journals").iterdir())
+    assert not (project / "one.txt").exists()
+
+
+def test_publication_aggregate_limit_includes_existing_preimages(
+    tmp_path: Path,
+) -> None:
+    from lockstep.runtime.owner_state import StorageLimitExceeded
+    from lockstep.runtime.publication import PublicationLimits, ProjectPublisher
+
+    owner, blobs, registry, refs = _registry(tmp_path, {"one": b"N"})
+    project = tmp_path / "project"
+    project.mkdir()
+    target = project / "one.txt"
+    target.write_bytes(b"OLD!!")
+    publisher = ProjectPublisher(
+        owner,
+        project,
+        registry,
+        blobs,
+        limits=PublicationLimits(max_total_bytes=5),
+    )
+
+    with pytest.raises(StorageLimitExceeded, match="aggregate"):
+        publisher.prepare(
+            _request(
+                refs,
+                ("one.txt",),
+                publisher_binding_digest=publisher.binding_digest,
+            )
+        )
+    assert target.read_bytes() == b"OLD!!"
+    assert not tuple((owner / "publications" / publisher.binding_digest / "journals").iterdir())
+
+
+def test_publication_rechecks_preimage_at_atomic_replacement_boundary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lockstep.runtime.publication import PublicationConflict, ProjectPublisher
+
+    owner, blobs, registry, refs = _registry(tmp_path, {"one": b"ONE"})
+    project = tmp_path / "project"
+    project.mkdir()
+    target = project / "one.txt"
+    target.write_bytes(b"OLD")
+    publisher = ProjectPublisher(owner, project, registry, blobs)
+    handle = publisher.prepare(
+        _request(
+            refs,
+            ("one.txt",),
+            publisher_binding_digest=publisher.binding_digest,
+        )
+    )
+    original = publisher._current_image
+    observations = 0
+
+    def current_after_foreign_write(parent_fd, leaf):
+        nonlocal observations
+        observations += 1
+        if observations == 2:
+            target.write_bytes(b"ALIEN")
+        return original(parent_fd, leaf)
+
+    monkeypatch.setattr(publisher, "_current_image", current_after_foreign_write)
+    with pytest.raises(PublicationConflict, match="destination changed"):
+        publisher.apply_or_recover(handle)
+    assert target.read_bytes() == b"ALIEN"
+
+
+def test_publication_reverifies_whole_set_before_applied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import lockstep.runtime.publication as publication
+
+    owner, blobs, registry, refs = _registry(tmp_path, {"one": b"ONE", "two": b"TWO"})
+    project = tmp_path / "project"
+    project.mkdir()
+    publisher = publication.ProjectPublisher(owner, project, registry, blobs)
+    handle = publisher.prepare(
+        _request(
+            refs,
+            ("one.txt", "two.txt"),
+            publisher_binding_digest=publisher.binding_digest,
+        )
+    )
+
+    def mutate_first_after_second(direction: str, index: int) -> None:
+        if direction == "apply" and index == 1:
+            (project / "one.txt").write_bytes(b"ALIEN")
+
+    monkeypatch.setattr(publication, "_after_replacement", mutate_first_after_second)
+    with pytest.raises(publication.PublicationConflict, match="changed"):
+        _finish_apply(publisher, handle)
+    assert (project / "one.txt").read_bytes() == b"ALIEN"
+
+
+def test_terminal_receipt_reverifies_bytes_and_preimage_mode(tmp_path: Path) -> None:
+    import os
+    from lockstep.runtime.publication import PublicationConflict, ProjectPublisher
+
+    owner, blobs, registry, refs = _registry(tmp_path, {"one": b"NEW"})
+    project = tmp_path / "project"
+    project.mkdir()
+    target = project / "one.txt"
+    target.write_bytes(b"OLD")
+    target.chmod(0o640)
+    publisher = ProjectPublisher(owner, project, registry, blobs)
+    handle = publisher.prepare(
+        _request(refs, ("one.txt",), publisher_binding_digest=publisher.binding_digest)
+    )
+    assert _finish_apply(publisher, handle).phase == "applied"
+    target.write_bytes(b"ALIEN")
+    with pytest.raises(PublicationConflict, match="changed"):
+        publisher.apply_or_recover(handle)
+    target.write_bytes(b"NEW")
+    target.chmod(0o600)
+
+    mode_target = project / "mode.txt"
+    mode_target.write_bytes(b"OLD")
+    mode_target.chmod(0o640)
+    mode_handle = publisher.prepare(
+        _request(refs, ("mode.txt",), publisher_binding_digest=publisher.binding_digest)
+    )
+    assert publisher.apply_or_recover(mode_handle).phase == "applying"
+    assert publisher.apply_or_recover(mode_handle).phase == "applying"
+    assert _finish_rollback(publisher, mode_handle).phase == "rolled_back"
+    assert mode_target.read_bytes() == b"OLD"
+    assert os.stat(mode_target).st_mode & 0o777 == 0o640
+
+
+def test_publication_advances_at_most_one_monotonic_action_per_call(
+    tmp_path: Path,
+) -> None:
+    from lockstep.runtime.publication import ProjectPublisher
+
+    owner, blobs, registry, refs = _registry(tmp_path, {"one": b"ONE", "two": b"TWO"})
+    project = tmp_path / "project"
+    project.mkdir()
+    publisher = ProjectPublisher(owner, project, registry, blobs)
+    handle = publisher.prepare(
+        _request(refs, ("one.txt", "two.txt"), publisher_binding_digest=publisher.binding_digest)
+    )
+    assert publisher.apply_or_recover(handle).phase == "applying"
+    assert (project / "one.txt").read_bytes() == b"ONE"
+    assert not (project / "two.txt").exists()
+    assert publisher.apply_or_recover(handle).phase == "applying"
+    assert not (project / "two.txt").exists()
+    assert publisher.apply_or_recover(handle).phase == "applying"
+    assert (project / "two.txt").read_bytes() == b"TWO"

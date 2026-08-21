@@ -98,6 +98,23 @@ def test_artifact_source_is_exact_safe_and_covered_by_declared_writes(artifact) 
         parse_effect_descriptor(managed_descriptor(artifacts=[artifact]))
 
 
+def test_descriptor_rejects_more_than_32_artifact_declarations() -> None:
+    from lockstep.runtime.effects.descriptors import parse_effect_descriptor
+
+    artifacts = [
+        {
+            "name": f"artifact-{index}",
+            "source_path": f"src/artifact-{index}.txt",
+            "media_type": "text/plain",
+            "required": True,
+        }
+        for index in range(33)
+    ]
+
+    with pytest.raises(ValueError, match="declaration limit"):
+        parse_effect_descriptor(managed_descriptor(artifacts=artifacts))
+
+
 def test_descriptor_rejects_callable_and_bounded_input_before_encoding() -> None:
     from lockstep.runtime.effects.descriptors import parse_effect_descriptor
 
@@ -164,6 +181,39 @@ def test_manual_effect_cannot_claim_deadline_or_bounded_scope() -> None:
         parse_effect_descriptor({**base, "deadline_seconds": 60})
     with pytest.raises(ValueError, match="manual.*bounded scope"):
         parse_effect_descriptor({**base, "scope_state_keys": ["scope"]})
+
+
+def test_publish_descriptor_is_no_spawn_and_binds_exact_destinations() -> None:
+    """Catches runner-shaped publication or destinations chosen after authority."""
+    from lockstep.runtime.effects.descriptors import parse_effect_descriptor
+
+    descriptor = parse_effect_descriptor(
+        {
+            "schema": "lockstep.effect/v1",
+            "kind": "publish",
+            "logical_id": "publish-review",
+            "items": [
+                {
+                    "qualified_handle": "review.review",
+                    "producer_result_state_key": "call_review_review_result",
+                    "declared_name": "review",
+                    "acceptance_result_state_key": "accept_review_result",
+                    "destination": ".lockstep/review.md",
+                    "transformation": "identity",
+                    "audience": "local-project",
+                }
+            ],
+            "result_schema": "lockstep.effect-result/v1",
+        },
+        known_state_keys={"call_review_review_result", "accept_review_result"},
+    )
+
+    assert descriptor.kind == "publish"
+    assert not hasattr(descriptor, "runner")
+    assert descriptor.items[0].destination == ".lockstep/review.md"
+    assert descriptor.items[0].producer_result_state_key == (
+        "call_review_review_result"
+    )
 
 
 def scope_descriptor(**changes):
@@ -421,6 +471,7 @@ def test_decision_and_acceptance_results_are_exact_closed_variants() -> None:
         "schema": "lockstep.acceptance-result/v1", "effect_id": "effect-2",
         "outcome": "PASS", "artifact_ref": "artifact-review",
         "artifact_digest": "a" * 64, "consent_ref": "consent-1",
+        "approval_generation": 1,
     })
     assert accepted.consent_ref == "consent-1"
     with pytest.raises(ValueError, match="unknown"):

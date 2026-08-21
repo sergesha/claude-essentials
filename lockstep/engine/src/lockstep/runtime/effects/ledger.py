@@ -15,13 +15,17 @@ from lockstep.runtime.catalog import RunBinding, RunCatalog
 from lockstep.runtime.effects.descriptors import (
     derive_effect_id,
     parse_effect_result,
+    parse_acceptance_result,
     parse_scope_result,
 )
 from lockstep.runtime.effects.models import (
+    AcceptDescriptor,
+    AcceptanceResult,
     EffectDescriptor,
     EffectResult,
     ScopeDescriptor,
     ScopeResult,
+    PublishDescriptor,
 )
 from lockstep.runtime.leases import Lease
 from lockstep.runtime.native_models import NativeCoordinate
@@ -74,7 +78,7 @@ class EffectRecord:
     created_at: datetime
     updated_at: datetime
     revision: int
-    result: EffectResult | ScopeResult | None = None
+    result: EffectResult | ScopeResult | AcceptanceResult | None = None
 
 
 def _utc(value: datetime) -> datetime:
@@ -205,7 +209,7 @@ class EffectLedger:
 
     def _result_for(
         self, connection, effect_id: str
-    ) -> EffectResult | ScopeResult | None:
+    ) -> EffectResult | ScopeResult | AcceptanceResult | None:
         observations = self._store.tables.effect_observations
         row = connection.execute(
             select(observations.c.result_json)
@@ -223,6 +227,8 @@ class EffectLedger:
         value = json.loads(row.result_json)
         if value.get("schema") == "lockstep.scope-result/v1":
             return parse_scope_result(value)
+        if value.get("schema") == "lockstep.acceptance-result/v1":
+            return parse_acceptance_result(value)
         return parse_effect_result(value)
 
     def _from_row(self, connection, row) -> EffectRecord:
@@ -367,7 +373,7 @@ class EffectLedger:
     def prepare(
         self,
         coordinate: NativeCoordinate,
-        descriptor: EffectDescriptor | ScopeDescriptor,
+        descriptor: EffectDescriptor | ScopeDescriptor | AcceptDescriptor | PublishDescriptor,
         *,
         deadline_at: datetime | None,
         runner_binding_digest: str | None,
@@ -406,8 +412,15 @@ class EffectLedger:
                 raise ValueError(
                     "runnable effect requires exact request and grant commitments"
                 )
-        elif descriptor.scope_kind == "call" and binding is None:
-            raise ValueError("call scope requires a runner binding")
+        elif isinstance(descriptor, ScopeDescriptor):
+            if descriptor.scope_kind == "call" and binding is None:
+                raise ValueError("call scope requires a runner binding")
+        elif isinstance(descriptor, AcceptDescriptor):
+            if binding is not None or request is not None or grant is not None:
+                raise ValueError("acceptance has no external launch commitment")
+        elif isinstance(descriptor, PublishDescriptor):
+            if binding is None or request is None or grant is None:
+                raise ValueError("publication requires exact authority commitments")
         effect_id = derive_effect_id(coordinate, descriptor.digest)
         table = self._store.tables.effects
         values = {
@@ -492,7 +505,7 @@ class EffectLedger:
         runner_binding_digest: str | None = None,
         workspace_ref: str | None = None,
         launch_commitment_digest: str | None = None,
-        result: EffectResult | ScopeResult | None = None,
+        result: EffectResult | ScopeResult | AcceptanceResult | None = None,
         scope_descriptor: ScopeDescriptor | None = None,
     ) -> EffectRecord:
         if type(expected_revision) is not int or expected_revision < 0:
@@ -515,7 +528,11 @@ class EffectLedger:
                     result, ScopeResult
                 ):
                     raise EffectConflict("effect result kind does not match scope")
-                if current.effect_kind != "scope" and not isinstance(
+                if current.effect_kind == "accept" and not isinstance(
+                    result, AcceptanceResult
+                ):
+                    raise EffectConflict("acceptance result kind does not match descriptor")
+                if current.effect_kind not in {"scope", "accept"} and not isinstance(
                     result, EffectResult
                 ):
                     raise EffectConflict("effect result kind does not match descriptor")
@@ -630,7 +647,7 @@ class EffectLedger:
             result_json = None
             if result is not None:
                 changes["result_ref"] = getattr(result, "result_ref", None)
-                changes["fixed_error_code"] = result.fixed_error_code
+                changes["fixed_error_code"] = getattr(result, "fixed_error_code", None)
                 result_json = json.dumps(
                     result.to_dict(),
                     sort_keys=True,
@@ -724,7 +741,7 @@ class EffectLedger:
     def seal(
         self,
         effect_id: str,
-        result: EffectResult | ScopeResult,
+        result: EffectResult | ScopeResult | AcceptanceResult,
         *,
         expected_revision: int,
         lease: Lease | None = None,

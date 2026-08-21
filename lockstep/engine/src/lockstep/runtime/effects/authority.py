@@ -7,10 +7,13 @@ import json
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from lockstep.runtime.payload_limits import bounded_json
 from lockstep.runtime.providers.base import EffectRequest, PreparedLaunch
+
+if TYPE_CHECKING:
+    from lockstep.runtime.publication import PreparedPublication
 
 
 class EffectAuthorityDenied(RuntimeError):
@@ -177,5 +180,5 @@ class EffectAuthorityGate(Protocol):
         self,
         grant: EffectGrant,
         request: EffectRequest,
-        launch: PreparedLaunch,
+        launch: PreparedLaunch | PreparedPublication,
     ) -> AbstractContextManager[None]: ...

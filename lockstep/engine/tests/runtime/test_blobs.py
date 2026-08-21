@@ -26,6 +26,19 @@ def test_blob_is_sha256_addressed_and_duplicate_put_is_immutable(blob_store):
     assert blob_store.read(first) == payload
 
 
+def test_new_blob_fsyncs_containing_directory_after_publish(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import lockstep.runtime.blobs as blobs
+
+    observed = []
+    monkeypatch.setattr(blobs, "fsync_owner_directory", observed.append)
+    store = blobs.BlobStore(tmp_path / "owner-state")
+    ref = store.put(b"durable")
+
+    assert observed == [store.path_for(ref).parent]
+
+
 def test_blob_put_rejects_expected_digest_mismatch(blob_store):
     from lockstep.runtime.blobs import DigestMismatch
 

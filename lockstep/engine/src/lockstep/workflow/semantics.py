@@ -99,6 +99,24 @@ class OutcomeSymbol:
 class ChildArtifactContract:
     handle: str
     fixed_source: str
+    declared_name: str
+    media_type: str
+    producer_logical_id: str
+    producer_result_state_key: str
+
+    def __post_init__(self) -> None:
+        for label, value in (
+            ("artifact handle", self.handle),
+            ("artifact declaration", self.declared_name),
+            ("producer logical id", self.producer_logical_id),
+            ("producer result state key", self.producer_result_state_key),
+        ):
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"child {label} must be non-empty text")
+        if not isinstance(self.fixed_source, str) or not self.fixed_source:
+            raise ValueError("child artifact source must be non-empty text")
+        if not isinstance(self.media_type, str) or "/" not in self.media_type:
+            raise ValueError("child artifact media type is invalid")
 
 
 @dataclass(frozen=True)

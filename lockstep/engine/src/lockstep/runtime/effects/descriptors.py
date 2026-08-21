@@ -22,6 +22,8 @@ from lockstep.runtime.effects.models import (
     EffectDescriptor,
     EffectResult,
     RunnerDescriptor,
+    PublishDescriptor,
+    PublishItem,
     RuntimeInputSelector,
     ScopeDescriptor,
     ScopeResult,
@@ -205,6 +207,8 @@ def _inputs(value: object) -> tuple[tuple[str, StateSelector | RuntimeInputSelec
 def _artifacts(value: object) -> tuple[ArtifactDescriptor, ...]:
     if not isinstance(value, list):
         raise TypeError("artifacts must be an array")
+    if len(value) > 32:
+        raise ValueError("artifacts exceed the declaration limit")
     parsed = []
     for item in value:
         if not isinstance(item, dict):
@@ -244,7 +248,7 @@ def parse_effect_descriptor(
     *,
     expected_digest: str | None = None,
     known_state_keys: AbstractSet[str] | None = None,
-) -> EffectDescriptor | ScopeDescriptor | DecisionDescriptor | AcceptDescriptor:
+) -> EffectDescriptor | ScopeDescriptor | DecisionDescriptor | AcceptDescriptor | PublishDescriptor:
     raw = _bounded_mapping(value, "effect descriptor")
     if raw.get("schema") != "lockstep.effect/v1":
         raise ValueError("unsupported effect descriptor schema")
@@ -268,6 +272,21 @@ def parse_effect_descriptor(
         parsed_accept = _parse_accept_descriptor(raw)
         _verify_expected_digest(parsed_accept.digest, expected_digest)
         return parsed_accept
+    if kind == "publish":
+        parsed_publish = _parse_publish_descriptor(raw)
+        _verify_expected_digest(parsed_publish.digest, expected_digest)
+        _verify_known_state_keys(
+            tuple(
+                key
+                for item in parsed_publish.items
+                for key in (
+                    item.producer_result_state_key,
+                    item.acceptance_result_state_key,
+                )
+            ),
+            known_state_keys,
+        )
+        return parsed_publish
     if kind not in EFFECT_KINDS:
         raise ValueError("unknown effect kind")
     allowed = {
@@ -385,14 +404,79 @@ def _parse_decision_descriptor(raw: dict[str, Any]) -> DecisionDescriptor:
 
 
 def _parse_accept_descriptor(raw: dict[str, Any]) -> AcceptDescriptor:
-    allowed = {"schema", "kind", "logical_id", "artifact_handle", "verdict", "result_schema"}
+    allowed = {
+        "schema", "kind", "logical_id", "artifact_handle",
+        "producer_result_state_key", "declared_name", "verdict", "result_schema",
+    }
     _closed(raw, allowed, allowed, "accept descriptor")
     if raw["verdict"] != "PASS":
         raise ValueError("accept verdict must be PASS")
     if raw["result_schema"] != "lockstep.acceptance-result/v1":
         raise ValueError("unsupported accept result_schema")
     canonical = _canonical(raw)
-    return AcceptDescriptor(raw["schema"], "accept", _name(raw["logical_id"], "logical_id"), _name(raw["artifact_handle"], "artifact_handle"), "PASS", raw["result_schema"], canonical, hashlib.sha256(canonical).hexdigest())
+    return AcceptDescriptor(
+        raw["schema"],
+        "accept",
+        _name(raw["logical_id"], "logical_id"),
+        _name(raw["artifact_handle"], "artifact_handle"),
+        _name(raw["producer_result_state_key"], "producer result state key"),
+        _name(raw["declared_name"], "declared artifact name"),
+        "PASS",
+        raw["result_schema"],
+        canonical,
+        hashlib.sha256(canonical).hexdigest(),
+    )
+
+
+def _parse_publish_descriptor(raw: dict[str, Any]) -> PublishDescriptor:
+    allowed = {"schema", "kind", "logical_id", "items", "result_schema"}
+    _closed(raw, allowed, allowed, "publish descriptor")
+    if raw["result_schema"] != "lockstep.effect-result/v1":
+        raise ValueError("unsupported publish result_schema")
+    items = raw["items"]
+    if not isinstance(items, list) or not items or len(items) > 32:
+        raise ValueError("publish items must be a bounded non-empty array")
+    parsed: list[PublishItem] = []
+    destinations: list[str] = []
+    for item in items:
+        fields = {
+            "qualified_handle", "producer_result_state_key", "declared_name",
+            "acceptance_result_state_key", "destination", "transformation", "audience",
+        }
+        if not isinstance(item, dict):
+            raise TypeError("publish item must be an object")
+        _closed(item, fields, fields, "publish item")
+        destination = _write_path(item["destination"])
+        if destination.endswith("/"):
+            raise ValueError("publish destination must be an exact file")
+        if item["transformation"] != "identity":
+            raise ValueError("publish transformation must be identity")
+        if item["audience"] != "local-project":
+            raise ValueError("publish audience must be local-project")
+        destinations.append(destination)
+        parsed.append(
+            PublishItem(
+                _name(item["qualified_handle"], "qualified artifact handle"),
+                _name(item["producer_result_state_key"], "producer result state key"),
+                _name(item["declared_name"], "declared artifact name"),
+                _name(item["acceptance_result_state_key"], "acceptance result state key"),
+                destination,
+                "identity",
+                "local-project",
+            )
+        )
+    if len(set(destinations)) != len(destinations):
+        raise ValueError("publish destinations must be unique")
+    canonical = _canonical(raw)
+    return PublishDescriptor(
+        raw["schema"],
+        "publish",
+        _name(raw["logical_id"], "logical_id"),
+        tuple(parsed),
+        raw["result_schema"],
+        canonical,
+        hashlib.sha256(canonical).hexdigest(),
+    )
 
 
 def _verify_expected_digest(actual: str, expected: str | None) -> None:
@@ -534,7 +618,8 @@ def parse_decision_result(
 def parse_acceptance_result(value: object) -> AcceptanceResult:
     raw = _bounded_mapping(value, "acceptance result")
     fields = {
-        "schema", "effect_id", "outcome", "artifact_ref", "artifact_digest", "consent_ref"
+        "schema", "effect_id", "outcome", "artifact_ref", "artifact_digest",
+        "consent_ref", "approval_generation",
     }
     _closed(raw, fields, fields, "acceptance result")
     if raw["schema"] != "lockstep.acceptance-result/v1" or raw["outcome"] != "PASS":
@@ -543,11 +628,15 @@ def parse_acceptance_result(value: object) -> AcceptanceResult:
     consent_ref = _optional_string(raw["consent_ref"], "consent_ref")
     if artifact_ref is None or consent_ref is None:
         raise ValueError("acceptance references must be non-null")
+    approval_generation = raw["approval_generation"]
+    if type(approval_generation) is not int or approval_generation < 0:
+        raise ValueError("approval_generation must be a non-negative integer")
     return AcceptanceResult(
         raw["schema"], _name(raw["effect_id"], "effect_id"), "PASS",
         artifact_ref,
         _hex_digest(raw["artifact_digest"], "artifact_digest"),
         consent_ref,
+        approval_generation,
     )
 
 

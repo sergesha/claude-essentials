@@ -226,12 +226,20 @@ def test_decide_and_choose_lower_to_closed_native_routing(tmp_path: Path) -> Non
     assert "risk_result.outcome == 'ERROR'" in conditions
 
 
-def test_accept_descriptor_is_distinct_and_contains_no_fake_runner_or_consent(
+def test_accept_and_publish_descriptors_bind_artifact_authority_without_fake_runner(
     tmp_path: Path,
 ) -> None:
-    from lockstep.workflow.lowering import lower_accept_descriptor
+    from lockstep.workflow.lowering import (
+        lower_accept_descriptor,
+        lower_publish_descriptor,
+    )
 
-    raw = lower_accept_descriptor("accept-review", "review.review")
+    raw = lower_accept_descriptor(
+        "accept-review",
+        "review.review",
+        "review_producer_result",
+        "export-review",
+    )
     descriptor = parse_effect_descriptor(raw)
 
     assert isinstance(descriptor, AcceptDescriptor)
@@ -240,10 +248,39 @@ def test_accept_descriptor_is_distinct_and_contains_no_fake_runner_or_consent(
         "kind": "accept",
         "logical_id": "accept-review",
         "artifact_handle": "review.review",
+        "producer_result_state_key": "review_producer_result",
+        "declared_name": "export-review",
         "verdict": "PASS",
         "result_schema": "lockstep.acceptance-result/v1",
     }
     assert not ({"runner", "writes", "deadline_seconds", "consent_ref"} & set(raw))
+
+    publish = lower_publish_descriptor(
+        "publish-review",
+        artifact_handle="review.review",
+        producer_result_state_key="review_producer_result",
+        declared_name="export-review",
+        acceptance_result_state_key="accept_review_result",
+        destination=".lockstep/review.md",
+    )
+    assert publish == {
+        "schema": "lockstep.effect/v1",
+        "kind": "publish",
+        "logical_id": "publish-review",
+        "items": [
+            {
+                "qualified_handle": "review.review",
+                "producer_result_state_key": "review_producer_result",
+                "declared_name": "export-review",
+                "acceptance_result_state_key": "accept_review_result",
+                "destination": ".lockstep/review.md",
+                "transformation": "identity",
+                "audience": "local-project",
+            }
+        ],
+        "result_schema": "lockstep.effect-result/v1",
+    }
+    assert "runner" not in publish
 
 
 def test_generated_loop_exit_may_not_target_a_protected_interrupt_directly(

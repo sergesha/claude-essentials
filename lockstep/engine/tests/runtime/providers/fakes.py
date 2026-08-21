@@ -192,7 +192,7 @@ class FakeEffectAuthority:
                 raise EffectAuthorityDenied("effect grant is revoked or superseded")
             if (
                 request.grant_digest != grant.digest
-                or launch.workspace_ref != grant.workspace_ref
+                or getattr(launch, "workspace_ref", None) != grant.workspace_ref
                 or grant.expires_at <= self._clock()
             ):
                 raise EffectAuthorityDenied("effect grant commitment is stale")

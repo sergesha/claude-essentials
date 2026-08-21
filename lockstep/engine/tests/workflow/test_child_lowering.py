@@ -21,6 +21,7 @@ from lockstep.workflow.schema import load_workflow, parse_workflow
 from lockstep.workflow.semantics import (
     CanonicalCompiledBundle,
     CatalogFile,
+    ChildArtifactContract,
     ChildWorkflowContract,
     ResolvedCatalog,
     ResolvedChild,
@@ -537,3 +538,404 @@ def test_specialization_preserves_topology_and_leaves_standalone_manual_bytes_st
     assert original["nodes"]["work"]["message"]["lockstep_effect"]["runner"] is None
     assert descriptor["kind"] == "managed"
     assert descriptor["runner"]["selector"] == "reviewer"
+
+
+def test_accept_after_child_artifact_bridge_lowers_exact_publish(
+    tmp_path: Path,
+) -> None:
+    """Catches live-path export or publication that bypasses explicit acceptance."""
+    child_bytes = (
+        b"version: '1.0'\nname: child\n"
+        b"state: {review_result: dict, lockstep_outcome: str}\n"
+        b"nodes:\n  review:\n    type: interrupt\n"
+        b"    state_key: review_request\n    resume_key: review_result\n"
+        b"    idempotent: false\n    message:\n"
+        b"      lockstep_effect:\n        schema: lockstep.effect/v1\n"
+        b"        kind: manual\n        logical_id: review\n        runner: null\n"
+        b"        inputs: {}\n        writes: [review.md]\n"
+        b"        artifacts:\n"
+        b"          - {name: review, source_path: review.md, media_type: text/markdown, required: true}\n"
+        b"        deadline_seconds: null\n        scope_state_keys: []\n"
+        b"        result_schema: lockstep.effect-result/v1\n"
+        b"  pass: {type: passthrough, output: {lockstep_outcome: PASS}}\n"
+        b"edges: [{from: START, to: review}, {from: review, to: pass}, "
+        b"{from: pass, to: END}]\n"
+    )
+    child_file = CatalogFile.build("child.recipe.yaml", child_bytes)
+    catalog = ResolvedCatalog(
+        children={
+            "child": ResolvedChild(
+                "child",
+                ChildWorkflowContract(
+                    ("pass", "fail", "error"),
+                    exports={
+                        "review": ChildArtifactContract(
+                            "review", "review.md", "review", "text/markdown",
+                            "review", "review_result"
+                        )
+                    },
+                ),
+                "d" * 64,
+                CanonicalCompiledBundle.build(
+                    root_relative_path="child.recipe.yaml",
+                    files=(child_file,),
+                    compiler_version="1",
+                ),
+            )
+        }
+    )
+    workflow = _workflow(
+        tmp_path,
+        "parent",
+        "  - call:\n"
+        "      id: review-call\n"
+        "      workflow: child\n"
+        "      runner: codex\n"
+        "      artifacts: {review: .lockstep/review.md}\n"
+        "  - accept:\n"
+        "      artifact_from: review-call.review\n"
+        "      verdict: PASS\n",
+    )
+    compiled = compile_workflow(validate_semantics(workflow, catalog), catalog)
+    document = yaml.safe_load(compiled.recipe_bytes)
+    specialized = yaml.safe_load(compiled.generated_files[0].content)
+    child_declaration = next(
+        artifact
+        for node in specialized["nodes"].values()
+        for artifact in node.get("message", {})
+        .get("lockstep_effect", {})
+        .get("artifacts", [])
+    )
+
+    accept_nodes = [
+        node
+        for node in document["nodes"].values()
+        if node.get("message", {}).get("lockstep_effect", {}).get("kind")
+        == "accept"
+    ]
+    publish_nodes = [
+        node
+        for node in document["nodes"].values()
+        if node.get("message", {}).get("lockstep_effect", {}).get("kind")
+        == "publish"
+    ]
+    assert len(accept_nodes) == 1
+    assert len(publish_nodes) == 1
+    descriptor = publish_nodes[0]["message"]["lockstep_effect"]
+    assert "runner" not in descriptor
+    assert len(descriptor["items"]) == 1
+    item = descriptor["items"][0]
+    assert item["qualified_handle"] == "review-call.review"
+    assert item["declared_name"] == child_declaration["name"]
+    assert item["acceptance_result_state_key"] == accept_nodes[0]["resume_key"]
+    assert item["destination"] == ".lockstep/review.md"
+    assert item["transformation"] == "identity"
+    assert item["audience"] == "local-project"
+    bridge_key = item["producer_result_state_key"]
+    assert document["state"][bridge_key] == "dict"
+    assert any(
+        node.get("output", {}).get(bridge_key, "").endswith("_review_result}")
+        for node in document["nodes"].values()
+    )
+
+
+def _artifact_child_catalog(
+    child_bytes: bytes,
+    export: ChildArtifactContract | dict[str, ChildArtifactContract],
+):
+    child_file = CatalogFile.build("child.recipe.yaml", child_bytes)
+    exports = export if isinstance(export, dict) else {"review": export}
+    return ResolvedCatalog(
+        children={
+            "child": ResolvedChild(
+                "child",
+                ChildWorkflowContract(
+                    ("pass", "fail", "error"), exports=exports
+                ),
+                "e" * 64,
+                CanonicalCompiledBundle.build(
+                    root_relative_path="child.recipe.yaml",
+                    files=(child_file,),
+                    compiler_version="1",
+                ),
+            )
+        }
+    )
+
+
+def _exact_child_export_contract(**overrides) -> ChildArtifactContract:
+    values = {
+        "handle": "review",
+        "fixed_source": "review.md",
+        "declared_name": "review",
+        "media_type": "text/markdown",
+        "producer_logical_id": "review",
+        "producer_result_state_key": "review_result",
+    }
+    values.update(overrides)
+    return ChildArtifactContract(**values)
+
+
+def _compile_artifact_child(tmp_path: Path, catalog: ResolvedCatalog):
+    workflow = _workflow(
+        tmp_path,
+        "parent",
+        "  - call:\n"
+        "      id: review-call\n"
+        "      workflow: child\n"
+        "      runner: codex\n"
+        "      artifacts: {review: .lockstep/review.md}\n"
+        "  - accept:\n"
+        "      artifact_from: review-call.review\n"
+        "      verdict: PASS\n",
+    )
+    return compile_workflow(validate_semantics(workflow, catalog), catalog)
+
+
+def test_child_artifact_contract_preserves_exact_producer_declaration_and_result_key(
+    tmp_path: Path,
+) -> None:
+    child_bytes = (
+        b"version: '1.0'\nname: child\n"
+        b"state: {review_result: dict, lockstep_outcome: str}\n"
+        b"nodes:\n  review:\n    type: interrupt\n"
+        b"    state_key: review_request\n    resume_key: review_result\n"
+        b"    idempotent: false\n    message:\n"
+        b"      lockstep_effect:\n        schema: lockstep.effect/v1\n"
+        b"        kind: manual\n        logical_id: review\n        runner: null\n"
+        b"        inputs: {}\n        writes: [review.md]\n"
+        b"        artifacts:\n"
+        b"          - {name: review, source_path: review.md, media_type: text/markdown, required: true}\n"
+        b"        deadline_seconds: null\n        scope_state_keys: []\n"
+        b"        result_schema: lockstep.effect-result/v1\n"
+        b"  pass: {type: passthrough, output: {lockstep_outcome: PASS}}\n"
+        b"edges: [{from: START, to: review}, {from: review, to: pass}, "
+        b"{from: pass, to: END}]\n"
+    )
+    compiled = _compile_artifact_child(
+        tmp_path,
+        _artifact_child_catalog(child_bytes, _exact_child_export_contract()),
+    )
+    parent = yaml.safe_load(compiled.recipe_bytes)
+    child = yaml.safe_load(compiled.generated_files[0].content)
+    producer = next(
+        node
+        for node in child["nodes"].values()
+        if node.get("message", {}).get("lockstep_effect", {}).get("artifacts")
+    )
+    declaration = producer["message"]["lockstep_effect"]["artifacts"][0]
+    publish = next(
+        node["message"]["lockstep_effect"]
+        for node in parent["nodes"].values()
+        if node.get("message", {}).get("lockstep_effect", {}).get("kind")
+        == "publish"
+    )
+
+    assert declaration == {
+        "name": "review",
+        "source_path": "review.md",
+        "media_type": "text/markdown",
+        "required": True,
+    }
+    bridge_key = publish["items"][0]["producer_result_state_key"]
+    assert publish["items"][0]["declared_name"] == "review"
+    assert any(
+        node.get("output", {}).get(bridge_key, "").endswith("_review_result}")
+        for node in parent["nodes"].values()
+    )
+
+
+def test_child_artifact_contract_rejects_a_writes_only_producer_match(
+    tmp_path: Path,
+) -> None:
+    child_bytes = (
+        b"version: '1.0'\nname: child\n"
+        b"state: {other_result: dict, lockstep_outcome: str}\n"
+        b"nodes:\n  other:\n    type: interrupt\n"
+        b"    state_key: other_request\n    resume_key: other_result\n"
+        b"    idempotent: false\n    message:\n"
+        b"      lockstep_effect:\n        schema: lockstep.effect/v1\n"
+        b"        kind: manual\n        logical_id: other\n        runner: null\n"
+        b"        inputs: {}\n        writes: [review.md]\n        artifacts: []\n"
+        b"        deadline_seconds: null\n        scope_state_keys: []\n"
+        b"        result_schema: lockstep.effect-result/v1\n"
+        b"  pass: {type: passthrough, output: {lockstep_outcome: PASS}}\n"
+        b"edges: [{from: START, to: other}, {from: other, to: pass}, "
+        b"{from: pass, to: END}]\n"
+    )
+    catalog = _artifact_child_catalog(child_bytes, _exact_child_export_contract())
+
+    with pytest.raises(ValueError, match="producer"):
+        _compile_artifact_child(tmp_path, catalog)
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        "{name: other, source_path: review.md, media_type: text/markdown, required: true}",
+        "{name: review, source_path: review.md, media_type: application/json, required: true}",
+    ],
+)
+def test_child_artifact_contract_rejects_rewriting_a_mismatched_declaration(
+    tmp_path: Path, declaration: str
+) -> None:
+    child_bytes = (
+        "version: '1.0'\nname: child\n"
+        "state: {review_result: dict, lockstep_outcome: str}\n"
+        "nodes:\n  review:\n    type: interrupt\n"
+        "    state_key: review_request\n    resume_key: review_result\n"
+        "    idempotent: false\n    message:\n"
+        "      lockstep_effect:\n        schema: lockstep.effect/v1\n"
+        "        kind: manual\n        logical_id: review\n        runner: null\n"
+        "        inputs: {}\n        writes: [review.md]\n"
+        f"        artifacts: [{declaration}]\n"
+        "        deadline_seconds: null\n        scope_state_keys: []\n"
+        "        result_schema: lockstep.effect-result/v1\n"
+        "  pass: {type: passthrough, output: {lockstep_outcome: PASS}}\n"
+        "edges: [{from: START, to: review}, {from: review, to: pass}, "
+        "{from: pass, to: END}]\n"
+    ).encode()
+    catalog = _artifact_child_catalog(child_bytes, _exact_child_export_contract())
+
+    with pytest.raises(ValueError, match="artifact contract"):
+        _compile_artifact_child(tmp_path, catalog)
+
+
+def _multi_artifact_child_bytes(declarations: str) -> bytes:
+    return (
+        "version: '1.0'\nname: child\n"
+        "state: {review_result: dict, lockstep_outcome: str}\n"
+        "nodes:\n  review:\n    type: interrupt\n"
+        "    state_key: review_request\n    resume_key: review_result\n"
+        "    idempotent: false\n    message:\n"
+        "      lockstep_effect:\n        schema: lockstep.effect/v1\n"
+        "        kind: manual\n        logical_id: review\n        runner: null\n"
+        "        inputs: {}\n        writes: [exports/]\n"
+        f"        artifacts:\n{declarations}"
+        "        deadline_seconds: null\n        scope_state_keys: []\n"
+        "        result_schema: lockstep.effect-result/v1\n"
+        "  pass: {type: passthrough, output: {lockstep_outcome: PASS}}\n"
+        "edges: [{from: START, to: review}, {from: review, to: pass}, "
+        "{from: pass, to: END}]\n"
+    ).encode()
+
+
+def _child_export(
+    handle: str, source: str, *, declared_name: str | None = None
+) -> ChildArtifactContract:
+    return ChildArtifactContract(
+        handle=handle,
+        fixed_source=source,
+        declared_name=declared_name or handle,
+        media_type="text/markdown",
+        producer_logical_id="review",
+        producer_result_state_key="review_result",
+    )
+
+
+def _compile_multi_artifact_child(
+    tmp_path: Path,
+    catalog: ResolvedCatalog,
+    *,
+    mappings: str,
+    accepts: tuple[str, ...],
+):
+    accept_flow = "".join(
+        "  - accept:\n"
+        f"      artifact_from: review-call.{handle}\n"
+        "      verdict: PASS\n"
+        for handle in accepts
+    )
+    workflow = _workflow(
+        tmp_path,
+        "parent",
+        "  - call:\n"
+        "      id: review-call\n"
+        "      workflow: child\n"
+        "      runner: codex\n"
+        f"      artifacts: {mappings}\n"
+        + accept_flow,
+    )
+    return compile_workflow(validate_semantics(workflow, catalog), catalog)
+
+
+def _specialized_producer_artifacts(compiled) -> list[dict]:
+    child = yaml.safe_load(compiled.generated_files[0].content)
+    return next(
+        node["message"]["lockstep_effect"]["artifacts"]
+        for node in child["nodes"].values()
+        if node.get("message", {}).get("lockstep_effect", {}).get("artifacts")
+    )
+
+
+def test_two_exports_from_one_producer_preserve_descriptor_artifact_order(
+    tmp_path: Path,
+) -> None:
+    declarations = (
+        "          - {name: alpha, source_path: exports/alpha.md, media_type: text/markdown, required: true}\n"
+        "          - {name: beta, source_path: exports/beta.md, media_type: text/markdown, required: true}\n"
+    )
+    catalog = _artifact_child_catalog(
+        _multi_artifact_child_bytes(declarations),
+        {
+            "alpha": _child_export("alpha", "exports/alpha.md"),
+            "beta": _child_export("beta", "exports/beta.md"),
+        },
+    )
+
+    compiled = _compile_multi_artifact_child(
+        tmp_path,
+        catalog,
+        mappings="{beta: .lockstep/beta.md, alpha: .lockstep/alpha.md}",
+        accepts=("beta", "alpha"),
+    )
+
+    assert _specialized_producer_artifacts(compiled) == [
+        {
+            "name": "alpha",
+            "source_path": "exports/alpha.md",
+            "media_type": "text/markdown",
+            "required": True,
+        },
+        {
+            "name": "beta",
+            "source_path": "exports/beta.md",
+            "media_type": "text/markdown",
+            "required": True,
+        },
+    ]
+
+
+def test_exporting_one_artifact_preserves_unexported_descriptor_artifacts(
+    tmp_path: Path,
+) -> None:
+    declarations = (
+        "          - {name: alpha, source_path: exports/alpha.md, media_type: text/markdown, required: true}\n"
+        "          - {name: private, source_path: exports/private.md, media_type: text/markdown, required: true}\n"
+    )
+    catalog = _artifact_child_catalog(
+        _multi_artifact_child_bytes(declarations),
+        {"alpha": _child_export("alpha", "exports/alpha.md")},
+    )
+
+    compiled = _compile_multi_artifact_child(
+        tmp_path,
+        catalog,
+        mappings="{alpha: .lockstep/alpha.md}",
+        accepts=("alpha",),
+    )
+
+    assert _specialized_producer_artifacts(compiled) == [
+        {
+            "name": "alpha",
+            "source_path": "exports/alpha.md",
+            "media_type": "text/markdown",
+            "required": True,
+        },
+        {
+            "name": "private",
+            "source_path": "exports/private.md",
+            "media_type": "text/markdown",
+            "required": True,
+        },
+    ]

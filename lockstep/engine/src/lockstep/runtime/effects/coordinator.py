@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
 from lockstep.runtime.catalog import RunBinding, RunCatalog
+from lockstep.runtime.artifacts import ArtifactDeclaration, ArtifactRegistry
 from lockstep.runtime.effects.authority import (
     EffectAuthorityDenied,
     EffectAuthorityGate,
@@ -22,6 +23,7 @@ from lockstep.runtime.effects.descriptors import (
     parse_effect_descriptor,
     parse_effect_result,
     parse_scope_result,
+    parse_acceptance_result,
 )
 from lockstep.runtime.effects.ledger import (
     EffectLedger,
@@ -30,11 +32,14 @@ from lockstep.runtime.effects.ledger import (
     StaleEffectRevision,
 )
 from lockstep.runtime.effects.models import (
+    AcceptDescriptor,
+    AcceptanceResult,
     EffectDescriptor,
     EffectResult,
     RuntimeInputSelector,
     ScopeDescriptor,
     ScopeResult,
+    PublishDescriptor,
 )
 from lockstep.runtime.graph_runtime import GraphRuntime
 from lockstep.runtime.leases import Lease, LeaseStore, LeaseUnavailable
@@ -54,6 +59,12 @@ from lockstep.runtime.providers.manual import (
     ManualProvider,
     ManualProviderError,
     ManualSubmission,
+)
+from lockstep.runtime.project_snapshots import ProjectSnapshotRef
+from lockstep.runtime.publication import (
+    ProjectPublisher,
+    PublicationEntry,
+    PublicationRequest,
 )
 from lockstep.runtime.status import ScenarioStatus, project_status
 
@@ -100,6 +111,9 @@ class EffectCoordinator:
         leases: LeaseStore,
         runners: Mapping[str, RunnerAdapter],
         authority: EffectAuthorityGate,
+        artifacts: ArtifactRegistry | None = None,
+        publisher: ProjectPublisher | None = None,
+        publisher_for: Callable[[RunBinding], ProjectPublisher] | None = None,
         manual: ManualProvider | None = None,
         clock: Callable[[], datetime] | None = None,
         owner_factory: Callable[[], str] | None = None,
@@ -114,6 +128,9 @@ class EffectCoordinator:
             runner.binding_digest: runner for runner in self._runners.values()
         }
         self._authority = authority
+        self._artifacts = artifacts
+        self._publisher = publisher
+        self._publisher_resolver = publisher_for
         self._manual = manual
         self._clock = clock or (lambda: datetime.now(UTC))
         self._owner_factory = owner_factory or (lambda: secrets.token_hex(16))
@@ -124,6 +141,25 @@ class EffectCoordinator:
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("coordinator clock must include a timezone")
         return value.astimezone(UTC)
+
+    def _publisher_for(self, binding: RunBinding) -> ProjectPublisher:
+        publisher = (
+            self._publisher_resolver(binding)
+            if self._publisher_resolver is not None
+            else self._publisher
+        )
+        if not isinstance(publisher, ProjectPublisher):
+            raise ProviderContractViolation(
+                "publication requires a project-resolved ProjectPublisher"
+            )
+        if (
+            self._publisher_resolver is not None
+            and publisher.project_identity != binding.project_identity
+        ):
+            raise ProviderContractViolation(
+                "publisher root differs from the run project identity"
+            )
+        return publisher
 
     def _binding(self, run_id: str) -> RunBinding:
         catalog_binding = self._catalog.get(run_id)
@@ -453,13 +489,6 @@ class EffectCoordinator:
                 runner=None,
                 grant=None,
             )
-        if descriptor.artifacts:
-            # Task 10 owns ArtifactRegistry and the provider-neutral artifact
-            # contract. Until that boundary exists, never erase descriptor
-            # requirements while constructing an EffectRequest.
-            raise ProviderContractViolation(
-                "artifact-bearing effects require the ArtifactRegistry boundary"
-            )
         runner = (
             self._runner_for(descriptor.runner.selector)
             if record is None
@@ -498,6 +527,7 @@ class EffectCoordinator:
                 for name, selector in descriptor.inputs
             ),
             writes=descriptor.writes,
+            artifacts=descriptor.artifacts,
             deadline_at=deadline_at,
             scope_bindings=tuple(scope_bindings),
         )
@@ -543,14 +573,20 @@ class EffectCoordinator:
         binding: RunBinding,
         interrupt: NativeInterrupt,
         record: EffectRecord | None,
-    ) -> tuple[EffectDescriptor | ScopeDescriptor, str]:
+    ) -> tuple[
+        EffectDescriptor | ScopeDescriptor | AcceptDescriptor | PublishDescriptor,
+        str,
+    ]:
         coordinate = interrupt.coordinate
         if coordinate.thread_id != binding.thread_id:
             raise CoordinatorLineageError(
                 "interrupt belongs to a foreign native thread"
             )
         descriptor = parse_effect_descriptor(self._raw_descriptor(interrupt))
-        if not isinstance(descriptor, (EffectDescriptor, ScopeDescriptor)):
+        if not isinstance(
+            descriptor,
+            (EffectDescriptor, ScopeDescriptor, AcceptDescriptor, PublishDescriptor),
+        ):
             raise ProviderContractViolation(
                 f"{descriptor.kind} execution requires its dedicated trusted runtime boundary"
             )
@@ -692,6 +728,470 @@ class EffectCoordinator:
                 )
         return True
 
+    def _admit_artifacts(
+        self,
+        binding: RunBinding,
+        context: _Context,
+        record: EffectRecord,
+        result: EffectResult,
+        safety: TerminalSafetyObservation,
+    ) -> EffectResult:
+        if result.artifact_refs:
+            raise ProviderContractViolation(
+                "providers may not supply immutable artifact references"
+            )
+        assert isinstance(context.descriptor, EffectDescriptor)
+        declarations = context.descriptor.artifacts
+        if result.outcome != "PASS" or not declarations:
+            return result
+        if context.descriptor.kind != "managed":
+            raise ProviderContractViolation(
+                "artifact admission requires a managed rollover snapshot"
+            )
+        if self._artifacts is None:
+            raise ProviderContractViolation(
+                "artifact-bearing effects require an ArtifactRegistry"
+            )
+        if (
+            result.snapshot_ref is None
+            or result.snapshot_ref != safety.rollover_snapshot_ref
+            or not result.snapshot_ref.startswith("snapshot:")
+            or record.request_digest is None
+            or record.workspace_ref is None
+        ):
+            raise ProviderContractViolation(
+                "artifact admission lacks the exact producer rollover binding"
+            )
+        try:
+            snapshot_ref = ProjectSnapshotRef(
+                result.snapshot_ref.removeprefix("snapshot:")
+            )
+            refs = self._artifacts.register_set(
+                public_run_id=binding.public_run_id,
+                project_identity=binding.project_identity,
+                definition_digest=binding.recipe_digest,
+                producer_effect_id=record.effect_id,
+                producer_request_digest=record.request_digest,
+                workspace_ref=record.workspace_ref,
+                producer_coordinate=record.coordinate,
+                descriptor_digest=record.descriptor_digest,
+                snapshot_ref=snapshot_ref,
+                declarations=tuple(
+                    ArtifactDeclaration(
+                        item.name,
+                        item.source_path,
+                        item.media_type,
+                        item.required,
+                    )
+                    for item in declarations
+                ),
+            )
+            data = result.to_dict()
+            data["artifact_refs"] = [str(ref) for ref in refs]
+            return parse_effect_result(data)
+        except ProviderContractViolation:
+            raise
+        except (KeyError, TypeError, ValueError, RuntimeError) as exc:
+            raise ProviderContractViolation(
+                "artifact admission failed exact provenance validation"
+            ) from exc
+
+    @staticmethod
+    def _interrupt_values(
+        snapshot: NativeSnapshot, interrupt: NativeInterrupt
+    ) -> Mapping[str, object]:
+        return snapshot.values if interrupt.state_values is None else interrupt.state_values
+
+    def _publication_intent(
+        self,
+        binding: RunBinding,
+        snapshot: NativeSnapshot,
+        interrupt: NativeInterrupt,
+        descriptor: PublishDescriptor,
+        effect_id: str,
+        publisher: ProjectPublisher,
+    ) -> tuple[EffectRequest, EffectGrant, PublicationRequest]:
+        if self._artifacts is None:
+            raise ProviderContractViolation(
+                "publication requires ArtifactRegistry and ProjectPublisher ports"
+            )
+        values = self._interrupt_values(snapshot, interrupt)
+        entries: list[PublicationEntry] = []
+        intent_inputs: list[tuple[str, object]] = []
+        approval_generation: int | None = None
+        consent_refs: list[str] = []
+        for ordinal, item in enumerate(descriptor.items):
+            try:
+                producer_result = parse_effect_result(
+                    values[item.producer_result_state_key]
+                )
+                acceptance = parse_acceptance_result(
+                    values[item.acceptance_result_state_key]
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise CoordinatorLineageError(
+                    "publication selectors lack closed delivered producer/consent results"
+                ) from exc
+            try:
+                producer_record = self._ledger.get(producer_result.effect_id)
+                acceptance_record = self._ledger.get(acceptance.effect_id)
+            except KeyError as exc:
+                raise CoordinatorLineageError(
+                    "publication state lacks ledger-proven producers"
+                ) from exc
+            if (
+                producer_record.phase != "delivered"
+                or producer_record.result != producer_result
+                or acceptance_record.phase != "delivered"
+                or acceptance_record.result != acceptance
+                or not self._runtime.checkpoint_is_ancestor(
+                    binding.public_run_id, producer_record.coordinate, interrupt
+                )
+                or not self._runtime.checkpoint_is_ancestor(
+                    binding.public_run_id, acceptance_record.coordinate, interrupt
+                )
+            ):
+                raise CoordinatorLineageError(
+                    "publication inputs are not exact delivered ancestors"
+                )
+            candidates = []
+            for raw_ref in producer_result.artifact_refs:
+                artifact = self._artifacts.read(raw_ref)
+                if artifact.declared_name == item.declared_name:
+                    candidates.append(artifact)
+            if len(candidates) != 1:
+                raise ProviderContractViolation(
+                    "publication requires one exact declared artifact reference"
+                )
+            artifact = candidates[0]
+            if (
+                artifact.public_run_id != binding.public_run_id
+                or artifact.project_identity != binding.project_identity
+                or artifact.definition_digest != binding.recipe_digest
+                or artifact.producer_effect_id != producer_record.effect_id
+                or artifact.producer_coordinate != producer_record.coordinate
+                or str(artifact.ref) != acceptance.artifact_ref
+                or artifact.blob.sha256 != acceptance.artifact_digest
+            ):
+                raise ProviderContractViolation(
+                    "publication artifact and consent provenance differ"
+                )
+            if approval_generation is None:
+                approval_generation = acceptance.approval_generation
+            elif approval_generation != acceptance.approval_generation:
+                raise ProviderContractViolation(
+                    "publication items require one approval generation"
+                )
+            consent_refs.append(acceptance.consent_ref)
+            entries.append(
+                PublicationEntry(
+                    artifact.ref,
+                    item.destination,
+                    item.transformation,
+                )
+            )
+            intent_inputs.append(
+                (
+                    f"item-{ordinal}",
+                    {
+                        "artifact_ref": str(artifact.ref),
+                        "artifact_blob": {
+                            "sha256": artifact.blob.sha256,
+                            "size": artifact.blob.size,
+                        },
+                        "destination": item.destination,
+                        "transformation": item.transformation,
+                        "audience": item.audience,
+                        "consent_ref": acceptance.consent_ref,
+                        "approval_generation": acceptance.approval_generation,
+                    },
+                )
+            )
+        assert approval_generation is not None
+        intent = EffectRequest.build(
+            effect_id=effect_id,
+            public_run_id=binding.public_run_id,
+            project_identity=binding.project_identity,
+            definition_digest=binding.recipe_digest,
+            coordinate=interrupt.coordinate,
+            descriptor_digest=descriptor.digest,
+            effect_kind="publish",
+            runner_selector="project-publisher",
+            runner_binding_digest=publisher.binding_digest,
+            required_capabilities=("publication",),
+            inputs=tuple(intent_inputs),
+            writes=tuple(item.destination for item in descriptor.items),
+            deadline_at=None,
+        )
+        grant = self._authority.resolve(intent)
+        if (
+            grant.required_authorities != publisher.required_authorities
+            or grant.workspace_ref is not None
+            or grant.approval_generation != approval_generation
+        ):
+            raise ProviderContractViolation(
+                "publication grant differs from publisher/consent authority"
+            )
+        request = intent.bind_grant(grant)
+        publication_request = PublicationRequest.build(
+            effect_id=effect_id,
+            public_run_id=binding.public_run_id,
+            project_identity=binding.project_identity,
+            definition_digest=binding.recipe_digest,
+            coordinate=interrupt.coordinate,
+            descriptor_digest=descriptor.digest,
+            authority_request_digest=request.request_digest,
+            grant_digest=grant.digest,
+            publisher_binding_digest=publisher.binding_digest,
+            consent_ref="consent-set:" + hashlib.sha256(
+                json.dumps(consent_refs, separators=(",", ":")).encode()
+            ).hexdigest(),
+            approval_generation=approval_generation,
+            policy_epoch=grant.policy_epoch,
+            config_epoch=grant.config_epoch,
+            parent_capability_generation=grant.parent_capability_generation,
+            entries=tuple(entries),
+        )
+        return request, grant, publication_request
+
+    @staticmethod
+    def _publication_result(effect_id: str, journal_digest: str) -> EffectResult:
+        return parse_effect_result(
+            {
+                "schema": "lockstep.effect-result/v1",
+                "effect_id": effect_id,
+                "outcome": "PASS",
+                "result_ref": f"publication:{journal_digest}",
+                "artifact_refs": [],
+                "snapshot_ref": None,
+                "diff_ref": None,
+                "fixed_error_code": None,
+                "evidence_refs": [],
+            }
+        )
+
+    @staticmethod
+    def _publication_error_result(
+        effect_id: str, journal_digest: str
+    ) -> EffectResult:
+        return parse_effect_result(
+            {
+                "schema": "lockstep.effect-result/v1",
+                "effect_id": effect_id,
+                "outcome": "ERROR",
+                "result_ref": f"publication:{journal_digest}",
+                "artifact_refs": [],
+                "snapshot_ref": None,
+                "diff_ref": None,
+                "fixed_error_code": "provider_error",
+                "evidence_refs": [],
+            }
+        )
+
+    def _reconcile_acceptance(
+        self,
+        run_id: str,
+        descriptor: AcceptDescriptor,
+        interrupt: NativeInterrupt,
+        effect_id: str,
+        record: EffectRecord | None,
+        lease: Lease,
+    ) -> ReconcileReport:
+        if record is None:
+            prepared = self._ledger.prepare(
+                interrupt.coordinate,
+                descriptor,
+                deadline_at=None,
+                runner_binding_digest=None,
+                workspace_ref=None,
+                lease=lease,
+            )
+            return self._report(run_id, prepared, "prepared")
+        if record.phase == "prepared":
+            return self._report(run_id, record, "acceptance_pending")
+        if record.phase in {"sealed", "indeterminate"}:
+            return self._report(run_id, record, "awaiting_delivery")
+        raise CoordinatorLineageError("acceptance has an impossible ledger phase")
+
+    def _reconcile_publication(
+        self,
+        run_id: str,
+        binding: RunBinding,
+        snapshot: NativeSnapshot,
+        descriptor: PublishDescriptor,
+        interrupt: NativeInterrupt,
+        effect_id: str,
+        record: EffectRecord | None,
+        lease: Lease,
+    ) -> ReconcileReport:
+        publisher = self._publisher_for(binding)
+        if record is not None and record.phase in {"sealed", "indeterminate"}:
+            return self._report(run_id, record, "awaiting_delivery")
+        if record is not None and record.phase == "launching":
+            recovering = publisher.prepared_for(
+                record.effect_id, record.request_digest or ""
+            )
+            if recovering is not None and recovering[1] in {
+                "applying", "applied", "rollback_pending", "rolled_back"
+            }:
+                prepared_publication, recovery_phase = recovering
+                if (
+                    record.launch_commitment_digest
+                    != publisher.commitment_digest(prepared_publication)
+                ):
+                    raise CoordinatorLineageError(
+                        "recovery journal differs from durable publication commitment"
+                    )
+                try:
+                    publication_lease = self._leases.acquire(
+                        "publication",
+                        binding.project_identity,
+                        self._owner_factory(),
+                        self._lease_ttl,
+                    )
+                except LeaseUnavailable:
+                    return self._report(run_id, record, "busy")
+                try:
+                    with self._runtime.commitment_guard(
+                        run_id, record.coordinate
+                    ) as guarded:
+                        guarded_descriptor = parse_effect_descriptor(
+                            self._raw_descriptor(guarded.interrupt)
+                        )
+                        current = self._ledger.get(record.effect_id)
+                        if (
+                            guarded.binding != binding
+                            or guarded.interrupt.coordinate != record.coordinate
+                            or guarded_descriptor != descriptor
+                            or current.revision != record.revision
+                            or current.phase != "launching"
+                            or not self._leases.is_current(lease)
+                            or not self._leases.is_current(publication_lease)
+                        ):
+                            return self._report(run_id, current, "busy")
+                        if recovery_phase in {"rollback_pending", "rolled_back"}:
+                            receipt = publisher.rollback_or_recover(
+                                prepared_publication
+                            )
+                            result = self._publication_error_result(
+                                record.effect_id, receipt.journal_digest
+                            )
+                        else:
+                            receipt = publisher.apply_or_recover(
+                                prepared_publication
+                            )
+                            result = self._publication_result(
+                                record.effect_id, receipt.journal_digest
+                            )
+                    if receipt.phase not in {"applied", "rolled_back"}:
+                        return self._report(
+                            run_id, record, "publication_progress"
+                        )
+                    sealed = self._ledger.seal(
+                        record.effect_id,
+                        result,
+                        expected_revision=record.revision,
+                        lease=lease,
+                        runner_binding_digest=publisher.binding_digest,
+                    )
+                    return self._report(run_id, sealed, "sealed")
+                finally:
+                    self._leases.release(publication_lease)
+        request, grant, publication_request = self._publication_intent(
+            binding, snapshot, interrupt, descriptor, effect_id, publisher
+        )
+        if record is None:
+            prepared = self._ledger.prepare(
+                interrupt.coordinate,
+                descriptor,
+                deadline_at=None,
+                runner_binding_digest=publisher.binding_digest,
+                workspace_ref=None,
+                request_digest=request.request_digest,
+                grant_digest=grant.digest,
+                lease=lease,
+            )
+            return self._report(run_id, prepared, "prepared")
+        if (
+            record.request_digest != request.request_digest
+            or record.grant_digest != grant.digest
+            or record.runner_binding_digest != publisher.binding_digest
+        ):
+            raise CoordinatorLineageError(
+                "publication authority differs from durable ledger facts"
+            )
+        prepared_publication = publisher.prepare(publication_request)
+        commitment_digest = publisher.commitment_digest(
+            prepared_publication
+        )
+        if record.phase == "prepared":
+            claimed = self._ledger.mark_launching(
+                record.effect_id,
+                expected_revision=record.revision,
+                lease=lease,
+                runner_binding_digest=publisher.binding_digest,
+                launch_commitment_digest=commitment_digest,
+            )
+            return self._report(run_id, claimed, "publication_claimed")
+        if record.phase == "launching":
+            if record.launch_commitment_digest != commitment_digest:
+                raise CoordinatorLineageError(
+                    "publication journal differs from durable commitment"
+                )
+            try:
+                publication_lease = self._leases.acquire(
+                    "publication",
+                    binding.project_identity,
+                    self._owner_factory(),
+                    self._lease_ttl,
+                )
+            except LeaseUnavailable:
+                return self._report(run_id, record, "busy")
+            try:
+                with self._runtime.commitment_guard(
+                    run_id, record.coordinate
+                ) as guarded:
+                    guarded_descriptor = parse_effect_descriptor(
+                        self._raw_descriptor(guarded.interrupt)
+                    )
+                    if (
+                        guarded.binding != binding
+                        or guarded.interrupt.coordinate != record.coordinate
+                        or guarded_descriptor != descriptor
+                    ):
+                        raise CoordinatorLineageError(
+                            "publication graph authority changed before commitment"
+                        )
+                    current = self._ledger.get(record.effect_id)
+                    if (
+                        current.revision != record.revision
+                        or current.phase != "launching"
+                        or not self._leases.is_current(lease)
+                        or not self._leases.is_current(publication_lease)
+                    ):
+                        return self._report(run_id, current, "busy")
+                    with self._authority.commitment(
+                        grant, request, prepared_publication
+                    ):
+                        receipt = publisher.apply_or_recover(
+                            prepared_publication
+                        )
+                if receipt.phase != "applied":
+                    return self._report(run_id, record, "publication_progress")
+                sealed = self._ledger.seal(
+                    record.effect_id,
+                    self._publication_result(
+                        record.effect_id, receipt.journal_digest
+                    ),
+                    expected_revision=record.revision,
+                    lease=lease,
+                    runner_binding_digest=publisher.binding_digest,
+                )
+                return self._report(run_id, sealed, "sealed")
+            finally:
+                self._leases.release(publication_lease)
+        raise CoordinatorLineageError("publication has an impossible ledger phase")
+
     def reconcile(self, run_id: str) -> ReconcileReport:
         binding = self._binding(run_id)
         snapshot = self._runtime.snapshot(run_id, subgraphs=True)
@@ -785,6 +1285,21 @@ class EffectCoordinator:
                     effect_id,
                     "busy",
                     None if record is None else record.phase,
+                )
+            if isinstance(descriptor, AcceptDescriptor):
+                return self._reconcile_acceptance(
+                    run_id, descriptor, interrupt, effect_id, record, lease
+                )
+            if isinstance(descriptor, PublishDescriptor):
+                return self._reconcile_publication(
+                    run_id,
+                    binding,
+                    snapshot,
+                    descriptor,
+                    interrupt,
+                    effect_id,
+                    record,
+                    lease,
                 )
             try:
                 context = self._context(
@@ -1070,6 +1585,9 @@ class EffectCoordinator:
                     context, safety, result=result, binding=record
                 ):
                     return self._report(run_id, record, "quiescence_pending")
+                result = self._admit_artifacts(
+                    binding, context, record, result, safety
+                )
                 sealed = self._ledger.seal(
                     record.effect_id,
                     result,
@@ -1159,6 +1677,95 @@ class EffectCoordinator:
                 if result.effect_id != effect_id:
                     raise ProviderContractViolation(
                         "manual result targets another effect"
+                    )
+                self._ledger.seal(
+                    effect_id,
+                    result,
+                    expected_revision=current.revision,
+                    lease=lease,
+                )
+        finally:
+            self._leases.release(lease)
+        return self.deliver_ready(run_id, [source.interrupt_id])
+
+    def submit_acceptance(
+        self,
+        run_id: str,
+        source,
+        result: AcceptanceResult,
+    ) -> ScenarioStatus:
+        """Commit owner consent for one exact compiler-selected ArtifactRef."""
+
+        if self._artifacts is None:
+            raise ProviderContractViolation("acceptance requires ArtifactRegistry")
+        if not isinstance(result, AcceptanceResult):
+            raise ProviderContractViolation("closed AcceptanceResult is required")
+        try:
+            parsed = parse_acceptance_result(result.to_dict())
+        except (TypeError, ValueError) as exc:
+            raise ProviderContractViolation("invalid closed acceptance result") from exc
+        if parsed != result:
+            raise ProviderContractViolation("acceptance result is not canonical")
+        binding = self._binding(run_id)
+        snapshot = self._runtime.snapshot(run_id, subgraphs=True)
+        matches = tuple(
+            interrupt
+            for interrupt in self._protected(snapshot)
+            if interrupt.coordinate == source
+        )
+        if len(matches) != 1:
+            raise CoordinatorLineageError(
+                "acceptance source is not the exact pending interrupt"
+            )
+        interrupt = matches[0]
+        descriptor, effect_id = self._identity(run_id, binding, interrupt, None)
+        if not isinstance(descriptor, AcceptDescriptor):
+            raise ProviderContractViolation("submission does not target acceptance")
+        if result.effect_id != effect_id:
+            raise ProviderContractViolation("acceptance targets another effect")
+        values = self._interrupt_values(snapshot, interrupt)
+        try:
+            producer = parse_effect_result(values[descriptor.producer_result_state_key])
+            artifact = self._artifacts.read(result.artifact_ref)
+            producer_record = self._ledger.get(producer.effect_id)
+            record = self._ledger.get(effect_id)
+        except (KeyError, TypeError, ValueError, RuntimeError) as exc:
+            raise CoordinatorLineageError(
+                "acceptance lacks exact delivered artifact provenance"
+            ) from exc
+        if (
+            record.phase != "prepared"
+            or producer_record.phase != "delivered"
+            or producer_record.result != producer
+            or result.artifact_ref not in producer.artifact_refs
+            or artifact.declared_name != descriptor.declared_name
+            or artifact.producer_effect_id != producer.effect_id
+            or artifact.producer_coordinate != producer_record.coordinate
+            or artifact.public_run_id != binding.public_run_id
+            or artifact.project_identity != binding.project_identity
+            or artifact.definition_digest != binding.recipe_digest
+            or artifact.blob.sha256 != result.artifact_digest
+        ):
+            raise CoordinatorLineageError(
+                "acceptance differs from the exact artifact producer"
+            )
+        lease = self._acquire(effect_id)
+        try:
+            with self._runtime.commitment_guard(run_id, source) as guarded:
+                guarded_descriptor = parse_effect_descriptor(
+                    self._raw_descriptor(guarded.interrupt)
+                )
+                current = self._ledger.get(effect_id)
+                if (
+                    guarded.binding != binding
+                    or guarded.interrupt.coordinate != source
+                    or guarded_descriptor != descriptor
+                    or current.revision != record.revision
+                    or current.phase != "prepared"
+                    or not self._leases.is_current(lease)
+                ):
+                    raise StaleEffectRevision(
+                        "acceptance changed before consent commitment"
                     )
                 self._ledger.seal(
                     effect_id,

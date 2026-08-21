@@ -7,7 +7,7 @@ from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from threading import RLock
+from threading import RLock, local
 
 from lockstep.recipe.authority import AuthorizedMaterialization
 from lockstep.runtime.catalog import RunBinding
@@ -74,14 +74,16 @@ class GraphRuntime:
         self._bindings: dict[str, RunBinding] = {}
         self._apps: dict[str, NativeAppPort] = {}
         self._lock = RLock()
+        self._guard_local = local()
         self._closed = False
+        self._closing = False
 
     @property
     def checkpoint_path(self) -> Path:
         return self._checkpoint_path
 
     def _ensure_open(self) -> None:
-        if self._closed:
+        if self._closed or self._closing:
             raise RuntimeError("GraphRuntime is closed")
 
     def bind(self, run: RunBinding) -> None:
@@ -124,18 +126,56 @@ class GraphRuntime:
             self._apps[run.public_run_id] = app
 
     def unbind(self, run_id: str) -> None:
+        # Closing/removing a native app is itself a lifecycle mutation.  It
+        # must serialize with resume, commitment, and lineage verification;
+        # otherwise recovery can unbind between a committed resume and the
+        # coordinator's proof that the commit descended from its source.
         with self._lock:
-            app = self._apps.pop(run_id, None)
-            self._bindings.pop(run_id, None)
+            binding = self._bindings.get(run_id)
+        if binding is None:
+            return
+        with self._invocations.hold(binding.thread_id):
+            with self._lock:
+                if self._bindings.get(run_id) != binding:
+                    return
+                app = self._apps.pop(run_id, None)
+                self._bindings.pop(run_id, None)
         if app is not None:
             app.close()
 
     def _bound(self, run_id: str) -> tuple[RunBinding, NativeAppPort]:
-        self._ensure_open()
-        try:
-            return self._bindings[run_id], self._apps[run_id]
-        except KeyError as exc:
-            raise KeyError(f"run {run_id!r} is not bound") from exc
+        with self._lock:
+            self._ensure_open()
+            try:
+                return self._bindings[run_id], self._apps[run_id]
+            except KeyError as exc:
+                raise KeyError(f"run {run_id!r} is not bound") from exc
+
+    @contextmanager
+    def _app_guard(self, run_id: str) -> Iterator[tuple[RunBinding, NativeAppPort]]:
+        """Serialize one app use with unbind, then revalidate after waiting."""
+
+        nested = getattr(self._guard_local, "current", None)
+        if nested is not None:
+            nested_run_id, expected, app = nested
+            if nested_run_id != run_id or self._bound(run_id) != (expected, app):
+                raise RuntimeBindingConflict(
+                    "nested native app use differs from its lifecycle guard"
+                )
+            yield expected, app
+            return
+        expected, _app = self._bound(run_id)
+        with self._invocations.hold(expected.thread_id):
+            binding, app = self._bound(run_id)
+            if binding != expected:
+                raise RuntimeBindingConflict(
+                    "run binding changed while waiting for native lifecycle guard"
+                )
+            self._guard_local.current = (run_id, binding, app)
+            try:
+                yield binding, app
+            finally:
+                del self._guard_local.current
 
     def binding(self, run_id: str) -> RunBinding:
         """Return the immutable binding used by this compiled native app."""
@@ -144,16 +184,17 @@ class GraphRuntime:
         return binding
 
     def _invoke(
-        self, run_id: str, operation: Callable[[], NativeSnapshot]
+        self,
+        run_id: str,
+        operation: Callable[[RunBinding, NativeAppPort], NativeSnapshot],
     ) -> NativeSnapshot:
-        binding, _app = self._bound(run_id)
-        with self._invocations.hold(binding.thread_id):
+        with self._app_guard(run_id) as (binding, app):
             owner = secrets.token_hex(16)
             lease = self._leases.acquire(
                 "invoke", binding.thread_id, owner, self._lease_ttl
             )
             try:
-                return operation()
+                return operation(binding, app)
             finally:
                 self._leases.release(lease)
 
@@ -163,9 +204,9 @@ class GraphRuntime:
     def ensure_started(self, run_id: str, input: dict) -> NativeSnapshot:
         """Deliver one admitted initial command, or adopt its committed checkpoint."""
 
-        binding, app = self._bound(run_id)
-
-        def snapshot_then_start() -> NativeSnapshot:
+        def snapshot_then_start(
+            binding: RunBinding, app: NativeAppPort
+        ) -> NativeSnapshot:
             current = app.snapshot(thread_id=binding.thread_id, subgraphs=True)
             if current.checkpoint_id:
                 return current
@@ -184,8 +225,8 @@ class GraphRuntime:
         return self._invoke(run_id, snapshot_then_start)
 
     def snapshot(self, run_id: str, *, subgraphs: bool = False) -> NativeSnapshot:
-        binding, app = self._bound(run_id)
-        return app.snapshot(thread_id=binding.thread_id, subgraphs=subgraphs)
+        with self._app_guard(run_id) as (binding, app):
+            return app.snapshot(thread_id=binding.thread_id, subgraphs=subgraphs)
 
     @contextmanager
     def commitment_guard(
@@ -193,21 +234,16 @@ class GraphRuntime:
     ) -> Iterator[NativeCommitment]:
         """Hold native commit serialization while one exact effect may launch."""
 
-        binding, app = self._bound(run_id)
-        if source.thread_id != binding.thread_id:
-            raise NativeCoordinateRejected(
-                "commitment source belongs to another native thread"
-            )
-        with self._invocations.hold(binding.thread_id):
+        with self._app_guard(run_id) as (binding, app):
+            if source.thread_id != binding.thread_id:
+                raise NativeCoordinateRejected(
+                    "commitment source belongs to another native thread"
+                )
             owner = secrets.token_hex(16)
             lease = self._leases.acquire(
                 "invoke", binding.thread_id, owner, self._lease_ttl
             )
             try:
-                if self.binding(run_id) != binding:
-                    raise RuntimeBindingConflict(
-                        "run binding changed before external commitment"
-                    )
                 snapshot = app.snapshot(thread_id=binding.thread_id, subgraphs=True)
                 matches = tuple(
                     interrupt
@@ -223,20 +259,20 @@ class GraphRuntime:
                 self._leases.release(lease)
 
     def history(self, run_id: str) -> Iterable[NativeSnapshot]:
-        binding, app = self._bound(run_id)
-        snapshots = []
-        history = iter(app.history(thread_id=binding.thread_id))
-        try:
-            for index, snapshot in enumerate(history):
-                if index >= MAX_HISTORY_SNAPSHOTS:
-                    raise NativeHistoryLimitExceeded(
-                        "native history exceeds public projection limit"
-                    )
-                snapshots.append(snapshot)
-        finally:
-            close = getattr(history, "close", None)
-            if close is not None:
-                close()
+        with self._app_guard(run_id) as (binding, app):
+            snapshots = []
+            history = iter(app.history(thread_id=binding.thread_id))
+            try:
+                for index, snapshot in enumerate(history):
+                    if index >= MAX_HISTORY_SNAPSHOTS:
+                        raise NativeHistoryLimitExceeded(
+                            "native history exceeds public projection limit"
+                        )
+                    snapshots.append(snapshot)
+            finally:
+                close = getattr(history, "close", None)
+                if close is not None:
+                    close()
         return tuple(snapshots)
 
     def interrupt_lineage(
@@ -244,7 +280,12 @@ class GraphRuntime:
     ) -> NativeLineageProof | None:
         """Prove one exact occurrence via current or namespace-scoped history."""
 
-        binding, app = self._bound(run_id)
+        with self._app_guard(run_id) as (binding, app):
+            return self._interrupt_lineage(binding, app, source)
+
+    def _interrupt_lineage(
+        self, binding: RunBinding, app: NativeAppPort, source: NativeCoordinate
+    ) -> NativeLineageProof | None:
         if source.thread_id != binding.thread_id:
             return None
         current = app.snapshot(thread_id=binding.thread_id, subgraphs=True)
@@ -297,34 +338,34 @@ class GraphRuntime:
     ) -> bool:
         """Prove producer checkpoint ancestry to one exact current interrupt."""
 
-        binding, app = self._bound(run_id)
-        if (
-            ancestor.thread_id != binding.thread_id
-            or descendant.coordinate.thread_id != binding.thread_id
-        ):
-            return False
-        current = app.snapshot(thread_id=binding.thread_id, subgraphs=True)
-        exact = tuple(
-            item
-            for item in current.pending
-            if item.coordinate == descendant.coordinate
-            and item.value == descendant.value
-        )
-        if len(exact) != 1:
-            return False
-        anchors = dict(exact[0].ancestor_checkpoints)
-        descendant_checkpoint_id = anchors.get(ancestor.checkpoint_ns)
-        if ancestor.checkpoint_ns == descendant.coordinate.checkpoint_ns:
-            descendant_checkpoint_id = descendant.coordinate.checkpoint_id
-        if not descendant_checkpoint_id:
-            return False
-        return app.checkpoint_is_ancestor(
-            thread_id=binding.thread_id,
-            checkpoint_ns=ancestor.checkpoint_ns,
-            ancestor_checkpoint_id=ancestor.checkpoint_id,
-            descendant_checkpoint_id=descendant_checkpoint_id,
-            snapshot_limit=MAX_HISTORY_SNAPSHOTS,
-        )
+        with self._app_guard(run_id) as (binding, app):
+            if (
+                ancestor.thread_id != binding.thread_id
+                or descendant.coordinate.thread_id != binding.thread_id
+            ):
+                return False
+            current = app.snapshot(thread_id=binding.thread_id, subgraphs=True)
+            exact = tuple(
+                item
+                for item in current.pending
+                if item.coordinate == descendant.coordinate
+                and item.value == descendant.value
+            )
+            if len(exact) != 1:
+                return False
+            anchors = dict(exact[0].ancestor_checkpoints)
+            descendant_checkpoint_id = anchors.get(ancestor.checkpoint_ns)
+            if ancestor.checkpoint_ns == descendant.coordinate.checkpoint_ns:
+                descendant_checkpoint_id = descendant.coordinate.checkpoint_id
+            if not descendant_checkpoint_id:
+                return False
+            return app.checkpoint_is_ancestor(
+                thread_id=binding.thread_id,
+                checkpoint_ns=ancestor.checkpoint_ns,
+                ancestor_checkpoint_id=ancestor.checkpoint_id,
+                descendant_checkpoint_id=descendant_checkpoint_id,
+                snapshot_limit=MAX_HISTORY_SNAPSHOTS,
+            )
 
     @staticmethod
     def _same_coordinate(left: NativeCoordinate, right: NativeCoordinate) -> bool:
@@ -336,20 +377,19 @@ class GraphRuntime:
         source: NativeCoordinate,
         results_by_interrupt_id: Mapping[str, object],
     ) -> NativeSnapshot:
-        binding, app = self._bound(run_id)
-        if source.thread_id != binding.thread_id:
-            raise NativeCoordinateRejected("resume source belongs to another thread")
         supplied = set(results_by_interrupt_id)
         if not supplied:
             raise NativeCoordinateRejected(
                 "resume requires at least one interrupt result"
             )
 
-        def guarded_resume() -> NativeSnapshot:
+        def guarded_resume(binding: RunBinding, app: NativeAppPort) -> NativeSnapshot:
+            if source.thread_id != binding.thread_id:
+                raise NativeCoordinateRejected("resume source belongs to another thread")
             # Membership is checked while holding the same invocation lease
             # that covers resume, so a queued stale caller cannot advance a
             # newly exposed interrupt after the first caller commits.
-            current = self.snapshot(run_id, subgraphs=True)
+            current = app.snapshot(thread_id=binding.thread_id, subgraphs=True)
             current_by_id = {
                 interrupt.coordinate.interrupt_id: interrupt.coordinate
                 for interrupt in current.pending
@@ -364,7 +404,7 @@ class GraphRuntime:
                 raise NativeCoordinateRejected(
                     f"interrupt result is not currently pending: {sorted(unknown)}"
                 )
-            proof = self.interrupt_lineage(run_id, source)
+            proof = self._interrupt_lineage(binding, app, source)
             if proof is None:
                 raise NativeCoordinateRejected(
                     "resume source is absent from native lineage"
@@ -377,10 +417,8 @@ class GraphRuntime:
         return self._invoke(run_id, guarded_resume)
 
     def stream(self, run_id: str, input_or_command: object) -> Iterable[NativeEvent]:
-        binding, app = self._bound(run_id)
-
         def events() -> Iterable[NativeEvent]:
-            with self._invocations.hold(binding.thread_id):
+            with self._app_guard(run_id) as (binding, app):
                 owner = secrets.token_hex(16)
                 lease = self._leases.acquire(
                     "invoke", binding.thread_id, owner, self._lease_ttl
@@ -394,18 +432,19 @@ class GraphRuntime:
 
     def close(self) -> None:
         with self._lock:
-            if self._closed:
+            if self._closed or self._closing:
                 return
-            self._closed = True
-            apps = tuple(self._apps.values())
-            self._apps.clear()
-            self._bindings.clear()
+            self._closing = True
+            run_ids = tuple(self._bindings)
         first_error: BaseException | None = None
-        for app in apps:
+        for run_id in run_ids:
             try:
-                app.close()
+                self.unbind(run_id)
             except BaseException as exc:  # noqa: BLE001 - close every owner first
                 first_error = first_error or exc
+        with self._lock:
+            self._closed = True
+            self._closing = False
         if first_error is not None:
             raise first_error
 

@@ -278,14 +278,51 @@ def _condition_may_match_outcome(
     return (outcome == expected) if operator == "==" else (outcome != expected)
 
 
-def lower_accept_descriptor(logical_id: str, artifact_handle: str) -> dict[str, Any]:
+def lower_accept_descriptor(
+    logical_id: str,
+    artifact_handle: str,
+    producer_result_state_key: str,
+    declared_name: str,
+) -> dict[str, Any]:
     descriptor = {
         "schema": "lockstep.effect/v1",
         "kind": "accept",
         "logical_id": logical_id,
         "artifact_handle": artifact_handle,
+        "producer_result_state_key": producer_result_state_key,
+        "declared_name": declared_name,
         "verdict": "PASS",
         "result_schema": "lockstep.acceptance-result/v1",
+    }
+    parse_effect_descriptor(descriptor)
+    return descriptor
+
+
+def lower_publish_descriptor(
+    logical_id: str,
+    *,
+    artifact_handle: str,
+    producer_result_state_key: str,
+    declared_name: str,
+    acceptance_result_state_key: str,
+    destination: str,
+) -> dict[str, Any]:
+    descriptor = {
+        "schema": "lockstep.effect/v1",
+        "kind": "publish",
+        "logical_id": logical_id,
+        "items": [
+            {
+                "qualified_handle": artifact_handle,
+                "producer_result_state_key": producer_result_state_key,
+                "declared_name": declared_name,
+                "acceptance_result_state_key": acceptance_result_state_key,
+                "destination": destination,
+                "transformation": "identity",
+                "audience": "local-project",
+            }
+        ],
+        "result_schema": "lockstep.effect-result/v1",
     }
     parse_effect_descriptor(descriptor)
     return descriptor
@@ -321,6 +358,7 @@ class _Builder:
         self.loop_exits: dict[str, str] = {}
         self.source_nodes: dict[str, dict[str, int | str]] = {}
         self.outcome_keys: dict[str, str] = {}
+        self.artifact_state_keys: dict[str, tuple[str, str]] = {}
         self.terminals = {
             outcome: self.node("/terminal", "terminal", outcome.lower(), {
                 "type": "passthrough", "output": {"lockstep_outcome": outcome}
@@ -465,8 +503,48 @@ class _Builder:
         if isinstance(block, AcceptIR):
             logical = block.id or f"accept-{pointer.rsplit('/', 1)[-1]}"
             result_key = f"{logical.replace('-', '_')}_result"
-            descriptor = lower_accept_descriptor(logical, block.artifact_from)
-            return self.descriptor_interrupt(pointer, "accept", logical, descriptor, {"step": logical, "lockstep_effect": descriptor}, result_key, None)
+            try:
+                producer_key, declared_name = self.artifact_state_keys[
+                    block.artifact_from
+                ]
+            except KeyError as exc:
+                raise ValueError(
+                    "accept artifact lacks a compiler-owned producer result channel"
+                ) from exc
+            descriptor = lower_accept_descriptor(
+                logical, block.artifact_from, producer_key, declared_name
+            )
+            acceptance = self.descriptor_interrupt(
+                pointer,
+                "accept",
+                logical,
+                descriptor,
+                {"step": logical, "lockstep_effect": descriptor},
+                result_key,
+                None,
+            )
+            publication_logical = f"publish-{logical}"
+            publication_result = f"{publication_logical.replace('-', '_')}_result"
+            artifact = self.validated.artifacts[block.artifact_from]
+            publish_descriptor = lower_publish_descriptor(
+                publication_logical,
+                artifact_handle=block.artifact_from,
+                producer_result_state_key=producer_key,
+                declared_name=declared_name,
+                acceptance_result_state_key=result_key,
+                destination=artifact.destination,
+            )
+            publication = self.descriptor_interrupt(
+                pointer,
+                "publish",
+                publication_logical,
+                publish_descriptor,
+                {"step": publication_logical, "lockstep_effect": publish_descriptor},
+                publication_result,
+                None,
+            )
+            self.connect(acceptance.exits, publication.entry)
+            return _Fragment(acceptance.entry, publication.exits)
         if isinstance(block, EscalateIR):
             return _Fragment(self.terminals["FAIL"], [])
         if isinstance(block, ChooseIR):
@@ -544,6 +622,36 @@ class _Builder:
         self.declare_generated_state(saved_context["_loop_counts"], "dict")
         self.declare_generated_state(saved_context["_loop_limit_reached"], "any")
         child_contract = resolved.contract
+        artifact_specs: dict[str, tuple[str, str, str, str, str]] = {}
+        for handle, destination in block.artifacts.items():
+            export = child_contract.exports[handle]
+            matches = [
+                artifact
+                for qualified, artifact in self.validated.artifacts.items()
+                if qualified.endswith(f".{block.id}.{handle}")
+                or qualified == f"{block.id}.{handle}"
+                if artifact.source == export.fixed_source
+                and artifact.destination == destination
+            ]
+            if len(matches) != 1:
+                raise ValueError(
+                    "child artifact export is not uniquely bound in parent semantics"
+                )
+            qualified = matches[0].handle
+            declared_name = export.declared_name
+            channel = "artifact_" + hashlib.sha256(
+                ("lockstep.artifact-channel/v1\0" + qualified).encode("utf-8")
+            ).hexdigest()
+            self.declare_generated_state(channel, "dict")
+            self.artifact_state_keys[qualified] = (channel, declared_name)
+            artifact_specs[qualified] = (
+                declared_name,
+                export.fixed_source,
+                export.media_type,
+                export.producer_logical_id,
+                export.producer_result_state_key,
+            )
+        producer_bindings = self._artifact_producers(resolved, artifact_specs)
         for key, state_type in {
             **dict(child_contract.state_inputs),
             **dict(child_contract.state_exports),
@@ -615,6 +723,9 @@ class _Builder:
                 block.runner,
                 reserved_channels=reserved_child_channels,
                 source_file=source_file,
+                artifact_bindings=producer_bindings.get(
+                    source_file.relative_path, ()
+                ),
             )
             target_path = f"{generated_base}/{source_file.relative_path}"
             specialized_bytes = canonical_yaml(specialized)
@@ -789,6 +900,23 @@ class _Builder:
             key: f"{{state.{namespace}_{key}}}"
             for key in child_contract.state_exports
         }
+        for qualified, (
+            _declared_name,
+            _source,
+            _media_type,
+            _producer_logical_id,
+            _producer_result_state_key,
+        ) in artifact_specs.items():
+            channel, _name = self.artifact_state_keys[qualified]
+            producer = next(
+                item
+                for items in producer_bindings.values()
+                for item in items
+                if item[0] == qualified
+            )
+            post_output[channel] = (
+                f"{{state.{_specialized_state_key(namespace, producer[4])}}}"
+            )
         restoration_output = {
             "current_step": f"{{state.{saved_context['current_step']}}}",
             "_loop_counts": f"{{state.{saved_context['_loop_counts']}}}",
@@ -818,6 +946,64 @@ class _Builder:
                 self.edge(restore, self.terminals[outcome])
         return _Fragment(context, [_Exit(restorations["PASS"])])
 
+    @staticmethod
+    def _artifact_producers(
+        resolved: Any,
+        artifact_specs: Mapping[str, tuple[str, str, str, str, str]],
+    ) -> dict[str, tuple[tuple[str, str, str, str, str, str], ...]]:
+        by_file: dict[str, list[tuple[str, str, str, str, str, str]]] = {}
+        for qualified, spec in artifact_specs.items():
+            declared_name, source, media_type, producer_logical_id, result_key = spec
+            candidates: list[tuple[str, tuple[str, str, str, str, str, str]]] = []
+            for source_file in resolved.standalone.files:
+                document = yaml.safe_load(source_file.content)
+                nodes = document.get("nodes", {}) if isinstance(document, dict) else {}
+                for node_name, node in nodes.items() if isinstance(nodes, dict) else ():
+                    if not isinstance(node, dict) or node.get("type") != "interrupt":
+                        continue
+                    message = node.get("message")
+                    descriptor = (
+                        message.get("lockstep_effect")
+                        if isinstance(message, dict)
+                        else None
+                    )
+                    resume_key = node.get("resume_key")
+                    if not isinstance(descriptor, dict) or not isinstance(resume_key, str):
+                        continue
+                    if (
+                        descriptor.get("logical_id") == producer_logical_id
+                        and resume_key == result_key
+                    ):
+                        declarations = descriptor.get("artifacts")
+                        expected = {
+                            "name": declared_name,
+                            "source_path": source,
+                            "media_type": media_type,
+                            "required": True,
+                        }
+                        if (
+                            not isinstance(declarations, list)
+                            or sum(item == expected for item in declarations) != 1
+                        ):
+                            raise ValueError(
+                                "child artifact contract differs from producer declaration"
+                            )
+                        candidates.append((source_file.relative_path, (
+                                qualified,
+                                declared_name,
+                                source,
+                                media_type,
+                                resume_key,
+                                producer_logical_id,
+                            )))
+            if len(candidates) != 1:
+                raise ValueError(
+                    f"child artifact source {source!r} requires exactly one contract-bound producer"
+                )
+            relative_path, candidate = candidates[0]
+            by_file.setdefault(relative_path, []).append(candidate)
+        return {key: tuple(value) for key, value in by_file.items()}
+
     def _specialize_child(
         self,
         resolved: Any,
@@ -828,6 +1014,7 @@ class _Builder:
         *,
         reserved_channels: frozenset[str],
         source_file: Any | None = None,
+        artifact_bindings: tuple[tuple[str, str, str, str, str, str], ...] = (),
     ) -> dict[str, Any]:
         selected_file = source_file or next(
             item
@@ -929,6 +1116,17 @@ class _Builder:
             descriptor = message.get("lockstep_effect") if isinstance(message, dict) else None
             if isinstance(descriptor, dict):
                 descriptor = plain(descriptor)
+                matching_artifacts = [
+                    item for item in artifact_bindings
+                    if key_map.get(item[4], specialized_key(item[4]))
+                    == node.get("resume_key")
+                    and descriptor.get("logical_id") == item[5]
+                ]
+                if matching_artifacts:
+                    # The immutable child descriptor already carries the full
+                    # ordered declaration set. Contract matching selects refs;
+                    # specialization must never rewrite or drop declarations.
+                    message["artifact_contract"] = {}
                 if isinstance(descriptor.get("logical_id"), str):
                     logical_digest = hashlib.sha256(
                         b"lockstep.specialized-logical-id/v1\0"

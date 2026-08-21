@@ -27,6 +27,7 @@ from lockstep.recipe.loader import RecipeError, RecipeLoader
 from lockstep.recipe.yamlgraph_adapter import open_native_app
 from lockstep.runtime import config, sessions
 from lockstep.runtime.blobs import BlobStore
+from lockstep.runtime.artifacts import ArtifactRef, ArtifactRegistry
 from lockstep.runtime.catalog import RunBinding, RunCatalog
 from lockstep.runtime.effects.authority import (
     EffectAuthorityGate,
@@ -39,6 +40,7 @@ from lockstep.runtime.effects.descriptors import (
 )
 from lockstep.runtime.effects.ledger import EffectLedger
 from lockstep.runtime.effects.models import EffectDescriptor, ScopeDescriptor
+from lockstep.runtime.effects.models import AcceptanceResult, AcceptDescriptor
 from lockstep.runtime.graph_runtime import (
     GraphRuntime,
     NativeCoordinateRejected,
@@ -54,6 +56,8 @@ from lockstep.runtime.providers.manual import (
     ManualProviderError,
     ManualSubmission,
 )
+from lockstep.runtime.project_snapshots import ProjectSnapshotStore
+from lockstep.runtime.publication import ProjectPublisher
 from lockstep.runtime.recipe_bundles import RecipeBundleStore
 from lockstep.runtime.status import ScenarioStatus, project_status
 from lockstep.runtime.storage import SQLiteStore
@@ -188,6 +192,10 @@ class LockstepService:
         self.leases = LeaseStore(self.store)
         self.effects = EffectLedger(self.store)
         self.blobs = BlobStore(self.state_dir)
+        self.snapshots = ProjectSnapshotStore(self.state_dir, self.blobs)
+        self.artifacts = ArtifactRegistry(
+            self.state_dir, self.blobs, self.snapshots
+        )
         self.manual = ManualProvider(self.state_dir, self.blobs)
         checkpoints = ensure_owner_directory(self.state_dir, "checkpoints")
         self.checkpoint_path = checkpoints / "native.sqlite"
@@ -205,6 +213,13 @@ class LockstepService:
             leases=self.leases,
             runners={} if runners is None else runners,
             authority=effect_authority or _UnavailableEffectAuthority(),
+            artifacts=self.artifacts,
+            publisher_for=lambda binding: ProjectPublisher(
+                self.state_dir,
+                Path(binding.project_identity),
+                self.artifacts,
+                self.blobs,
+            ),
             manual=self.manual,
         )
         self._wait_clock = time.monotonic
@@ -215,6 +230,10 @@ class LockstepService:
         self._queued_effect_runs: set[str] = set()
         self._active_effect_queue: deque[str] = deque()
         self._active_effect_lock = threading.Lock()
+        # A newly durable dispatch watch must be adopted by exactly one drive.
+        # Serialize foreground admission with recovery enumeration so the pump
+        # cannot finish and unbind a run between two foreground app uses.
+        self._admission_recovery_lock = threading.RLock()
         self._recovery_thread_cursor: str | None = None
         self._pump_thread: threading.Thread | None = None
         self._pump_failure: BaseException | None = None
@@ -230,8 +249,9 @@ class LockstepService:
     def _recover_engine_effects(self) -> None:
         """Adopt durable protected work without a scheduler or status side effect."""
 
-        self._recover_start_admissions()
-        self._recover_effect_batch()
+        with self._admission_recovery_lock:
+            self._recover_start_admissions()
+            self._recover_effect_batch()
 
     def _recover_effect_batch(self) -> None:
         thread_ids = self.effects.list_recovery_threads(
@@ -331,8 +351,7 @@ class LockstepService:
                     binding = self.catalog.get(run_id)
                     self.runtime.bind(binding)
                     self._drive_engine_owned(run_id, binding=binding)
-                self._recover_start_admissions()
-                self._recover_effect_batch()
+                self._recover_engine_effects()
             except Exception as exc:  # noqa: BLE001 - retain cross-provider failure
                 self._pump_failure = exc
                 return
@@ -451,28 +470,29 @@ class LockstepService:
             recipe_snapshot_ref=admitted.bundle.digest,
             project_identity=str(project_root),
         )
-        try:
-            binding, _admission = self.effects.admit_start(
-                self.catalog, binding, input_blob
-            )
-            # Catalog admission canonicalizes immutable lineage (including
-            # created_at). Bind only that admitted value so the coordinator
-            # never observes a pre-admission lookalike.
-            self.runtime.bind(binding)
-            if not self._reserve_effect_run(run_id):
-                snapshot = self.runtime.snapshot(run_id, subgraphs=True)
+        with self._admission_recovery_lock:
+            try:
+                binding, _admission = self.effects.admit_start(
+                    self.catalog, binding, input_blob
+                )
+                # Catalog admission canonicalizes immutable lineage (including
+                # created_at). Bind only that admitted value so the coordinator
+                # never observes a pre-admission lookalike.
+                self.runtime.bind(binding)
+                if not self._reserve_effect_run(run_id):
+                    snapshot = self.runtime.snapshot(run_id, subgraphs=True)
+                    self.runtime.unbind(run_id)
+                    return project_status(
+                        binding, snapshot, self.leases, self.effects
+                    ).to_dict()
+                snapshot = self.runtime.ensure_started(run_id, values)
+            except BaseException:
+                self._deactivate_effect_run(run_id)
                 self.runtime.unbind(run_id)
-                return project_status(
-                    binding, snapshot, self.leases, self.effects
-                ).to_dict()
-            snapshot = self.runtime.ensure_started(run_id, values)
-        except BaseException:
-            self._deactivate_effect_run(run_id)
-            self.runtime.unbind(run_id)
-            raise
-        return self._drive_engine_owned(
-            binding.public_run_id, binding=binding, snapshot=snapshot
-        ).to_dict()
+                raise
+            return self._drive_engine_owned(
+                binding.public_run_id, binding=binding, snapshot=snapshot
+            ).to_dict()
 
     def _drive_engine_owned(
         self,
@@ -775,48 +795,51 @@ class LockstepService:
         session_id: str | None,
         project: str,
     ) -> dict[str, Any]:
-        self._bind_existing(run_id, project)
-        try:
-            with sessions.locked_owner(
-                self.state_dir,
-                run_id,
-                session_id,
-                config.session_stale_minutes(),
-            ):
-                binding, interrupt = self._worker_interrupt(run_id, step, project)
-                descriptor = self._protected_descriptor(interrupt)
-                if descriptor is not None:
-                    if descriptor.kind != "manual" or manual_submission is None:
-                        raise LockstepError(
-                            "worker submission cannot target an engine-owned effect"
-                        )
-                    effect_id = derive_effect_id(
-                        interrupt.coordinate, descriptor.digest
-                    )
-                    assert session_id is not None
-                    session_lease = self.leases.acquire(
-                        "session",
-                        effect_id,
-                        session_id,
-                        config.session_stale_minutes() * 60,
-                    )
-                    try:
-                        self.coordinator.submit_manual(
-                            run_id, interrupt.coordinate, manual_submission
-                        )
-                    finally:
-                        self.leases.release(session_lease)
-                    return self._drive_engine_owned(run_id, binding=binding).to_dict()
-                snapshot = self.runtime.resume(
+        with self._admission_recovery_lock:
+            self._bind_existing(run_id, project)
+            try:
+                with sessions.locked_owner(
+                    self.state_dir,
                     run_id,
-                    interrupt.coordinate,
-                    {interrupt.coordinate.interrupt_id: dict(result)},
-                )
-        except PermissionError as exc:
-            raise LockstepError(str(exc)) from exc
-        except (NativeCoordinateRejected, NativeHistoryLimitExceeded) as exc:
-            raise LockstepError(str(exc)) from exc
-        return project_status(binding, snapshot, (), ()).to_dict()
+                    session_id,
+                    config.session_stale_minutes(),
+                ):
+                    binding, interrupt = self._worker_interrupt(run_id, step, project)
+                    descriptor = self._protected_descriptor(interrupt)
+                    if descriptor is not None:
+                        if descriptor.kind != "manual" or manual_submission is None:
+                            raise LockstepError(
+                                "worker submission cannot target an engine-owned effect"
+                            )
+                        effect_id = derive_effect_id(
+                            interrupt.coordinate, descriptor.digest
+                        )
+                        assert session_id is not None
+                        session_lease = self.leases.acquire(
+                            "session",
+                            effect_id,
+                            session_id,
+                            config.session_stale_minutes() * 60,
+                        )
+                        try:
+                            self.coordinator.submit_manual(
+                                run_id, interrupt.coordinate, manual_submission
+                            )
+                        finally:
+                            self.leases.release(session_lease)
+                        return self._drive_engine_owned(
+                            run_id, binding=binding
+                        ).to_dict()
+                    snapshot = self.runtime.resume(
+                        run_id,
+                        interrupt.coordinate,
+                        {interrupt.coordinate.interrupt_id: dict(result)},
+                    )
+            except PermissionError as exc:
+                raise LockstepError(str(exc)) from exc
+            except (NativeCoordinateRejected, NativeHistoryLimitExceeded) as exc:
+                raise LockstepError(str(exc)) from exc
+            return project_status(binding, snapshot, (), ()).to_dict()
 
     def scenario_done(
         self,
@@ -840,6 +863,89 @@ class LockstepService:
             session_id=session_id,
             project=project,
         )
+
+    def scenario_accept_artifact(
+        self,
+        run_id: str,
+        step: str,
+        artifact_ref: str,
+        consent_ref: str,
+        approval_generation: int,
+        *,
+        session_id: str | None,
+        project: str,
+    ) -> dict[str, Any]:
+        """Commit owner consent for one exact pending artifact acceptance."""
+
+        if not isinstance(step, str) or not step:
+            raise LockstepError("acceptance step must be non-empty text")
+        if not isinstance(consent_ref, str) or not consent_ref:
+            raise LockstepError("acceptance consent_ref must be non-empty text")
+        if type(approval_generation) is not int or approval_generation < 0:
+            raise LockstepError(
+                "acceptance approval_generation must be a non-negative integer"
+            )
+        with self._admission_recovery_lock:
+            binding = self._bind_existing(run_id, project)
+            try:
+                with sessions.locked_owner(
+                    self.state_dir,
+                    run_id,
+                    session_id,
+                    config.session_stale_minutes(),
+                ):
+                    try:
+                        parsed_ref = ArtifactRef.parse(artifact_ref)
+                        artifact = self.artifacts.read(parsed_ref)
+                    except (KeyError, TypeError, ValueError, RuntimeError) as exc:
+                        raise LockstepError(
+                            "unknown or invalid artifact reference"
+                        ) from exc
+                    if (
+                        artifact.public_run_id != binding.public_run_id
+                        or artifact.project_identity != binding.project_identity
+                        or artifact.definition_digest != binding.recipe_digest
+                    ):
+                        raise LockstepError("unknown or invalid artifact reference")
+                    snapshot = self.runtime.snapshot(run_id, subgraphs=True)
+                    matches = []
+                    for interrupt in snapshot.pending:
+                        descriptor = self._protected_interrupt_descriptor(interrupt)
+                        observed_step = (
+                            interrupt.value.get("step")
+                            if isinstance(interrupt.value, dict)
+                            else None
+                        )
+                        if (
+                            isinstance(descriptor, AcceptDescriptor)
+                            and (descriptor.logical_id == step or observed_step == step)
+                        ):
+                            matches.append((interrupt, descriptor))
+                    if len(matches) != 1:
+                        raise LockstepError(
+                            "acceptance step does not identify exactly one pending interrupt"
+                        )
+                    interrupt, descriptor = matches[0]
+                    effect_id = derive_effect_id(
+                        interrupt.coordinate, descriptor.digest
+                    )
+                    result = AcceptanceResult(
+                        "lockstep.acceptance-result/v1",
+                        effect_id,
+                        "PASS",
+                        str(parsed_ref),
+                        artifact.blob.sha256,
+                        consent_ref,
+                        approval_generation,
+                    )
+                    self.coordinator.submit_acceptance(
+                        run_id, interrupt.coordinate, result
+                    )
+                    return self._drive_engine_owned(
+                        run_id, binding=binding
+                    ).to_dict()
+            except PermissionError as exc:
+                raise LockstepError(str(exc)) from exc
 
     def scenario_escalate(
         self,

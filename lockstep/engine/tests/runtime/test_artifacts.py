@@ -212,3 +212,48 @@ def test_registry_enforces_hard_cardinality_and_manifest_limits(tmp_path: Path) 
                 ArtifactDeclaration("b", "b", "text/plain", True),
             ),
         )
+
+
+def test_registry_crash_before_set_commit_exposes_no_partial_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lockstep.runtime.artifacts import ArtifactDeclaration, ArtifactRef
+
+    blobs, snapshots, registry = _stores(tmp_path)
+    snapshot = _snapshot(blobs, snapshots, {"one": b"ONE", "two": b"TWO"})
+    declarations = (
+        ArtifactDeclaration("one", "one", "text/plain", True),
+        ArtifactDeclaration("two", "two", "text/plain", True),
+    )
+    original = registry._publish_immutable
+    published = 0
+
+    def crash(path, encoded, *, collision):
+        nonlocal published
+        original(path, encoded, collision=collision)
+        published += 1
+        if published == 2:
+            raise RuntimeError("crash before producer-set commit")
+
+    monkeypatch.setattr(registry, "_publish_immutable", crash)
+    with pytest.raises(RuntimeError, match="producer-set commit"):
+        registry.register_set(
+            public_run_id="run-1",
+            project_identity="project-1",
+            definition_digest="d" * 64,
+            producer_effect_id="effect-1",
+            producer_request_digest="f" * 64,
+            workspace_ref="workspace:one",
+            producer_coordinate=_coordinate(),
+            descriptor_digest="a" * 64,
+            snapshot_ref=snapshot,
+            declarations=declarations,
+        )
+
+    assert registry.list_for_producer(
+        "effect-1", _coordinate(), "a" * 64, ("one", "two")
+    ) == ()
+    manifests = tuple((tmp_path / "owner/artifacts/manifests").glob("*.json"))
+    assert manifests
+    with pytest.raises(KeyError):
+        registry.read(ArtifactRef(manifests[0].stem))

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 from collections import deque
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
@@ -31,7 +32,6 @@ def test_scenario_status_is_an_explicit_read_only_public_control() -> None:
         "owner": "engine",
         "next_action": "scenario_wait",
     }
-
     assert service.scenario_status("run-1", "/project") == {
         "status": "running",
         "run_id": "run-1",
@@ -39,6 +39,29 @@ def test_scenario_status_is_an_explicit_read_only_public_control() -> None:
         "next_action": "scenario_wait",
     }
 
+
+def test_service_composes_project_resolved_artifact_publication_and_acceptance(
+    tmp_path,
+) -> None:
+    recipes = tmp_path / "recipes"
+    recipes.mkdir()
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    service = LockstepService(tmp_path / "state", recipes)
+    try:
+        assert service.artifacts is service.coordinator._artifacts
+        one = service.coordinator._publisher_for(
+            RunBinding("run-1", "thread-1", "a" * 64, "bundle", str(first))
+        )
+        two = service.coordinator._publisher_for(
+            RunBinding("run-2", "thread-2", "b" * 64, "bundle", str(second))
+        )
+        assert one.binding_digest != two.binding_digest
+        assert callable(service.scenario_accept_artifact)
+    finally:
+        service.close()
 
 def test_engine_effect_queue_has_a_hard_admission_ceiling() -> None:
     service = object.__new__(LockstepService)
@@ -87,6 +110,7 @@ def test_startup_recovery_discovers_native_start_commit_before_ledger_prepare() 
     service._active_effect_runs = set()
     service._queued_effect_runs = set()
     service._active_effect_lock = threading.Lock()
+    service._admission_recovery_lock = threading.RLock()
     service._recovery_thread_cursor = None
 
     def drive(run_id, **_kwargs):
@@ -100,6 +124,155 @@ def test_startup_recovery_discovers_native_start_commit_before_ledger_prepare() 
     assert bound == [binding]
     assert driven == ["run-1"]
     assert unbound == ["run-1"]
+
+
+def test_dispatch_recovery_serializes_with_foreground_admission() -> None:
+    service = object.__new__(LockstepService)
+    service._admission_recovery_lock = threading.RLock()
+    entered = threading.Event()
+    finished = threading.Event()
+    service._recover_start_admissions = entered.set
+    service._recover_effect_batch = lambda: None
+
+    with service._admission_recovery_lock:
+        worker = threading.Thread(
+            target=lambda: (service._recover_engine_effects(), finished.set())
+        )
+        worker.start()
+        assert not entered.wait(0.05)
+        assert not finished.is_set()
+
+    worker.join(timeout=1)
+    assert entered.is_set()
+    assert finished.is_set()
+
+
+def test_worker_resume_blocks_recovery_unbind_for_the_whole_composite(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = object.__new__(LockstepService)
+    service._admission_recovery_lock = threading.RLock()
+    service.state_dir = tmp_path
+    binding = RunBinding("run-1", "thread-1", "a" * 64, "bundle", "/project")
+    coordinate = NativeCoordinate("thread-1", "cp-1", "", "task-1", "int-1")
+    interrupt = NativeInterrupt(coordinate, {"step": "work"})
+    foreground_late = threading.Event()
+    release = threading.Event()
+    recovery_unbound = threading.Event()
+    failures: list[BaseException] = []
+    service._bind_existing = lambda *_args: binding
+    service._worker_interrupt = lambda *_args: (binding, interrupt)
+
+    def resume(*_args, **_kwargs):
+        foreground_late.set()
+        assert release.wait(1)
+        return NativeSnapshot(values={"lockstep_outcome": "PASS"}, checkpoint_id="cp-2")
+
+    service.runtime = SimpleNamespace(
+        resume=resume,
+        unbind=lambda _run_id: recovery_unbound.set(),
+    )
+    service._recover_start_admissions = lambda: service.runtime.unbind("run-1")
+    service._recover_effect_batch = lambda: None
+    monkeypatch.setattr(sessions, "locked_owner", lambda *_args, **_kwargs: nullcontext())
+
+    def foreground() -> None:
+        try:
+            service._resume_worker(
+                "run-1", "work", {"outcome": "PASS"},
+                session_id="session-1", project="/project",
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            failures.append(exc)
+
+    foreground_thread = threading.Thread(target=foreground)
+    foreground_thread.start()
+    assert foreground_late.wait(1)
+    recovery_thread = threading.Thread(target=service._recover_engine_effects)
+    recovery_thread.start()
+    assert not recovery_unbound.wait(0.05)
+    release.set()
+    foreground_thread.join(timeout=1)
+    recovery_thread.join(timeout=1)
+    assert failures == []
+    assert recovery_unbound.is_set()
+
+
+def test_artifact_acceptance_blocks_recovery_unbind_through_drive(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lockstep.runtime.artifacts import ArtifactRef
+
+    service = object.__new__(LockstepService)
+    service._admission_recovery_lock = threading.RLock()
+    service.state_dir = tmp_path
+    binding = RunBinding("run-1", "thread-1", "a" * 64, "bundle", "/project")
+    coordinate = NativeCoordinate("thread-1", "cp-1", "", "task-1", "int-1")
+    raw = {
+        "schema": "lockstep.effect/v1",
+        "kind": "accept",
+        "logical_id": "accept-review",
+        "artifact_handle": "review-call.review",
+        "producer_result_state_key": "review_result",
+        "declared_name": "review",
+        "verdict": "PASS",
+        "result_schema": "lockstep.acceptance-result/v1",
+    }
+    snapshot = NativeSnapshot(
+        values={},
+        pending=(NativeInterrupt(coordinate, {"lockstep_effect": raw}),),
+        checkpoint_id="cp-1",
+    )
+    artifact_ref = ArtifactRef("b" * 64)
+    foreground_late = threading.Event()
+    release = threading.Event()
+    recovery_unbound = threading.Event()
+    failures: list[BaseException] = []
+    service._bind_existing = lambda *_args: binding
+    service.artifacts = SimpleNamespace(
+        read=lambda _ref: SimpleNamespace(
+            public_run_id="run-1",
+            project_identity="/project",
+            definition_digest="a" * 64,
+            blob=SimpleNamespace(sha256="c" * 64),
+        )
+    )
+    service.coordinator = SimpleNamespace(submit_acceptance=lambda *_args: None)
+
+    def drive(*_args, **_kwargs):
+        foreground_late.set()
+        assert release.wait(1)
+        return ScenarioStatus("completed", "run-1", "engine", None)
+
+    service._drive_engine_owned = drive
+    service.runtime = SimpleNamespace(
+        snapshot=lambda *_args, **_kwargs: snapshot,
+        unbind=lambda _run_id: recovery_unbound.set(),
+    )
+    service._recover_start_admissions = lambda: service.runtime.unbind("run-1")
+    service._recover_effect_batch = lambda: None
+    monkeypatch.setattr(sessions, "locked_owner", lambda *_args, **_kwargs: nullcontext())
+
+    def foreground() -> None:
+        try:
+            service.scenario_accept_artifact(
+                "run-1", "accept-review", str(artifact_ref), "consent-1", 1,
+                session_id="session-1", project="/project",
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            failures.append(exc)
+
+    foreground_thread = threading.Thread(target=foreground)
+    foreground_thread.start()
+    assert foreground_late.wait(1)
+    recovery_thread = threading.Thread(target=service._recover_engine_effects)
+    recovery_thread.start()
+    assert not recovery_unbound.wait(0.05)
+    release.set()
+    foreground_thread.join(timeout=1)
+    recovery_thread.join(timeout=1)
+    assert failures == []
+    assert recovery_unbound.is_set()
 
 
 def test_start_recovery_defers_before_native_commit_when_active_batch_is_full() -> None:
@@ -520,6 +693,7 @@ def test_protected_manual_done_uses_coordinator_not_direct_native_resume(
     service._drive_engine_owned = lambda *_args, **_kwargs: ScenarioStatus(
         "completed", "run-1", "engine", None
     )
+    service._admission_recovery_lock = threading.RLock()
     service._closed = False
 
     completed = service.scenario_done(

@@ -212,26 +212,69 @@ def _resolve_state_path(dotted: str, state_blob: dict) -> tuple[bool, Any]:
 
 
 def _check_file_matches_hash(check: dict, evidence: dict, ctx: dict) -> list[str]:
+    from lockstep.runtime.artifacts import ArtifactRef, ArtifactRegistry
+    from lockstep.runtime.native_models import NativeCoordinate
+
     raw, err = _get_path(check, evidence)
     if err:
         return [f"file_matches_hash: {err}"]
-    hash_from = check.get("hash_from")
-    if not isinstance(hash_from, str) or not hash_from:
-        return ["file_matches_hash requires 'hash_from'"]
-    present, expected = _resolve_state_path(hash_from, ctx.get("_state") or {})
+    artifact_ref_from = check.get("artifact_ref_from")
+    binding_name = check.get("artifact_binding")
+    if (
+        not isinstance(artifact_ref_from, str)
+        or not artifact_ref_from
+        or not isinstance(binding_name, str)
+        or not binding_name
+    ):
+        return ["file_matches_hash requires an ArtifactRef and trusted binding"]
+    state = ctx.get("_state") or {}
+    present, selected_ref = _resolve_state_path(artifact_ref_from, state)
     if not present:
-        # RuntimeError -> run_checks' blanket except -> error verdict: no
-        # resume, no retry-budget burn
-        raise RuntimeError(f"hash pin '{hash_from}' not present in run state")
-    if not isinstance(expected, str) or not expected:
-        raise RuntimeError(f"hash pin '{hash_from}' present but not a hex digest: {expected!r}")
+        raise RuntimeError(
+            f"artifact ref selector '{artifact_ref_from}' not present in run state"
+        )
+    bindings = ctx.get("_artifact_provenance_bindings")
+    expected = bindings.get(binding_name) if isinstance(bindings, dict) else None
+    expected_fields = {
+        "schema", "qualified_handle", "declared_name", "producer_effect_id",
+        "producer_coordinate", "producer_descriptor_digest",
+    }
+    if (
+        not isinstance(expected, dict)
+        or set(expected) != expected_fields
+        or expected.get("schema") != "lockstep.validator-artifact-binding/v1"
+        or expected.get("qualified_handle") != binding_name
+    ):
+        raise RuntimeError("trusted artifact provenance binding is unavailable")
+    registry = ctx.get("_artifact_registry")
+    if not isinstance(registry, ArtifactRegistry):
+        raise RuntimeError("trusted ArtifactRegistry is unavailable")
+    try:
+        coordinate_data = expected["producer_coordinate"]
+        if not isinstance(coordinate_data, dict) or set(coordinate_data) != {
+            "thread_id", "checkpoint_id", "checkpoint_ns", "task_id", "interrupt_id"
+        }:
+            raise ValueError
+        coordinate = NativeCoordinate(**coordinate_data)
+        record = registry.read(ArtifactRef.parse(selected_ref))
+    except (KeyError, TypeError, ValueError) as exc:
+        return ["file_matches_hash: artifact provenance is invalid"]
+    if (
+        record.producer_effect_id != expected["producer_effect_id"]
+        or record.producer_coordinate != coordinate
+        or record.descriptor_digest != expected["producer_descriptor_digest"]
+        or record.declared_name != expected["declared_name"]
+    ):
+        return ["file_matches_hash: artifact provenance does not match producer"]
     resolved = _resolve_path(raw, ctx.get("_project"))
-    if not resolved.exists():
+    if not resolved.is_file():
         return [f"file_matches_hash: {raw} does not exist"]
-    actual = hashlib.sha256(resolved.read_bytes()).hexdigest()
-    if actual != expected:
-        return [f"file_matches_hash: hash mismatch for {raw} — "
-                "artifact changed after its producer pinned it"]
+    content = resolved.read_bytes()
+    if (
+        hashlib.sha256(content).hexdigest() != record.blob.sha256
+        or len(content) != record.blob.size
+    ):
+        return [f"file_matches_hash: content mismatch for {raw}"]
     return []
 
 
@@ -598,6 +641,10 @@ def run_checks(state: dict[str, Any], execute: bool = False) -> dict[str, Any]:
         "_baseline_prev": state.get("_baseline_prev"),
         "_baseline_globs": state.get("_baseline_globs") or [],
         "_state": state.get("_state") or {},
+        "_artifact_registry": state.get("_artifact_registry"),
+        "_artifact_provenance_bindings": state.get(
+            "_artifact_provenance_bindings"
+        ),
     }
 
     reasons: list[str] = []

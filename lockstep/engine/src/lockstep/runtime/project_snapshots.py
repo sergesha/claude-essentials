@@ -18,6 +18,7 @@ from lockstep.runtime.owner_state import (
     InsecureStatePath,
     StorageLimitExceeded,
     ensure_owner_directory,
+    fsync_owner_directory,
     initialize_owner_state,
     seal_owner_file,
     take_bounded,
@@ -379,6 +380,7 @@ class ProjectSnapshotStore:
                         os.fsync(stream.fileno())
                     seal_owner_file(tmp, writable=False)
                     os.replace(tmp, path)
+                    fsync_owner_directory(path.parent)
                 finally:
                     if tmp.exists():
                         tmp.unlink()

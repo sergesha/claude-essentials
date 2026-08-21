@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
+import threading
 
 import pytest
 
@@ -91,6 +92,38 @@ def test_fresh_start_restart_history_and_live_source_deletion(tmp_path):
     restarted.close()
     store.close()
 
+
+def test_snapshot_serializes_with_unbind_lifecycle_guard(tmp_path):
+    bundles, binding = _binding(tmp_path, FIXTURES / "parent_direct.recipe.yaml")
+    store = SQLiteStore(tmp_path / "runtime.sqlite")
+    leases = LeaseStore(store)
+    invocations = InvocationLockStore(tmp_path / "owner-state")
+    snapshot_entered = threading.Event()
+
+    class App:
+        def snapshot(self, *, thread_id, subgraphs=False):
+            snapshot_entered.set()
+            return NativeSnapshot(values={})
+
+        def close(self):
+            pass
+
+    runtime = GraphRuntime(
+        bundle_store=bundles,
+        leases=leases,
+        invocations=invocations,
+        checkpoint_path=tmp_path / "checkpoints.sqlite",
+        app_factory=lambda *_: App(),
+    )
+    runtime.bind(binding)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with invocations.hold(binding.thread_id):
+            pending = pool.submit(runtime.snapshot, binding.public_run_id)
+            assert not snapshot_entered.wait(0.1)
+        assert pending.result(timeout=1) == NativeSnapshot(values={})
+    runtime.close()
+    store.close()
 
 def test_ensure_started_serializes_two_recoverers_and_never_replays_input(tmp_path):
     bundles, binding = _binding(tmp_path, FIXTURES / "parent_direct.recipe.yaml")

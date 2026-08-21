@@ -50,7 +50,10 @@ def semantic_error(workflow, catalog=None):
 def review_contract(*, non_artifact_writes: tuple[str, ...] = ()) -> ChildWorkflowContract:
     return ChildWorkflowContract(
         outcomes=("pass", "fail", "error"),
-        exports={"review": ChildArtifactContract("review", "review.md")},
+        exports={"review": ChildArtifactContract(
+            "review", "review.md", "review", "application/octet-stream",
+            "review", "review_result"
+        )},
         non_artifact_writes=non_artifact_writes,
     )
 
@@ -593,9 +596,9 @@ workflow = WorkflowIR("1", "release", "Release safely", ("**",), (
 catalog = InMemoryWorkflowCatalog({"reviewer": ChildWorkflowContract(
     outcomes=("pass", "fail", "error"),
     exports={
-        "alpha": ChildArtifactContract("alpha", "alpha.md"),
-        "beta": ChildArtifactContract("beta", "beta.md"),
-        "gamma": ChildArtifactContract("gamma", "gamma.md"),
+        "alpha": ChildArtifactContract("alpha", "alpha.md", "alpha", "application/octet-stream", "alpha", "alpha_result"),
+        "beta": ChildArtifactContract("beta", "beta.md", "beta", "application/octet-stream", "beta", "beta_result"),
+        "gamma": ChildArtifactContract("gamma", "gamma.md", "gamma", "application/octet-stream", "gamma", "gamma_result"),
     },
 )})
 print(json.dumps(list(validate_semantics(workflow, catalog).artifacts)))

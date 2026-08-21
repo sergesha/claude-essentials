@@ -241,6 +241,8 @@ class AcceptDescriptor:
     kind: Literal["accept"]
     logical_id: str
     artifact_handle: str
+    producer_result_state_key: str
+    declared_name: str
     verdict: Literal["PASS"]
     result_schema: str
     canonical_json: bytes
@@ -252,7 +254,51 @@ class AcceptDescriptor:
             "kind": self.kind,
             "logical_id": self.logical_id,
             "artifact_handle": self.artifact_handle,
+            "producer_result_state_key": self.producer_result_state_key,
+            "declared_name": self.declared_name,
             "verdict": self.verdict,
+            "result_schema": self.result_schema,
+        }
+
+
+@dataclass(frozen=True)
+class PublishItem:
+    qualified_handle: str
+    producer_result_state_key: str
+    declared_name: str
+    acceptance_result_state_key: str
+    destination: str
+    transformation: Literal["identity"]
+    audience: Literal["local-project"]
+
+
+@dataclass(frozen=True)
+class PublishDescriptor:
+    schema: str
+    kind: Literal["publish"]
+    logical_id: str
+    items: tuple[PublishItem, ...]
+    result_schema: str
+    canonical_json: bytes
+    digest: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema": self.schema,
+            "kind": self.kind,
+            "logical_id": self.logical_id,
+            "items": [
+                {
+                    "qualified_handle": item.qualified_handle,
+                    "producer_result_state_key": item.producer_result_state_key,
+                    "declared_name": item.declared_name,
+                    "acceptance_result_state_key": item.acceptance_result_state_key,
+                    "destination": item.destination,
+                    "transformation": item.transformation,
+                    "audience": item.audience,
+                }
+                for item in self.items
+            ],
             "result_schema": self.result_schema,
         }
 
@@ -349,6 +395,7 @@ class AcceptanceResult:
     artifact_ref: str
     artifact_digest: str
     consent_ref: str
+    approval_generation: int
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -358,4 +405,5 @@ class AcceptanceResult:
             "artifact_ref": self.artifact_ref,
             "artifact_digest": self.artifact_digest,
             "consent_ref": self.consent_ref,
+            "approval_generation": self.approval_generation,
         }
