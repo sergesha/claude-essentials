@@ -1,0 +1,183 @@
+from __future__ import annotations
+
+from importlib import import_module, resources
+from pathlib import Path
+
+import pytest
+import yaml
+
+from lockstep.recipe.authority import StrictRecipeIngress
+
+
+EXPECTED_BUNDLES = {
+    "reviewed-change": {
+        "files": {
+            "template.yaml",
+            "parent.workflow.yaml",
+            "review.workflow.yaml",
+        },
+        "outputs": {
+            "parent": "{name}",
+            "review": "{name}-review",
+        },
+    },
+    "parallel-review": {
+        "files": {
+            "template.yaml",
+            "parent.workflow.yaml",
+            "security-review.workflow.yaml",
+            "architecture-review.workflow.yaml",
+        },
+        "outputs": {
+            "parent": "{name}",
+            "security-review": "{name}-security-review",
+            "architecture-review": "{name}-architecture-review",
+        },
+    },
+}
+
+
+def _templates():
+    return import_module("lockstep.templates")
+
+
+def test_catalog_is_discovered_from_exact_package_resource_bundles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    assert _templates().list_templates() == ("parallel-review", "reviewed-change")
+
+    package_root = resources.files("lockstep.templates")
+    bundles = {
+        item.name
+        for item in package_root.iterdir()
+        if item.is_dir() and not item.name.startswith("__")
+    }
+    assert bundles == set(EXPECTED_BUNDLES)
+
+
+@pytest.mark.parametrize("bundle_name", sorted(EXPECTED_BUNDLES))
+def test_each_bundle_has_one_manifest_as_its_complete_role_map(bundle_name: str) -> None:
+    package_root = resources.files("lockstep.templates")
+    bundle = package_root.joinpath(bundle_name)
+    observed_files = {
+        item.name for item in bundle.iterdir() if item.is_file()
+    }
+
+    assert observed_files == EXPECTED_BUNDLES[bundle_name]["files"]
+    manifest = yaml.safe_load(bundle.joinpath("template.yaml").read_text())
+    assert manifest == {
+        "template_version": "1",
+        "outputs": EXPECTED_BUNDLES[bundle_name]["outputs"],
+        "files": {
+            role: f"{role}.workflow.yaml"
+            for role in EXPECTED_BUNDLES[bundle_name]["outputs"]
+        },
+    }
+
+
+def test_template_show_returns_exact_roles_outputs_sources_and_compile_order() -> None:
+    shown = _templates().show_template("parallel-review", "release")
+
+    assert shown.to_dict() == {
+        "template": "parallel-review",
+        "name": "release",
+        "roles": {
+            "parent": "release",
+            "security-review": "release-security-review",
+            "architecture-review": "release-architecture-review",
+        },
+        "sources": {
+            "parent": "parent.workflow.yaml",
+            "security-review": "security-review.workflow.yaml",
+            "architecture-review": "architecture-review.workflow.yaml",
+        },
+        "dependencies": {
+            "release": ["release-security-review", "release-architecture-review"],
+            "release-security-review": [],
+            "release-architecture-review": [],
+        },
+        "compile_order": [
+            "release-security-review",
+            "release-architecture-review",
+            "release",
+        ],
+    }
+
+
+@pytest.mark.parametrize(
+    "collision",
+    [
+        ".lockstep/workflows/release.workflow.yaml",
+        ".lockstep/workflows/release-review.workflow.yaml",
+        ".lockstep/recipes/release.recipe.yaml",
+        ".lockstep/recipes/release-review.recipe.yaml",
+    ],
+)
+def test_every_destination_is_preflighted_before_any_bundle_write(
+    tmp_path: Path, collision: str
+) -> None:
+    occupied = tmp_path / collision
+    occupied.parent.mkdir(parents=True, exist_ok=True)
+    occupied.write_bytes(b"owner bytes\n")
+    before = {
+        path.relative_to(tmp_path): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+
+    with pytest.raises(_templates().TemplateCollision, match=collision):
+        _templates().install_template("reviewed-change", "release", tmp_path)
+
+    after = {
+        path.relative_to(tmp_path): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+
+
+def test_atomic_install_publishes_the_complete_self_contained_child_dag(
+    tmp_path: Path,
+) -> None:
+    installed = _templates().install_template(
+        "parallel-review", "release", tmp_path
+    )
+
+    expected_sources = {
+        tmp_path / ".lockstep/workflows/release.workflow.yaml",
+        tmp_path / ".lockstep/workflows/release-security-review.workflow.yaml",
+        tmp_path / ".lockstep/workflows/release-architecture-review.workflow.yaml",
+    }
+    expected_recipes = {
+        tmp_path / ".lockstep/recipes/release.recipe.yaml",
+        tmp_path / ".lockstep/recipes/release-security-review.recipe.yaml",
+        tmp_path / ".lockstep/recipes/release-architecture-review.recipe.yaml",
+    }
+    assert set(installed.sources) == expected_sources
+    assert set(installed.recipes) == expected_recipes
+    assert all(path.is_file() for path in expected_sources | expected_recipes)
+
+    candidate = StrictRecipeIngress(tmp_path / ".lockstep/recipes").inspect(
+        "release.recipe.yaml"
+    )
+    assert candidate.dependency_dag.root == "release.recipe.yaml"
+    assert {item.path for item in candidate.files} >= {
+        "release.recipe.yaml",
+        "release-security-review.recipe.yaml",
+        "release-architecture-review.recipe.yaml",
+    }
+    assert installed.compile_order == (
+        "release-security-review",
+        "release-architecture-review",
+        "release",
+    )
+
+
+def test_custom_template_path_is_rejected_as_a_v2_feature(tmp_path: Path) -> None:
+    custom = tmp_path / "custom-template"
+    custom.mkdir()
+
+    with pytest.raises(ValueError, match="custom template paths are a v2 feature"):
+        _templates().install_template(str(custom), "release", tmp_path)
