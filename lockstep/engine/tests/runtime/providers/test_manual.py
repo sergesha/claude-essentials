@@ -1,16 +1,18 @@
 from __future__ import annotations
 
-from pathlib import Path
 from datetime import UTC, datetime
 from itertools import count
+from pathlib import Path
 
 from lockstep.runtime.blobs import BlobStore
 from lockstep.runtime.catalog import RunBinding
 from lockstep.runtime.effects.descriptors import parse_effect_descriptor
-from lockstep.runtime.native_models import NativeCoordinate, NativeInterrupt
-from lockstep.runtime.native_models import NativeSnapshot
+from lockstep.runtime.native_models import (
+    NativeCoordinate,
+    NativeInterrupt,
+    NativeSnapshot,
+)
 from lockstep.runtime.storage import SQLiteStore
-
 from tests.runtime.effects.test_coordinator import FakeRuntime
 from tests.runtime.providers.fakes import FakeEffectAuthority
 
@@ -43,9 +45,7 @@ def test_manual_handoff_captures_baseline_before_allowed_edit(tmp_path: Path) ->
     )
     coordinate = NativeCoordinate("thread-1", "cp-1", "", "task-1", "int-1")
     descriptor = parse_effect_descriptor(_manual_descriptor())
-    interrupt = NativeInterrupt(
-        coordinate, {"lockstep_effect": _manual_descriptor()}
-    )
+    interrupt = NativeInterrupt(coordinate, {"lockstep_effect": _manual_descriptor()})
     provider = ManualProvider(owner, BlobStore(owner))
 
     handoff = provider.prepare_handoff(binding, interrupt, descriptor)
@@ -73,9 +73,7 @@ def test_manual_manifest_is_checked_on_fail_not_only_pass(tmp_path: Path) -> Non
     )
     coordinate = NativeCoordinate("thread-1", "cp-1", "", "task-1", "int-1")
     descriptor = parse_effect_descriptor(_manual_descriptor())
-    interrupt = NativeInterrupt(
-        coordinate, {"lockstep_effect": _manual_descriptor()}
-    )
+    interrupt = NativeInterrupt(coordinate, {"lockstep_effect": _manual_descriptor()})
     provider = ManualProvider(owner, BlobStore(owner))
     handoff = provider.prepare_handoff(binding, interrupt, descriptor)
     (project / "outside.txt").write_text("forbidden")
@@ -87,6 +85,33 @@ def test_manual_manifest_is_checked_on_fail_not_only_pass(tmp_path: Path) -> Non
 
     assert result.outcome == "ERROR"
     assert result.fixed_error_code == "manifest_invalid"
+
+
+def test_manual_handoff_restart_reuses_original_baseline(tmp_path: Path) -> None:
+    from lockstep.runtime.providers.manual import ManualProvider
+
+    owner = tmp_path / "owner"
+    project = tmp_path / "project"
+    (project / "src").mkdir(parents=True)
+    target = project / "src/app.py"
+    target.write_text("VALUE = 1\n")
+    binding = RunBinding(
+        "run-1", "thread-1", "a" * 64, "bundle:" + "b" * 64, str(project)
+    )
+    coordinate = NativeCoordinate("thread-1", "cp-1", "", "task-1", "int-1")
+    descriptor = parse_effect_descriptor(_manual_descriptor())
+    interrupt = NativeInterrupt(coordinate, {"lockstep_effect": _manual_descriptor()})
+    first = ManualProvider(owner, BlobStore(owner)).prepare_handoff(
+        binding, interrupt, descriptor
+    )
+    target.write_text("VALUE = 2\n")
+
+    restarted = ManualProvider(owner, BlobStore(owner)).prepare_handoff(
+        binding, interrupt, descriptor
+    )
+
+    assert restarted == first
+    assert restarted.baseline.sha256 == first.baseline.sha256
 
 
 def test_coordinator_prepares_then_seals_manual_through_the_same_ledger(
@@ -117,17 +142,13 @@ def test_coordinator_prepares_then_seals_manual_through_the_same_ledger(
                 str(project),
             )
         )
-        coordinate = NativeCoordinate(
-            "thread-1", "cp-1", "", "task-1", "int-1"
-        )
+        coordinate = NativeCoordinate("thread-1", "cp-1", "", "task-1", "int-1")
         interrupt = NativeInterrupt(
             coordinate, {"lockstep_effect": _manual_descriptor()}
         )
         runtime = FakeRuntime(
             binding,
-            NativeSnapshot(
-                values={}, pending=(interrupt,), checkpoint_id="cp-1"
-            ),
+            NativeSnapshot(values={}, pending=(interrupt,), checkpoint_id="cp-1"),
         )
         ledger = EffectLedger(store, clock=lambda: now)
         manual = ManualProvider(owner, BlobStore(owner))
