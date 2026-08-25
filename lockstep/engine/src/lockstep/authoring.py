@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Mapping
@@ -30,6 +31,20 @@ class AuthoringError(ValueError):
     pass
 
 
+_WORKFLOW_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
+
+
+def validate_logical_name(name: str) -> str:
+    """Validate a Workflow DSL logical name before it can reach a path."""
+
+    if not isinstance(name, str) or not _WORKFLOW_NAME_RE.fullmatch(name):
+        raise AuthoringError(
+            f"invalid workflow name {name!r}; use lowercase letters, digits, and "
+            "hyphens, beginning with a letter"
+        )
+    return name
+
+
 @dataclass(frozen=True)
 class AuthoredRecipe:
     name: str
@@ -41,6 +56,7 @@ class AuthoredRecipe:
 
 
 def project_paths(project: Path, name: str) -> AuthoredRecipe:
+    validate_logical_name(name)
     root = Path(project).resolve()
     workflow = root / ".lockstep" / "workflows" / f"{name}.workflow.yaml"
     recipe = root / ".lockstep" / "recipes" / f"{name}.recipe.yaml"
@@ -170,6 +186,12 @@ def link_recipe_dependencies(recipe_bytes: bytes, children: tuple[str, ...]) -> 
     return canonical_yaml(document)
 
 
+def canonical_recipe_bytes(source: Path, compiled: CompilationResult) -> bytes:
+    """Return the one canonical on-disk root, including child ingress links."""
+
+    return link_recipe_dependencies(compiled.recipe_bytes, _call_names(source))
+
+
 def _generated_candidates(recipe: AuthoredRecipe, compiled: CompilationResult) -> dict[str, bytes]:
     root = recipe.recipe_path.parent
     candidates = {}
@@ -194,7 +216,14 @@ def canonical_match(recipe: AuthoredRecipe) -> CompilerProvenance:
     except OSError as exc:
         raise AuthoringError("generated canonical files are missing") from exc
     generated = _generated_candidates(recipe, compiled)
-    if root == compiled.recipe_bytes:
+    expected_root = canonical_recipe_bytes(recipe.workflow_path, compiled)
+    if root != expected_root:
+        raise AuthoringError(
+            "generated recipe is not a byte-for-byte canonical match"
+        )
+
+    calls = _call_names(recipe.workflow_path)
+    if not calls:
         return verify_canonical_match(
             validated,
             catalog,
@@ -203,12 +232,6 @@ def canonical_match(recipe: AuthoredRecipe) -> CompilerProvenance:
             candidate_dependency_manifest_bytes=dependency,
         )
 
-    calls = _call_names(recipe.workflow_path)
-    linked = link_recipe_dependencies(compiled.recipe_bytes, calls)
-    if root != linked:
-        raise AuthoringError(
-            "generated recipe is not a byte-for-byte canonical match"
-        )
     if dependency != compiled.dependency_manifest_bytes:
         raise AuthoringError(
             "dependency manifest is not a byte-for-byte canonical match"
@@ -290,7 +313,7 @@ def write_compilation(recipe: AuthoredRecipe) -> CompilationResult:
         )
     _validated, _catalog, compiled = compile_project_source(recipe.workflow_path)
     destinations = {
-        recipe.recipe_path: compiled.recipe_bytes,
+        recipe.recipe_path: canonical_recipe_bytes(recipe.workflow_path, compiled),
         recipe.dependency_path: compiled.dependency_manifest_bytes,
         recipe.source_map_path: compiled.source_map_bytes,
         **{
@@ -327,7 +350,7 @@ def diff_recipe(project: Path, name: str) -> str:
         return ""
     _validated, _catalog, compiled = compile_project_source(recipe.workflow_path)
     observed = recipe.recipe_path.read_text() if recipe.recipe_path.exists() else ""
-    expected = compiled.recipe_bytes.decode("utf-8")
+    expected = canonical_recipe_bytes(recipe.workflow_path, compiled).decode("utf-8")
     return "".join(
         difflib.unified_diff(
             observed.splitlines(keepends=True),
@@ -361,6 +384,7 @@ def estimate_recipe(project: Path, name: str) -> dict[str, object]:
 
 
 def initialize_minimal(project: Path, name: str) -> AuthoredRecipe:
+    validate_logical_name(name)
     root = Path(project).resolve()
     workflow = root / ".lockstep" / "workflows" / f"{name}.workflow.yaml"
     recipe_path = root / ".lockstep" / "recipes" / f"{name}.recipe.yaml"

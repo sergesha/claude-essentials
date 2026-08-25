@@ -6,6 +6,14 @@ from pathlib import Path
 import pytest
 import yaml
 
+from lockstep.authoring import (
+    AuthoringError,
+    canonical_match,
+    compile_project_source,
+    diff_recipe,
+    project_paths,
+    write_compilation,
+)
 from lockstep.recipe.authority import StrictRecipeIngress
 
 
@@ -173,6 +181,48 @@ def test_atomic_install_publishes_the_complete_self_contained_child_dag(
         "release-architecture-review",
         "release",
     )
+
+
+@pytest.mark.parametrize("bundle_name", sorted(EXPECTED_BUNDLES))
+def test_template_install_compile_round_trip_preserves_canonical_child_dag(
+    tmp_path: Path, bundle_name: str
+) -> None:
+    installed = _templates().install_template(bundle_name, "release", tmp_path)
+    expected_recipes = {
+        f"{output.replace('{name}', 'release')}.recipe.yaml"
+        for output in EXPECTED_BUNDLES[bundle_name]["outputs"].values()
+    }
+
+    for output in installed.compile_order:
+        assert diff_recipe(tmp_path, output) == ""
+        canonical_match(project_paths(tmp_path, output))
+    before = StrictRecipeIngress(tmp_path / ".lockstep/recipes").inspect(
+        "release.recipe.yaml"
+    )
+    assert {item.path for item in before.files} >= expected_recipes
+
+    write_compilation(project_paths(tmp_path, "release"))
+
+    for output in installed.compile_order:
+        assert diff_recipe(tmp_path, output) == ""
+        canonical_match(project_paths(tmp_path, output))
+    after = StrictRecipeIngress(tmp_path / ".lockstep/recipes").inspect(
+        "release.recipe.yaml"
+    )
+    assert {item.path for item in after.files} >= expected_recipes
+
+
+@pytest.mark.parametrize("bundle_name", sorted(EXPECTED_BUNDLES))
+def test_unlinked_template_parent_recipe_is_not_canonical(
+    tmp_path: Path, bundle_name: str
+) -> None:
+    _templates().install_template(bundle_name, "release", tmp_path)
+    recipe = project_paths(tmp_path, "release")
+    _validated, _catalog, compiled = compile_project_source(recipe.workflow_path)
+    recipe.recipe_path.write_bytes(compiled.recipe_bytes)
+
+    with pytest.raises(AuthoringError, match="canonical match"):
+        canonical_match(recipe)
 
 
 def test_custom_template_path_is_rejected_as_a_v2_feature(tmp_path: Path) -> None:

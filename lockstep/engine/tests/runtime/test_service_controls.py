@@ -5,6 +5,7 @@ import threading
 from collections import deque
 from contextlib import nullcontext
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -442,6 +443,177 @@ def test_effect_recovery_cursor_does_not_skip_a_capacity_deferred_run() -> None:
 
     assert service._recovery_thread_cursor is None
     assert "deferred" not in service._active_effect_runs
+
+
+def test_scenario_recover_selects_active_effect_threads_before_catalog_limit(
+    tmp_path,
+) -> None:
+    from lockstep.runtime.catalog import RunCatalog
+    from lockstep.runtime.effects.ledger import EffectLedger
+    from lockstep.runtime.storage import SQLiteStore
+
+    project = tmp_path / "project"
+    project.mkdir()
+    project_identity = str(project.resolve())
+    store = SQLiteStore(tmp_path / "runtime.db")
+    try:
+        catalog = RunCatalog(store)
+        effects = EffectLedger(store)
+        for index in range(128):
+            catalog.create(
+                RunBinding(
+                    f"terminal-{index:03}",
+                    f"thread-terminal-{index:03}",
+                    "a" * 64,
+                    "bundle:" + "b" * 64,
+                    project_identity,
+                    f"2026-08-20T10:{index // 60:02}:{index % 60:02}+00:00",
+                )
+            )
+        active = catalog.create(
+            RunBinding(
+                "active-late",
+                "thread-active-late",
+                "a" * 64,
+                "bundle:" + "b" * 64,
+                project_identity,
+                "2026-08-20T10:03:00+00:00",
+            )
+        )
+        descriptor = parse_effect_descriptor(
+            {
+                "schema": "lockstep.effect/v1",
+                "kind": "managed",
+                "logical_id": "work",
+                "runner": {
+                    "selector": "codex",
+                    "required_capabilities": ["workspace", "bounded_result"],
+                },
+                "inputs": {"brief": {"state_key": "brief"}},
+                "writes": ["src/"],
+                "artifacts": [],
+                "deadline_seconds": 300,
+                "scope_state_keys": [],
+                "result_schema": "lockstep.effect-result/v1",
+            }
+        )
+        effects.prepare(
+            NativeCoordinate(
+                active.thread_id, "checkpoint", "", "task", "interrupt"
+            ),
+            descriptor,
+            deadline_at=datetime(2030, 1, 1, tzinfo=UTC),
+            runner_binding_digest="c" * 64,
+            workspace_ref="snapshot:" + "d" * 64,
+            request_digest="e" * 64,
+            grant_digest="f" * 64,
+        )
+        driven: list[str] = []
+        service = object.__new__(LockstepService)
+        service.catalog = catalog
+        service.effects = effects
+        service.runtime = SimpleNamespace(bind=lambda _binding: None)
+        service.coordinator = SimpleNamespace(MAX_DUE_PER_SCAN=128)
+        service._drive_engine_owned = lambda run_id, **_kwargs: driven.append(run_id)
+        service._admission_recovery_lock = threading.RLock()
+        service._scenario_recovery_cursors = {}
+        service._active_effect_runs = set()
+        service._active_effect_lock = threading.Lock()
+
+        result = service.scenario_recover(project_identity, limit=128)
+
+        assert result["recovered"] == ["active-late"]
+        assert driven == ["active-late"]
+    finally:
+        store.close()
+
+
+def test_scenario_recover_pages_nonterminal_threads_with_stable_project_progress() -> None:
+    project_identity = str(Path("/project").resolve())
+    foreign = RunBinding(
+        "foreign", "thread-a", "a" * 64, "bundle:" + "b" * 64, "/foreign"
+    )
+    local = RunBinding(
+        "local", "thread-b", "a" * 64, "bundle:" + "b" * 64, project_identity
+    )
+    pages = {None: ("thread-a",), "thread-a": ("thread-b",)}
+    cursors: list[str | None] = []
+
+    def list_recovery_threads(*, limit: int, after_thread_id: str | None = None):
+        assert limit == 1
+        cursors.append(after_thread_id)
+        return pages[after_thread_id]
+
+    bindings = {foreign.thread_id: foreign, local.thread_id: local}
+    driven: list[str] = []
+    service = object.__new__(LockstepService)
+    service.effects = SimpleNamespace(list_recovery_threads=list_recovery_threads)
+    service.catalog = SimpleNamespace(
+        list=lambda *_args, **_kwargs: pytest.fail(
+            "scenario recovery limited the unfiltered run catalog"
+        ),
+        find_by_thread=lambda thread_id: bindings[thread_id],
+    )
+    service.runtime = SimpleNamespace(bind=lambda _binding: None)
+    service._drive_engine_owned = lambda run_id, **_kwargs: driven.append(run_id)
+    service._admission_recovery_lock = threading.RLock()
+    service._scenario_recovery_cursors = {}
+    service._active_effect_runs = set()
+    service._active_effect_lock = threading.Lock()
+
+    first = service.scenario_recover(project_identity, limit=1)
+    second = service.scenario_recover(project_identity, limit=1)
+
+    assert first["recovered"] == []
+    assert second["recovered"] == ["local"]
+    assert cursors == [None, "thread-a"]
+    assert driven == ["local"]
+
+
+def test_scenario_recover_capacity_deferral_does_not_advance_or_report_recovery() -> None:
+    project_identity = str(Path("/project").resolve())
+    binding = RunBinding(
+        "deferred",
+        "thread-deferred",
+        "a" * 64,
+        "bundle:" + "b" * 64,
+        project_identity,
+    )
+
+    def list_recovery_threads(*, limit: int, after_thread_id: str | None = None):
+        assert limit == 1
+        return (binding.thread_id,) if after_thread_id is None else ()
+
+    bound: list[RunBinding] = []
+    driven: list[str] = []
+    service = object.__new__(LockstepService)
+    service.effects = SimpleNamespace(list_recovery_threads=list_recovery_threads)
+    service.catalog = SimpleNamespace(find_by_thread=lambda _thread_id: binding)
+    service.runtime = SimpleNamespace(bind=bound.append)
+    service._drive_engine_owned = lambda run_id, **_kwargs: driven.append(run_id)
+    service._admission_recovery_lock = threading.RLock()
+    service._scenario_recovery_cursors = {}
+    service._active_effect_runs = {
+        f"active-{index}" for index in range(service._MAX_ACTIVE_EFFECT_RUNS)
+    }
+    service._active_effect_lock = threading.Lock()
+
+    first = service.scenario_recover(project_identity, limit=1)
+
+    assert first["recovered"] == []
+    assert service._scenario_recovery_cursors == {}
+    assert bound == []
+    assert driven == []
+
+    service._active_effect_runs.clear()
+    second = service.scenario_recover(project_identity, limit=1)
+
+    assert second["recovered"] == ["deferred"]
+    assert service._scenario_recovery_cursors == {
+        project_identity: binding.thread_id
+    }
+    assert bound == [binding]
+    assert driven == ["deferred"]
 
 
 @pytest.mark.parametrize("timeout", [0, 61, True, "1"])

@@ -277,6 +277,10 @@ class LockstepService:
         # cannot finish and unbind a run between two foreground app uses.
         self._admission_recovery_lock = threading.RLock()
         self._recovery_thread_cursor: str | None = None
+        # Ephemeral scan progress only; effect phase and native state remain the
+        # durable authorities.  Project cursors prevent bounded operator sweeps
+        # from repeatedly selecting the same foreign/earlier active threads.
+        self._scenario_recovery_cursors: dict[str, str] = {}
         self._pump_thread: threading.Thread | None = None
         self._pump_failure: BaseException | None = None
         self._closed = False
@@ -845,15 +849,23 @@ class LockstepService:
         project_identity = str(Path(project).resolve())
         recovered: list[str] = []
         with self._admission_recovery_lock:
-            for binding in self.catalog.list(project_identity, limit=limit):
-                records = self.effects.list_nonterminal_for_thread(
-                    binding.thread_id, limit=self.coordinator.MAX_DUE_PER_SCAN
-                )
-                if not records:
+            cursor = self._scenario_recovery_cursors.get(project_identity)
+            thread_ids = self.effects.list_recovery_threads(
+                limit=limit, after_thread_id=cursor
+            )
+            if not thread_ids:
+                self._scenario_recovery_cursors.pop(project_identity, None)
+            for thread_id in thread_ids:
+                binding = self.catalog.find_by_thread(thread_id)
+                if binding.project_identity != project_identity:
+                    self._scenario_recovery_cursors[project_identity] = thread_id
                     continue
+                if not self._reserve_effect_run(binding.public_run_id):
+                    break
                 self.runtime.bind(binding)
                 self._drive_engine_owned(binding.public_run_id, binding=binding)
                 recovered.append(binding.public_run_id)
+                self._scenario_recovery_cursors[project_identity] = thread_id
         return {"recovered": recovered, "count": len(recovered), "limit": limit}
 
     def _worker_interrupt(self, run_id: str, step: str | None, project: str):

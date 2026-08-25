@@ -13,7 +13,11 @@ from typing import Mapping
 
 import yaml
 
-from lockstep.authoring import compile_source, link_recipe_dependencies
+from lockstep.authoring import (
+    canonical_recipe_bytes,
+    compile_source,
+    validate_logical_name,
+)
 
 
 class TemplateCollision(ValueError):
@@ -118,6 +122,7 @@ def _role_dependencies(template: str, role: str) -> tuple[str, ...]:
 
 
 def show_template(template: str, name: str) -> TemplateView:
+    validate_logical_name(name)
     manifest = _manifest(template)
     roles = {role: output.replace("{name}", name) for role, output in manifest["outputs"].items()}
     sources = dict(manifest["files"])
@@ -210,6 +215,7 @@ def _recover_install(project: Path) -> None:
 
 
 def install_template(template: str, name: str, project: Path) -> InstalledTemplate:
+    validate_logical_name(name)
     if template not in _EXPECTED:
         if Path(template).exists() or "/" in template or "\\" in template:
             raise ValueError("custom template paths are a v2 feature")
@@ -256,9 +262,8 @@ def install_template(template: str, name: str, project: Path) -> InstalledTempla
             recipe_root = root / ".lockstep" / "recipes"
             root_destination = recipe_root / f"{output}.recipe.yaml"
             recipe_roots.append(root_destination)
-            children = tuple(shown.dependencies[output])
-            staged_files[root_destination] = link_recipe_dependencies(
-                compiled.recipe_bytes, children
+            staged_files[root_destination] = canonical_recipe_bytes(
+                staged_sources[role], compiled
             )
             staged_files[recipe_root / f"{output}.dependencies.json"] = compiled.dependency_manifest_bytes
             staged_files[recipe_root / f"{output}.source-map.json"] = compiled.source_map_bytes
