@@ -28,9 +28,10 @@ from lockstep.recipe.yamlgraph_adapter import open_native_app
 from lockstep.authoring import AuthoringError, classify_generated_recipe
 from lockstep.runtime import config, sessions
 from lockstep.runtime.blobs import BlobStore
-from lockstep.runtime.artifacts import ArtifactRef, ArtifactRegistry
+from lockstep.runtime.artifacts import ArtifactRegistry
 from lockstep.runtime.catalog import RunBinding, RunCatalog
 from lockstep.runtime.effects.authority import (
+    EffectAuthorityDenied,
     EffectAuthorityGate,
     EffectAuthorityUnavailable,
 )
@@ -41,7 +42,11 @@ from lockstep.runtime.effects.descriptors import (
 )
 from lockstep.runtime.effects.ledger import EffectLedger
 from lockstep.runtime.effects.models import EffectDescriptor, ScopeDescriptor
-from lockstep.runtime.effects.models import AcceptanceResult, AcceptDescriptor
+from lockstep.runtime.effects.models import AcceptDescriptor
+from lockstep.runtime.effects.owner_consent import (
+    IssuedPublicationConsent,
+    OwnerConsentAuthority,
+)
 from lockstep.runtime.graph_runtime import (
     GraphRuntime,
     NativeCoordinateRejected,
@@ -238,13 +243,17 @@ class LockstepService:
             self.blobs,
             self.runtime,
         )
+        self.authority = OwnerConsentAuthority(
+            self.store,
+            delegate=effect_authority or _UnavailableEffectAuthority(),
+        )
         self.coordinator = EffectCoordinator(
             runtime=self.runtime,
             catalog=self.catalog,
             ledger=self.effects,
             leases=self.leases,
             runners={} if runners is None else runners,
-            authority=effect_authority or _UnavailableEffectAuthority(),
+            authority=self.authority,
             artifacts=self.artifacts,
             publisher_for=lambda binding: ProjectPublisher(
                 self.state_dir,
@@ -1000,88 +1009,100 @@ class LockstepService:
             project=project,
         )
 
-    def scenario_accept_artifact(
+    def _pending_acceptance(
         self,
         run_id: str,
         step: str,
-        artifact_ref: str,
-        consent_ref: str,
-        approval_generation: int,
         *,
-        session_id: str | None,
         project: str,
-    ) -> dict[str, Any]:
-        """Commit owner consent for one exact pending artifact acceptance."""
-
+    ):
         if not isinstance(step, str) or not step:
             raise LockstepError("acceptance step must be non-empty text")
-        if not isinstance(consent_ref, str) or not consent_ref:
-            raise LockstepError("acceptance consent_ref must be non-empty text")
-        if type(approval_generation) is not int or approval_generation < 0:
-            raise LockstepError(
-                "acceptance approval_generation must be a non-negative integer"
+        binding = self._bind_existing(run_id, project)
+        snapshot = self.runtime.snapshot(run_id, subgraphs=True)
+        matches = []
+        for interrupt in snapshot.pending:
+            descriptor = self._protected_interrupt_descriptor(interrupt)
+            observed_step = (
+                interrupt.value.get("step")
+                if isinstance(interrupt.value, dict)
+                else None
             )
+            if isinstance(descriptor, AcceptDescriptor) and (
+                descriptor.logical_id == step or observed_step == step
+            ):
+                matches.append(interrupt)
+        if len(matches) != 1:
+            raise LockstepError(
+                "acceptance step does not identify exactly one pending interrupt"
+            )
+        return binding, matches[0]
+
+    def preview_publication_consent(
+        self, run_id: str, step: str, *, project: str
+    ) -> dict[str, Any]:
+        _binding, interrupt = self._pending_acceptance(
+            run_id, step, project=project
+        )
+        return self.coordinator.preview_acceptance(
+            run_id, interrupt.coordinate
+        ).to_dict()
+
+    def issue_publication_consent(
+        self,
+        run_id: str,
+        step: str,
+        expected_commitment_digest: str,
+        *,
+        project: str,
+    ) -> IssuedPublicationConsent:
         with self._admission_recovery_lock:
-            binding = self._bind_existing(run_id, project)
+            _binding, interrupt = self._pending_acceptance(
+                run_id, step, project=project
+            )
+            return self.coordinator.issue_acceptance_consent(
+                run_id,
+                interrupt.coordinate,
+                expected_commitment_digest,
+            )
+
+    def scenario_accept_artifact(
+        self, token: str, *, project: str
+    ) -> dict[str, Any]:
+        """Redeem one owner bearer token within the ambient host project."""
+
+        project_identity = str(Path(project).resolve())
+        try:
+            stored = self.authority.inspect_token(token)
+        except (EffectAuthorityDenied, TypeError, ValueError) as exc:
+            raise LockstepError("invalid or stale publication consent") from exc
+        commitment = stored.commitment
+        if commitment.project_identity != project_identity:
+            raise LockstepError("invalid or stale publication consent")
+        with self._admission_recovery_lock:
             try:
-                with sessions.locked_owner(
-                    self.state_dir,
-                    run_id,
-                    session_id,
-                    config.session_stale_minutes(),
+                binding = self._bind_existing(
+                    commitment.public_run_id, project_identity
+                )
+                if (
+                    binding.public_run_id != commitment.public_run_id
+                    or binding.project_identity != commitment.project_identity
+                    or binding.recipe_digest != commitment.definition_digest
                 ):
-                    try:
-                        parsed_ref = ArtifactRef.parse(artifact_ref)
-                        artifact = self.artifacts.read(parsed_ref)
-                    except (KeyError, TypeError, ValueError, RuntimeError) as exc:
-                        raise LockstepError(
-                            "unknown or invalid artifact reference"
-                        ) from exc
-                    if (
-                        artifact.public_run_id != binding.public_run_id
-                        or artifact.project_identity != binding.project_identity
-                        or artifact.definition_digest != binding.recipe_digest
-                    ):
-                        raise LockstepError("unknown or invalid artifact reference")
-                    snapshot = self.runtime.snapshot(run_id, subgraphs=True)
-                    matches = []
-                    for interrupt in snapshot.pending:
-                        descriptor = self._protected_interrupt_descriptor(interrupt)
-                        observed_step = (
-                            interrupt.value.get("step")
-                            if isinstance(interrupt.value, dict)
-                            else None
-                        )
-                        if (
-                            isinstance(descriptor, AcceptDescriptor)
-                            and (descriptor.logical_id == step or observed_step == step)
-                        ):
-                            matches.append((interrupt, descriptor))
-                    if len(matches) != 1:
-                        raise LockstepError(
-                            "acceptance step does not identify exactly one pending interrupt"
-                        )
-                    interrupt, descriptor = matches[0]
-                    effect_id = derive_effect_id(
-                        interrupt.coordinate, descriptor.digest
-                    )
-                    result = AcceptanceResult(
-                        "lockstep.acceptance-result/v1",
-                        effect_id,
-                        "PASS",
-                        str(parsed_ref),
-                        artifact.blob.sha256,
-                        consent_ref,
-                        approval_generation,
-                    )
-                    self.coordinator.submit_acceptance(
-                        run_id, interrupt.coordinate, result
-                    )
-                    return self._drive_engine_owned(
-                        run_id, binding=binding
-                    ).to_dict()
-            except PermissionError as exc:
-                raise LockstepError(str(exc)) from exc
+                    raise LockstepError("invalid or stale publication consent")
+                self.coordinator.submit_acceptance(
+                    commitment.public_run_id,
+                    commitment.source,
+                    token,
+                )
+            except EffectAuthorityDenied as exc:
+                raise LockstepError("invalid or stale publication consent") from exc
+            return self._drive_engine_owned(
+                commitment.public_run_id, binding=binding
+            ).to_dict()
+
+    def revoke_publication_consents(self, *, project: str) -> int:
+        return self.authority.revoke(str(Path(project).resolve()))
 
     def scenario_escalate(
         self,

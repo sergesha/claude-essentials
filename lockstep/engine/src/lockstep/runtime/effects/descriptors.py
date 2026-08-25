@@ -406,13 +406,21 @@ def _parse_decision_descriptor(raw: dict[str, Any]) -> DecisionDescriptor:
 def _parse_accept_descriptor(raw: dict[str, Any]) -> AcceptDescriptor:
     allowed = {
         "schema", "kind", "logical_id", "artifact_handle",
-        "producer_result_state_key", "declared_name", "verdict", "result_schema",
+        "producer_result_state_key", "declared_name", "destination",
+        "transformation", "audience", "verdict", "result_schema",
     }
     _closed(raw, allowed, allowed, "accept descriptor")
     if raw["verdict"] != "PASS":
         raise ValueError("accept verdict must be PASS")
     if raw["result_schema"] != "lockstep.acceptance-result/v1":
         raise ValueError("unsupported accept result_schema")
+    destination = _write_path(raw["destination"])
+    if destination.endswith("/"):
+        raise ValueError("accept destination must be an exact file")
+    if raw["transformation"] != "identity":
+        raise ValueError("accept transformation must be identity")
+    if raw["audience"] != "local-project":
+        raise ValueError("accept audience must be local-project")
     canonical = _canonical(raw)
     return AcceptDescriptor(
         raw["schema"],
@@ -421,6 +429,9 @@ def _parse_accept_descriptor(raw: dict[str, Any]) -> AcceptDescriptor:
         _name(raw["artifact_handle"], "artifact_handle"),
         _name(raw["producer_result_state_key"], "producer result state key"),
         _name(raw["declared_name"], "declared artifact name"),
+        destination,
+        "identity",
+        "local-project",
         "PASS",
         raw["result_schema"],
         canonical,
@@ -615,11 +626,14 @@ def parse_decision_result(
     raise ValueError("unknown decision result outcome")
 
 
-def parse_acceptance_result(value: object) -> AcceptanceResult:
+def parse_acceptance_result(
+    value: object, *, descriptor: AcceptDescriptor | None = None
+) -> AcceptanceResult:
     raw = _bounded_mapping(value, "acceptance result")
     fields = {
         "schema", "effect_id", "outcome", "artifact_ref", "artifact_digest",
-        "consent_ref", "approval_generation",
+        "destination", "transformation", "audience", "consent_ref",
+        "approval_generation", "receipt_digest",
     }
     _closed(raw, fields, fields, "acceptance result")
     if raw["schema"] != "lockstep.acceptance-result/v1" or raw["outcome"] != "PASS":
@@ -628,6 +642,19 @@ def parse_acceptance_result(value: object) -> AcceptanceResult:
     consent_ref = _optional_string(raw["consent_ref"], "consent_ref")
     if artifact_ref is None or consent_ref is None:
         raise ValueError("acceptance references must be non-null")
+    destination = _write_path(raw["destination"])
+    if destination.endswith("/"):
+        raise ValueError("acceptance destination must be an exact file")
+    if raw["transformation"] != "identity":
+        raise ValueError("acceptance publication commitment transformation must be identity")
+    if raw["audience"] != "local-project":
+        raise ValueError("acceptance publication commitment audience must be local-project")
+    if descriptor is not None and (
+        destination != descriptor.destination
+        or raw["transformation"] != descriptor.transformation
+        or raw["audience"] != descriptor.audience
+    ):
+        raise ValueError("acceptance publication commitment differs from descriptor")
     approval_generation = raw["approval_generation"]
     if type(approval_generation) is not int or approval_generation < 0:
         raise ValueError("approval_generation must be a non-negative integer")
@@ -635,8 +662,12 @@ def parse_acceptance_result(value: object) -> AcceptanceResult:
         raw["schema"], _name(raw["effect_id"], "effect_id"), "PASS",
         artifact_ref,
         _hex_digest(raw["artifact_digest"], "artifact_digest"),
+        destination,
+        "identity",
+        "local-project",
         consent_ref,
         approval_generation,
+        _hex_digest(raw["receipt_digest"], "receipt_digest"),
     )
 
 

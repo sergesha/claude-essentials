@@ -239,6 +239,7 @@ def test_accept_and_publish_descriptors_bind_artifact_authority_without_fake_run
         "review.review",
         "review_producer_result",
         "export-review",
+        ".lockstep/review.md",
     )
     descriptor = parse_effect_descriptor(raw)
 
@@ -250,6 +251,9 @@ def test_accept_and_publish_descriptors_bind_artifact_authority_without_fake_run
         "artifact_handle": "review.review",
         "producer_result_state_key": "review_producer_result",
         "declared_name": "export-review",
+        "destination": ".lockstep/review.md",
+        "transformation": "identity",
+        "audience": "local-project",
         "verdict": "PASS",
         "result_schema": "lockstep.acceptance-result/v1",
     }
@@ -281,6 +285,17 @@ def test_accept_and_publish_descriptors_bind_artifact_authority_without_fake_run
         "result_schema": "lockstep.effect-result/v1",
     }
     assert "runner" not in publish
+
+    changed_destination = lower_accept_descriptor(
+        "accept-review",
+        "review.review",
+        "review_producer_result",
+        "export-review",
+        ".lockstep/other.md",
+    )
+    assert changed_destination != raw
+    assert parse_effect_descriptor(changed_destination).digest != descriptor.digest
+    assert changed_destination["destination"] == ".lockstep/other.md"
 
 
 def test_generated_loop_exit_may_not_target_a_protected_interrupt_directly(

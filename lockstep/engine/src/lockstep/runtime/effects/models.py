@@ -243,6 +243,9 @@ class AcceptDescriptor:
     artifact_handle: str
     producer_result_state_key: str
     declared_name: str
+    destination: str
+    transformation: Literal["identity"]
+    audience: Literal["local-project"]
     verdict: Literal["PASS"]
     result_schema: str
     canonical_json: bytes
@@ -256,6 +259,9 @@ class AcceptDescriptor:
             "artifact_handle": self.artifact_handle,
             "producer_result_state_key": self.producer_result_state_key,
             "declared_name": self.declared_name,
+            "destination": self.destination,
+            "transformation": self.transformation,
+            "audience": self.audience,
             "verdict": self.verdict,
             "result_schema": self.result_schema,
         }
@@ -394,8 +400,12 @@ class AcceptanceResult:
     outcome: Literal["PASS"]
     artifact_ref: str
     artifact_digest: str
+    destination: str
+    transformation: Literal["identity"]
+    audience: Literal["local-project"]
     consent_ref: str
     approval_generation: int
+    receipt_digest: str
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -404,6 +414,10 @@ class AcceptanceResult:
             "outcome": self.outcome,
             "artifact_ref": self.artifact_ref,
             "artifact_digest": self.artifact_digest,
+            "destination": self.destination,
+            "transformation": self.transformation,
+            "audience": self.audience,
             "consent_ref": self.consent_ref,
             "approval_generation": self.approval_generation,
+            "receipt_digest": self.receipt_digest,
         }

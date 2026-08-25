@@ -7,7 +7,7 @@ import hashlib
 from pathlib import PurePosixPath
 import re
 import shlex
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 
@@ -289,6 +289,9 @@ def lower_accept_descriptor(
     artifact_handle: str,
     producer_result_state_key: str,
     declared_name: str,
+    destination: str,
+    transformation: Literal["identity"] = "identity",
+    audience: Literal["local-project"] = "local-project",
 ) -> dict[str, Any]:
     descriptor = {
         "schema": "lockstep.effect/v1",
@@ -297,6 +300,9 @@ def lower_accept_descriptor(
         "artifact_handle": artifact_handle,
         "producer_result_state_key": producer_result_state_key,
         "declared_name": declared_name,
+        "destination": destination,
+        "transformation": transformation,
+        "audience": audience,
         "verdict": "PASS",
         "result_schema": "lockstep.acceptance-result/v1",
     }
@@ -548,8 +554,13 @@ class _Builder:
                 raise ValueError(
                     "accept artifact lacks a compiler-owned producer result channel"
                 ) from exc
+            artifact = self.validated.artifacts[block.artifact_from]
             descriptor = lower_accept_descriptor(
-                logical, block.artifact_from, producer_key, declared_name
+                logical,
+                block.artifact_from,
+                producer_key,
+                declared_name,
+                artifact.destination,
             )
             acceptance = self.descriptor_interrupt(
                 pointer,
@@ -562,7 +573,6 @@ class _Builder:
             )
             publication_logical = f"publish-{logical}"
             publication_result = f"{publication_logical.replace('-', '_')}_result"
-            artifact = self.validated.artifacts[block.artifact_from]
             publish_descriptor = lower_publish_descriptor(
                 publication_logical,
                 artifact_handle=block.artifact_from,

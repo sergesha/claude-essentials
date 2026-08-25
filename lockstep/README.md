@@ -123,6 +123,45 @@ expects the project to use `src/`, `tests/`, and pytest; dependency or test-runn
 configuration changes need a separate recipe because `pyproject.toml`,
 `pytest.ini`, and `conftest.py` are deliberately frozen.
 
+## Owner consent for artifact publication
+
+A workflow that publishes an artifact first stops at its generated `accept`
+step. The compiler, not the caller accepting it, fixes the artifact,
+destination, `identity` transformation, and `local-project` audience. From the
+project directory, the owner previews and issues consent locally:
+
+```bash
+lockstep consent issue --run <run-id> --step <accept-step>
+```
+
+Issuance requires an interactive input and output TTY. The command prints the
+exact publication commitment and asks the owner to type its digest before it
+mints anything. On an exact match it displays the bearer token once. Do not put
+that token in argv, logs, chat history, or a file. Redeem it from the same
+project with `lockstep consent accept`, which reads it using a hidden prompt (or
+one bounded stdin line). An MCP client can instead call only the token-bearing
+`scenario_accept_artifact` tool; MCP deliberately exposes no preview, issuance,
+revocation, row-inspection, or caller-selected publication fields.
+
+The token is stored only as SHA-256 in owner state. First redemption writes one
+exact receipt; an interrupted retry returns that same receipt and can only
+finish the same pending or already-delivered acceptance—it cannot be retargeted.
+To invalidate every not-yet-committed consent in the current project, run
+`lockstep consent revoke` at a TTY and confirm the exact resolved project path.
+Revocation advances that project's epoch; other projects are unaffected.
+
+Publication becomes committed when its durable journal reaches `applying`
+inside the final authority guard, before the first project-file replacement.
+Revocation before that point leaves the journal prepared and project bytes
+untouched. Revocation afterward does not cancel or reauthorize recovery: the
+already-committed journal must finish applying or rolling back after a crash.
+
+This is a local same-user trust boundary, not human authentication. A hostile
+process running as the same OS user, a compromised Python process, debugger,
+memory reader, or TTY injector can impersonate the owner or observe the live
+token. Hash-only storage prevents additional token persistence; it is not
+cryptographic protection from that same-user threat.
+
 ## Configuration
 
 Two environment variables, read by the MCP server process:

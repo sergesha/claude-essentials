@@ -41,6 +41,7 @@ def _result() -> dict:
         "audience": "local-project",
         "consent_ref": "consent:owner-issued-1",
         "approval_generation": 7,
+        "receipt_digest": "c" * 64,
     }
 
 
@@ -67,3 +68,28 @@ def test_acceptance_commitment_mismatch_is_rejected(
 
     with pytest.raises(ValueError, match="commitment|descriptor"):
         parse_acceptance_result(value, descriptor=descriptor)
+
+
+@pytest.mark.parametrize(
+    "receipt_digest",
+    [None, "", "C" * 64, "c" * 63, "not-a-digest"],
+)
+def test_acceptance_result_requires_an_owner_receipt_digest(
+    receipt_digest: object,
+) -> None:
+    value = _result()
+    if receipt_digest is None:
+        del value["receipt_digest"]
+    else:
+        value["receipt_digest"] = receipt_digest
+
+    with pytest.raises((TypeError, ValueError), match="receipt|closed|field"):
+        parse_acceptance_result(value, descriptor=_descriptor())
+
+
+@pytest.mark.parametrize("field", ["token", "session_id", "runner"])
+def test_acceptance_result_rejects_caller_authority_fields(field: str) -> None:
+    with pytest.raises(ValueError, match="unknown|field|closed"):
+        parse_acceptance_result(
+            {**_result(), field: "caller-asserted"}, descriptor=_descriptor()
+        )

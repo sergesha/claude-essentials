@@ -1178,6 +1178,315 @@ def test_artifact_admission_seals_registry_refs_before_native_visibility(
     assert delivered["artifact_refs"] == list(sealed.artifact_refs)
 
 
+def _acceptance_system(system, tmp_path, monkeypatch, *, tokens=("accept-token",)):
+    from lockstep.runtime.artifacts import ArtifactDeclaration, ArtifactRegistry
+    from lockstep.runtime.blobs import BlobStore
+    from lockstep.runtime.effects.coordinator import EffectCoordinator
+    from lockstep.runtime.effects.owner_consent import OwnerConsentAuthority
+    from lockstep.runtime.leases import LeaseStore
+    from lockstep.runtime.project_snapshots import ProjectSnapshotStore
+
+    old, runtime, _runner, ledger, store, _coordinate = system
+    leases = LeaseStore(store, clock=lambda: NOW)
+    owner = tmp_path / "acceptance-owner"
+    blobs = BlobStore(owner)
+    snapshots = ProjectSnapshotStore(owner, blobs)
+    registry = ArtifactRegistry(owner, blobs, snapshots)
+    producer_coordinate = NativeCoordinate(
+        "thread-1", "producer-cp", "", "producer-task", "producer-int"
+    )
+    producer_descriptor = parse_effect_descriptor(
+        {
+            "schema": "lockstep.effect/v1",
+            "kind": "manual",
+            "logical_id": "producer",
+            "runner": None,
+            "inputs": {},
+            "writes": ["review.md"],
+            "artifacts": [
+                {
+                    "name": "review",
+                    "source_path": "review.md",
+                    "media_type": "text/markdown",
+                    "required": True,
+                }
+            ],
+            "deadline_seconds": None,
+            "scope_state_keys": [],
+            "result_schema": "lockstep.effect-result/v1",
+        }
+    )
+    producer_id = derive_effect_id(producer_coordinate, producer_descriptor.digest)
+    snapshot_ref = snapshots.capture(
+        {"review.md": blobs.put(b"APPROVED\n")},
+        declared_paths=("review.md",),
+        provenance={
+            "source": "managed-workspace-rollover",
+            "request_digest": "f" * 64,
+            "workspace_ref": "workspace:producer",
+        },
+    )
+    artifact_ref = registry.register_set(
+        public_run_id="run-1",
+        project_identity="project-1",
+        definition_digest="a" * 64,
+        producer_effect_id=producer_id,
+        producer_request_digest="f" * 64,
+        workspace_ref="workspace:producer",
+        producer_coordinate=producer_coordinate,
+        descriptor_digest=producer_descriptor.digest,
+        snapshot_ref=snapshot_ref,
+        declarations=(
+            ArtifactDeclaration("review", "review.md", "text/markdown", True),
+        ),
+    )[0]
+    producer_result = parse_effect_result(
+        {
+            "schema": "lockstep.effect-result/v1",
+            "effect_id": producer_id,
+            "outcome": "PASS",
+            "result_ref": "blob:" + "1" * 64,
+            "artifact_refs": [str(artifact_ref)],
+            "snapshot_ref": f"snapshot:{snapshot_ref.digest}",
+            "diff_ref": None,
+            "fixed_error_code": None,
+            "evidence_refs": [],
+        }
+    )
+    producer_lease = leases.acquire("effect", producer_id, "producer-owner", 30)
+    producer = ledger.prepare(
+        producer_coordinate,
+        producer_descriptor,
+        deadline_at=None,
+        runner_binding_digest=None,
+        workspace_ref=None,
+        lease=producer_lease,
+    )
+    producer = ledger.seal(
+        producer_id,
+        producer_result,
+        expected_revision=producer.revision,
+        lease=producer_lease,
+    )
+    ledger.mark_delivered(
+        producer_id, expected_revision=producer.revision, lease=producer_lease
+    )
+    leases.release(producer_lease)
+
+    acceptance_coordinate = NativeCoordinate(
+        "thread-1", "accept-cp", "", "accept-task", "accept-int"
+    )
+    raw_acceptance = {
+        "schema": "lockstep.effect/v1",
+        "kind": "accept",
+        "logical_id": "accept-review",
+        "artifact_handle": "call.review",
+        "producer_result_state_key": "producer_result",
+        "declared_name": "review",
+        "destination": ".lockstep/review.md",
+        "transformation": "identity",
+        "audience": "local-project",
+        "verdict": "PASS",
+        "result_schema": "lockstep.acceptance-result/v1",
+    }
+    runtime.current = NativeSnapshot(
+        values={"producer_result": producer_result.to_dict()},
+        pending=(
+            NativeInterrupt(
+                acceptance_coordinate,
+                {"lockstep_effect": raw_acceptance},
+            ),
+        ),
+        checkpoint_id="accept-cp",
+    )
+    runtime.history_coordinates.update(
+        {producer_coordinate, acceptance_coordinate}
+    )
+    runtime.history_values[acceptance_coordinate] = runtime.current.pending[0].value
+    runtime.ancestry_pairs.add((producer_coordinate, acceptance_coordinate))
+    token_values = iter(tokens)
+    ref_values = count(1)
+    authority = OwnerConsentAuthority(
+        store,
+        delegate=old._authority,
+        clock=lambda: NOW,
+        token_factory=lambda: next(token_values),
+        consent_ref_factory=lambda: f"consent:accept-{next(ref_values)}",
+    )
+    coordinator = EffectCoordinator(
+        runtime=runtime,
+        catalog=old._catalog,
+        ledger=ledger,
+        leases=leases,
+        runners={},
+        authority=authority,
+        artifacts=registry,
+        clock=lambda: NOW,
+        owner_factory=lambda: "acceptance-coordinator",
+    )
+    return (
+        coordinator,
+        authority,
+        runtime,
+        ledger,
+        store,
+        acceptance_coordinate,
+        raw_acceptance,
+        producer_result,
+        artifact_ref,
+        registry,
+        blobs,
+    )
+
+
+def test_acceptance_preview_issue_and_token_redemption_are_exact_and_idempotent(
+    system, tmp_path, monkeypatch
+) -> None:
+    (
+        coordinator,
+        authority,
+        runtime,
+        ledger,
+        store,
+        coordinate,
+        _raw,
+        _producer_result,
+        _artifact_ref,
+        _registry,
+        _blobs,
+    ) = _acceptance_system(system, tmp_path, monkeypatch)
+
+    assert coordinator.reconcile("run-1").action == "prepared"
+    preview = coordinator.preview_acceptance("run-1", coordinate)
+    with store.read_connection() as connection:
+        assert connection.scalar(
+            __import__("sqlalchemy").select(__import__("sqlalchemy").func.count()).select_from(
+                store.tables.publication_consents
+            )
+        ) == 0
+    issued = coordinator.issue_acceptance_consent(
+        "run-1", coordinate, preview.digest
+    )
+    assert issued.commitment_digest == preview.digest
+    assert ledger.get(preview.effect_id).phase == "prepared"
+    assert runtime.resume_calls == []
+
+    status = coordinator.submit_acceptance("run-1", coordinate, issued.token)
+    assert status.status == "completed"
+    delivered = ledger.get(preview.effect_id)
+    assert delivered.phase == "delivered"
+    assert delivered.result == authority.redeem(issued.token, preview)
+    assert len(runtime.resume_calls) == 1
+
+    retry = coordinator.submit_acceptance("run-1", coordinate, issued.token)
+    assert retry == status
+    assert len(runtime.resume_calls) == 1
+
+
+def test_acceptance_receipt_commit_before_ledger_seal_retries_exactly_once(
+    system, tmp_path, monkeypatch
+) -> None:
+    (
+        coordinator,
+        authority,
+        runtime,
+        ledger,
+        _store,
+        coordinate,
+        _raw,
+        _producer_result,
+        _artifact_ref,
+        _registry,
+        _blobs,
+    ) = _acceptance_system(system, tmp_path, monkeypatch)
+    assert coordinator.reconcile("run-1").action == "prepared"
+    preview = coordinator.preview_acceptance("run-1", coordinate)
+    issued = coordinator.issue_acceptance_consent("run-1", coordinate, preview.digest)
+    real_seal = ledger.seal
+    calls = []
+
+    def crash_once(*args, **kwargs):
+        calls.append(args[0])
+        if len(calls) == 1:
+            raise RuntimeError("receipt committed before seal")
+        return real_seal(*args, **kwargs)
+
+    monkeypatch.setattr(ledger, "seal", crash_once)
+    with pytest.raises(RuntimeError, match="receipt committed"):
+        coordinator.submit_acceptance("run-1", coordinate, issued.token)
+    stored = authority.inspect_token(issued.token)
+    assert stored.receipt_digest is not None
+    assert ledger.get(preview.effect_id).phase == "prepared"
+    assert runtime.resume_calls == []
+
+    completed = coordinator.submit_acceptance("run-1", coordinate, issued.token)
+    assert completed.status == "completed"
+    assert calls == [preview.effect_id, preview.effect_id]
+    assert ledger.get(preview.effect_id).result == authority.redeem(
+        issued.token, preview
+    )
+
+
+def test_token_for_another_pending_accept_never_mutates_ledger_or_native(
+    system, tmp_path, monkeypatch
+) -> None:
+    (
+        coordinator,
+        _authority,
+        runtime,
+        ledger,
+        _store,
+        coordinate,
+        raw,
+        producer_result,
+        _artifact_ref,
+        _registry,
+        _blobs,
+    ) = _acceptance_system(system, tmp_path, monkeypatch)
+    assert coordinator.reconcile("run-1").action == "prepared"
+    first = coordinator.preview_acceptance("run-1", coordinate)
+    issued = coordinator.issue_acceptance_consent("run-1", coordinate, first.digest)
+
+    other_coordinate = NativeCoordinate(
+        "thread-1", "other-cp", "", "other-task", "other-int"
+    )
+    other_raw = {
+        **raw,
+        "logical_id": "accept-other",
+        "destination": ".lockstep/other.md",
+    }
+    other_descriptor = parse_effect_descriptor(other_raw)
+    other_id = derive_effect_id(other_coordinate, other_descriptor.digest)
+    other_lease = coordinator._leases.acquire(
+        "effect", other_id, "other-owner", 30
+    )
+    other_record = ledger.prepare(
+        other_coordinate,
+        other_descriptor,
+        deadline_at=None,
+        runner_binding_digest=None,
+        workspace_ref=None,
+        lease=other_lease,
+    )
+    coordinator._leases.release(other_lease)
+    runtime.current = NativeSnapshot(
+        values={"producer_result": producer_result.to_dict()},
+        pending=(NativeInterrupt(other_coordinate, {"lockstep_effect": other_raw}),),
+        checkpoint_id="other-cp",
+    )
+    runtime.history_coordinates.add(other_coordinate)
+    runtime.history_values[other_coordinate] = runtime.current.pending[0].value
+    producer_coordinate = ledger.get(producer_result.effect_id).coordinate
+    runtime.ancestry_pairs.add((producer_coordinate, other_coordinate))
+
+    from lockstep.runtime.effects.authority import EffectAuthorityDenied
+
+    with pytest.raises(EffectAuthorityDenied, match="invalid or stale"):
+        coordinator.submit_acceptance("run-1", other_coordinate, issued.token)
+    assert ledger.get(other_id) == other_record
+    assert runtime.resume_calls == []
+
+
 def test_publish_uses_existing_authority_commitment_and_project_lease_without_runner(
     system,
 ) -> None:
@@ -1199,14 +1508,191 @@ def test_publish_uses_existing_authority_commitment_and_project_lease_without_ru
     )
 
 
+def _publication_system(system, tmp_path, monkeypatch):
+    from lockstep.runtime.effects.coordinator import EffectCoordinator
+    from lockstep.runtime.publication import ProjectPublisher
+
+    (
+        acceptance_coordinator,
+        authority,
+        runtime,
+        ledger,
+        _store,
+        acceptance_coordinate,
+        _raw_acceptance,
+        producer_result,
+        _artifact_ref,
+        registry,
+        blobs,
+    ) = _acceptance_system(system, tmp_path, monkeypatch)
+    assert acceptance_coordinator.reconcile("run-1").action == "prepared"
+    preview = acceptance_coordinator.preview_acceptance(
+        "run-1", acceptance_coordinate
+    )
+    issued = acceptance_coordinator.issue_acceptance_consent(
+        "run-1", acceptance_coordinate, preview.digest
+    )
+    acceptance_coordinator.submit_acceptance(
+        "run-1", acceptance_coordinate, issued.token
+    )
+    acceptance_result = ledger.get(preview.effect_id).result
+    assert acceptance_result is not None
+
+    publish_coordinate = NativeCoordinate(
+        "thread-1", "publish-cp", "", "publish-task", "publish-int"
+    )
+    raw_publish = {
+        "schema": "lockstep.effect/v1",
+        "kind": "publish",
+        "logical_id": "publish-review",
+        "items": [
+            {
+                "qualified_handle": "call.review",
+                "producer_result_state_key": "producer_result",
+                "declared_name": "review",
+                "acceptance_result_state_key": "acceptance_result",
+                "destination": ".lockstep/review.md",
+                "transformation": "identity",
+                "audience": "local-project",
+            }
+        ],
+        "result_schema": "lockstep.effect-result/v1",
+    }
+    project = tmp_path / "publication-project"
+    (project / ".lockstep").mkdir(parents=True)
+    publisher = ProjectPublisher(
+        tmp_path / "publication-journal", project, registry, blobs
+    )
+    runtime.current = NativeSnapshot(
+        values={
+            "producer_result": producer_result.to_dict(),
+            "acceptance_result": acceptance_result.to_dict(),
+        },
+        pending=(
+            NativeInterrupt(
+                publish_coordinate,
+                {"lockstep_effect": raw_publish},
+            ),
+        ),
+        checkpoint_id="publish-cp",
+    )
+    runtime.history_coordinates.add(publish_coordinate)
+    runtime.history_values[publish_coordinate] = runtime.current.pending[0].value
+    runtime.ancestry_pairs.update(
+        {
+            (ledger.get(producer_result.effect_id).coordinate, publish_coordinate),
+            (acceptance_coordinate, publish_coordinate),
+        }
+    )
+    coordinator = EffectCoordinator(
+        runtime=runtime,
+        catalog=acceptance_coordinator._catalog,
+        ledger=ledger,
+        leases=acceptance_coordinator._leases,
+        runners={},
+        authority=authority,
+        artifacts=registry,
+        publisher=publisher,
+        clock=lambda: NOW,
+        owner_factory=lambda: "publisher-owner",
+    )
+    return coordinator, authority, runtime, ledger, publisher, project, publish_coordinate, raw_publish
+
+
+def test_revoke_inside_native_guard_before_first_publication_commit_denies_without_mutation(
+    system, tmp_path, monkeypatch
+) -> None:
+    from lockstep.runtime.effects.authority import EffectAuthorityDenied
+
+    (
+        coordinator,
+        authority,
+        runtime,
+        ledger,
+        publisher,
+        project,
+        coordinate,
+        raw_publish,
+    ) = _publication_system(system, tmp_path, monkeypatch)
+    assert coordinator.reconcile("run-1").action == "prepared"
+    assert coordinator.reconcile("run-1").action == "publication_claimed"
+    effect_id = derive_effect_id(
+        coordinate, parse_effect_descriptor(raw_publish).digest
+    )
+    runtime.commitment_callbacks.append(lambda: authority.revoke("project-1"))
+
+    with pytest.raises(EffectAuthorityDenied, match="invalid|stale"):
+        coordinator.reconcile("run-1")
+
+    record = ledger.get(effect_id)
+    prepared = publisher.prepared_for(effect_id, record.request_digest)
+    assert prepared is not None and prepared[1] == "prepared"
+    assert record.phase == "launching"
+    assert not (project / ".lockstep/review.md").exists()
+
+
+def test_applying_journal_crash_before_first_replacement_recovers_after_revoke_without_reauthorization(
+    system, tmp_path, monkeypatch
+) -> None:
+    (
+        coordinator,
+        authority,
+        _runtime,
+        ledger,
+        publisher,
+        project,
+        coordinate,
+        raw_publish,
+    ) = _publication_system(system, tmp_path, monkeypatch)
+    commit_calls = []
+    real_commitment = authority.commitment
+
+    @contextmanager
+    def capture_commitment(grant, request, launch):
+        commit_calls.append(grant.digest)
+        with real_commitment(grant, request, launch):
+            yield
+
+    monkeypatch.setattr(authority, "commitment", capture_commitment)
+    assert coordinator.reconcile("run-1").action == "prepared"
+    assert coordinator.reconcile("run-1").action == "publication_claimed"
+    real_advance = publisher._advance_plan
+    monkeypatch.setattr(
+        publisher,
+        "_advance_plan",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("applying durable before first replacement")
+        ),
+    )
+    with pytest.raises(RuntimeError, match="before first replacement"):
+        coordinator.reconcile("run-1")
+    effect_id = derive_effect_id(
+        coordinate, parse_effect_descriptor(raw_publish).digest
+    )
+    record = ledger.get(effect_id)
+    prepared = publisher.prepared_for(effect_id, record.request_digest)
+    assert prepared is not None and prepared[1] == "applying"
+    assert not (project / ".lockstep/review.md").exists()
+    assert len(commit_calls) == 1
+
+    authority.revoke("project-1")
+    monkeypatch.setattr(publisher, "_advance_plan", real_advance)
+    actions = [coordinator.reconcile("run-1").action for _ in range(4)]
+    assert "sealed" in actions
+    assert (project / ".lockstep/review.md").read_bytes() == b"APPROVED\n"
+    assert len(commit_calls) == 1
+
+
 def test_publication_revocation_boundary_and_apply_first_recovery(
     system, tmp_path, monkeypatch
 ) -> None:
     from lockstep.runtime.artifacts import ArtifactDeclaration, ArtifactRegistry
     from lockstep.runtime.blobs import BlobStore
-    from lockstep.runtime.effects.authority import EffectAuthorityDenied, EffectGrant
     from lockstep.runtime.effects.coordinator import EffectCoordinator
-    from lockstep.runtime.effects.models import AcceptanceResult
+    from lockstep.runtime.effects.owner_consent import (
+        OwnerConsentAuthority,
+        PublicationConsentCommitment,
+    )
     from lockstep.runtime.leases import LeaseStore
     from lockstep.runtime.project_snapshots import ProjectSnapshotStore
     from lockstep.runtime.publication import ProjectPublisher
@@ -1311,6 +1797,9 @@ def test_publication_revocation_boundary_and_apply_first_recovery(
             "artifact_handle": "call.review",
             "producer_result_state_key": "producer_result",
             "declared_name": "review",
+            "destination": ".lockstep/review.md",
+            "transformation": "identity",
+            "audience": "local-project",
             "verdict": "PASS",
             "result_schema": "lockstep.acceptance-result/v1",
         }
@@ -1318,14 +1807,25 @@ def test_publication_revocation_boundary_and_apply_first_recovery(
     acceptance_id = derive_effect_id(
         acceptance_coordinate, acceptance_descriptor.digest
     )
-    acceptance_result = AcceptanceResult(
-        "lockstep.acceptance-result/v1",
-        acceptance_id,
-        "PASS",
-        str(artifact_ref),
-        registry.read(artifact_ref).blob.sha256,
-        "consent:owner",
-        7,
+    authority = OwnerConsentAuthority(
+        store,
+        delegate=old._authority,
+        clock=lambda: NOW,
+        token_factory=lambda: "publication-owner-token",
+        consent_ref_factory=lambda: "consent:publication-owner",
+    )
+    consent_commitment = PublicationConsentCommitment.build(
+        binding=old._catalog.get("run-1"),
+        source=acceptance_coordinate,
+        effect_id=acceptance_id,
+        descriptor=acceptance_descriptor,
+        producer_effect_id=producer_id,
+        artifact_ref=str(artifact_ref),
+        artifact_digest=registry.read(artifact_ref).blob.sha256,
+    )
+    issued = authority.issue(consent_commitment)
+    acceptance_result = authority.redeem(
+        issued.token, consent_commitment
     )
     acceptance_lease = leases.acquire(
         "effect", acceptance_id, "acceptance-owner", 30
@@ -1403,45 +1903,49 @@ def test_publication_revocation_boundary_and_apply_first_recovery(
         ledger=ledger,
         leases=leases,
         runners={},
-        authority=old._authority,
+        authority=authority,
         artifacts=registry,
         publisher=publisher,
         clock=lambda: NOW,
         owner_factory=lambda: "publisher-owner",
     )
 
-    with pytest.raises(EffectAuthorityDenied):
-        coordinator.reconcile("run-1")
-    intent = old._authority.resolve_intents[-1]
-    grant = EffectGrant.build(
-        intent,
-        actor_binding_digest="d" * 64,
-        required_authorities=("publication",),
-        workspace_ref=None,
-        parent_capability_generation=3,
-        grant_generation=5,
-        policy_epoch=11,
-        config_epoch=13,
-        approval_generation=7,
-        expires_at=NOW + timedelta(hours=1),
-    )
-    old._authority._grants[intent.intent_digest] = grant
+    resolved = []
+    real_resolve = authority.resolve
+
+    def capture_resolve(intent):
+        resolved.append(intent)
+        return real_resolve(intent)
+
+    monkeypatch.setattr(authority, "resolve", capture_resolve)
+    commit_calls = []
+    real_commitment = authority.commitment
+
+    @contextmanager
+    def capture_commitment(grant, request, launch):
+        commit_calls.append(grant.digest)
+        with real_commitment(grant, request, launch):
+            yield
+
+    monkeypatch.setattr(authority, "commitment", capture_commitment)
     assert coordinator.reconcile("run-1").action == "prepared"
+    item = dict(resolved[-1].inputs)["item-0"]
+    assert item == {
+        "artifact_ref": str(artifact_ref),
+        "artifact_blob": {
+            "sha256": registry.read(artifact_ref).blob.sha256,
+            "size": registry.read(artifact_ref).blob.size,
+        },
+        "destination": ".lockstep/review.md",
+        "transformation": "identity",
+        "audience": "local-project",
+        "consent_ref": acceptance_result.consent_ref,
+        "approval_generation": 1,
+        "receipt_digest": acceptance_result.receipt_digest,
+    }
     assert coordinator.reconcile("run-1").action == "publication_claimed"
     assert not (project / ".lockstep/review.md").exists()
 
-    runtime.commitment_callbacks.append(
-        lambda: old._authority.revoke(intent.intent_digest)
-    )
-    with pytest.raises(EffectAuthorityDenied):
-        coordinator.reconcile("run-1")
-    assert not (project / ".lockstep/review.md").exists()
-    assert ledger.get(derive_effect_id(
-        publish_coordinate, parse_effect_descriptor(raw_publish).digest
-    )).phase == "launching"
-
-    old._authority._grants[intent.intent_digest] = grant
-    old._authority._revoked.discard(intent.intent_digest)
     monkeypatch.setattr(
         publication,
         "_after_replacement",
@@ -1451,12 +1955,12 @@ def test_publication_revocation_boundary_and_apply_first_recovery(
         for _ in range(4):
             coordinator.reconcile("run-1")
     assert (project / ".lockstep/review.md").read_bytes() == b"APPROVED\n"
-    assert old._authority.commit_calls == [grant.digest]
-    old._authority.revoke(intent.intent_digest)
+    assert len(commit_calls) == 1
+    authority.revoke("project-1")
     monkeypatch.setattr(publication, "_after_replacement", lambda *_args: None)
 
     actions = [coordinator.reconcile("run-1").action for _ in range(2)]
     assert actions[-1] == "sealed"
     assert (project / ".lockstep/review.md").read_bytes() == b"APPROVED\n"
-    assert old._authority.commit_calls == [grant.digest]
+    assert len(commit_calls) == 1
     assert coordinator.reconcile("run-1").action == "awaiting_delivery"

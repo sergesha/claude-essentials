@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
 import sys
@@ -206,7 +207,81 @@ def _cmd_scenario(args: argparse.Namespace) -> int:
         engine.close()
 
 
-_HANDLERS = {"serve": _cmd_serve, "hook-stop": _cmd_hook_stop, "hook-session-start": _cmd_hook_session_start, "hook-pretool": _cmd_hook_pretool, "hook-posttool": _cmd_hook_posttool, "policy": _cmd_policy, "doctor": _cmd_doctor, "recipe": _cmd_recipe, "template": _cmd_template, "scenario": _cmd_scenario}
+def _require_owner_tty() -> None:
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        raise AuthoringError("owner consent issuance and revocation require a TTY")
+
+
+def _read_consent_token() -> str:
+    if sys.stdin.isatty():
+        token = getpass.getpass("Publication consent token: ")
+    else:
+        raw = sys.stdin.readline(4098)
+        token = raw.rstrip("\r\n")
+    if not token:
+        raise AuthoringError("publication consent token is required")
+    if len(token.encode("utf-8")) > 4096:
+        raise AuthoringError("publication consent token is too long")
+    return token
+
+
+def _cmd_consent(args: argparse.Namespace) -> int:
+    from lockstep.runtime.engine import Engine
+
+    if args.action in {"issue", "revoke"}:
+        _require_owner_tty()
+    project = Path.cwd().resolve()
+    engine = Engine(state_dir(), project / ".lockstep" / "recipes")
+    try:
+        if args.action == "issue":
+            preview = engine.preview_publication_consent(
+                args.run_id, args.step, project=str(project)
+            )
+            sys.stdout.write(json_text(preview))
+            expected = str(preview["digest"])
+            entered = input("Type the exact commitment digest to issue consent: ")
+            if entered != expected:
+                raise AuthoringError("publication consent issuance cancelled")
+            issued = engine.issue_publication_consent(
+                args.run_id,
+                args.step,
+                expected,
+                project=str(project),
+            )
+            print(issued.token)
+            return 0
+        if args.action == "accept":
+            result = engine.scenario_accept_artifact(
+                _read_consent_token(), project=str(project)
+            )
+            sys.stdout.write(json_text(result))
+            return 0
+        if args.action == "revoke":
+            expected = f"REVOKE {project}"
+            entered = input(f"Type {expected!r} to revoke project publication consent: ")
+            if entered != expected:
+                raise AuthoringError("publication consent revocation cancelled")
+            epoch = engine.revoke_publication_consents(project=str(project))
+            print(f"publication consent epoch {epoch}")
+            return 0
+        raise AuthoringError("unknown consent action")
+    finally:
+        engine.close()
+
+
+_HANDLERS = {
+    "serve": _cmd_serve,
+    "hook-stop": _cmd_hook_stop,
+    "hook-session-start": _cmd_hook_session_start,
+    "hook-pretool": _cmd_hook_pretool,
+    "hook-posttool": _cmd_hook_posttool,
+    "policy": _cmd_policy,
+    "doctor": _cmd_doctor,
+    "recipe": _cmd_recipe,
+    "template": _cmd_template,
+    "scenario": _cmd_scenario,
+    "consent": _cmd_consent,
+}
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -275,6 +350,15 @@ def _build_parser() -> argparse.ArgumentParser:
             events.add_argument("run_id")
             recover = scenario.add_parser("recover")
             recover.add_argument("--limit", type=int, default=128)
+        elif verb == "consent":
+            consent = sub.add_parser("consent").add_subparsers(
+                dest="action", required=True
+            )
+            issue = consent.add_parser("issue")
+            issue.add_argument("--run", dest="run_id", required=True)
+            issue.add_argument("--step", required=True)
+            consent.add_parser("accept")
+            consent.add_parser("revoke")
         else:
             sub.add_parser(verb)
     return parser
@@ -282,7 +366,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
-    args, _unknown = parser.parse_known_args(argv)
+    args = parser.parse_args(argv)
     if args.version:
         print(__version__)
         return 0

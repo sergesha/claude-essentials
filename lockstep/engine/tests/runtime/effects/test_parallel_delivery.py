@@ -172,6 +172,8 @@ def test_runtime_schema_contains_no_parallel_workflow_authority(system) -> None:
         "effects",
         "effect_observations",
         "effect_dispatch_watches",
+        "consent_epochs",
+        "publication_consents",
     }
     assert not any(
         forbidden in name

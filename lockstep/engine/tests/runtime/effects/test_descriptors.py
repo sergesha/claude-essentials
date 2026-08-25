@@ -471,7 +471,9 @@ def test_decision_and_acceptance_results_are_exact_closed_variants() -> None:
         "schema": "lockstep.acceptance-result/v1", "effect_id": "effect-2",
         "outcome": "PASS", "artifact_ref": "artifact-review",
         "artifact_digest": "a" * 64, "consent_ref": "consent-1",
-        "approval_generation": 1,
+        "approval_generation": 1, "destination": "docs/review.md",
+        "transformation": "identity", "audience": "local-project",
+        "receipt_digest": "b" * 64,
     })
     assert accepted.consent_ref == "consent-1"
     with pytest.raises(ValueError, match="unknown"):

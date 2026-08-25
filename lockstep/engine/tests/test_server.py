@@ -13,9 +13,30 @@ from lockstep.runtime.engine import LockstepError
 
 FIXTURES = Path(__file__).parent / "fixtures" / "native"
 EXPECTED_TOOLS = {
-    "scenario_start", "scenario_status", "scenario_done", "scenario_escalate",
-    "scenario_abort", "scenario_dryrun", "list_recipes", "validate_recipe",
-    "render_flow", "list_runs", "run_trace",
+    "scenario_start",
+    "scenario_status",
+    "scenario_done",
+    "scenario_escalate",
+    "scenario_abort",
+    "scenario_accept_artifact",
+    "scenario_wait",
+    "scenario_history",
+    "scenario_events",
+    "scenario_recover",
+    "scenario_dryrun",
+    "recipe_init",
+    "recipe_compile",
+    "recipe_check",
+    "recipe_diff",
+    "recipe_render",
+    "recipe_estimate",
+    "template_list",
+    "template_show",
+    "list_recipes",
+    "validate_recipe",
+    "render_flow",
+    "list_runs",
+    "run_trace",
 }
 
 
@@ -49,6 +70,64 @@ def _ctx(project: Path, session_id: str | None = None):
 
 def test_tools_registered():
     assert {tool.name for tool in server.app._tool_manager.list_tools()} == EXPECTED_TOOLS
+
+
+def test_accept_artifact_is_the_only_token_only_mcp_consent_surface() -> None:
+    tools = {tool.name: tool for tool in server.app._tool_manager.list_tools()}
+    schema = tools["scenario_accept_artifact"].parameters
+    assert set(schema["properties"]) == {"token"}
+    assert schema["required"] == ["token"]
+    assert not any(
+        forbidden in name
+        for name in tools
+        for forbidden in ("issue_consent", "preview_consent", "revoke_consent")
+    )
+
+
+def test_accept_artifact_forwards_only_token_and_ambient_project_without_session(
+    tmp_path, monkeypatch
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    calls = []
+
+    class FakeEngine:
+        def scenario_accept_artifact(self, token, *, project):
+            calls.append((token, project))
+            return {"run_id": "run-1", "status": "completed"}
+
+    monkeypatch.setattr(server, "_eng", lambda actual: FakeEngine())
+    monkeypatch.setattr(
+        server,
+        "_assert_origin",
+        lambda *_args, **_kwargs: pytest.fail("token acceptance used session origin"),
+    )
+    monkeypatch.setattr(
+        server,
+        "_session_for_context",
+        lambda *_args, **_kwargs: pytest.fail("token acceptance read a session"),
+    )
+    token = "secret-publication-token"
+    result = server.scenario_accept_artifact(token, ctx=_ctx(project, "foreign"))
+
+    assert calls == [(token, str(project.resolve()))]
+    assert token not in json.dumps(result)
+
+
+def test_accept_artifact_error_does_not_echo_token(tmp_path, monkeypatch) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+
+    class FakeEngine:
+        def scenario_accept_artifact(self, token, *, project):
+            del token, project
+            raise LockstepError("invalid or stale publication consent")
+
+    monkeypatch.setattr(server, "_eng", lambda actual: FakeEngine())
+    token = "secret-publication-token"
+    with pytest.raises(LockstepError) as caught:
+        server.scenario_accept_artifact(token, ctx=_ctx(project))
+    assert token not in str(caught.value)
 
 
 def test_native_start_status_list_and_history_use_immutable_catalog(tmp_path, monkeypatch):

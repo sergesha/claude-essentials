@@ -12,7 +12,10 @@ developer's real `~/.lockstep`. `LOCKSTEP_RECIPES` likewise, for
 
 from __future__ import annotations
 
+import builtins
+import io
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -102,3 +105,236 @@ def test_doctor_exit_code_reflects_health(tmp_path, monkeypatch):
     (tmp_path / "state").mkdir()
     (tmp_path / "recipes").mkdir()
     assert cli.main(["doctor"]) == 0
+
+
+def test_consent_issue_and_revoke_require_an_interactive_owner_tty_before_service(
+    monkeypatch, capsys
+) -> None:
+    from lockstep.runtime import engine as engine_module
+
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(
+        engine_module,
+        "Engine",
+        lambda *_args, **_kwargs: pytest.fail("non-TTY consent constructed service"),
+    )
+
+    assert cli.main(
+        ["consent", "issue", "--run", "run-1", "--step", "accept-review"]
+    ) == 2
+    assert "TTY" in capsys.readouterr().err
+    assert cli.main(["consent", "revoke"]) == 2
+    assert "TTY" in capsys.readouterr().err
+
+
+def test_consent_issue_previews_exact_commitment_and_prints_token_once(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    from lockstep.runtime import engine as engine_module
+
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: True)
+    digest = "a" * 64
+    calls = []
+
+    class FakeEngine:
+        def preview_publication_consent(self, run_id, step, *, project):
+            calls.append(("preview", run_id, step, project))
+            return {
+                "public_run_id": run_id,
+                "artifact_ref": "artifact:" + "b" * 64,
+                "artifact_digest": "c" * 64,
+                "destination": "docs/review.md",
+                "transformation": "identity",
+                "audience": "local-project",
+                "digest": digest,
+            }
+
+        def issue_publication_consent(
+            self, run_id, step, expected_commitment_digest, *, project
+        ):
+            calls.append(
+                ("issue", run_id, step, expected_commitment_digest, project)
+            )
+            return SimpleNamespace(token="one-time-secret-token")
+
+        def close(self):
+            calls.append(("close",))
+
+    monkeypatch.setattr(engine_module, "Engine", lambda *_args: FakeEngine())
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": digest)
+
+    assert cli.main(
+        ["consent", "issue", "--run", "run-1", "--step", "accept-review"]
+    ) == 0
+    output = capsys.readouterr().out
+    assert digest in output
+    assert "docs/review.md" in output
+    assert output.count("one-time-secret-token") == 1
+    assert calls == [
+        ("preview", "run-1", "accept-review", str(project.resolve())),
+        ("issue", "run-1", "accept-review", digest, str(project.resolve())),
+        ("close",),
+    ]
+
+
+def test_consent_issue_confirmation_mismatch_never_mints(tmp_path, monkeypatch, capsys) -> None:
+    from lockstep.runtime import engine as engine_module
+
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: True)
+    calls = []
+
+    class FakeEngine:
+        def preview_publication_consent(self, run_id, step, *, project):
+            calls.append(("preview", run_id, step, project))
+            return {"digest": "a" * 64, "destination": "docs/review.md"}
+
+        def issue_publication_consent(self, *_args, **_kwargs):
+            pytest.fail("mismatched confirmation minted consent")
+
+        def close(self):
+            calls.append(("close",))
+
+    monkeypatch.setattr(engine_module, "Engine", lambda *_args: FakeEngine())
+    monkeypatch.setattr(builtins, "input", lambda _prompt="": "b" * 64)
+
+    assert cli.main(
+        ["consent", "issue", "--run", "run-1", "--step", "accept-review"]
+    ) == 2
+    assert "cancelled" in capsys.readouterr().err
+    assert calls == [
+        ("preview", "run-1", "accept-review", str(project.resolve())),
+        ("close",),
+    ]
+
+
+@pytest.mark.parametrize(
+    "forbidden",
+    ["--artifact", "--destination", "--generation", "--consent-ref", "--token", "--yes"],
+)
+def test_consent_issue_parser_has_no_noninteractive_or_caller_authority_escape(
+    forbidden: str,
+) -> None:
+    with pytest.raises(SystemExit):
+        cli._build_parser().parse_args(
+            [
+                "consent",
+                "issue",
+                "--run",
+                "run-1",
+                "--step",
+                "accept-review",
+                forbidden,
+                "forged",
+            ]
+        )
+
+
+def test_consent_accept_reads_hidden_token_and_forwards_only_token_and_cwd(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    import getpass
+    from lockstep.runtime import engine as engine_module
+
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    calls = []
+
+    class FakeEngine:
+        def scenario_accept_artifact(self, token, *, project):
+            calls.append(("accept", token, project))
+            return {"status": "completed", "run_id": "run-1"}
+
+        def close(self):
+            calls.append(("close",))
+
+    monkeypatch.setattr(engine_module, "Engine", lambda *_args: FakeEngine())
+    monkeypatch.setattr(getpass, "getpass", lambda _prompt="": "hidden-token")
+
+    assert cli.main(["consent", "accept"]) == 0
+    assert calls == [
+        ("accept", "hidden-token", str(project.resolve())),
+        ("close",),
+    ]
+    assert "hidden-token" not in capsys.readouterr().out
+
+
+def test_consent_accept_reads_one_bounded_piped_line_and_revoke_scopes_to_cwd(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    from lockstep.runtime import engine as engine_module
+
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    calls = []
+
+    class FakeEngine:
+        def scenario_accept_artifact(self, token, *, project):
+            calls.append(("accept", token, project))
+            return {"status": "completed", "run_id": "run-1"}
+
+        def revoke_publication_consents(self, *, project):
+            calls.append(("revoke", project))
+            return 4
+
+        def close(self):
+            calls.append(("close",))
+
+    monkeypatch.setattr(engine_module, "Engine", lambda *_args: FakeEngine())
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO("piped-token\nignored\n"))
+    assert cli.main(["consent", "accept"]) == 0
+    assert calls[:2] == [
+        ("accept", "piped-token", str(project.resolve())),
+        ("close",),
+    ]
+
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(
+        builtins,
+        "input",
+        lambda _prompt="": f"REVOKE {project.resolve()}",
+    )
+    assert cli.main(["consent", "revoke"]) == 0
+    assert calls[2:] == [
+        ("revoke", str(project.resolve())),
+        ("close",),
+    ]
+    assert "epoch 4" in capsys.readouterr().out
+
+
+def test_consent_accept_allows_one_maximum_bounded_piped_token(
+    tmp_path, monkeypatch
+) -> None:
+    from lockstep.runtime import engine as engine_module
+
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    token = "x" * 4096
+    calls = []
+
+    class FakeEngine:
+        def scenario_accept_artifact(self, actual, *, project):
+            calls.append((actual, project))
+            return {"status": "completed"}
+
+        def close(self):
+            calls.append(("close",))
+
+    monkeypatch.setattr(engine_module, "Engine", lambda *_args: FakeEngine())
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO(f"{token}\nignored\n"))
+
+    assert cli.main(["consent", "accept"]) == 0
+    assert calls == [(token, str(project.resolve())), ("close",)]

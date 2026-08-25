@@ -271,6 +271,17 @@ def scenario_abort(run_id: str, ctx: Context | None = None) -> dict:
 
 
 @app.tool()
+def scenario_accept_artifact(
+    token: str,
+    ctx: Context | None = None,
+) -> dict:
+    project = _project_for_context(ctx)
+    return _mark(
+        _eng(project).scenario_accept_artifact(token, project=str(project))
+    )
+
+
+@app.tool()
 def scenario_wait(
     run_id: str, timeout_seconds: int = 30, ctx: Context | None = None
 ) -> dict:

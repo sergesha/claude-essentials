@@ -7,7 +7,7 @@ from datetime import timedelta
 import pytest
 from lockstep.runtime.providers.base import RunnerObservation, TerminalSafetyObservation
 
-from .test_coordinator import NOW, _advance_to_running, _result
+from .test_coordinator import NOW, _advance_to_running, _result, system
 
 
 def test_launching_recovery_adopts_same_attempt_and_never_spawns_twice(system) -> None:

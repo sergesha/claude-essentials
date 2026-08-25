@@ -37,6 +37,8 @@ class RuntimeTables:
     runs: Table
     run_start_inputs: Table
     effect_runtime_inputs: Table
+    consent_epochs: Table
+    publication_consents: Table
     leases: Table
     effects: Table
     effect_observations: Table
@@ -84,6 +86,46 @@ def _define_tables(metadata: MetaData, external_metadata: MetaData) -> RuntimeTa
         Column("descriptor_digest", String(64), nullable=False),
         Column("snapshot_ref", String(64), nullable=False),
         Column("created_at", String, nullable=False),
+    )
+    consent_epochs = Table(
+        "consent_epochs",
+        metadata,
+        Column("project_identity", String, primary_key=True),
+        Column("epoch", Integer, nullable=False),
+        Column("updated_at", String, nullable=False),
+    )
+    publication_consents = Table(
+        "publication_consents",
+        metadata,
+        Column("consent_ref", String, primary_key=True),
+        Column("token_sha256", String(64), nullable=False, unique=True),
+        Column("project_identity", String, nullable=False),
+        Column("public_run_id", String, nullable=False),
+        Column("definition_digest", String(64), nullable=False),
+        Column("source_thread_id", String, nullable=False),
+        Column("source_checkpoint_ns", String, nullable=False),
+        Column("source_checkpoint_id", String, nullable=False),
+        Column("source_task_id", String, nullable=False),
+        Column("source_interrupt_id", String, nullable=False),
+        Column("effect_id", String, nullable=False),
+        Column("descriptor_digest", String(64), nullable=False),
+        Column("producer_effect_id", String, nullable=False),
+        Column("artifact_ref", String, nullable=False),
+        Column("artifact_digest", String(64), nullable=False),
+        Column("destination", String, nullable=False),
+        Column("transformation", String, nullable=False),
+        Column("audience", String, nullable=False),
+        Column("commitment_digest", String(64), nullable=False),
+        Column("consent_epoch", Integer, nullable=False),
+        Column("issued_at", String, nullable=False),
+        Column("redeemed_at", String, nullable=True),
+        Column("receipt_digest", String(64), nullable=True, unique=True),
+        UniqueConstraint(
+            "project_identity",
+            "consent_epoch",
+            "commitment_digest",
+            name="uq_publication_consents_exact_epoch",
+        ),
     )
     leases = Table(
         "leases",
@@ -154,6 +196,8 @@ def _define_tables(metadata: MetaData, external_metadata: MetaData) -> RuntimeTa
         runs=runs,
         run_start_inputs=run_start_inputs,
         effect_runtime_inputs=effect_runtime_inputs,
+        consent_epochs=consent_epochs,
+        publication_consents=publication_consents,
         leases=leases,
         effects=effects,
         effect_observations=effect_observations,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import threading
 from collections import deque
 from contextlib import nullcontext
@@ -60,6 +61,10 @@ def test_service_composes_project_resolved_artifact_publication_and_acceptance(
         )
         assert one.binding_digest != two.binding_digest
         assert callable(service.scenario_accept_artifact)
+        from lockstep.runtime.effects.owner_consent import OwnerConsentAuthority
+
+        assert isinstance(service.authority, OwnerConsentAuthority)
+        assert service.coordinator._authority is service.authority
     finally:
         service.close()
 
@@ -201,43 +206,28 @@ def test_worker_resume_blocks_recovery_unbind_for_the_whole_composite(
 def test_artifact_acceptance_blocks_recovery_unbind_through_drive(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from lockstep.runtime.artifacts import ArtifactRef
-
     service = object.__new__(LockstepService)
     service._admission_recovery_lock = threading.RLock()
-    service.state_dir = tmp_path
     binding = RunBinding("run-1", "thread-1", "a" * 64, "bundle", "/project")
     coordinate = NativeCoordinate("thread-1", "cp-1", "", "task-1", "int-1")
-    raw = {
-        "schema": "lockstep.effect/v1",
-        "kind": "accept",
-        "logical_id": "accept-review",
-        "artifact_handle": "review-call.review",
-        "producer_result_state_key": "review_result",
-        "declared_name": "review",
-        "verdict": "PASS",
-        "result_schema": "lockstep.acceptance-result/v1",
-    }
-    snapshot = NativeSnapshot(
-        values={},
-        pending=(NativeInterrupt(coordinate, {"lockstep_effect": raw}),),
-        checkpoint_id="cp-1",
-    )
-    artifact_ref = ArtifactRef("b" * 64)
     foreground_late = threading.Event()
     release = threading.Event()
     recovery_unbound = threading.Event()
     failures: list[BaseException] = []
     service._bind_existing = lambda *_args: binding
-    service.artifacts = SimpleNamespace(
-        read=lambda _ref: SimpleNamespace(
+    stored = SimpleNamespace(
+        commitment=SimpleNamespace(
             public_run_id="run-1",
             project_identity="/project",
             definition_digest="a" * 64,
-            blob=SimpleNamespace(sha256="c" * 64),
-        )
+            source=coordinate,
+        ),
     )
-    service.coordinator = SimpleNamespace(submit_acceptance=lambda *_args: None)
+    service.authority = SimpleNamespace(inspect_token=lambda token: stored)
+    submit_calls = []
+    service.coordinator = SimpleNamespace(
+        submit_acceptance=lambda *args: submit_calls.append(args)
+    )
 
     def drive(*_args, **_kwargs):
         foreground_late.set()
@@ -245,20 +235,20 @@ def test_artifact_acceptance_blocks_recovery_unbind_through_drive(
         return ScenarioStatus("completed", "run-1", "engine", None)
 
     service._drive_engine_owned = drive
-    service.runtime = SimpleNamespace(
-        snapshot=lambda *_args, **_kwargs: snapshot,
-        unbind=lambda _run_id: recovery_unbound.set(),
-    )
+    service.runtime = SimpleNamespace(unbind=lambda _run_id: recovery_unbound.set())
     service._recover_start_admissions = lambda: service.runtime.unbind("run-1")
     service._recover_effect_batch = lambda: None
-    monkeypatch.setattr(sessions, "locked_owner", lambda *_args, **_kwargs: nullcontext())
+    monkeypatch.setattr(
+        sessions,
+        "locked_owner",
+        lambda *_args, **_kwargs: pytest.fail(
+            "token acceptance consulted session authority"
+        ),
+    )
 
     def foreground() -> None:
         try:
-            service.scenario_accept_artifact(
-                "run-1", "accept-review", str(artifact_ref), "consent-1", 1,
-                session_id="session-1", project="/project",
-            )
+            service.scenario_accept_artifact("secret-token", project="/project")
         except BaseException as exc:  # pragma: no cover - asserted below
             failures.append(exc)
 
@@ -273,6 +263,79 @@ def test_artifact_acceptance_blocks_recovery_unbind_through_drive(
     recovery_thread.join(timeout=1)
     assert failures == []
     assert recovery_unbound.is_set()
+    assert submit_calls == [("run-1", coordinate, "secret-token")]
+
+
+def test_artifact_acceptance_public_signature_is_token_plus_ambient_project() -> None:
+    signature = inspect.signature(LockstepService.scenario_accept_artifact)
+    assert tuple(signature.parameters) == ("self", "token", "project")
+    assert signature.parameters["project"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert {
+        "run_id",
+        "step",
+        "artifact_ref",
+        "consent_ref",
+        "approval_generation",
+        "session_id",
+    }.isdisjoint(signature.parameters)
+
+
+def test_publication_consent_preview_is_read_only_and_issue_rechecks_digest() -> None:
+    service = object.__new__(LockstepService)
+    binding = RunBinding("run-1", "thread-1", "a" * 64, "bundle", "/project")
+    coordinate = NativeCoordinate("thread-1", "cp-1", "", "task-1", "int-1")
+    interrupt = NativeInterrupt(coordinate, {})
+    service._pending_acceptance = lambda *_args, **_kwargs: (binding, interrupt)
+    calls = []
+
+    class Coordinator:
+        def preview_acceptance(self, run_id, source):
+            calls.append(("preview", run_id, source))
+            return SimpleNamespace(
+                to_dict=lambda: {
+                    "schema": "lockstep.publication-consent-commitment/v1",
+                    "digest": "b" * 64,
+                    "destination": "docs/review.md",
+                }
+            )
+
+        def issue_acceptance_consent(self, run_id, source, expected):
+            calls.append(("issue", run_id, source, expected))
+            raise RuntimeError("acceptance changed after owner consent preview")
+
+    service.coordinator = Coordinator()
+    service._admission_recovery_lock = threading.RLock()
+
+    preview = service.preview_publication_consent(
+        "run-1", "accept-review", project="/project"
+    )
+    assert preview["digest"] == "b" * 64
+    assert "token" not in preview
+    with pytest.raises(RuntimeError, match="changed after owner consent preview"):
+        service.issue_publication_consent(
+            "run-1", "accept-review", "b" * 64, project="/project"
+        )
+    assert calls == [
+        ("preview", "run-1", coordinate),
+        ("issue", "run-1", coordinate, "b" * 64),
+    ]
+
+
+def test_artifact_acceptance_foreign_ambient_project_is_generic_and_read_only() -> None:
+    service = object.__new__(LockstepService)
+    token = "never-echo-this-token"
+    service.authority = SimpleNamespace(
+        inspect_token=lambda _token: SimpleNamespace(
+            commitment=SimpleNamespace(project_identity="/owner-project")
+        )
+    )
+    service.coordinator = SimpleNamespace(
+        submit_acceptance=lambda *_args: pytest.fail("foreign token was redeemed")
+    )
+
+    with pytest.raises(LockstepError, match="invalid or stale") as exc:
+        service.scenario_accept_artifact(token, project="/foreign-project")
+    assert token not in str(exc.value)
 
 
 def test_start_recovery_defers_before_native_commit_when_active_batch_is_full() -> None:
