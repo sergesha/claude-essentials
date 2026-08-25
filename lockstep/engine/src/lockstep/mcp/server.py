@@ -1,4 +1,4 @@
-"""The FastMCP app — the 11-tool lockstep MCP surface.
+"""The FastMCP app — thin native runtime and authoring surfaces.
 
 Scenario lifecycle operations delegate to the state-free ``Engine`` facade;
 read-only tools project immutable catalog bindings and native checkpoints.
@@ -39,6 +39,15 @@ from mcp.server.mcpserver import Context
 from mcp.server.mcpserver import MCPServer as FastMCP
 
 from lockstep.recipe import profile
+from lockstep.authoring import (
+    check_recipe,
+    diff_recipe,
+    estimate_recipe,
+    initialize_minimal,
+    project_paths,
+    render_recipe,
+    write_compilation,
+)
 from lockstep.recipe import yamlgraph_adapter as yg
 from lockstep.recipe.authority import (
     RecipeAuthorityError,
@@ -262,6 +271,42 @@ def scenario_abort(run_id: str, ctx: Context | None = None) -> dict:
 
 
 @app.tool()
+def scenario_wait(
+    run_id: str, timeout_seconds: int = 30, ctx: Context | None = None
+) -> dict:
+    """Wait boundedly for a read-only native status revision."""
+
+    project = _project_for_context(ctx)
+    return _mark(
+        _eng(project).scenario_wait(run_id, timeout_seconds, str(project))
+    )
+
+
+@app.tool()
+def scenario_history(run_id: str, ctx: Context | None = None) -> list[dict]:
+    """Return the bounded redacted native checkpoint history."""
+
+    project = _project_for_context(ctx)
+    return _eng(project).scenario_history(run_id, str(project))
+
+
+@app.tool()
+def scenario_events(run_id: str, ctx: Context | None = None) -> list[dict]:
+    """Return bounded native/effect observations without advancing the run."""
+
+    project = _project_for_context(ctx)
+    return _eng(project).scenario_events(run_id, str(project))
+
+
+@app.tool()
+def scenario_recover(limit: int = 128, ctx: Context | None = None) -> dict:
+    """Explicitly perform one bounded durable-recovery sweep."""
+
+    project = _project_for_context(ctx)
+    return _eng(project).scenario_recover(str(project), limit=limit)
+
+
+@app.tool()
 def scenario_dryrun(
     recipe: str, step: str, evidence: dict, ctx: Context | None = None
 ) -> dict:
@@ -326,6 +371,67 @@ def scenario_dryrun(
 # ---------------------------------------------------------------------------
 # recipe / run introspection
 # ---------------------------------------------------------------------------
+
+
+@app.tool()
+def recipe_init(name: str, ctx: Context | None = None) -> dict:
+    project = _project_for_context(ctx)
+    recipe = initialize_minimal(project, name)
+    return {
+        "name": name,
+        "workflow": str(recipe.workflow_path.relative_to(project)),
+        "recipe": str(recipe.recipe_path.relative_to(project)),
+    }
+
+
+@app.tool()
+def recipe_compile(name: str, ctx: Context | None = None) -> dict:
+    project = _project_for_context(ctx)
+    result = write_compilation(project_paths(project, name))
+    return {
+        "name": name,
+        "digest": result.digest,
+        "source_bundle_sha256": result.bundle_sha256,
+    }
+
+
+@app.tool()
+def recipe_check(name: str, ctx: Context | None = None) -> dict:
+    return check_recipe(_project_for_context(ctx), name)
+
+
+@app.tool()
+def recipe_diff(name: str, ctx: Context | None = None) -> str:
+    return diff_recipe(_project_for_context(ctx), name)
+
+
+@app.tool()
+def recipe_render(
+    name: str, view: str = "workflow", ctx: Context | None = None
+) -> str:
+    return render_recipe(_project_for_context(ctx), name, view)
+
+
+@app.tool()
+def recipe_estimate(name: str, ctx: Context | None = None) -> dict:
+    return estimate_recipe(_project_for_context(ctx), name)
+
+
+@app.tool()
+def template_list() -> list[str]:
+    from lockstep.templates import list_templates
+
+    return list(list_templates())
+
+
+@app.tool()
+def template_show(
+    template: str, name: str, ctx: Context | None = None
+) -> dict:
+    from lockstep.templates import show_template
+
+    del ctx
+    return show_template(template, name).to_dict()
 
 
 @app.tool()

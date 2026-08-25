@@ -384,6 +384,28 @@ status signal", not "process compliance".
 
 ## Testing
 
+### Native runtime inputs and authoring (Task 12)
+
+- Runtime project inputs are immutable external facts in the neutral
+  `run_start_inputs` and `effect_runtime_inputs` tables. They are neither
+  LangGraph state nor external-effect ledger fields. Start, current-lineage
+  GCA, manual, publication, and runner-rollover snapshots are resolved from
+  exact run/native-coordinate bindings; a trusted `Decision` evaluates those
+  facts without a runner.
+- `scenario_status`, `scenario_wait`, `scenario_history`, and
+  `scenario_events` are bounded, redacted observations. They never poll,
+  reconcile, recover, or resume. Recovery is an explicit bounded
+  `scenario_recover` operation.
+- `.lockstep/workflows/*.workflow.yaml` is the authoring source. A generated
+  recipe marker is accepted from disk only when strict parse/catalog/compile
+  reproduces its root recipe, specialized children, and dependency manifest
+  byte-for-byte. Missing, stale, or foreign source fails before durable run
+  admission. Marker-free yamlgraph recipes remain manual inputs.
+- The package template catalog is closed to `parallel-review` and
+  `reviewed-change`. Installation rejects custom paths, preflights the whole
+  destination set, compiles children before their parent, and publishes via a
+  recoverable atomic journal.
+
 - Unit: MemorySaver runs of fixture recipes; profile_check on a corpus of
   good/broken recipes; evidence schema accept/reject; example recipes pass
   `validate_recipe`.

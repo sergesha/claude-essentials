@@ -35,13 +35,15 @@ from lockstep.runtime.owner_state import (
 @dataclass(frozen=True)
 class RuntimeTables:
     runs: Table
+    run_start_inputs: Table
+    effect_runtime_inputs: Table
     leases: Table
     effects: Table
     effect_observations: Table
     effect_dispatch_watches: Table
 
 
-def _define_tables(metadata: MetaData) -> RuntimeTables:
+def _define_tables(metadata: MetaData, external_metadata: MetaData) -> RuntimeTables:
     runs = Table(
         "runs",
         metadata,
@@ -52,6 +54,36 @@ def _define_tables(metadata: MetaData) -> RuntimeTables:
         Column("project_identity", String, nullable=False),
         Column("created_at", String, nullable=False),
         UniqueConstraint("thread_id", name="uq_runs_thread_id"),
+    )
+    run_start_inputs = Table(
+        "run_start_inputs",
+        external_metadata,
+        Column(
+            "public_run_id",
+            String,
+            ForeignKey(runs.c.public_run_id),
+            primary_key=True,
+        ),
+        Column("runtime_key", String, primary_key=True),
+        Column("snapshot_ref", String(64), nullable=False),
+        Column("project_identity", String, nullable=False),
+        Column("definition_digest", String(64), nullable=False),
+        Column("created_at", String, nullable=False),
+    )
+    effect_runtime_inputs = Table(
+        "effect_runtime_inputs",
+        external_metadata,
+        Column("effect_id", String, primary_key=True),
+        Column("runtime_key", String, primary_key=True),
+        Column("public_run_id", String, ForeignKey(runs.c.public_run_id), nullable=False),
+        Column("thread_id", String, nullable=False),
+        Column("checkpoint_ns", String, nullable=False),
+        Column("checkpoint_id", String, nullable=False),
+        Column("task_id", String, nullable=False),
+        Column("interrupt_id", String, nullable=False),
+        Column("descriptor_digest", String(64), nullable=False),
+        Column("snapshot_ref", String(64), nullable=False),
+        Column("created_at", String, nullable=False),
     )
     leases = Table(
         "leases",
@@ -120,6 +152,8 @@ def _define_tables(metadata: MetaData) -> RuntimeTables:
     )
     return RuntimeTables(
         runs=runs,
+        run_start_inputs=run_start_inputs,
+        effect_runtime_inputs=effect_runtime_inputs,
         leases=leases,
         effects=effects,
         effect_observations=effect_observations,
@@ -154,8 +188,13 @@ class SQLiteStore:
             connect_args={"check_same_thread": False, "timeout": 30},
         )
         self.metadata = MetaData()
-        self.tables = _define_tables(self.metadata)
+        # Runtime-input facts are deliberately not part of the effect/catalog
+        # schema metadata.  They share the transaction engine while retaining
+        # their own neutral, append-only schema boundary.
+        self.external_fact_metadata = MetaData()
+        self.tables = _define_tables(self.metadata, self.external_fact_metadata)
         self.metadata.create_all(self.engine)
+        self.external_fact_metadata.create_all(self.engine)
         self._seal_sqlite_files()
 
     def _sqlite_files(self) -> tuple[Path, ...]:

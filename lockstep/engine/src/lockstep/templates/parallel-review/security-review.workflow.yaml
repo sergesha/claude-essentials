@@ -1,0 +1,6 @@
+workflow_version: "1"
+name: "{name}-security-review"
+description: Security review child workflow
+protect: ["**"]
+flow:
+  - escalate: {}

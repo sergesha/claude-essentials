@@ -143,12 +143,18 @@ class RunCatalog:
             raise KeyError(thread_id)
         return self._from_row(row)
 
-    def list(self, project_identity: str) -> list[RunBinding]:
+    def list(
+        self, project_identity: str, *, limit: int | None = None
+    ) -> list[RunBinding]:
+        if limit is not None and (type(limit) is not int or not 1 <= limit <= 10_000):
+            raise ValueError("run catalog limit must be from 1 to 10000")
         table = self._store.tables.runs
         statement = (
             select(table)
             .where(table.c.project_identity == project_identity)
             .order_by(table.c.created_at, table.c.public_run_id)
         )
+        if limit is not None:
+            statement = statement.limit(limit)
         with self._store.read_connection() as connection:
             return [self._from_row(row) for row in connection.execute(statement)]

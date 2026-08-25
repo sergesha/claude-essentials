@@ -1,0 +1,7 @@
+template_version: "1"
+outputs:
+  parent: "{name}"
+  review: "{name}-review"
+files:
+  parent: parent.workflow.yaml
+  review: review.workflow.yaml

@@ -25,6 +25,7 @@ from lockstep.recipe.authority import (
 )
 from lockstep.recipe.loader import RecipeError, RecipeLoader
 from lockstep.recipe.yamlgraph_adapter import open_native_app
+from lockstep.authoring import AuthoringError, classify_generated_recipe
 from lockstep.runtime import config, sessions
 from lockstep.runtime.blobs import BlobStore
 from lockstep.runtime.artifacts import ArtifactRef, ArtifactRegistry
@@ -57,6 +58,11 @@ from lockstep.runtime.providers.manual import (
     ManualSubmission,
 )
 from lockstep.runtime.project_snapshots import ProjectSnapshotStore
+from lockstep.runtime.snapshot_resolver import (
+    RuntimeSnapshotFacts,
+    RuntimeSnapshotResolver,
+    capture_authoritative_snapshot,
+)
 from lockstep.runtime.publication import ProjectPublisher
 from lockstep.runtime.recipe_bundles import RecipeBundleStore
 from lockstep.runtime.status import ScenarioStatus, project_status
@@ -140,11 +146,26 @@ def preflight_recipe(
         raise LockstepError(f"invalid recipe name {name!r}")
     try:
         source = RecipeLoader(Path(recipes_dir).resolve()).resolve(name).path
+        # A trusted same-process compiler capability already binds the exact
+        # executable bundle (used by embedders/tests before files are checked
+        # into the conventional project layout).  Public file ingress has no
+        # such capability and must mint canonical-match from source instead.
+        canonical_proof = (
+            None
+            if compiler_provenance is not None
+            else classify_generated_recipe(Path(recipes_dir).resolve(), name, source)
+        )
+        if compiler_provenance is not None and canonical_proof is not None:
+            if compiler_provenance.source_bundle_sha256 != canonical_proof.source_bundle_sha256:
+                raise RecipeAuthorityError(
+                    "supplied compiler provenance does not match canonical source"
+                )
+        effective_provenance = canonical_proof or compiler_provenance
         candidate = StrictRecipeIngress(source.parent).inspect(source.name)
         if (
-            compiler_provenance is not None
+            effective_provenance is not None
             and candidate.source_bundle_sha256
-            != compiler_provenance.source_bundle_sha256
+            != effective_provenance.source_bundle_sha256
         ):
             raise RecipeAuthorityError(
                 "compiler provenance does not bind the exact source bundle"
@@ -152,18 +173,21 @@ def preflight_recipe(
         authorized = candidate.authorize(
             authority_policy or RecipeAuthorityPolicy()
         )
+        authorized = replace(
+            authorized, canonical_match_proof=canonical_proof
+        )
         with tempfile.TemporaryDirectory(prefix="lockstep-preflight-") as raw:
             store = RecipeBundleStore(Path(raw) / "owner-state")
             materialized = authorized.capture(store).materialize(store)
-            if compiler_provenance is None:
+            if effective_provenance is None:
                 errors, _warnings = profile.check_recipe_full(
                     materialized.source_path
                 )
             else:
                 errors, _warnings = profile.check_recipe_full(
-                    materialized.source_path, provenance=compiler_provenance
+                    materialized.source_path, provenance=effective_provenance
                 )
-    except (OSError, ValueError, RecipeError, RecipeAuthorityError) as exc:
+    except (OSError, ValueError, AuthoringError, RecipeError, RecipeAuthorityError) as exc:
         raise LockstepError(str(exc)) from exc
     if errors:
         raise LockstepError("recipe failed Lockstep profile: " + "; ".join(errors))
@@ -173,6 +197,7 @@ def preflight_recipe(
 class LockstepService:
     _MAX_ENGINE_PROGRESS_DECISIONS = 32
     _MAX_ACTIVE_EFFECT_RUNS = 128
+    _MAX_PUBLIC_EVENTS = 10_000
 
     def __init__(
         self,
@@ -206,6 +231,13 @@ class LockstepService:
             checkpoint_path=self.checkpoint_path,
             app_factory=open_native_app,
         )
+        self.runtime_snapshot_facts = RuntimeSnapshotFacts(self.store)
+        self.snapshot_resolver = RuntimeSnapshotResolver(
+            self.runtime_snapshot_facts,
+            self.snapshots,
+            self.blobs,
+            self.runtime,
+        )
         self.coordinator = EffectCoordinator(
             runtime=self.runtime,
             catalog=self.catalog,
@@ -221,6 +253,7 @@ class LockstepService:
                 self.blobs,
             ),
             manual=self.manual,
+            snapshot_resolver=self.snapshot_resolver,
         )
         self._wait_clock = time.monotonic
         self._wait_sleep = time.sleep
@@ -286,6 +319,9 @@ class LockstepService:
                 values = validate_start_input(json.loads(encoded))
                 if self._canonical_start_input(values) != encoded:
                     raise LockstepError("start admission input is not canonical")
+                resolver = getattr(self, "snapshot_resolver", None)
+                if resolver is not None:
+                    resolver.start_ref(binding)
                 self.runtime.bind(binding)
                 snapshot = self.runtime.ensure_started(binding.public_run_id, values)
                 self._drive_engine_owned(
@@ -435,6 +471,7 @@ class LockstepService:
         compiler_provenance: profile.CompilerProvenance | None = None,
     ) -> dict[str, Any]:
         values = validate_start_input(input)
+        compiler_provenance = compiler_provenance or authorized.canonical_match_proof
         project_root = Path(project).resolve()
         if self.state_dir == project_root or project_root in self.state_dir.parents:
             raise LockstepError("owner state must be outside the writable project")
@@ -470,10 +507,25 @@ class LockstepService:
             recipe_snapshot_ref=admitted.bundle.digest,
             project_identity=str(project_root),
         )
+        start_snapshot_ref = capture_authoritative_snapshot(
+            project_root,
+            self.snapshots,
+            self.blobs,
+            binding,
+            previous=None,
+            purpose="run-start",
+        )
         with self._admission_recovery_lock:
             try:
                 binding, _admission = self.effects.admit_start(
-                    self.catalog, binding, input_blob
+                    self.catalog,
+                    binding,
+                    input_blob,
+                    on_admit=lambda connection, admitted: (
+                        self.runtime_snapshot_facts.bind_run_start_in_transaction(
+                            connection, admitted, start_snapshot_ref
+                        )
+                    ),
                 )
                 # Catalog admission canonicalizes immutable lineage (including
                 # created_at). Bind only that admitted value so the coordinator
@@ -719,6 +771,81 @@ class LockstepService:
             ]
         except NativeHistoryLimitExceeded as exc:
             raise LockstepError(str(exc)) from exc
+
+    def scenario_history(self, run_id: str, project: str) -> list[dict[str, Any]]:
+        """Closed, bounded native-history projection with no recovery side effect."""
+
+        return self.history(run_id, project)
+
+    def scenario_events(self, run_id: str, project: str) -> list[dict[str, Any]]:
+        """Merge redacted native/effect observations without advancing either."""
+
+        try:
+            binding = self.catalog.get(run_id)
+        except KeyError as exc:
+            raise LockstepError(f"unknown run {run_id!r}") from exc
+        if Path(binding.project_identity).resolve() != Path(project).resolve():
+            raise LockstepError(f"unknown run {run_id!r}")
+        bind = getattr(self.runtime, "bind", None)
+        if callable(bind):
+            bind(binding)
+        try:
+            native = list(self.runtime.history(run_id))
+        except NativeHistoryLimitExceeded as exc:
+            raise LockstepError(str(exc)) from exc
+        if len(native) > self._MAX_PUBLIC_EVENTS:
+            raise LockstepError("event observations exceed public bound")
+        effects = list(self.effects.list_for_thread(binding.thread_id))
+        if len(native) + len(effects) > self._MAX_PUBLIC_EVENTS:
+            raise LockstepError("event observations exceed public bound")
+        observed: list[dict[str, Any]] = [
+            {
+                "source": "native",
+                "checkpoint_id": item.checkpoint_id,
+                "checkpoint_ns": item.checkpoint_ns,
+                "created_at": item.created_at,
+                "next": list(item.next),
+                "pending_count": len(item.pending),
+                "error_count": len(item.task_errors),
+            }
+            for item in native
+        ]
+        observed.extend(
+            {
+                "source": "effect",
+                "effect_id": item.effect_id,
+                "effect_kind": item.effect_kind,
+                "phase": item.phase,
+                "updated_at": (
+                    item.updated_at.isoformat()
+                    if hasattr(item.updated_at, "isoformat")
+                    else item.updated_at
+                ),
+            }
+            for item in effects
+        )
+        return observed
+
+    def scenario_recover(
+        self, project: str, *, limit: int = 128
+    ) -> dict[str, Any]:
+        """Explicitly run one bounded recovery sweep; status/wait/history never do."""
+
+        if type(limit) is not int or not 1 <= limit <= self._MAX_ACTIVE_EFFECT_RUNS:
+            raise LockstepError("scenario recover limit must be an integer from 1 to 128")
+        project_identity = str(Path(project).resolve())
+        recovered: list[str] = []
+        with self._admission_recovery_lock:
+            for binding in self.catalog.list(project_identity, limit=limit):
+                records = self.effects.list_nonterminal_for_thread(
+                    binding.thread_id, limit=self.coordinator.MAX_DUE_PER_SCAN
+                )
+                if not records:
+                    continue
+                self.runtime.bind(binding)
+                self._drive_engine_owned(binding.public_run_id, binding=binding)
+                recovered.append(binding.public_run_id)
+        return {"recovered": recovered, "count": len(recovered), "limit": limit}
 
     def _worker_interrupt(self, run_id: str, step: str | None, project: str):
         binding, status = self._snapshot_status(run_id, project)

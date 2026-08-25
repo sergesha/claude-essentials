@@ -1,0 +1,23 @@
+workflow_version: "1"
+name: "{name}"
+description: Parallel review workflow
+protect: ["**"]
+flow:
+  - parallel:
+      id: reviews
+      join: all
+      timeout_minutes: 5
+      branches:
+        security:
+          - call:
+              id: security
+              workflow: "{name}-security-review"
+              runner: codex
+              timeout_minutes: 5
+        architecture:
+          - call:
+              id: architecture
+              workflow: "{name}-architecture-review"
+              runner: codex
+              timeout_minutes: 5
+  - escalate: {}

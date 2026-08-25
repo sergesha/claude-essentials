@@ -20,6 +20,7 @@ from lockstep.runtime.effects.authority import (
 from lockstep.runtime.effects.descriptors import (
     build_scope_result,
     derive_effect_id,
+    parse_decision_result,
     parse_effect_descriptor,
     parse_effect_result,
     parse_scope_result,
@@ -34,6 +35,7 @@ from lockstep.runtime.effects.ledger import (
 from lockstep.runtime.effects.models import (
     AcceptDescriptor,
     AcceptanceResult,
+    DecisionDescriptor,
     EffectDescriptor,
     EffectResult,
     RuntimeInputSelector,
@@ -61,6 +63,7 @@ from lockstep.runtime.providers.manual import (
     ManualSubmission,
 )
 from lockstep.runtime.project_snapshots import ProjectSnapshotRef
+from lockstep.runtime.snapshot_resolver import RuntimeSnapshotResolver
 from lockstep.runtime.publication import (
     ProjectPublisher,
     PublicationEntry,
@@ -115,6 +118,7 @@ class EffectCoordinator:
         publisher: ProjectPublisher | None = None,
         publisher_for: Callable[[RunBinding], ProjectPublisher] | None = None,
         manual: ManualProvider | None = None,
+        snapshot_resolver: RuntimeSnapshotResolver | None = None,
         clock: Callable[[], datetime] | None = None,
         owner_factory: Callable[[], str] | None = None,
         lease_ttl: float = 30.0,
@@ -132,6 +136,7 @@ class EffectCoordinator:
         self._publisher = publisher
         self._publisher_resolver = publisher_for
         self._manual = manual
+        self._snapshot_resolver = snapshot_resolver
         self._clock = clock or (lambda: datetime.now(UTC))
         self._owner_factory = owner_factory or (lambda: secrets.token_hex(16))
         self._lease_ttl = lease_ttl
@@ -412,9 +417,10 @@ class EffectCoordinator:
             isinstance(selector, RuntimeInputSelector)
             for _name, selector in descriptor.inputs
         ):
-            raise ProviderContractViolation(
-                "runtime snapshot selectors require the dedicated durable snapshot resolver"
-            )
+            if self._snapshot_resolver is None:
+                raise ProviderContractViolation(
+                    "runtime snapshot selectors require the dedicated durable snapshot resolver"
+                )
         now = self._now()
         verified_ancestors = self._ancestor_results(
             binding.public_run_id, binding, descriptor, snapshot, interrupt
@@ -504,6 +510,16 @@ class EffectCoordinator:
                     "call scope runner binding does not match the selected adapter"
                 )
             scope_bindings.append(scope_binding)
+        runtime_inputs = (
+            {}
+            if self._snapshot_resolver is None
+            else self._snapshot_resolver.inputs_for(
+                binding, interrupt, descriptor, effect_id
+            )
+        )
+        state_values = (
+            snapshot.values if interrupt.state_values is None else interrupt.state_values
+        )
         intent = EffectRequest.build(
             effect_id=effect_id,
             public_run_id=binding.public_run_id,
@@ -518,11 +534,9 @@ class EffectCoordinator:
             inputs=tuple(
                 (
                     name,
-                    (
-                        snapshot.values
-                        if interrupt.state_values is None
-                        else interrupt.state_values
-                    )[selector.state_key],
+                    runtime_inputs[name]
+                    if isinstance(selector, RuntimeInputSelector)
+                    else state_values[selector.state_key],
                 )
                 for name, selector in descriptor.inputs
             ),
@@ -574,7 +588,7 @@ class EffectCoordinator:
         interrupt: NativeInterrupt,
         record: EffectRecord | None,
     ) -> tuple[
-        EffectDescriptor | ScopeDescriptor | AcceptDescriptor | PublishDescriptor,
+        EffectDescriptor | ScopeDescriptor | DecisionDescriptor | AcceptDescriptor | PublishDescriptor,
         str,
     ]:
         coordinate = interrupt.coordinate
@@ -585,7 +599,13 @@ class EffectCoordinator:
         descriptor = parse_effect_descriptor(self._raw_descriptor(interrupt))
         if not isinstance(
             descriptor,
-            (EffectDescriptor, ScopeDescriptor, AcceptDescriptor, PublishDescriptor),
+            (
+                EffectDescriptor,
+                ScopeDescriptor,
+                DecisionDescriptor,
+                AcceptDescriptor,
+                PublishDescriptor,
+            ),
         ):
             raise ProviderContractViolation(
                 f"{descriptor.kind} execution requires its dedicated trusted runtime boundary"
@@ -604,6 +624,57 @@ class EffectCoordinator:
                 "ledger fact does not match the exact pending descriptor coordinate"
             )
         return descriptor, effect_id
+
+    def _reconcile_decision(
+        self,
+        run_id: str,
+        binding: RunBinding,
+        interrupt: NativeInterrupt,
+        descriptor: DecisionDescriptor,
+        effect_id: str,
+        record: EffectRecord | None,
+    ) -> ReconcileReport:
+        """Evaluate a closed trusted decision without a runner or effect row."""
+
+        if record is not None:
+            raise CoordinatorLineageError(
+                "trusted decision unexpectedly collides with an external-effect row"
+            )
+        if self._snapshot_resolver is None:
+            raise ProviderContractViolation(
+                "decision execution requires the durable runtime snapshot resolver"
+            )
+        with self._runtime.commitment_guard(run_id, interrupt.coordinate) as guarded:
+            guarded_descriptor = parse_effect_descriptor(
+                self._raw_descriptor(guarded.interrupt)
+            )
+            if (
+                guarded.binding != binding
+                or guarded.interrupt.coordinate != interrupt.coordinate
+                or guarded_descriptor != descriptor
+            ):
+                raise CoordinatorLineageError(
+                    "decision source changed before trusted evaluation"
+                )
+            result = self._snapshot_resolver.decide(
+                binding, guarded.interrupt, descriptor, effect_id
+            )
+            parsed = parse_decision_result(result.to_dict(), descriptor=descriptor)
+            if parsed != result or parsed.effect_id != effect_id:
+                raise ProviderContractViolation("trusted decision result is not closed")
+        committed = self._runtime.resume(
+            run_id,
+            interrupt.coordinate,
+            {interrupt.coordinate.interrupt_id: result.to_dict()},
+        )
+        if any(
+            item.coordinate.interrupt_id == interrupt.coordinate.interrupt_id
+            for item in committed.pending
+        ):
+            raise CoordinatorLineageError(
+                "native decision resume did not consume the exact interrupt"
+            )
+        return ReconcileReport(run_id, effect_id, "delivered", None)
 
     def _protected_lineage(
         self, run_id: str, coordinate, descriptor_digest: str
@@ -1087,6 +1158,15 @@ class EffectCoordinator:
                         return self._report(
                             run_id, record, "publication_progress"
                         )
+                    if receipt.phase == "applied":
+                        if self._snapshot_resolver is not None:
+                            self._snapshot_resolver.capture_successor(
+                                binding,
+                                interrupt,
+                                descriptor,
+                                effect_id,
+                                purpose="publication",
+                            )
                     sealed = self._ledger.seal(
                         record.effect_id,
                         result,
@@ -1178,6 +1258,14 @@ class EffectCoordinator:
                         )
                 if receipt.phase != "applied":
                     return self._report(run_id, record, "publication_progress")
+                if self._snapshot_resolver is not None:
+                    self._snapshot_resolver.capture_successor(
+                        binding,
+                        interrupt,
+                        descriptor,
+                        effect_id,
+                        purpose="publication",
+                    )
                 sealed = self._ledger.seal(
                     record.effect_id,
                     self._publication_result(
@@ -1324,6 +1412,15 @@ class EffectCoordinator:
                     effect_id,
                     "busy",
                     None if record is None else record.phase,
+                )
+            if isinstance(descriptor, DecisionDescriptor):
+                return self._reconcile_decision(
+                    run_id,
+                    binding,
+                    interrupt,
+                    descriptor,
+                    effect_id,
+                    record,
                 )
             if isinstance(descriptor, AcceptDescriptor):
                 return self._reconcile_acceptance(
@@ -1627,6 +1724,21 @@ class EffectCoordinator:
                 result = self._admit_artifacts(
                     binding, context, record, result, safety
                 )
+                if result.snapshot_ref is not None:
+                    if not result.snapshot_ref.startswith("snapshot:"):
+                        raise ProviderContractViolation(
+                            "effect rollover snapshot reference is invalid"
+                        )
+                    if self._snapshot_resolver is not None:
+                        self._snapshot_resolver.adopt_successor(
+                            binding,
+                            context.interrupt,
+                            context.descriptor,
+                            record.effect_id,
+                            ProjectSnapshotRef(
+                                result.snapshot_ref.removeprefix("snapshot:")
+                            ),
+                        )
                 sealed = self._ledger.seal(
                     record.effect_id,
                     result,
@@ -1784,6 +1896,14 @@ class EffectCoordinator:
                 if result.effect_id != effect_id:
                     raise ProviderContractViolation(
                         "manual result targets another effect"
+                    )
+                if self._snapshot_resolver is not None:
+                    self._snapshot_resolver.capture_successor(
+                        binding,
+                        guarded.interrupt,
+                        guarded_descriptor,
+                        effect_id,
+                        purpose="manual",
                     )
                 self._ledger.seal(
                     effect_id,

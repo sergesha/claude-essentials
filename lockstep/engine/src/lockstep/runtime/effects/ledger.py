@@ -129,6 +129,8 @@ class EffectLedger:
         catalog: RunCatalog,
         binding: RunBinding,
         input_blob: BlobRef,
+        *,
+        on_admit: Callable[[object, RunBinding], None] | None = None,
     ) -> tuple[RunBinding, EffectDispatchWatch]:
         """Atomically bind a run and record its immutable initial command."""
 
@@ -145,6 +147,8 @@ class EffectLedger:
         admitted_at = self._now()
         with self._store.write_transaction() as connection:
             admitted_binding = catalog.create_in_transaction(connection, binding)
+            if on_admit is not None:
+                on_admit(connection, admitted_binding)
             row = connection.execute(
                 select(table).where(table.c.public_run_id == binding.public_run_id)
             ).first()
@@ -269,6 +273,26 @@ class EffectLedger:
             if row is None:
                 raise KeyError(effect_id)
             return self._from_row(connection, row)
+
+    def list_for_thread(
+        self, thread_id: str, *, limit: int = 10_000
+    ) -> tuple[EffectRecord, ...]:
+        """Bounded read-only observation of durable effect facts."""
+
+        _nonempty(thread_id, "effect thread_id")
+        if type(limit) is not int or not 1 <= limit <= 10_000:
+            raise ValueError("effect observation limit must be from 1 to 10000")
+        table = self._store.tables.effects
+        with self._store.read_connection() as connection:
+            rows = connection.execute(
+                select(table)
+                .where(table.c.thread_id == thread_id)
+                .order_by(table.c.created_at, table.c.effect_id)
+                .limit(limit + 1)
+            ).all()
+            if len(rows) > limit:
+                raise ValueError("effect observations exceed public bound")
+            return tuple(self._from_row(connection, row) for row in rows)
 
     def list_nonterminal(self, *, limit: int | None = None) -> list[EffectRecord]:
         if limit is not None and (type(limit) is not int or limit <= 0):

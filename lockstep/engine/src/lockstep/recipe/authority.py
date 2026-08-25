@@ -40,6 +40,7 @@ from lockstep.runtime.recipe_bundles import (
 )
 
 if TYPE_CHECKING:
+    from lockstep.recipe.profile import CompilerProvenance
     from lockstep.runtime.recipe_bundles import RecipeBundleStore
 
 
@@ -177,6 +178,7 @@ class AuthorizedRecipe:
     dependency_dag: ValidatedDependencyDAG
     authority_requirements: tuple[AuthorityRequirement, ...]
     source_bundle_sha256: str
+    canonical_match_proof: CompilerProvenance | None = None
 
     def capture(self, store: RecipeBundleStore) -> AdmittedRecipe:
         """Publish these exact canonical bytes through the DAG-only store seam."""
