@@ -1,0 +1,928 @@
+"""Task 12R0 Gate B0 behavioral REDs and independent B-schema contracts."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from inspect import Parameter, signature
+from pathlib import Path
+from types import NoneType
+from typing import get_type_hints
+
+import pytest
+from sqlalchemy import Integer, inspect as sa_inspect
+
+from lockstep.runtime.effects.authority import EffectAuthorityDenied
+from lockstep.runtime.effects.descriptors import (
+    parse_effect_descriptor,
+    parse_effect_result,
+)
+from lockstep.runtime.providers.base import TerminalSafetyObservation
+from lockstep.runtime.providers.manual import ManualSubmission
+from lockstep.runtime.service import LockstepService
+from lockstep.workflow.compiler import compile_workflow
+from lockstep.workflow.schema import load_workflow, parse_workflow
+from lockstep.workflow.semantics import ResolvedCatalog, validate_semantics
+from tests.runtime.providers.fakes import FakeEffectAuthority, FakeRunner
+
+
+class _AutoGrantAuthority(FakeEffectAuthority):
+    def __init__(self) -> None:
+        super().__init__()
+        self.auto_authorize = True
+
+    def resolve(self, intent):
+        try:
+            return super().resolve(intent)
+        except EffectAuthorityDenied:
+            if not self.auto_authorize:
+                raise
+            self.authorize(intent)
+            return super().resolve(intent)
+
+
+def _compile(tmp_path: Path, name: str, flow: str):
+    source = tmp_path / f"{name}.workflow.yaml"
+    source.write_text(
+        "workflow_version: '1'\n"
+        f"name: {name}\n"
+        "description: Gate B durable recovery state\n"
+        "protect: ['**']\n"
+        f"flow:\n{flow}"
+    )
+    catalog = ResolvedCatalog()
+    workflow = parse_workflow(load_workflow(source))
+    result = compile_workflow(validate_semantics(workflow, catalog), catalog)
+    recipes = tmp_path / "recipes"
+    recipes.mkdir(exist_ok=True)
+    for relative_path, content in result.executable_files.items():
+        target = recipes / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+    return recipes, result
+
+
+def _stop_pump(service: LockstepService) -> None:
+    service._pump_stop.set()  # noqa: SLF001 - deterministic recovery boundary
+    service._pump_wakeup.set()  # noqa: SLF001
+    thread = service._pump_thread  # noqa: SLF001
+    if thread is not None:
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+
+@dataclass(frozen=True)
+class _DecisionCrash:
+    state: Path
+    recipes: Path
+    project: Path
+    run_id: str
+    thread_id: str
+
+
+def _bound_snapshot(service: LockstepService, crash: _DecisionCrash):
+    service.runtime.bind(service.catalog.get(crash.run_id))
+    return service.runtime.snapshot(crash.run_id, subgraphs=True)
+
+
+def _manual_to_decision_crash(tmp_path: Path) -> _DecisionCrash:
+    recipes, compiled = _compile(
+        tmp_path,
+        "manual-decision",
+        "  - step: edit\n"
+        "    task: Edit the project\n"
+        "    exit: Editing is complete\n"
+        "  - decide:\n"
+        "      id: risk\n"
+        "      using:\n"
+        "        type: changed-paths\n"
+        "        since: start\n"
+        "        cases: {high: [auth/**]}\n"
+        "        default: low\n"
+        "  - choose:\n"
+        "      value: risk\n"
+        "      cases:\n"
+        "        high: [{escalate: {}}]\n"
+        "        low: [{escalate: {}}]\n",
+    )
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "README.md").write_text("unchanged\n")
+    state = tmp_path / "state"
+    service = LockstepService(state, recipes)
+    _stop_pump(service)
+    started = service.start(
+        "manual-decision",
+        {},
+        str(project),
+        compiler_provenance=compiled.compiler_provenance,
+    )
+    run_id = started["run_id"]
+    binding = service.catalog.get(run_id)
+    manual = service.runtime.snapshot(run_id, subgraphs=True)
+    assert len(manual.pending) == 1
+    manual_descriptor = parse_effect_descriptor(
+        manual.pending[0].value["lockstep_effect"]
+    )
+    assert manual_descriptor.kind == "manual"
+
+    # Crash cut: seal/deliver the predecessor into native Decision state, but
+    # do not call the service's subsequent engine drive.
+    service.coordinator.submit_manual(
+        run_id,
+        manual.pending[0].coordinate,
+        ManualSubmission.build("PASS", evidence={}),
+    )
+    decision = service.runtime.snapshot(run_id, subgraphs=True)
+    assert len(decision.pending) == 1
+    decision_descriptor = parse_effect_descriptor(
+        decision.pending[0].value["lockstep_effect"]
+    )
+    assert decision_descriptor.__class__.__name__ == "DecisionDescriptor"
+    assert service.effects.list_dispatch_watches(limit=128) == ()
+    effects = service.effects.list_for_thread(binding.thread_id)
+    assert [record.effect_kind for record in effects] == ["manual"]
+    assert effects[0].phase == "delivered"
+    service.close()
+    return _DecisionCrash(state, recipes, project, run_id, binding.thread_id)
+
+
+def _normalized_facts(service: LockstepService, crash: _DecisionCrash) -> dict:
+    snapshot = _bound_snapshot(service, crash)
+    effects = service.effects.list_for_thread(crash.thread_id)
+    return {
+        "catalog": service.catalog.get(crash.run_id),
+        "watch": tuple(
+            (item.public_run_id, item.input_blob.sha256, item.input_blob.size)
+            for item in service.effects.list_dispatch_watches(limit=128)
+        ),
+        "effects": tuple(
+            (
+                item.effect_id,
+                item.effect_kind,
+                item.phase,
+                item.revision,
+                item.result_ref,
+            )
+            for item in effects
+        ),
+        "checkpoint": snapshot.checkpoint_id,
+        "pending": tuple((item.coordinate, item.value) for item in snapshot.pending),
+        "next": snapshot.next,
+        "values": snapshot.values,
+        "history": tuple(
+            (item["checkpoint_id"], item["status"])
+            for item in service.scenario_history(crash.run_id, str(crash.project))
+        ),
+        "events": tuple(
+            tuple(sorted(item.items()))
+            for item in service.scenario_events(crash.run_id, str(crash.project))
+        ),
+    }
+
+
+def test_recovery_consumes_rowless_decision_after_manual_delivery_crash(
+    tmp_path: Path,
+) -> None:
+    crash = _manual_to_decision_crash(tmp_path)
+    restarted = LockstepService(crash.state, crash.recipes)
+    try:
+        _stop_pump(restarted)
+        snapshot = _bound_snapshot(restarted, crash)
+        effects = restarted.effects.list_for_thread(crash.thread_id)
+        assert all(item.effect_kind != "decide" for item in effects)
+        assert snapshot.pending == ()
+        assert snapshot.values["lockstep_outcome"] == "ESCALATED"
+    finally:
+        restarted.close()
+
+
+def _managed_park(tmp_path: Path, *, sealed: bool):
+    recipes, compiled = _compile(
+        tmp_path,
+        "managed-park",
+        "  - verify:\n"
+        "      id: tests\n"
+        "      command: pytest -q\n"
+        "      timeout: 60\n",
+    )
+    project = tmp_path / "project"
+    project.mkdir()
+    runner = FakeRunner()
+    service = LockstepService(
+        tmp_path / "state",
+        recipes,
+        runners={"pinned": runner},
+        effect_authority=_AutoGrantAuthority(),
+    )
+    _stop_pump(service)
+    started = service.start(
+        "managed-park", {}, str(project),
+        compiler_provenance=compiled.compiler_provenance,
+    )
+    run_id = started["run_id"]
+    record = service.effects.list_for_thread(service.catalog.get(run_id).thread_id)[0]
+    assert record.phase == "running"
+    if sealed:
+        launch = runner.ensure_started_calls[-1]
+        result = parse_effect_result({
+            "schema": "lockstep.effect-result/v1",
+            "effect_id": record.effect_id,
+            "outcome": "PASS",
+            "result_ref": "blob:" + "d" * 64,
+            "artifact_refs": [],
+            "snapshot_ref": None,
+            "diff_ref": None,
+            "fixed_error_code": None,
+            "evidence_refs": [],
+        })
+        runner.inspect_observations.append(runner.terminal(launch, result))
+        runner.safety_observations.append(
+            TerminalSafetyObservation.proven_for(launch, result_stable=True)
+        )
+        for _ in range(4):
+            service.coordinator.reconcile(run_id)
+            record = service.effects.get(record.effect_id)
+            if record.phase == "sealed":
+                break
+        assert record.phase == "sealed"
+    return service, run_id
+
+
+@pytest.mark.parametrize(
+    "park",
+    (
+        "worker_manual",
+        "managed_running",
+        "sealed_external",
+        "delivered_to_decision",
+    ),
+)
+def test_drive_watch_survives_every_nonterminal_park(
+    tmp_path: Path, park: str
+) -> None:
+    if park in {"managed_running", "sealed_external"}:
+        service, run_id = _managed_park(
+            tmp_path, sealed=park == "sealed_external"
+        )
+    elif park == "delivered_to_decision":
+        crash = _manual_to_decision_crash(tmp_path)
+        service = LockstepService(crash.state, crash.recipes)
+        run_id = crash.run_id
+        service.runtime.bind(service.catalog.get(run_id))
+    else:
+        recipes, compiled = _compile(
+            tmp_path,
+            "manual-park",
+            "  - step: edit\n"
+            "    task: Edit the project\n"
+            "    exit: Editing is complete\n",
+        )
+        project = tmp_path / "project"
+        project.mkdir()
+        service = LockstepService(tmp_path / "state", recipes)
+        _stop_pump(service)
+        started = service.start(
+            "manual-park", {}, str(project),
+            compiler_provenance=compiled.compiler_provenance,
+        )
+        run_id = started["run_id"]
+    try:
+        _stop_pump(service)
+        assert service.runtime.snapshot(run_id, subgraphs=True).pending
+        assert tuple(
+            watch.public_run_id
+            for watch in service.effects.list_dispatch_watches(limit=128)
+        ) == (run_id,)
+    finally:
+        service.close()
+
+
+def test_watch_is_not_removed_at_nonterminal_manual_park(
+    tmp_path: Path,
+) -> None:
+    recipes, compiled = _compile(
+        tmp_path,
+        "manual-lifetime",
+        "  - step: edit\n"
+        "    task: Edit the project\n"
+        "    exit: Editing is complete\n",
+    )
+    project = tmp_path / "project"
+    project.mkdir()
+    service = LockstepService(tmp_path / "state", recipes)
+    _stop_pump(service)
+    started = service.start(
+        "manual-lifetime", {}, str(project),
+        compiler_provenance=compiled.compiler_provenance,
+    )
+    try:
+        run_id = started["run_id"]
+        snapshot = service.runtime.snapshot(run_id, subgraphs=True)
+        assert snapshot.pending and snapshot.next
+        assert tuple(
+            watch.public_run_id
+            for watch in service.effects.list_dispatch_watches(limit=128)
+        ) == (run_id,)
+    finally:
+        service.close()
+
+
+def _blocked_then_decision_population(tmp_path: Path, *, revoke: bool = True):
+    recipes, managed_compiled = _compile(
+        tmp_path,
+        "blocked-managed",
+        "  - verify:\n"
+        "      id: tests\n"
+        "      command: pytest -q\n"
+        "      timeout: 60\n",
+    )
+    _recipes, decision_compiled = _compile(
+        tmp_path,
+        "later-decision",
+        "  - step: edit\n"
+        "    task: Edit the project\n"
+        "    exit: Editing is complete\n"
+        "  - decide:\n"
+        "      id: risk\n"
+        "      using:\n"
+        "        type: changed-paths\n"
+        "        since: start\n"
+        "        cases: {high: [auth/**]}\n"
+        "        default: low\n"
+        "  - choose:\n"
+        "      value: risk\n"
+        "      cases:\n"
+        "        high: [{escalate: {}}]\n"
+        "        low: [{escalate: {}}]\n",
+    )
+    _recipes, worker_compiled = _compile(
+        tmp_path,
+        "worker-only",
+        "  - step: edit\n"
+        "    task: Edit the project\n"
+        "    exit: Editing is complete\n",
+    )
+    project = tmp_path / "project"
+    project.mkdir()
+    foreign = tmp_path / "foreign-project"
+    foreign.mkdir()
+    authority = _AutoGrantAuthority()
+    runner = FakeRunner()
+    service = LockstepService(
+        tmp_path / "state", recipes,
+        runners={"pinned": runner}, effect_authority=authority,
+    )
+    _stop_pump(service)
+    foreign_park = service.start(
+        "worker-only", {}, str(foreign),
+        compiler_provenance=worker_compiled.compiler_provenance,
+    )["run_id"]
+    local_park = service.start(
+        "worker-only", {}, str(project),
+        compiler_provenance=worker_compiled.compiler_provenance,
+    )["run_id"]
+    assert service.runtime.snapshot(foreign_park, subgraphs=True).pending
+    assert service.runtime.snapshot(local_park, subgraphs=True).pending
+    managed = service.start(
+        "blocked-managed", {}, str(project),
+        compiler_provenance=managed_compiled.compiler_provenance,
+    )
+    managed_id = managed["run_id"]
+    assert service.effects.list_for_thread(
+        service.catalog.get(managed_id).thread_id
+    )[0].phase == "running"
+    intent_digest = authority.resolve_intents[-1].intent_digest
+    if revoke:
+        authority.revoke(intent_digest)
+        authority.auto_authorize = False
+    later = service.start(
+        "later-decision", {}, str(project),
+        compiler_provenance=decision_compiled.compiler_provenance,
+    )
+    later_id = later["run_id"]
+    manual = service.runtime.snapshot(later_id, subgraphs=True)
+    service.coordinator.submit_manual(
+        later_id, manual.pending[0].coordinate,
+        ManualSubmission.build("PASS", evidence={}),
+    )
+    assert service.runtime.snapshot(later_id, subgraphs=True).pending
+    service._active_effect_runs.clear()  # noqa: SLF001 - fake capacity port
+    service._queued_effect_runs.clear()  # noqa: SLF001
+    service._active_effect_queue.clear()  # noqa: SLF001
+    return service, project, managed_id, later_id, authority, runner
+
+
+def _protected_action_trace(
+    service: LockstepService, managed_id: str, runner: FakeRunner
+) -> dict:
+    binding = service.catalog.get(managed_id)
+    record = service.effects.list_for_thread(binding.thread_id)[0]
+    return {
+        "effect": (
+            record.effect_id,
+            record.request_digest,
+            record.grant_digest,
+            record.launch_commitment_digest,
+            record.phase,
+            record.revision,
+        ),
+        "runner_prepare": len(runner.prepare_calls),
+        "runner_start": len(runner.ensure_started_calls),
+        "runner_spawn": runner.spawn_count,
+    }
+
+
+@pytest.mark.parametrize("mode", ("explicit", "automatic"))
+def test_watch_does_not_authorize_blocked_runner(
+    tmp_path: Path, mode: str
+) -> None:
+    service, project, managed_id, later_id, _authority, runner = (
+        _blocked_then_decision_population(tmp_path)
+    )
+    protected_before = _protected_action_trace(service, managed_id, runner)
+    escaped = None
+    try:
+        try:
+            if mode == "explicit":
+                service.scenario_recover(str(project), limit=128)
+            else:
+                service._recover_engine_effects()  # noqa: SLF001
+        except BaseException as exc:  # captured into the final trace oracle
+            escaped = type(exc).__name__
+        service.runtime.bind(service.catalog.get(later_id))
+        target = service.runtime.snapshot(later_id, subgraphs=True)
+        protected_after = _protected_action_trace(service, managed_id, runner)
+        assert {
+            "escaped": escaped,
+            "protected_facts_unchanged": (
+                protected_after["effect"] == protected_before["effect"]
+            ),
+            "new_runner_prepare": (
+                protected_after["runner_prepare"]
+                - protected_before["runner_prepare"]
+            ),
+            "new_runner_start": (
+                protected_after["runner_start"]
+                - protected_before["runner_start"]
+            ),
+            "new_runner_spawn": (
+                protected_after["runner_spawn"]
+                - protected_before["runner_spawn"]
+            ),
+            "later_pending": len(target.pending),
+        } == {
+            "escaped": None,
+            "protected_facts_unchanged": True,
+            "new_runner_prepare": 0,
+            "new_runner_start": 0,
+            "new_runner_spawn": 0,
+            "later_pending": 0,
+        }
+    finally:
+        service.close()
+
+
+@pytest.mark.parametrize("mode", ("explicit", "automatic"))
+def test_capacity_deferral_advances_current_sweep_and_preserves_next_eligibility(
+    tmp_path: Path, mode: str
+) -> None:
+    service, project, managed_id, later_id, _authority, runner = (
+        _blocked_then_decision_population(tmp_path, revoke=False)
+    )
+    protected_before = _protected_action_trace(service, managed_id, runner)
+    # Capacity is the only faked decision. Catalog, effect, watch and native
+    # populations above are real durable facts.
+    service._active_effect_runs = {  # noqa: SLF001
+        f"occupied-{index}" for index in range(service._MAX_ACTIVE_EFFECT_RUNS)
+    }
+    try:
+        before = tuple(
+            (item.effect_id, item.phase, item.revision)
+            for binding in service.catalog.list(str(project.resolve()), limit=128)
+            for item in service.effects.list_for_thread(binding.thread_id)
+        )
+        if mode == "explicit":
+            service.scenario_recover(str(project), limit=128)
+        else:
+            service._recover_engine_effects()  # noqa: SLF001
+        service.runtime.bind(service.catalog.get(later_id))
+        current = service.runtime.snapshot(later_id, subgraphs=True)
+        after = tuple(
+            (item.effect_id, item.phase, item.revision)
+            for binding in service.catalog.list(str(project.resolve()), limit=128)
+            for item in service.effects.list_for_thread(binding.thread_id)
+        )
+        service._active_effect_runs.clear()  # noqa: SLF001
+        if mode == "explicit":
+            recovered = service.scenario_recover(str(project), limit=1)["recovered"]
+            selected_next = recovered[0] if recovered else None
+        else:
+            service._recover_engine_effects()  # noqa: SLF001
+            selected_next = (
+                managed_id
+                if managed_id in service._active_effect_runs  # noqa: SLF001
+                else None
+            )
+        protected_after = _protected_action_trace(service, managed_id, runner)
+
+        # One final trace proves both halves of the ordering contract.  b794
+        # stops the first sweep at the capacity-full row, even though the same
+        # row remains correctly eligible once capacity is released.
+        assert {
+            "later_pending": len(current.pending),
+            "facts_after_deferral": after,
+            "protected_facts_unchanged": (
+                protected_after["effect"] == protected_before["effect"]
+            ),
+            "new_runner_prepare": (
+                protected_after["runner_prepare"]
+                - protected_before["runner_prepare"]
+            ),
+            "new_runner_start": (
+                protected_after["runner_start"]
+                - protected_before["runner_start"]
+            ),
+            "new_runner_spawn": (
+                protected_after["runner_spawn"]
+                - protected_before["runner_spawn"]
+            ),
+            "selected_next": selected_next,
+        } == {
+            "later_pending": 0,
+            "facts_after_deferral": before,
+            "protected_facts_unchanged": True,
+            "new_runner_prepare": 0,
+            "new_runner_start": 0,
+            "new_runner_spawn": 0,
+            "selected_next": managed_id,
+        }
+    finally:
+        service.close()
+
+
+@pytest.mark.parametrize("mode", ("explicit", "automatic"))
+def test_explicit_and_automatic_recovery_fairness(
+    tmp_path: Path, mode: str
+) -> None:
+    service, project, managed_id, later_id, _authority, runner = (
+        _blocked_then_decision_population(tmp_path)
+    )
+    protected_before = _protected_action_trace(service, managed_id, runner)
+    driven = []
+    escaped = None
+    real_drive = service._drive_engine_owned  # noqa: SLF001
+
+    def traced_drive(run_id, **kwargs):
+        driven.append(run_id)
+        return real_drive(run_id, **kwargs)
+
+    service._drive_engine_owned = traced_drive  # noqa: SLF001
+    try:
+        try:
+            if mode == "explicit":
+                service.scenario_recover(str(project), limit=128)
+            else:
+                service._recover_engine_effects()  # noqa: SLF001
+        except BaseException as exc:  # final trace records per-run isolation
+            escaped = type(exc).__name__
+        service.runtime.bind(service.catalog.get(later_id))
+        later = service.runtime.snapshot(later_id, subgraphs=True)
+        protected_after = _protected_action_trace(service, managed_id, runner)
+        assert {
+            "escaped": escaped,
+            "protected_facts_unchanged": (
+                protected_after["effect"] == protected_before["effect"]
+            ),
+            "new_runner_prepare": (
+                protected_after["runner_prepare"]
+                - protected_before["runner_prepare"]
+            ),
+            "new_runner_start": (
+                protected_after["runner_start"]
+                - protected_before["runner_start"]
+            ),
+            "new_runner_spawn": (
+                protected_after["runner_spawn"]
+                - protected_before["runner_spawn"]
+            ),
+            "later_driven": later_id in driven,
+            "later_pending": len(later.pending),
+        } == {
+            "escaped": None,
+            "protected_facts_unchanged": True,
+            "new_runner_prepare": 0,
+            "new_runner_start": 0,
+            "new_runner_spawn": 0,
+            "later_driven": True,
+            "later_pending": 0,
+        }
+    finally:
+        service.close()
+
+
+def test_start_watch_replays_only_before_first_checkpoint_non_null(
+    tmp_path: Path,
+) -> None:
+    recipes, compiled = _compile(
+        tmp_path,
+        "manual-checkpoint",
+        "  - step: edit\n"
+        "    task: Edit the project\n"
+        "    exit: Editing is complete\n",
+    )
+    project = tmp_path / "project"
+    project.mkdir()
+    service = LockstepService(tmp_path / "state", recipes)
+    _stop_pump(service)
+
+    # Real crash cut after atomic admission but before the native runtime has
+    # established its first checkpoint.  The old non-null watch is the sole
+    # restart input and must be replayed exactly once.
+    real_start = service.runtime.ensure_started
+
+    def crash_before_first_checkpoint(_run_id, _values):
+        raise RuntimeError("crash before first checkpoint")
+
+    service.runtime.ensure_started = crash_before_first_checkpoint
+    with pytest.raises(RuntimeError, match="crash before first checkpoint"):
+        service.start(
+            "manual-checkpoint", {}, str(project),
+            compiler_provenance=compiled.compiler_provenance,
+        )
+    service.runtime.ensure_started = real_start
+    admission = service.effects.list_dispatch_watches(limit=128)
+    assert len(admission) == 1
+    no_checkpoint_blob = admission[0].input_blob
+
+    blob_reads = []
+    starts = []
+    real_read = service.blobs.read
+    service.blobs.read = lambda ref: (blob_reads.append(ref), real_read(ref))[1]
+    service.runtime.ensure_started = lambda rid, values: (
+        starts.append((rid, values)), real_start(rid, values)
+    )[1]
+    service._recover_start_admissions()  # noqa: SLF001 - b794 oracle
+    before_checkpoint_trace = {
+        "input_reads": sum(ref == no_checkpoint_blob for ref in blob_reads),
+        "starts": len(starts),
+    }
+
+    blob_reads.clear()
+    starts.clear()
+    started = service.start(
+        "manual-checkpoint", {}, str(project),
+        compiler_provenance=compiled.compiler_provenance,
+    )
+    run_id = started["run_id"]
+    input_blob = service.blobs.put(b"{}")
+    table = service.store.tables.effect_dispatch_watches
+    with service.store.write_transaction() as connection:
+        connection.execute(table.insert().values(
+            public_run_id=run_id,
+            input_blob_sha256=input_blob.sha256,
+            input_blob_size=input_blob.size,
+            admitted_at="2026-08-25T00:00:00+00:00",
+        ))
+    blob_reads.clear()
+    starts.clear()
+    try:
+        assert service.runtime.snapshot(run_id, subgraphs=True).checkpoint_id
+        service._recover_start_admissions()  # noqa: SLF001 - b794 oracle
+        assert {
+            "before_checkpoint": before_checkpoint_trace,
+            "after_checkpoint": {
+                "input_reads": sum(ref == input_blob for ref in blob_reads),
+                "starts": len(starts),
+            },
+        } == {
+            "before_checkpoint": {"input_reads": 1, "starts": 1},
+            "after_checkpoint": {"input_reads": 0, "starts": 0},
+        }
+    finally:
+        service.close()
+
+
+def test_fresh_driver_reaches_decision_after_128_worker_parks(
+    tmp_path: Path,
+) -> None:
+    recipes, parked_compiled = _compile(
+        tmp_path,
+        "worker-park",
+        "  - step: edit\n"
+        "    task: Edit the project\n"
+        "    exit: Editing is complete\n",
+    )
+    _recipes, decision_compiled = _compile(
+        tmp_path,
+        "late-decision",
+        "  - step: edit\n"
+        "    task: Edit the project\n"
+        "    exit: Editing is complete\n"
+        "  - decide:\n"
+        "      id: risk\n"
+        "      using:\n"
+        "        type: changed-paths\n"
+        "        since: start\n"
+        "        cases: {high: [auth/**]}\n"
+        "        default: low\n"
+        "  - choose:\n"
+        "      value: risk\n"
+        "      cases:\n"
+        "        high: [{escalate: {}}]\n"
+        "        low: [{escalate: {}}]\n",
+    )
+    project = tmp_path / "project"
+    project.mkdir()
+    state = tmp_path / "state"
+    service = LockstepService(state, recipes)
+    _stop_pump(service)
+    for _index in range(128):
+        parked = service.start(
+            "worker-park", {}, str(project),
+            compiler_provenance=parked_compiled.compiler_provenance,
+        )
+        assert service.runtime.snapshot(
+            parked["run_id"], subgraphs=True
+        ).pending
+    late = service.start(
+        "late-decision", {}, str(project),
+        compiler_provenance=decision_compiled.compiler_provenance,
+    )
+    late_id = late["run_id"]
+    late_binding = service.catalog.get(late_id)
+    manual = service.runtime.snapshot(late_id, subgraphs=True)
+    service.coordinator.submit_manual(
+        late_id,
+        manual.pending[0].coordinate,
+        ManualSubmission.build("PASS", evidence={}),
+    )
+    assert service.runtime.snapshot(late_id, subgraphs=True).pending
+    service.close()
+
+    fresh = LockstepService(state, recipes)
+    try:
+        _stop_pump(fresh)
+        fresh.runtime.bind(late_binding)
+        snapshot = fresh.runtime.snapshot(late_id, subgraphs=True)
+        assert snapshot.pending == ()
+    finally:
+        fresh.close()
+
+
+def test_b794_acknowledged_state_backfills_null_input_watch(tmp_path: Path) -> None:
+    crash = _manual_to_decision_crash(tmp_path)
+    restarted = LockstepService(crash.state, crash.recipes)
+    try:
+        _stop_pump(restarted)
+        snapshot = _bound_snapshot(restarted, crash)
+        assert snapshot.pending == ()
+        assert restarted.effects.list_dispatch_watches(limit=128) == ()
+    finally:
+        restarted.close()
+
+
+def test_repeated_recovery_is_idempotent(tmp_path: Path) -> None:
+    crash = _manual_to_decision_crash(tmp_path)
+    restarted = LockstepService(crash.state, crash.recipes)
+    try:
+        _stop_pump(restarted)
+        before = _normalized_facts(restarted, crash)
+        restarted.scenario_recover(str(crash.project), limit=128)
+        after_first = _normalized_facts(restarted, crash)
+        restarted.scenario_recover(str(crash.project), limit=128)
+        after_second = _normalized_facts(restarted, crash)
+        assert after_first != before
+        assert after_second == after_first
+        assert after_first["pending"] == ()
+    finally:
+        restarted.close()
+
+
+# Exact B-schema missing-contract REDs; these make no behavioral claim.
+def test_run_drive_watch_public_dto_contract() -> None:
+    from lockstep.runtime.effects import ledger as ledger_module
+
+    watch_type = getattr(ledger_module, "RunDriveWatch", None)
+    assert watch_type is not None, "R2a must publish the exact RunDriveWatch DTO"
+    assert tuple(watch_type.__dataclass_fields__) == (
+        "admission_seq",
+        "public_run_id",
+        "input_blob_sha256",
+        "input_blob_size",
+        "admitted_at",
+    )
+
+
+def test_run_drive_watch_ddl_contract(tmp_path: Path) -> None:
+    from lockstep.runtime.storage import SQLiteStore
+
+    store = SQLiteStore(tmp_path / "runtime.db")
+    try:
+        table = getattr(store.tables, "run_drive_watches", None)
+        assert table is not None, "R2a must replace the legacy watch table"
+        assert tuple(table.c.keys()) == (
+            "admission_seq", "public_run_id", "input_blob_sha256",
+            "input_blob_size", "admitted_at",
+        )
+        assert table.c.admission_seq.primary_key
+        assert isinstance(table.c.admission_seq.type, Integer)
+        assert table.c.admission_seq.autoincrement is True
+        assert table.c.public_run_id.unique
+        assert not table.c.public_run_id.nullable
+        assert table.c.input_blob_sha256.nullable
+        assert table.c.input_blob_size.nullable
+        assert not table.c.admitted_at.nullable
+        assert len(table.c.public_run_id.foreign_keys) == 1
+        checks = {
+            "".join(item["sqltext"].lower().split())
+            for item in sa_inspect(store.engine).get_check_constraints(
+                "run_drive_watches"
+            )
+        }
+        assert any(
+            "input_blob_sha256isnull" in sql
+            and "input_blob_sizeisnull" in sql
+            and "input_blob_sha256isnotnull" in sql
+            and "input_blob_sizeisnotnull" in sql
+            and "or" in sql
+            for sql in checks
+        ), "blob digest and size must be null as a pair"
+        assert table.dialect_options["sqlite"]["autoincrement"] is True
+        assert "effect_dispatch_watches" not in store.metadata.tables
+    finally:
+        store.close()
+
+
+def _exact_parameters(
+    callable_value,
+    expected: tuple[tuple[str, object], ...],
+    expected_return,
+) -> None:
+    observed = tuple(
+        (name, parameter.kind)
+        for name, parameter in signature(callable_value).parameters.items()
+    )
+    assert observed == expected
+    assert get_type_hints(callable_value)["return"] == expected_return
+
+
+def test_run_drive_watch_high_water_api_exact_signature() -> None:
+    from lockstep.runtime.effects.ledger import EffectLedger
+
+    method = getattr(EffectLedger, "max_run_drive_admission_seq", None)
+    assert callable(method)
+    _exact_parameters(
+        method,
+        (("self", Parameter.POSITIONAL_OR_KEYWORD),),
+        int | None,
+    )
+
+
+def test_run_drive_watch_page_api_exact_signature() -> None:
+    from lockstep.runtime.effects import ledger as ledger_module
+    from lockstep.runtime.effects.ledger import EffectLedger
+
+    method = getattr(EffectLedger, "list_run_drive_watches", None)
+    assert callable(method)
+    watch_type = getattr(ledger_module, "RunDriveWatch", None)
+    assert watch_type is not None
+    _exact_parameters(
+        method,
+        (
+            ("self", Parameter.POSITIONAL_OR_KEYWORD),
+            ("after_admission_seq", Parameter.KEYWORD_ONLY),
+            ("high_water", Parameter.KEYWORD_ONLY),
+            ("limit", Parameter.KEYWORD_ONLY),
+        ),
+        tuple[watch_type, ...],
+    )
+
+
+def test_run_drive_watch_ack_api_exact_signature() -> None:
+    from lockstep.runtime.effects.ledger import EffectLedger
+
+    method = getattr(EffectLedger, "acknowledge_run_drive_watch", None)
+    assert callable(method)
+    _exact_parameters(
+        method,
+        (
+            ("self", Parameter.POSITIONAL_OR_KEYWORD),
+            ("public_run_id", Parameter.POSITIONAL_OR_KEYWORD),
+        ),
+        NoneType,
+    )
+
+
+def test_v2_write_transaction_is_exact_context_contract(tmp_path: Path) -> None:
+    from lockstep.runtime.storage import SQLiteStore
+
+    store = SQLiteStore(tmp_path / "runtime.db")
+    try:
+        method = getattr(store, "_v2_write_transaction", None)
+        assert callable(method)
+        assert tuple(signature(method).parameters) == ()
+        context = method()
+        assert callable(getattr(context, "__enter__", None))
+        assert callable(getattr(context, "__exit__", None))
+    finally:
+        store.close()
