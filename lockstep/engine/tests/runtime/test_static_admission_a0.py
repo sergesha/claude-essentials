@@ -3,19 +3,20 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import shlex
+import stat
 
 import pytest
 from sqlalchemy import func, select
 
 from lockstep import cli
-from lockstep.recipe.authority import RecipeAuthorityPolicy, StrictRecipeIngress
 from lockstep.runtime.catalog import RunCatalog
 from lockstep.runtime.effects.owner_policy import RuntimeRequirementIndex
 from lockstep.runtime.engine import Engine
 from lockstep.runtime.errors import LockstepError
-from lockstep.runtime.service import LockstepCommandService, preflight_recipe
-from lockstep.runtime.start_service import plan_authorized_start
+from lockstep.runtime.service import preflight_recipe
 from lockstep.runtime.storage import SQLiteStore
 
 
@@ -155,9 +156,13 @@ def _write_acceptance_recipe(project: Path) -> Path:
     return path
 
 
-def _config(tmp_path: Path) -> dict[str, object]:
+def _config(tmp_path: Path, *, provider_marker: Path | None = None) -> dict[str, object]:
     executable = tmp_path / "codex"
-    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    marker = provider_marker or tmp_path / "provider-invoked"
+    executable.write_text(
+        "#!/bin/sh\nprintf invoked > " + shlex.quote(str(marker)) + "\nexit 0\n",
+        encoding="utf-8",
+    )
     executable.chmod(0o700)
     codex_home = tmp_path / "codex-home"
     codex_home.mkdir(mode=0o700)
@@ -228,12 +233,38 @@ def _provision(
     return cli.main(argv)
 
 
-def _tree(root: Path) -> tuple[tuple[str, bytes], ...]:
-    return tuple(
-        (str(path.relative_to(root)), path.read_bytes())
-        for path in sorted(root.rglob("*"))
-        if path.is_file() and not path.name.endswith(("-wal", "-shm", "-journal"))
-    )
+def _owner_state_snapshot(root: Path) -> tuple[tuple[str, str, int, bytes | str], ...]:
+    """Capture every owner-state inode without following symlinks."""
+
+    entries: list[tuple[str, str, int, bytes | str]] = []
+
+    def visit(path: Path, relative: str) -> None:
+        metadata = os.lstat(path)
+        mode = stat.S_IMODE(metadata.st_mode)
+        if stat.S_ISDIR(metadata.st_mode):
+            entries.append((relative, "directory", mode, ""))
+            with os.scandir(path) as children:
+                for child in sorted(children, key=lambda entry: entry.name):
+                    child_relative = child.name if relative == "." else f"{relative}/{child.name}"
+                    visit(Path(child.path), child_relative)
+        elif stat.S_ISREG(metadata.st_mode):
+            entries.append((relative, "regular", mode, path.read_bytes()))
+        elif stat.S_ISLNK(metadata.st_mode):
+            entries.append((relative, "symlink", mode, os.readlink(path)))
+        else:
+            inode_type = {
+                stat.S_IFIFO: "fifo",
+                stat.S_IFSOCK: "socket",
+                stat.S_IFCHR: "character-device",
+                stat.S_IFBLK: "block-device",
+            }.get(stat.S_IFMT(metadata.st_mode), f"unknown:{stat.S_IFMT(metadata.st_mode):o}")
+            entries.append((relative, inode_type, mode, ""))
+
+    try:
+        visit(root, ".")
+    except FileNotFoundError:
+        return ()
+    return tuple(entries)
 
 
 def _start(project: Path, owner_state: Path, recipe: str) -> dict[str, object]:
@@ -248,6 +279,7 @@ def _assert_prelaunch_park(
     owner_state: Path,
     project: Path,
     result: dict[str, object],
+    provider_marker: Path,
 ) -> None:
     run_id = result["run_id"]
     assert isinstance(run_id, str) and run_id
@@ -270,6 +302,7 @@ def _assert_prelaunch_park(
     finally:
         store.close()
     assert not (owner_state / "checkpoints" / "native.sqlite").exists()
+    assert not provider_marker.exists()
 
 
 def test_granted_codex_static_admission_parks_before_native_execution(
@@ -280,15 +313,22 @@ def test_granted_codex_static_admission_parks_before_native_execution(
     project = tmp_path / "project"
     _write_direct_recipe(project, "codex-workflow", "codex")
     owner_state = tmp_path / "owner-state"
+    provider_marker = tmp_path / "codex-provider-invoked"
     granted = tuple(item.grant_selection_key for item in _requirements(project, "codex-workflow"))
     assert len(granted) == 1
     assert _provision(
-        tmp_path, monkeypatch, project, owner_state, _config(tmp_path), granted, "codex-workflow"
+        tmp_path,
+        monkeypatch,
+        project,
+        owner_state,
+        _config(tmp_path, provider_marker=provider_marker),
+        granted,
+        "codex-workflow",
     ) == 0
 
     result = _start(project, owner_state, "codex-workflow")
 
-    _assert_prelaunch_park(owner_state, project, result)
+    _assert_prelaunch_park(owner_state, project, result, provider_marker)
 
 
 def test_granted_pinned_static_admission_parks_before_native_execution(
@@ -299,15 +339,22 @@ def test_granted_pinned_static_admission_parks_before_native_execution(
     project = tmp_path / "project"
     _write_direct_recipe(project, "pinned-workflow", "pinned")
     owner_state = tmp_path / "owner-state"
+    provider_marker = tmp_path / "pinned-provider-invoked"
     granted = tuple(item.grant_selection_key for item in _requirements(project, "pinned-workflow"))
     assert len(granted) == 1
     assert _provision(
-        tmp_path, monkeypatch, project, owner_state, _config(tmp_path), granted, "pinned-workflow"
+        tmp_path,
+        monkeypatch,
+        project,
+        owner_state,
+        _config(tmp_path, provider_marker=provider_marker),
+        granted,
+        "pinned-workflow",
     ) == 0
 
     result = _start(project, owner_state, "pinned-workflow")
 
-    _assert_prelaunch_park(owner_state, project, result)
+    _assert_prelaunch_park(owner_state, project, result, provider_marker)
 
 
 @pytest.mark.parametrize("configuration_only", (False, True))
@@ -333,12 +380,12 @@ def test_ungranted_or_configuration_only_runtime_start_is_write_free(
         "target",
         "other",
     ) == 0
-    before = _tree(owner_state)
+    before = _owner_state_snapshot(owner_state)
 
     with pytest.raises(LockstepError):
         _start(project, owner_state, "target")
 
-    assert _tree(owner_state) == before
+    assert _owner_state_snapshot(owner_state) == before
 
 
 def test_real_captured_binding_drift_is_write_free(
@@ -357,35 +404,23 @@ def test_real_captured_binding_drift_is_write_free(
     Path(str(codex["codex_home"]), "auth.json").write_text(
         '{"rotated":true}', encoding="utf-8"
     )
-    before = _tree(owner_state)
+    before = _owner_state_snapshot(owner_state)
 
     with pytest.raises(LockstepError):
         _start(project, owner_state, "target")
 
-    assert _tree(owner_state) == before
+    assert _owner_state_snapshot(owner_state) == before
 
 
-def test_acceptance_static_preflight_requires_no_publication_bearer(
-    tmp_path: Path,
-) -> None:
+def test_acceptance_real_start_requires_no_publication_bearer(tmp_path: Path) -> None:
     project = tmp_path / "project"
-    recipe_path = _write_acceptance_recipe(project)
-    authorized = StrictRecipeIngress(recipe_path.parent).inspect(recipe_path.name).authorize(
-        RecipeAuthorityPolicy()
-    )
+    _write_acceptance_recipe(project)
     owner_state = tmp_path / "owner-state"
 
-    plan = plan_authorized_start(
-        state_dir=owner_state,
-        authorized=authorized,
-        project=str(project),
-        compiler_provenance=None,
-        require_runtime_policy=LockstepCommandService._require_owner_runtime_policy,
-    )
+    result = _start(project, owner_state, "acceptance")
 
     assert _requirements(project, "acceptance") == ()
-    assert plan.authorized is authorized
-    assert not owner_state.exists()
+    assert isinstance(result["run_id"], str) and result["run_id"]
 
 
 def test_three_level_inventory_rejects_an_omitted_grandchild_grant(
@@ -395,20 +430,29 @@ def test_three_level_inventory_rejects_an_omitted_grandchild_grant(
     _write_three_level_recipe(project)
     owner_state = tmp_path / "owner-state"
     requirements = _requirements(project, "root")
-    assert {
-        use
-        for requirement in requirements
-        for use in requirement.uses
-    } == {
+    expected_uses = {
         ("root.recipe.yaml", "root-work"),
         ("child.yaml", "child-work"),
         ("grandchild.yaml", "grandchild-work"),
     }
+    assert len(requirements) == 3
+    by_use_partition = {requirement.uses: requirement for requirement in requirements}
+    assert set(by_use_partition) == {(use,) for use in expected_uses}
+    assert len({requirement.grant_selection_key for requirement in requirements}) == 3
+    retained_uses = (
+        (("root.recipe.yaml", "root-work"),),
+        (("child.yaml", "child-work"),),
+    )
+    expected_retained_keys = {
+        by_use_partition[uses].grant_selection_key for uses in retained_uses
+    }
     without_grandchild = tuple(
         requirement.grant_selection_key
         for requirement in requirements
-        if ("grandchild.yaml", "grandchild-work") not in requirement.uses
+        if requirement.grant_selection_key in expected_retained_keys
     )
+    assert len(without_grandchild) == 2
+    assert set(without_grandchild) == expected_retained_keys
 
     assert _provision(
         tmp_path,
@@ -419,9 +463,16 @@ def test_three_level_inventory_rejects_an_omitted_grandchild_grant(
         without_grandchild,
         "root",
     ) == 0
-    before = _tree(owner_state)
+    snapshot = json.loads(
+        (owner_state / "runtime-owner" / "snapshot.json").read_text(encoding="utf-8")
+    )
+    assert len(snapshot["grants"]) == 2
+    assert {grant["grant_selection_key"] for grant in snapshot["grants"]} == set(
+        without_grandchild
+    )
+    before = _owner_state_snapshot(owner_state)
 
     with pytest.raises(LockstepError):
         _start(project, owner_state, "root")
 
-    assert _tree(owner_state) == before
+    assert _owner_state_snapshot(owner_state) == before
