@@ -156,7 +156,7 @@ def _snapshot_from_bytes(encoded: bytes) -> OwnerRuntimeSnapshot:
         if not isinstance(value, dict) or set(value) != grant_fields:
             raise ValueError("owner runtime snapshot grant schema is invalid")
         grants.append(OwnerRuntimeGrant(**value))
-    return OwnerRuntimeSnapshot(
+    snapshot = OwnerRuntimeSnapshot(
         schema=document["schema"],
         config_generation=document["config_generation"],
         policy_generation=document["policy_generation"],
@@ -164,6 +164,8 @@ def _snapshot_from_bytes(encoded: bytes) -> OwnerRuntimeSnapshot:
         pinned=_binding_from_document(document["pinned"]),
         grants=tuple(grants),
     )
+    _assert_snapshot_grants_consistent(snapshot)
+    return snapshot
 
 
 def _read_snapshot(path: Path) -> tuple[bytes, OwnerRuntimeSnapshot] | None:
@@ -194,14 +196,9 @@ def open_runtime_snapshot(state_dir: Path) -> tuple[str, OwnerRuntimeSnapshot]:
     return hashlib.sha256(encoded).hexdigest(), snapshot
 
 
-def _assert_predecessor_consistent(
-    snapshot: OwnerRuntimeSnapshot,
-    index: RuntimeRequirementIndex,
-) -> None:
-    requirements = {
-        requirement.grant_selection_key: requirement
-        for requirement in index.requirements
-    }
+def _assert_snapshot_grants_consistent(snapshot: OwnerRuntimeSnapshot) -> None:
+    """Reject any grant not bound to a captured snapshot binding generation."""
+
     for grant in snapshot.grants:
         candidates = {
             requirement_digest(
@@ -213,6 +210,18 @@ def _assert_predecessor_consistent(
         }
         if grant.requirement_digest not in candidates:
             raise ValueError("owner runtime snapshot grant requirement digest is stale")
+
+
+def _assert_predecessor_consistent(
+    snapshot: OwnerRuntimeSnapshot,
+    index: RuntimeRequirementIndex,
+) -> None:
+    _assert_snapshot_grants_consistent(snapshot)
+    requirements = {
+        requirement.grant_selection_key: requirement
+        for requirement in index.requirements
+    }
+    for grant in snapshot.grants:
         requirement = requirements.get(grant.grant_selection_key)
         if requirement is None:
             continue

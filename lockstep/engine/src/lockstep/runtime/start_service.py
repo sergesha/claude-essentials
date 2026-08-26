@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from lockstep.recipe import profile
-from lockstep.recipe.authority import AuthorizedRecipe
+from lockstep.recipe.authority import AuthorizedRecipe, recipe_definition_sha256
 from lockstep.runtime.catalog import RunBinding
 from lockstep.runtime.effects.owner_policy import (
     OwnerRuntimeAuthority,
@@ -22,6 +22,7 @@ from lockstep.runtime.effects.owner_provisioning import (
 )
 from lockstep.runtime.effects.owner_snapshot_store import open_runtime_snapshot
 from lockstep.runtime.errors import LockstepError
+from lockstep.runtime.recipe_bundles import RecipeBundleRef, RecipeBundleStore
 from lockstep.runtime.snapshot_resolver import capture_authoritative_snapshot
 from lockstep.runtime.status import ScenarioStatus, project_status
 
@@ -58,6 +59,37 @@ def _preflight_runtime_requirements(
         raise LockstepError("runtime execution policy is unavailable") from exc
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise LockstepError(str(exc)) from exc
+
+
+def _is_static_runtime_admission(
+    binding: RunBinding,
+    bundle_store: RecipeBundleStore,
+) -> bool:
+    """Classify one durable admission from its verified immutable bundle."""
+
+    try:
+        ref = RecipeBundleRef(binding.recipe_snapshot_ref)
+        manifest = bundle_store.read_manifest(ref)
+        materialized = bundle_store.read_materialization(ref)
+        observed_definition = recipe_definition_sha256(
+            manifest.root,
+            ((entry.path, entry.sha256, entry.size) for entry in manifest.files),
+        )
+        if observed_definition != binding.recipe_digest:
+            raise ValueError("catalog recipe digest does not match admitted bundle")
+        documents = tuple(
+            (entry.path, (materialized.directory / entry.path).read_bytes())
+            for entry in manifest.files
+        )
+        return bool(
+            RuntimeRequirementIndex._for_recipe_documents(
+                documents,
+                definition_digest=binding.recipe_digest,
+                project_identity=binding.project_identity,
+            ).requirements
+        )
+    except (KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise LockstepError("durable start admission integrity failure") from exc
 
 
 def plan_authorized_start(
@@ -126,7 +158,6 @@ class AuthorizedStartService:
         admission_lock: object,
         reserve_effect_run: Callable[[str], bool],
         deactivate_effect_run: Callable[[str], None],
-        park_prelaunch: Callable[[str], None],
         drive_engine_owned: Callable[..., object],
     ) -> None:
         self._blobs = blobs
@@ -140,7 +171,6 @@ class AuthorizedStartService:
         self._admission_lock = admission_lock
         self._reserve_effect_run = reserve_effect_run
         self._deactivate_effect_run = deactivate_effect_run
-        self._park_prelaunch = park_prelaunch
         self._drive_engine_owned = drive_engine_owned
 
     @staticmethod
@@ -214,7 +244,6 @@ class AuthorizedStartService:
                     )
                 ),
             )
-            self._park_prelaunch(binding.public_run_id)
         return ScenarioStatus(
             "starting",
             binding.public_run_id,

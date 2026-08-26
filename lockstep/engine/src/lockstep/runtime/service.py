@@ -65,6 +65,7 @@ from lockstep.runtime.snapshot_resolver import (
 )
 from lockstep.runtime.start_service import (
     AuthorizedStartService,
+    _is_static_runtime_admission,
     _preflight_runtime_requirements,
     plan_authorized_start,
 )
@@ -218,7 +219,6 @@ class LockstepCommandService:
         self._pump_stop = threading.Event()
         self._pump_wakeup = threading.Event()
         self._active_effect_runs: set[str] = set()
-        self._static_prelaunch_parks: set[str] = set()
         self._queued_effect_runs: set[str] = set()
         self._active_effect_queue: deque[str] = deque()
         self._active_effect_lock = threading.Lock()
@@ -375,12 +375,16 @@ class LockstepCommandService:
         for watch in self.effects.list_dispatch_watches(
             limit=self._MAX_ACTIVE_EFFECT_RUNS
         ):
-            if watch.public_run_id in getattr(self, "_static_prelaunch_parks", ()):
-                continue
             binding = self.catalog.get(watch.public_run_id)
             if not self._reserve_effect_run(binding.public_run_id):
                 return
             try:
+                bundle_store = getattr(self, "bundle_store", None)
+                if bundle_store is not None and _is_static_runtime_admission(
+                    binding, bundle_store
+                ):
+                    self._deactivate_effect_run(binding.public_run_id)
+                    continue
                 encoded = self.blobs.read(watch.input_blob)
                 values = validate_start_input(json.loads(encoded))
                 if self._canonical_start_input(values) != encoded:
@@ -557,7 +561,6 @@ class LockstepCommandService:
             admission_lock=self._admission_recovery_lock,
             reserve_effect_run=self._reserve_effect_run,
             deactivate_effect_run=self._deactivate_effect_run,
-            park_prelaunch=self._static_prelaunch_parks.add,
             drive_engine_owned=self._drive_engine_owned,
         ).start(
             recipe,

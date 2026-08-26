@@ -152,6 +152,46 @@ def _stable_requirement_facts(requirement: RuntimeRequirement) -> tuple[object, 
     )
 
 
+def _merge_requirement(
+    requirements: dict[str, RuntimeRequirement],
+    requirement: RuntimeRequirement,
+) -> None:
+    existing = requirements.get(requirement.grant_selection_key)
+    if existing is None:
+        requirements[requirement.grant_selection_key] = requirement
+    elif _stable_requirement_facts(existing) != _stable_requirement_facts(
+        requirement
+    ):
+        raise ValueError("runtime requirement selection key collision")
+    else:
+        requirements[requirement.grant_selection_key] = replace(
+            existing,
+            uses=tuple(sorted(set(existing.uses + requirement.uses))),
+        )
+
+
+def _runtime_descriptors(encoded: bytes) -> tuple[EffectDescriptor, ...]:
+    document = json.loads(encoded)
+    known_state_keys = set(document.get("state") or {})
+    descriptors: list[EffectDescriptor] = []
+    for node in (document.get("nodes") or {}).values():
+        if not isinstance(node, dict) or node.get("type") != "interrupt":
+            continue
+        message = node.get("message")
+        if not isinstance(message, dict) or "lockstep_effect" not in message:
+            continue
+        descriptor = parse_effect_descriptor(
+            message["lockstep_effect"],
+            known_state_keys=known_state_keys,
+        )
+        if (
+            isinstance(descriptor, EffectDescriptor)
+            and descriptor.runner is not None
+        ):
+            descriptors.append(descriptor)
+    return tuple(descriptors)
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeRequirementIndex:
     """Pure static inventory for an authorized recipe closure."""
@@ -191,64 +231,59 @@ class RuntimeRequirementIndex:
     ) -> RuntimeRequirementIndex:
         requirements: dict[str, RuntimeRequirement] = {}
         for authorized in authorized_closures:
-            for file in authorized.files:
-                document = json.loads(file.bytes)
-                known_state_keys = set(document.get("state") or {})
-                for node in (document.get("nodes") or {}).values():
-                    if not isinstance(node, dict) or node.get("type") != "interrupt":
-                        continue
-                    message = node.get("message")
-                    if not isinstance(message, dict) or "lockstep_effect" not in message:
-                        continue
-                    descriptor = parse_effect_descriptor(
-                        message["lockstep_effect"],
-                        known_state_keys=known_state_keys,
+            derived = cls._for_recipe_documents(
+                tuple((file.path, file.bytes) for file in authorized.files),
+                definition_digest=authorized.definition_sha256,
+                project_identity=project_identity,
+            )
+            for requirement in derived.requirements:
+                _merge_requirement(requirements, requirement)
+        return cls(
+            project_identity=project_identity,
+            requirements=tuple(requirements[key] for key in sorted(requirements)),
+        )
+
+    @classmethod
+    def _for_recipe_documents(
+        cls,
+        documents: tuple[tuple[str, bytes], ...],
+        *,
+        definition_digest: str,
+        project_identity: str,
+    ) -> RuntimeRequirementIndex:
+        """Derive inventory from already verified immutable recipe bytes."""
+
+        requirements: dict[str, RuntimeRequirement] = {}
+        for logical_path, encoded in documents:
+            for descriptor in _runtime_descriptors(encoded):
+                assert descriptor.runner is not None
+                if descriptor.runner.selector not in {"codex", "pinned"}:
+                    raise ValueError(
+                        "runtime requirement has an unsupported runner selector"
                     )
-                    if (
-                        not isinstance(descriptor, EffectDescriptor)
-                        or descriptor.runner is None
-                    ):
-                        continue
-                    if descriptor.runner.selector not in {"codex", "pinned"}:
-                        raise ValueError(
-                            "runtime requirement has an unsupported runner selector"
-                        )
-                    capabilities = tuple(
-                        sorted(descriptor.runner.required_capabilities)
-                    )
-                    authorities = ("os_user_execution",)
-                    selection_key = grant_selection_key(
-                        project_identity=project_identity,
-                        definition_digest=authorized.definition_sha256,
-                        protected_descriptor_digest=descriptor.digest,
-                        runner_selector=descriptor.runner.selector,
-                        required_capabilities=capabilities,
-                        required_authorities=authorities,
-                    )
-                    requirement = RuntimeRequirement(
-                        grant_selection_key=selection_key,
-                        project_identity=project_identity,
-                        definition_digest=authorized.definition_sha256,
-                        protected_descriptor_digest=descriptor.digest,
-                        runner_selector=descriptor.runner.selector,
-                        required_capabilities=capabilities,
-                        required_authorities=authorities,
-                        uses=((file.path, descriptor.logical_id),),
-                    )
-                    existing = requirements.get(selection_key)
-                    if existing is None:
-                        requirements[selection_key] = requirement
-                    elif _stable_requirement_facts(existing) != (
-                        _stable_requirement_facts(requirement)
-                    ):
-                        raise ValueError("runtime requirement selection key collision")
-                    else:
-                        requirements[selection_key] = replace(
-                            existing,
-                            uses=tuple(
-                                sorted(set(existing.uses + requirement.uses))
-                            ),
-                        )
+                capabilities = tuple(
+                    sorted(descriptor.runner.required_capabilities)
+                )
+                authorities = ("os_user_execution",)
+                selection_key = grant_selection_key(
+                    project_identity=project_identity,
+                    definition_digest=definition_digest,
+                    protected_descriptor_digest=descriptor.digest,
+                    runner_selector=descriptor.runner.selector,
+                    required_capabilities=capabilities,
+                    required_authorities=authorities,
+                )
+                requirement = RuntimeRequirement(
+                    grant_selection_key=selection_key,
+                    project_identity=project_identity,
+                    definition_digest=definition_digest,
+                    protected_descriptor_digest=descriptor.digest,
+                    runner_selector=descriptor.runner.selector,
+                    required_capabilities=capabilities,
+                    required_authorities=authorities,
+                    uses=((logical_path, descriptor.logical_id),),
+                )
+                _merge_requirement(requirements, requirement)
         return cls(
             project_identity=project_identity,
             requirements=tuple(requirements[key] for key in sorted(requirements)),
