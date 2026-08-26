@@ -17,6 +17,8 @@ from lockstep.runtime.effects.coordinator import ProviderContractViolation
 from lockstep.runtime.effects.owner_policy import RuntimeRequirementIndex
 from lockstep.runtime.engine import Engine
 from lockstep.runtime.errors import LockstepError
+from lockstep.runtime import service as service_module
+from lockstep.runtime import start_service as start_service_module
 from lockstep.runtime.service import preflight_recipe
 from lockstep.runtime.storage import SQLiteStore
 
@@ -384,6 +386,53 @@ def test_granted_static_admission_remains_parked_after_service_restart(
         "target",
     ) == 0
     result = _start(project, owner_state, "target")
+    _assert_prelaunch_park(owner_state, project, result, provider_marker)
+
+
+def test_repeated_recovery_classifies_one_immutable_static_admission_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Positive durable classification is bounded and reused only to park."""
+
+    project = tmp_path / "project"
+    _write_direct_recipe(project, "target", "codex")
+    owner_state = tmp_path / "owner-state"
+    provider_marker = tmp_path / "provider-invoked"
+    granted = tuple(item.grant_selection_key for item in _requirements(project, "target"))
+    assert _provision(
+        tmp_path,
+        monkeypatch,
+        project,
+        owner_state,
+        _config(tmp_path, provider_marker=provider_marker),
+        granted,
+        "target",
+    ) == 0
+    result = _start(project, owner_state, "target")
+
+    original = start_service_module._is_static_runtime_admission
+    classifications = 0
+
+    def counted(binding, bundle_store):
+        nonlocal classifications
+        classifications += 1
+        return original(binding, bundle_store)
+
+    monkeypatch.setattr(
+        start_service_module, "_is_static_runtime_admission", counted
+    )
+    monkeypatch.setattr(
+        service_module, "_is_static_runtime_admission", counted, raising=False
+    )
+    reopened = Engine.command(owner_state, project / ".lockstep" / "recipes")
+    try:
+        reopened._open_writable_stores()
+        for _ in range(4):
+            reopened._recover_start_admissions()
+    finally:
+        reopened.close()
+
+    assert classifications == 1
     _assert_prelaunch_park(owner_state, project, result, provider_marker)
 
     reopened = Engine.command(owner_state, project / ".lockstep" / "recipes")
