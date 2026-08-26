@@ -63,7 +63,7 @@ class RuntimeBundleRequirementResolver:
     def __init__(self, bundles: RecipeBundleStore) -> None:
         self._bundles = bundles
 
-    def _index(self, binding: RunBinding) -> RuntimeRequirementIndex:
+    def index(self, binding: RunBinding) -> RuntimeRequirementIndex:
         ref = RecipeBundleRef(binding.recipe_snapshot_ref)
         manifest = self._bundles.read_manifest(ref)
         materialized = self._bundles.read_materialization(ref)
@@ -92,7 +92,7 @@ class RuntimeBundleRequirementResolver:
             raise ValueError("effect intent differs from immutable run binding")
         matches = tuple(
             item
-            for item in self._index(binding).requirements
+            for item in self.index(binding).requirements
             if item.protected_descriptor_digest == intent.descriptor_digest
             and item.runner_selector == intent.runner_selector
             and item.required_capabilities

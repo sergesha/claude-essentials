@@ -31,6 +31,12 @@ def _service_double() -> LockstepCommandService:
     service._activation_lock = threading.RLock()  # noqa: SLF001
     service._writable_core_active = True  # noqa: SLF001
     service._initial_recovery_exclusion = None  # noqa: SLF001
+    service._recovery_thread_cursor = None  # noqa: SLF001
+    # These focused doubles model a service whose coordinator is already open.
+    service._runtime_execution_context = object()  # noqa: SLF001
+    service._reconstruct_runtime_execution_context = (  # noqa: SLF001
+        lambda **_kwargs: None
+    )
     return service
 
 
@@ -241,6 +247,70 @@ def test_dispatch_recovery_serializes_with_foreground_admission() -> None:
     assert finished.is_set()
 
 
+def test_runtime_reconstruction_tracks_the_bounded_recovery_page() -> None:
+    service = _service_double()
+    service._runtime_execution_context = None
+    service._recovery_thread_cursor = "thread-128"
+    service._admission_recovery_lock = threading.RLock()
+    observed = []
+    service._reconstruct_runtime_execution_context = (
+        lambda *, after_thread_id=None, limit=None: observed.append(
+            (after_thread_id, limit)
+        )
+    )
+    service._recover_start_admissions = lambda: None
+    service._recover_effect_batch = lambda: None
+
+    service._recover_engine_effects()
+
+    assert observed == [("thread-128", None)]
+
+
+def test_parallel_recovery_installs_one_runtime_composition() -> None:
+    service = _service_double()
+    service._runtime_execution_context = None
+    service._recovery_thread_cursor = "thread-128"
+    service._admission_recovery_lock = threading.RLock()
+    reconstructed = object()
+    reconstruct_calls = []
+    install_calls = []
+
+    def reconstruct(*, after_thread_id=None, limit=None):
+        reconstruct_calls.append((after_thread_id, limit))
+        return reconstructed
+
+    def install(context):
+        install_calls.append(context)
+        service._runtime_execution_context = context
+
+    service._reconstruct_runtime_execution_context = reconstruct
+    service._install_runtime_execution = install
+    service._recover_start_admissions = lambda: None
+    service._recover_effect_batch = lambda: None
+
+    workers = [threading.Thread(target=service._recover_engine_effects) for _ in range(2)]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(timeout=1)
+
+    assert all(not worker.is_alive() for worker in workers)
+    assert reconstruct_calls == [("thread-128", None), ("thread-128", None)]
+    assert install_calls == [reconstructed]
+
+
+def test_recovery_rejects_a_different_preinstalled_runtime_context() -> None:
+    service = _service_double()
+    service._recovery_thread_cursor = "thread-129"
+    service._reconstruct_runtime_execution_context = lambda **_kwargs: object()
+    service._admission_recovery_lock = threading.RLock()
+
+    with pytest.raises(
+        LockstepError, match="recovered runtime execution snapshot changed"
+    ):
+        service._recover_engine_effects()
+
+
 def test_worker_resume_blocks_recovery_unbind_for_the_whole_composite(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -408,6 +478,49 @@ def test_publication_consent_preview_is_read_only_and_issue_rechecks_digest() ->
         ("preview", "run-1", coordinate),
         ("issue", "run-1", coordinate, "b" * 64),
     ]
+
+
+def test_consent_activates_before_waiting_for_recovery_admission() -> None:
+    service = _service_double()
+    activation_entered = threading.Event()
+    release_activation = threading.Event()
+    finished = threading.Event()
+    failures: list[BaseException] = []
+
+    def activate() -> None:
+        activation_entered.set()
+        assert release_activation.wait(1)
+
+    service._activate_writable_core = activate
+    service._pending_acceptance = lambda *_args, **_kwargs: (
+        None,
+        SimpleNamespace(coordinate="coordinate"),
+    )
+    service.coordinator = SimpleNamespace(
+        issue_acceptance_consent=lambda *_args: "issued"
+    )
+    service._admission_recovery_lock = threading.RLock()
+
+    def issue() -> None:
+        try:
+            service.issue_publication_consent(
+                "run", "accept", "a" * 64, project="/project"
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            failures.append(exc)
+        finally:
+            finished.set()
+
+    with service._admission_recovery_lock:
+        worker = threading.Thread(target=issue)
+        worker.start()
+        assert activation_entered.wait(1)
+        release_activation.set()
+        assert not finished.wait(0.05)
+
+    worker.join(timeout=1)
+    assert failures == []
+    assert finished.is_set()
 
 
 def test_artifact_acceptance_foreign_ambient_project_is_generic_and_read_only() -> None:
@@ -634,6 +747,7 @@ def test_scenario_recover_pages_nonterminal_threads_with_stable_project_progress
 
     bindings = {foreign.thread_id: foreign, local.thread_id: local}
     driven: list[str] = []
+    validated: list[tuple[str | None, int | None]] = []
     service = _service_double()
     service.effects = SimpleNamespace(list_recovery_threads=list_recovery_threads)
     service.catalog = SimpleNamespace(
@@ -648,6 +762,11 @@ def test_scenario_recover_pages_nonterminal_threads_with_stable_project_progress
     service._scenario_recovery_cursors = {}
     service._active_effect_runs = set()
     service._active_effect_lock = threading.Lock()
+    service._install_recovered_runtime_execution = (
+        lambda *, after_thread_id=None, limit=None: validated.append(
+            (after_thread_id, limit)
+        )
+    )
 
     first = service.scenario_recover(project_identity, limit=1)
     second = service.scenario_recover(project_identity, limit=1)
@@ -655,6 +774,7 @@ def test_scenario_recover_pages_nonterminal_threads_with_stable_project_progress
     assert first["recovered"] == []
     assert second["recovered"] == ["local"]
     assert cursors == [None, "thread-a"]
+    assert validated == [(None, 1), ("thread-a", 1)]
     assert driven == ["local"]
 
 

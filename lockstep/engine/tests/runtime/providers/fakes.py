@@ -32,6 +32,9 @@ def _legacy_command_service(
 
     service = LockstepCommandService(state_dir, recipes_dir)
     service._require_owner_runtime_policy = lambda _requirements: None  # noqa: SLF001
+    service._reconstruct_runtime_execution_context = (  # noqa: SLF001
+        lambda **_kwargs: None
+    )
 
     def open_test_coordinator() -> None:
         authority, coordinator = service._effect_coordinator_for(  # noqa: SLF001

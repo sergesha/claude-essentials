@@ -1400,6 +1400,7 @@ class CodexRunnerAdapter:
 
     required_authorities = _CodexAttemptDriver.required_authorities
     reconciliation_boundary = _CodexAttemptDriver.reconciliation_boundary
+    accepted_effect_kinds = _CodexAttemptDriver.accepted_effect_kinds
 
     def __init__(self, **kwargs) -> None:
         self._driver = _CodexAttemptDriver(**kwargs)

@@ -79,6 +79,7 @@ from lockstep.runtime.runtime_execution import (
     build_runtime_execution_composition,
     capture_runtime_execution_admission,
 )
+from lockstep.runtime.runtime_execution_recovery import RuntimeExecutionRecovery
 from lockstep.runtime.status import ScenarioStatus, project_status
 from lockstep.runtime.storage import SQLiteStore
 
@@ -340,11 +341,52 @@ class LockstepCommandService:
             {}, _UnavailableEffectAuthority()
         )
 
+    def _reconstruct_runtime_execution_context(
+        self,
+        *,
+        after_thread_id: str | None = None,
+        limit: int | None = None,
+    ) -> RuntimeExecutionContext | None:
+        return RuntimeExecutionRecovery(
+            state_dir=self.state_dir,
+            catalog=self.catalog,
+            bundles=self.bundle_store,
+            effects=self.effects,
+        ).reconstruct(
+            limit=self._MAX_ACTIVE_EFFECT_RUNS if limit is None else limit,
+            after_thread_id=after_thread_id,
+        )
+
+    def _install_recovered_runtime_execution(
+        self,
+        *,
+        after_thread_id: str | None = None,
+        limit: int | None = None,
+    ) -> None:
+        """Serialize cold reconstruction with foreground runtime admission."""
+
+        with self._activation_lock:
+            context = self._reconstruct_runtime_execution_context(
+                after_thread_id=after_thread_id,
+                limit=limit,
+            )
+            if context is None:
+                return
+            current = self._runtime_execution_context
+            if current is None:
+                self._install_runtime_execution(context)
+            elif current != context:
+                raise LockstepError("recovered runtime execution snapshot changed")
+
     def _prepare_writable_core(self) -> None:
         """Open complete writable resources without recovery or background work."""
 
         self._open_writable_stores()
         self._open_graph_runtime()
+        if self._runtime_execution_context is None:
+            self._runtime_execution_context = (
+                self._reconstruct_runtime_execution_context()
+            )
         self._open_effect_coordinator()
 
     def _finish_writable_core_activation(
@@ -428,6 +470,9 @@ class LockstepCommandService:
     def _recover_engine_effects(self) -> None:
         """Adopt durable protected work without a scheduler or status side effect."""
 
+        self._install_recovered_runtime_execution(
+            after_thread_id=self._recovery_thread_cursor
+        )
         with self._admission_recovery_lock:
             self._recover_start_admissions()
             self._recover_effect_batch()
@@ -758,8 +803,11 @@ class LockstepCommandService:
         project_identity = str(Path(project).resolve())
         self._activate_writable_core()
         recovered: list[str] = []
-        with self._admission_recovery_lock:
+        with self._activation_lock, self._admission_recovery_lock:
             cursor = self._scenario_recovery_cursors.get(project_identity)
+            self._install_recovered_runtime_execution(
+                after_thread_id=cursor, limit=limit
+            )
             thread_ids = self.effects.list_recovery_threads(
                 limit=limit, after_thread_id=cursor
             )
@@ -914,7 +962,6 @@ class LockstepCommandService:
     ):
         if not isinstance(step, str) or not step:
             raise LockstepError("acceptance step must be non-empty text")
-        self._activate_writable_core()
         binding = self._bind_existing(run_id, project)
         snapshot = self.runtime.snapshot(run_id, subgraphs=True)
         matches = []
@@ -938,6 +985,7 @@ class LockstepCommandService:
     def preview_publication_consent(
         self, run_id: str, step: str, *, project: str
     ) -> dict[str, Any]:
+        self._activate_writable_core()
         _binding, interrupt = self._pending_acceptance(
             run_id, step, project=project
         )
@@ -953,6 +1001,7 @@ class LockstepCommandService:
         *,
         project: str,
     ) -> IssuedPublicationConsent:
+        self._activate_writable_core()
         with self._admission_recovery_lock:
             _binding, interrupt = self._pending_acceptance(
                 run_id, step, project=project

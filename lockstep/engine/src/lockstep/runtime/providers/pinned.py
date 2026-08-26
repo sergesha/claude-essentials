@@ -165,6 +165,7 @@ class PinnedRunnerAdapter:
 
     required_authorities = _CodexAttemptDriver.required_authorities
     reconciliation_boundary = _CodexAttemptDriver.reconciliation_boundary
+    accepted_effect_kinds = _PinnedCodexStrategy.accepted_effect_kinds
 
     def __init__(self, **kwargs) -> None:
         self._driver = _PinnedCodexStrategy(**kwargs)
