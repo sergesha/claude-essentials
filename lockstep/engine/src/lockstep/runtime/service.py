@@ -65,7 +65,7 @@ from lockstep.runtime.snapshot_resolver import (
 )
 from lockstep.runtime.start_service import (
     AuthorizedStartService,
-    _is_static_runtime_admission,
+    _StaticAdmissionParkCache,
     _preflight_runtime_requirements,
     plan_authorized_start,
 )
@@ -219,6 +219,7 @@ class LockstepCommandService:
         self._pump_stop = threading.Event()
         self._pump_wakeup = threading.Event()
         self._active_effect_runs: set[str] = set()
+        self._static_admission_classifier = _StaticAdmissionParkCache()
         self._queued_effect_runs: set[str] = set()
         self._active_effect_queue: deque[str] = deque()
         self._active_effect_lock = threading.Lock()
@@ -336,6 +337,7 @@ class LockstepCommandService:
         self._pump_failure = None
         self._pump_stop.clear()
         self._pump_wakeup.clear()
+        self._static_admission_classifier.clear()
         self._writable_core_active = False
 
     def _require_owner_runtime_policy(self, index):
@@ -380,8 +382,11 @@ class LockstepCommandService:
                 return
             try:
                 bundle_store = getattr(self, "bundle_store", None)
-                if bundle_store is not None and _is_static_runtime_admission(
-                    binding, bundle_store
+                classifier = getattr(self, "_static_admission_classifier", None)
+                if (
+                    bundle_store is not None
+                    and classifier is not None
+                    and classifier.requires_park(binding, bundle_store)
                 ):
                     self._deactivate_effect_run(binding.public_run_id)
                     continue
@@ -971,6 +976,7 @@ class LockstepCommandService:
             if self._closed:
                 return
             self._closed = True
+            self._static_admission_classifier.clear()
             if not self._writable_core_active:
                 return
             self._writable_core_active = False

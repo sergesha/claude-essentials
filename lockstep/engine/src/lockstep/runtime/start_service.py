@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tempfile
 import uuid
+from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -90,6 +91,44 @@ def _is_static_runtime_admission(
         )
     except (KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
         raise LockstepError("durable start admission integrity failure") from exc
+
+
+class _StaticAdmissionParkCache:
+    """Bounded positive cache that can only preserve a pre-native park."""
+
+    _MAX_ENTRIES = 128
+
+    def __init__(self) -> None:
+        self._parks: OrderedDict[tuple[str, ...], None] = OrderedDict()
+
+    @staticmethod
+    def _identity(binding: RunBinding) -> tuple[str, ...]:
+        return (
+            binding.public_run_id,
+            binding.thread_id,
+            binding.recipe_digest,
+            binding.recipe_snapshot_ref,
+            binding.project_identity,
+        )
+
+    def requires_park(
+        self,
+        binding: RunBinding,
+        bundle_store: RecipeBundleStore,
+    ) -> bool:
+        identity = self._identity(binding)
+        if identity in self._parks:
+            self._parks.move_to_end(identity)
+            return True
+        if not _is_static_runtime_admission(binding, bundle_store):
+            return False
+        self._parks[identity] = None
+        if len(self._parks) > self._MAX_ENTRIES:
+            self._parks.popitem(last=False)
+        return True
+
+    def clear(self) -> None:
+        self._parks.clear()
 
 
 def plan_authorized_start(
