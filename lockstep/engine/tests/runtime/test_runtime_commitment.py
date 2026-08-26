@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from threading import Event
-
 import pytest
 import yaml
 
@@ -14,12 +12,13 @@ from lockstep.runtime.effects.owner_policy import (
 )
 from lockstep.runtime.effects.owner_snapshot_store import open_runtime_snapshot
 from lockstep.runtime.engine import Engine
-from lockstep.runtime.providers.base import EffectRequest, launch_commitment_digest
+from lockstep.runtime.providers.base import launch_commitment_digest
 from lockstep.runtime.providers.codex import CodexRunnerAdapter
 from lockstep.runtime.providers.pinned import PinnedRunnerAdapter
 from lockstep.templates import install_template
 
 from ._runtime_commitment_harness import provision_managed_closure
+from ._runtime_commitment_observer import RuntimeCommitmentObserver
 
 
 @pytest.mark.parametrize(
@@ -116,48 +115,12 @@ def test_public_managed_codex_binds_requirement_through_durable_commitment(
         config_generation=snapshot.config_generation,
     )
 
-    granted: list[object] = []
-    prepared: list[tuple[CodexRunnerAdapter, EffectRequest]] = []
-    commitments: list[tuple[object, object, str, object]] = []
-    commitment_reached = Event()
-    command_holder: list[object] = []
-    original_bind_grant = EffectRequest.bind_grant
-    original_prepare = CodexRunnerAdapter.prepare
-    original_ensure_started = CodexRunnerAdapter.ensure_started
-
-    def capture_grant(intent, grant):
-        granted.append(grant)
-        return original_bind_grant(intent, grant)
-
-    def capture_prepare(adapter, request):
-        prepared.append((adapter, request))
-        return original_prepare(adapter, request)
-
-    def observe_durable_commitment(adapter, launch):
-        assert len(prepared) == 1
-        command_service = command_holder[0]
-        record = command_service.effects.get(launch.effect_id)
-        current_digest, current_snapshot = open_runtime_snapshot(
-            provisioned.owner_state
-        )
-        commitments.append(
-            (launch, record, current_digest, current_snapshot)
-        )
-        commitment_reached.set()
-        return original_ensure_started(adapter, launch)
-
-    monkeypatch.setattr(EffectRequest, "bind_grant", capture_grant)
-    monkeypatch.setattr(CodexRunnerAdapter, "prepare", capture_prepare)
-    monkeypatch.setattr(
-        CodexRunnerAdapter,
-        "ensure_started",
-        observe_durable_commitment,
-    )
+    observer = RuntimeCommitmentObserver(monkeypatch, provisioned.owner_state)
     command = Engine.command(
         provisioned.owner_state,
         provisioned.project / ".lockstep" / "recipes",
     )
-    command_holder.append(command)
+    observer.attach(command)
     try:
         started = command.start(
             provisioned.recipe,
@@ -165,32 +128,69 @@ def test_public_managed_codex_binds_requirement_through_durable_commitment(
             str(provisioned.project),
         )
         assert started["run_id"]
-        assert commitment_reached.wait(timeout=2), (
+        assert observer.reached.wait(timeout=2), (
             "public managed start remained at the static-admission park instead "
             "of reaching its durable, current owner-guarded launch commitment"
         )
-        assert len(commitments) == 1
-        assert len(granted) == len(prepared) == 1
-        effect_grant = granted[0]
-        adapter, request = prepared[0]
-        launch, launching_record, current_digest, current_snapshot = commitments[0]
-        assert launching_record.phase == "launching"
-        assert launching_record.launch_commitment_digest == (
-            launch_commitment_digest(request, launch)
+        assert observer.commitments
+        assert observer.bound_requests
+        assert observer.prepares
+        reference_grant = observer.bound_requests[0].grant
+        reference_request = observer.bound_requests[0].request
+        reference_launch_digest = (
+            observer.commitments[0].record.launch_commitment_digest
         )
-        assert current_digest == _snapshot_digest
-        assert current_snapshot == snapshot
-        assert effect_grant.actor_binding_digest == owner_grant.requirement_digest
-        assert effect_grant.config_epoch == snapshot.config_generation
-        assert effect_grant.policy_epoch == snapshot.policy_generation
-        assert effect_grant.grant_generation == owner_grant.grant_generation
-        assert adapter.binding_digest == snapshot.codex.binding_digest
-        assert request.runner_selector == "codex"
-        assert request.runner_binding_digest == snapshot.codex.binding_digest
-        assert request.grant_digest == effect_grant.digest
-        record = command.effects.get(request.effect_id)
-        assert record.runner_binding_digest == request.runner_binding_digest
-        assert record.request_digest == request.request_digest
-        assert record.grant_digest == effect_grant.digest
+        assert reference_launch_digest is not None
+        for call in observer.bound_requests:
+            intent, effect_grant, bound_request = (
+                call.intent,
+                call.grant,
+                call.request,
+            )
+            assert effect_grant.actor_binding_digest == owner_grant.requirement_digest
+            assert effect_grant.config_epoch == snapshot.config_generation
+            assert effect_grant.policy_epoch == snapshot.policy_generation
+            assert effect_grant.grant_generation == owner_grant.grant_generation
+            assert effect_grant.digest == reference_grant.digest
+            assert bound_request.effect_id == reference_request.effect_id
+            assert bound_request.request_digest == reference_request.request_digest
+            assert bound_request.runner_binding_digest == snapshot.codex.binding_digest
+            assert bound_request.grant_digest == effect_grant.digest
+            assert intent.effect_id == bound_request.effect_id
+            assert intent.intent_digest == bound_request.intent_digest
+        for call in observer.prepares:
+            adapter, request, launch = call.adapter, call.request, call.launch
+            assert adapter.binding_digest == snapshot.codex.binding_digest
+            assert request.runner_selector == "codex"
+            assert request.runner_binding_digest == snapshot.codex.binding_digest
+            assert request.request_digest == reference_request.request_digest
+            assert request.grant_digest == reference_grant.digest
+            assert launch.effect_id == request.effect_id
+            assert launch.request_digest == request.request_digest
+            assert launch.runner_binding_digest == request.runner_binding_digest
+            assert (
+                launch_commitment_digest(request, launch)
+                == reference_launch_digest
+            )
+        for call in observer.commitments:
+            assert call.correlated_prepares
+            launching_record = call.record
+            assert launching_record.phase == "launching"
+            assert launching_record.launch_commitment_digest == (
+                reference_launch_digest
+            )
+            assert all(
+                launching_record.launch_commitment_digest
+                == launch_commitment_digest(prepared.request, call.launch)
+                for prepared in call.correlated_prepares
+            )
+            assert launching_record.runner_binding_digest == (
+                snapshot.codex.binding_digest
+            )
+            assert launching_record.request_digest == reference_request.request_digest
+            assert launching_record.grant_digest == reference_grant.digest
+            assert call.owner_digest == _snapshot_digest
+            assert call.owner_snapshot == snapshot
     finally:
+        observer.release()
         command.close()
