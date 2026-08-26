@@ -74,7 +74,11 @@ def _pinned_system(tmp_path: Path, *, result_source: str = "exit"):
         CodexLaunchDecisionGate,
         CodexSandboxAttestor,
     )
-    from lockstep.runtime.providers.pinned import PinnedCommandSpec, PinnedRunnerAdapter
+    from lockstep.runtime.providers.pinned import (
+        PinnedCommandSpec,
+        PinnedRunnerAdapter,
+        pinned_runner_binding_digest,
+    )
 
     owner = tmp_path / "owner"
     blobs = BlobStore(owner)
@@ -105,14 +109,18 @@ def _pinned_system(tmp_path: Path, *, result_source: str = "exit"):
         },
     )
     workspaces = LocalGitWorkspaceProvider(owner, snapshots, blobs)
+    permission_profile = "lockstep-pinned"
     adapter = PinnedRunnerAdapter(
         owner_state_dir=owner,
         installation=lambda: binding,
-        decision_gate=CodexLaunchDecisionGate(binding.digest, generation=1),
+        decision_gate=CodexLaunchDecisionGate(
+            pinned_runner_binding_digest(binding.digest, permission_profile),
+            generation=1,
+        ),
         workspaces=workspaces,
         blobs=blobs,
         sandbox=CodexSandboxAttestor(cli_version=binding.cli_version),
-        permission_profile="lockstep-pinned",
+        permission_profile=permission_profile,
     )
     spec = PinnedCommandSpec.build(
         logical_argv=("python", "-m", "pytest", "-q"),
