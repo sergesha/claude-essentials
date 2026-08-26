@@ -412,15 +412,15 @@ def test_real_captured_binding_drift_is_write_free(
     assert _owner_state_snapshot(owner_state) == before
 
 
-def test_acceptance_real_start_requires_no_publication_bearer(tmp_path: Path) -> None:
+def test_acceptance_static_inventory_requires_no_publication_bearer(
+    tmp_path: Path,
+) -> None:
     project = tmp_path / "project"
     _write_acceptance_recipe(project)
-    owner_state = tmp_path / "owner-state"
 
-    result = _start(project, owner_state, "acceptance")
-
+    # Dynamic acceptance consent is covered by the service/effects suite;
+    # static admission only owns whether this recipe demands runtime authority.
     assert _requirements(project, "acceptance") == ()
-    assert isinstance(result["run_id"], str) and result["run_id"]
 
 
 def test_three_level_inventory_rejects_an_omitted_grandchild_grant(
