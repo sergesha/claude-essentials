@@ -14,7 +14,7 @@ from lockstep.runtime.effects.owner_policy import (
 )
 from lockstep.runtime.effects.owner_snapshot_store import open_runtime_snapshot
 from lockstep.runtime.engine import Engine
-from lockstep.runtime.providers.base import EffectRequest
+from lockstep.runtime.providers.base import EffectRequest, launch_commitment_digest
 from lockstep.runtime.providers.codex import CodexRunnerAdapter
 from lockstep.runtime.providers.pinned import PinnedRunnerAdapter
 from lockstep.templates import install_template
@@ -86,6 +86,8 @@ def test_packaged_template_scope_only_public_start_has_no_runtime_authority(
             effects = tuple(rows)
         bindings = command.catalog.list(str(project.resolve()))
         assert len(bindings) == 1
+        assert len(effects) <= expected_scope_rows
+        assert {record["effect_kind"] for record in effects} <= {"scope"}
         assert all(record["effect_kind"] == "scope" for record in effects)
         assert all(record["runner_binding_digest"] is None for record in effects)
         assert all(record["request_digest"] is None for record in effects)
@@ -97,7 +99,7 @@ def test_packaged_template_scope_only_public_start_has_no_runtime_authority(
         command.close()
 
 
-def test_public_managed_codex_binds_static_requirement_through_provider_prepare(
+def test_public_managed_codex_binds_requirement_through_durable_commitment(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -116,9 +118,12 @@ def test_public_managed_codex_binds_static_requirement_through_provider_prepare(
 
     granted: list[object] = []
     prepared: list[tuple[CodexRunnerAdapter, EffectRequest]] = []
-    provider_prepare = Event()
+    commitments: list[tuple[object, object, str, object]] = []
+    commitment_reached = Event()
+    command_holder: list[object] = []
     original_bind_grant = EffectRequest.bind_grant
     original_prepare = CodexRunnerAdapter.prepare
+    original_ensure_started = CodexRunnerAdapter.ensure_started
 
     def capture_grant(intent, grant):
         granted.append(grant)
@@ -126,15 +131,33 @@ def test_public_managed_codex_binds_static_requirement_through_provider_prepare(
 
     def capture_prepare(adapter, request):
         prepared.append((adapter, request))
-        provider_prepare.set()
         return original_prepare(adapter, request)
+
+    def observe_durable_commitment(adapter, launch):
+        assert len(prepared) == 1
+        command_service = command_holder[0]
+        record = command_service.effects.get(launch.effect_id)
+        current_digest, current_snapshot = open_runtime_snapshot(
+            provisioned.owner_state
+        )
+        commitments.append(
+            (launch, record, current_digest, current_snapshot)
+        )
+        commitment_reached.set()
+        return original_ensure_started(adapter, launch)
 
     monkeypatch.setattr(EffectRequest, "bind_grant", capture_grant)
     monkeypatch.setattr(CodexRunnerAdapter, "prepare", capture_prepare)
+    monkeypatch.setattr(
+        CodexRunnerAdapter,
+        "ensure_started",
+        observe_durable_commitment,
+    )
     command = Engine.command(
         provisioned.owner_state,
         provisioned.project / ".lockstep" / "recipes",
     )
+    command_holder.append(command)
     try:
         started = command.start(
             provisioned.recipe,
@@ -142,13 +165,21 @@ def test_public_managed_codex_binds_static_requirement_through_provider_prepare(
             str(provisioned.project),
         )
         assert started["run_id"]
-        assert provider_prepare.wait(timeout=2), (
+        assert commitment_reached.wait(timeout=2), (
             "public managed start remained at the static-admission park instead "
-            "of preparing its released Codex request"
+            "of reaching its durable, current owner-guarded launch commitment"
         )
+        assert len(commitments) == 1
         assert len(granted) == len(prepared) == 1
         effect_grant = granted[0]
         adapter, request = prepared[0]
+        launch, launching_record, current_digest, current_snapshot = commitments[0]
+        assert launching_record.phase == "launching"
+        assert launching_record.launch_commitment_digest == (
+            launch_commitment_digest(request, launch)
+        )
+        assert current_digest == _snapshot_digest
+        assert current_snapshot == snapshot
         assert effect_grant.actor_binding_digest == owner_grant.requirement_digest
         assert effect_grant.config_epoch == snapshot.config_generation
         assert effect_grant.policy_epoch == snapshot.policy_generation
