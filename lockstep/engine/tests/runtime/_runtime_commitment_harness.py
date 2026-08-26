@@ -41,11 +41,19 @@ def write_managed_recipe(project: Path, *, recipe: str = "managed-work") -> None
                         "runner": {
                             "selector": "codex",
                             "required_capabilities": [
-                                "workspace",
                                 "bounded_result",
+                                "credentials",
+                                "network",
+                                "sandbox",
+                                "workspace",
                             ],
                         },
-                        "inputs": {"brief": {"state_key": "brief"}},
+                        "inputs": {
+                            "brief": {"state_key": "brief"},
+                            "snapshot": {
+                                "runtime_key": "run_start_project_snapshot"
+                            },
+                        },
                         "writes": [],
                         "artifacts": [],
                         "deadline_seconds": 120,
