@@ -128,6 +128,44 @@ def test_close_serializes_with_first_writable_core_activation(
     assert not pump.is_alive()
 
 
+def test_active_close_clears_static_classifier_only_after_pump_join() -> None:
+    service = _service_double()
+    service._closed = False
+    service._pump_stop = threading.Event()
+    service._pump_wakeup = threading.Event()
+    pump_release = threading.Event()
+    join_entered = threading.Event()
+    classifier_cleared = threading.Event()
+
+    pump_thread = threading.Thread(target=pump_release.wait)
+    pump_thread.start()
+
+    class ObservedPump:
+        def join(self) -> None:
+            join_entered.set()
+            pump_thread.join()
+
+    service._pump_thread = ObservedPump()
+    service._static_admission_classifier = SimpleNamespace(
+        clear=classifier_cleared.set
+    )
+    service.runtime = SimpleNamespace(close=lambda: None)
+    service.store = SimpleNamespace(close=lambda: None)
+    closing = threading.Thread(target=service.close)
+    closing.start()
+    assert join_entered.wait(2)
+    cleared_before_join_completed = classifier_cleared.is_set()
+
+    pump_release.set()
+    closing.join(2)
+    pump_thread.join(2)
+
+    assert cleared_before_join_completed is False
+    assert classifier_cleared.is_set()
+    assert not closing.is_alive()
+    assert not pump_thread.is_alive()
+
+
 def test_service_composes_project_resolved_artifact_publication_and_acceptance(
     tmp_path,
 ) -> None:

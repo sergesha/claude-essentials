@@ -12,13 +12,12 @@ import pytest
 from sqlalchemy import func, select
 
 from lockstep import cli
+from lockstep.runtime import start_service as start_service_module
 from lockstep.runtime.catalog import RunCatalog
 from lockstep.runtime.effects.coordinator import ProviderContractViolation
 from lockstep.runtime.effects.owner_policy import RuntimeRequirementIndex
 from lockstep.runtime.engine import Engine
 from lockstep.runtime.errors import LockstepError
-from lockstep.runtime import service as service_module
-from lockstep.runtime import start_service as start_service_module
 from lockstep.runtime.service import preflight_recipe
 from lockstep.runtime.storage import SQLiteStore
 
@@ -388,6 +387,19 @@ def test_granted_static_admission_remains_parked_after_service_restart(
     result = _start(project, owner_state, "target")
     _assert_prelaunch_park(owner_state, project, result, provider_marker)
 
+    reopened = Engine.command(owner_state, project / ".lockstep" / "recipes")
+    try:
+        try:
+            reopened._activate_writable_core()
+        except ProviderContractViolation:
+            # The regression oracle is the durable boundary below: recovery may
+            # report a fail-closed error, but it may never cross into native work.
+            pass
+    finally:
+        reopened.close()
+
+    _assert_prelaunch_park(owner_state, project, result, provider_marker)
+
 
 def test_repeated_recovery_classifies_one_immutable_static_admission_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -421,31 +433,15 @@ def test_repeated_recovery_classifies_one_immutable_static_admission_once(
     monkeypatch.setattr(
         start_service_module, "_is_static_runtime_admission", counted
     )
-    monkeypatch.setattr(
-        service_module, "_is_static_runtime_admission", counted, raising=False
-    )
     reopened = Engine.command(owner_state, project / ".lockstep" / "recipes")
     try:
-        reopened._open_writable_stores()
-        for _ in range(4):
+        reopened._activate_writable_core()
+        for _ in range(3):
             reopened._recover_start_admissions()
     finally:
         reopened.close()
 
     assert classifications == 1
-    _assert_prelaunch_park(owner_state, project, result, provider_marker)
-
-    reopened = Engine.command(owner_state, project / ".lockstep" / "recipes")
-    try:
-        try:
-            reopened._activate_writable_core()
-        except ProviderContractViolation:
-            # The regression oracle is the durable boundary below: recovery may
-            # report a fail-closed error, but it may never cross into native work.
-            pass
-    finally:
-        reopened.close()
-
     _assert_prelaunch_park(owner_state, project, result, provider_marker)
 
 
