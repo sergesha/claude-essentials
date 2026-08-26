@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import os
 from pathlib import Path
@@ -223,6 +223,60 @@ class ThreadCall:
         finished = self.finished.wait(timeout)
         self.thread.join(timeout=1.0)
         return finished and not self.thread.is_alive()
+
+
+@dataclass
+class A1ConcurrentCleanup:
+    """Own every A1 thread and barrier until its command service is closed."""
+
+    close_service: Callable[[], None]
+    release_events: tuple[threading.Event, ...]
+    calls: list[ThreadCall] = field(default_factory=list)
+    threads_stopped: bool = False
+
+    def __enter__(self) -> "A1ConcurrentCleanup":
+        return self
+
+    def launch(self, name: str, call: Callable[[], object]) -> ThreadCall:
+        started = ThreadCall.launch(name, call)
+        self.calls.append(started)
+        return started
+
+    def __exit__(self, _kind, original: BaseException | None, _traceback) -> bool:
+        cleanup_errors: list[BaseException] = []
+        stopped: list[bool] = []
+        try:
+            for release in self.release_events:
+                try:
+                    release.set()
+                except BaseException as exc:
+                    cleanup_errors.append(exc)
+            for call in self.calls:
+                try:
+                    stopped.append(call.stop())
+                except BaseException as exc:
+                    stopped.append(False)
+                    cleanup_errors.append(exc)
+        finally:
+            try:
+                self.close_service()
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+
+        self.threads_stopped = all(stopped)
+        cleanup_failed = not self.threads_stopped or bool(cleanup_errors)
+        if cleanup_failed and original is not None:
+            original.add_note(self._failure_note(cleanup_errors))
+        elif cleanup_errors:
+            raise BaseExceptionGroup("A1 concurrent cleanup failed", cleanup_errors)
+        return False
+
+    def _failure_note(self, errors: list[BaseException]) -> str:
+        details: list[str] = []
+        if not self.threads_stopped:
+            details.append("not every started A1 thread stopped")
+        details.extend(f"{type(exc).__name__}: {exc}" for exc in errors)
+        return "A1 cleanup assertion failed after all actions: " + "; ".join(details)
 
 
 def owner_tree(root: Path) -> tuple[tuple[str, str, int, bytes | str], ...]:

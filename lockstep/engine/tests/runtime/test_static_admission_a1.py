@@ -13,7 +13,11 @@ from lockstep.runtime import start_service as start_service_module
 from lockstep.runtime.effects.owner_policy import RuntimeAdmissionDecision
 from lockstep.runtime.effects.owner_snapshot_store import open_runtime_snapshot
 from lockstep.runtime.errors import LockstepError
-from tests.runtime._static_admission_a1_harness import A1Harness, ThreadCall, owner_tree
+from tests.runtime._static_admission_a1_harness import (
+    A1ConcurrentCleanup,
+    A1Harness,
+    owner_tree,
+)
 
 
 def test_supported_revocation_after_real_preflight_is_write_free(
@@ -35,11 +39,12 @@ def test_supported_revocation_after_real_preflight_is_write_free(
 
     monkeypatch.setattr(service_module, "plan_authorized_start", barrier_after_real_preflight)
     service = harness.command()
-    start = ThreadCall.launch(
-        "lockstep-a1-start",
-        lambda: service.start("target", {}, harness.project_identity),
-    )
-    try:
+    cleanup = A1ConcurrentCleanup(service.close, (release_start,))
+    with cleanup:
+        start = cleanup.launch(
+            "lockstep-a1-start",
+            lambda: service.start("target", {}, harness.project_identity),
+        )
         assert preflight_finished.wait(10.0), "real static preflight did not finish"
         assert harness.provision((), suffix="revoke") == 0
         revoked_digest, revoked_snapshot = open_runtime_snapshot(harness.owner_state)
@@ -50,14 +55,10 @@ def test_supported_revocation_after_real_preflight_is_write_free(
         assert revoked_snapshot.pinned == granted_snapshot.pinned
         assert revoked_snapshot.grants == ()
         expected_after_drift = owner_tree(harness.owner_state)
-    finally:
-        release_start.set()
-        start_stopped = start.stop()
-        service.close()
 
     assert {
         "rejected": len(start.outcome) == 1 and isinstance(start.outcome[0], LockstepError),
-        "worker_stopped": start_stopped,
+        "worker_stopped": cleanup.threads_stopped,
         "owner_tree_unchanged": owner_tree(harness.owner_state) == expected_after_drift,
         "runtime_database_absent": not (harness.owner_state / "runtime.sqlite").exists(),
         "native_checkpoint_absent": not (
@@ -92,26 +93,22 @@ def test_admission_first_holds_snapshot_lock_until_durable_park(
         start_service_module.AuthorizedStartService, "_admit_and_park", blocked_park
     )
     service = harness.command()
-    start = ThreadCall.launch(
-        "lockstep-a1-admit-first",
-        lambda: service.start("target", {}, harness.project_identity),
-    )
-    try:
+    cleanup = A1ConcurrentCleanup(service.close, (release_park,))
+    with cleanup:
+        start = cleanup.launch(
+            "lockstep-a1-admit-first",
+            lambda: service.start("target", {}, harness.project_identity),
+        )
         assert park_entered.wait(10.0), "start never reached the durable park"
-        revoke = ThreadCall.launch(
+        revoke = cleanup.launch(
             "lockstep-a1-admit-first-provision",
             lambda: harness.provision((), suffix="admission-first-revoke"),
         )
         provisioning_blocked = not revoke.finished.wait(0.5)
-    finally:
-        release_park.set()
-        start_stopped = start.stop()
-        revoke_stopped = revoke.stop()
-        service.close()
 
     assert {
         "provisioning_blocked": provisioning_blocked,
-        "threads_stopped": start_stopped and revoke_stopped,
+        "threads_stopped": cleanup.threads_stopped,
         "start_parked": start.outcome[0].get("status") == "starting",
         "supported_revoke_succeeded": revoke.outcome == [0],
     } == {
@@ -142,30 +139,26 @@ def test_cold_recovery_runs_after_park_without_holding_snapshot_lock(
         original_recovery()
 
     monkeypatch.setattr(service, "_recover_engine_effects", blocked_recovery)
-    start = ThreadCall.launch(
-        "lockstep-a1-recovery",
-        lambda: service.start("target", {}, harness.project_identity),
-    )
-    try:
+    cleanup = A1ConcurrentCleanup(service.close, (release_recovery,))
+    with cleanup:
+        start = cleanup.launch(
+            "lockstep-a1-recovery",
+            lambda: service.start("target", {}, harness.project_identity),
+        )
         assert recovery_entered.wait(10.0), "cold activation never reached recovery"
         parked_before_recovery = len(service.catalog.list(harness.project_identity)) == 2
-        revoke = ThreadCall.launch(
+        revoke = cleanup.launch(
             "lockstep-a1-recovery-provision",
             lambda: harness.provision((), suffix="recovery-revoke"),
         )
         provision_completed = revoke.finished.wait(2.0)
-    finally:
-        release_recovery.set()
-        start_stopped = start.stop()
-        revoke_stopped = revoke.stop()
-        service.close()
 
     assert {
         "new_park_precedes_recovery": parked_before_recovery,
         "provision_completed_during_recovery": provision_completed,
         "supported_revoke_succeeded": revoke.outcome == [0],
         "start_parked": start.outcome[0].get("status") == "starting",
-        "threads_stopped": start_stopped and revoke_stopped,
+        "threads_stopped": cleanup.threads_stopped,
     } == {
         "new_park_precedes_recovery": True,
         "provision_completed_during_recovery": True,
@@ -201,26 +194,23 @@ def test_activation_waiter_does_not_hold_snapshot_lock_during_prior_recovery(
 
     monkeypatch.setattr(service, "_recover_engine_effects", blocked_recovery)
     monkeypatch.setattr(RuntimeAdmissionDecision, "assert_current", observed_currentness)
-    first = ThreadCall.launch(
-        "lockstep-a1-first-start",
-        lambda: service.start("target", {}, harness.project_identity),
-    )
-    try:
+    cleanup = A1ConcurrentCleanup(service.close, (release_recovery,))
+    with cleanup:
+        first = cleanup.launch(
+            "lockstep-a1-first-start",
+            lambda: service.start("target", {}, harness.project_identity),
+        )
         assert recovery_entered.wait(10.0), "first start did not enter recovery"
-        second = ThreadCall.launch(
+        second = cleanup.launch(
             "lockstep-a1-second-start",
             lambda: service.start("target", {}, harness.project_identity),
         )
         assert second_guard_entered.wait(10.0), "second start missed currentness"
-        revoke = ThreadCall.launch(
+        revoke = cleanup.launch(
             "lockstep-a1-waiter-provision",
             lambda: harness.provision((), suffix="waiter-revoke"),
         )
         provision_completed = revoke.finished.wait(2.0)
-    finally:
-        release_recovery.set()
-        threads_stopped = first.stop() and second.stop() and revoke.stop()
-        service.close()
 
     run_ids = harness.run_ids()
     assert {
@@ -228,7 +218,7 @@ def test_activation_waiter_does_not_hold_snapshot_lock_during_prior_recovery(
         "first_parked": first.outcome[0].get("status") == "starting",
         "second_rejected": isinstance(second.outcome[0], LockstepError),
         "exactly_one_run": len(run_ids) == 1,
-        "threads_stopped": threads_stopped,
+        "threads_stopped": cleanup.threads_stopped,
     } == {
         "provision_completed_during_recovery": True,
         "first_parked": True,
