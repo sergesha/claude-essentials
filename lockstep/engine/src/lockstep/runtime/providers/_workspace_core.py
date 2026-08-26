@@ -11,36 +11,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
 import stat
-import tempfile
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Literal
 
 from lockstep.runtime.blobs import BlobStore
-from lockstep.runtime.locking import file_lock
-from lockstep.runtime.manifests import (
-    PathContractError,
-    ProjectWritePath,
-    capture_project,
-    compare_effect,
-    snapshot_from_data,
-    snapshot_to_data,
-)
 from lockstep.runtime.manifests import ProjectSnapshot as FilesystemSnapshot
-from lockstep.runtime.owner_state import (
-    InsecureStatePath,
-    ensure_owner_directory,
-    initialize_owner_state,
-    seal_owner_file,
-    verify_owner_file,
-)
-from lockstep.runtime.project_paths import (
-    ProjectTreeLimits,
-    portable_collision_key,
-    validate_portable_project_paths,
-)
+from lockstep.runtime.project_paths import ProjectTreeLimits
 from lockstep.runtime.project_snapshots import ProjectSnapshotRef, ProjectSnapshotStore
 
 
@@ -53,6 +31,19 @@ WorkspacePurpose = Literal["managed_output", "no_publish_operation"]
 
 
 WorkspaceLimits = ProjectTreeLimits
+
+
+@dataclass(frozen=True)
+class WorkspaceContext:
+    """Immutable resources and owner-only paths shared by workspace helpers."""
+
+    records: Path
+    checkouts: Path
+    staging: Path
+    quarantine: Path
+    snapshots: ProjectSnapshotStore
+    blobs: BlobStore
+    limits: ProjectTreeLimits
 
 
 @dataclass(frozen=True)
@@ -172,6 +163,3 @@ def _read_regular_nofollow(
     if hashlib.sha256(data).hexdigest() != expected_sha256:
         raise WorkspaceError(f"workspace manifest changed during rollover: {path}")
     return data
-
-
-

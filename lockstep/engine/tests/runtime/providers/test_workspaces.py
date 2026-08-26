@@ -134,12 +134,17 @@ def test_materialize_validates_declared_writes_as_one_bounded_tree(
 def test_rollover_checks_tree_limits_before_first_mutable_capture(tmp_path, monkeypatch):
     provider, lease = _materialized(tmp_path)
     (lease.workspace_path / "src/extra.py").write_text("extra")
-    provider._limits = ProjectTreeLimits(max_entries=1)
+    provider = LocalGitWorkspaceProvider(
+        provider._owner_state,
+        provider._snapshots,
+        provider._blobs,
+        limits=ProjectTreeLimits(max_entries=1),
+    )
 
     def capture_must_not_run(_workspace):
         raise AssertionError("capture ran before tree-limit preflight")
 
-    monkeypatch.setattr(provider, "_capture", capture_must_not_run)
+    monkeypatch.setattr(provider._attestor, "_capture", capture_must_not_run)
     with pytest.raises(WorkspaceError, match="entries"):
         provider.quarantine_and_rollover(lease)
 
@@ -147,12 +152,17 @@ def test_rollover_checks_tree_limits_before_first_mutable_capture(tmp_path, monk
 def test_materialize_reuse_checks_limits_before_recapture(tmp_path, monkeypatch):
     provider, lease = _materialized(tmp_path)
     (lease.workspace_path / "src/extra.py").write_text("extra")
-    provider._limits = ProjectTreeLimits(max_entries=1)
+    provider = LocalGitWorkspaceProvider(
+        provider._owner_state,
+        provider._snapshots,
+        provider._blobs,
+        limits=ProjectTreeLimits(max_entries=1),
+    )
 
     def capture_must_not_run(_workspace):
         raise AssertionError("capture ran before tree-limit preflight")
 
-    monkeypatch.setattr(provider, "_capture", capture_must_not_run)
+    monkeypatch.setattr(provider._attestor, "_capture", capture_must_not_run)
     with pytest.raises(WorkspaceError, match="entries"):
         provider.materialize(
             effect_id=lease.effect_id,

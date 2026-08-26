@@ -1,30 +1,41 @@
 from __future__ import annotations
-import hashlib, json, os, shutil, stat, tempfile
-from pathlib import Path, PurePosixPath
-from typing import Any
-from lockstep.runtime.locking import file_lock
-from lockstep.runtime.manifests import PathContractError, ProjectWritePath, capture_project, compare_effect, snapshot_from_data, snapshot_to_data
+
+import json
+import os
+import shutil
+import tempfile
+from pathlib import Path
+
+from lockstep.runtime.manifests import snapshot_from_data, snapshot_to_data
 from lockstep.runtime.manifests import ProjectSnapshot as FilesystemSnapshot
 from lockstep.runtime.owner_state import InsecureStatePath, seal_owner_file, verify_owner_file
-from lockstep.runtime.project_paths import portable_collision_key, validate_portable_project_paths
-from lockstep.runtime.project_snapshots import ProjectSnapshotRef
-from lockstep.runtime.providers._workspace_core import NoPublishProof, WorkspaceError, WorkspaceLease, WorkspacePurpose, _canonical, _hex, _read_regular_nofollow, _snapshot_ref, _stat_identity, _text, _workspace_digest
+from lockstep.runtime.providers._workspace_core import (
+    WorkspaceContext,
+    WorkspaceError,
+    WorkspaceLease,
+    _canonical,
+    _hex,
+    _snapshot_ref,
+    _text,
+    _workspace_digest,
+)
 
 class WorkspaceRecordRepository:
-    def __init__(self, owner: Any) -> None: self._owner = owner
-    def __getattr__(self, name): return getattr(self._owner, name)
+    def __init__(self, context: WorkspaceContext) -> None:
+        self._context = context
+
     def inspect(self, workspace_ref: str): return self._read_record(_workspace_digest(workspace_ref))
     def _record_path(self, key: str) -> Path:
-        return self._records / f"{key}.json"
+        return self._context.records / f"{key}.json"
 
     def _checkout_path(self, key: str) -> Path:
-        return self._checkouts / key
+        return self._context.checkouts / key
 
     def _staging_path(self, key: str) -> Path:
-        return self._staging / key
+        return self._context.staging / key
 
     def _quarantine_path(self, key: str) -> Path:
-        return self._quarantine / key
+        return self._context.quarantine / key
 
     def _discard_recovery_tree(self, path: Path, parent: Path) -> None:
         if path.parent != parent or path.is_symlink():
@@ -56,7 +67,7 @@ class WorkspaceRecordRepository:
         encoded = _canonical(data)
         path = self._record_path(key)
         descriptor, raw_temporary = tempfile.mkstemp(
-            prefix=f".{key}.", dir=self._records
+            prefix=f".{key}.", dir=self._context.records
         )
         temporary = Path(raw_temporary)
         try:
@@ -66,7 +77,7 @@ class WorkspaceRecordRepository:
                 os.fsync(stream.fileno())
             seal_owner_file(temporary, writable=False)
             os.replace(temporary, path)
-            self._fsync_directory(self._records)
+            self._fsync_directory(self._context.records)
         finally:
             if temporary.exists():
                 temporary.unlink()

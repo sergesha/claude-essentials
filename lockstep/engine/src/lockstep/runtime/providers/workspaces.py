@@ -10,6 +10,7 @@ from lockstep.runtime.project_snapshots import ProjectSnapshotStore
 from lockstep.runtime.providers._workspace_attestation import WorkspaceAttestor
 from lockstep.runtime.providers._workspace_core import (
     NoPublishProof,
+    WorkspaceContext,
     WorkspaceError,
     WorkspaceLease,
     WorkspaceLimits,
@@ -42,19 +43,37 @@ class LocalGitWorkspaceProvider:
         *,
         limits: WorkspaceLimits | None = None,
     ) -> None:
-        self._owner_state = initialize_owner_state(owner_state_dir)
-        self._root = ensure_owner_directory(self._owner_state, "managed-workspaces")
-        self._records = ensure_owner_directory(self._root, "records")
-        self._checkouts = ensure_owner_directory(self._root, "checkouts")
-        self._staging = ensure_owner_directory(self._root, "staging")
-        self._quarantine = ensure_owner_directory(self._root, "quarantine")
-        self._snapshots = snapshots
-        self._blobs = blobs
-        self._limits = limits or snapshots.limits
-        self._attestor = WorkspaceAttestor(self)
-        self._record_repository = WorkspaceRecordRepository(self)
-        self._materializer = WorkspaceMaterializationTransaction(self)
-        self._rollover = WorkspaceRolloverTransaction(self)
+        owner_state = initialize_owner_state(owner_state_dir)
+        root = ensure_owner_directory(owner_state, "managed-workspaces")
+        context = WorkspaceContext(
+            records=ensure_owner_directory(root, "records"),
+            checkouts=ensure_owner_directory(root, "checkouts"),
+            staging=ensure_owner_directory(root, "staging"),
+            quarantine=ensure_owner_directory(root, "quarantine"),
+            snapshots=snapshots,
+            blobs=blobs,
+            limits=limits or snapshots.limits,
+        )
+        self._context = context
+
+        # Preserve the established facade's diagnostic/private aliases.
+        self._owner_state = owner_state
+        self._root = root
+        self._records = context.records
+        self._checkouts = context.checkouts
+        self._staging = context.staging
+        self._quarantine = context.quarantine
+        self._snapshots = context.snapshots
+        self._blobs = context.blobs
+        self._limits = context.limits
+        self._attestor = WorkspaceAttestor(context)
+        self._record_repository = WorkspaceRecordRepository(context)
+        self._materializer = WorkspaceMaterializationTransaction(
+            context, self._record_repository, self._attestor
+        )
+        self._rollover = WorkspaceRolloverTransaction(
+            context, self._record_repository, self._attestor
+        )
 
     def workspace_ref_for(self, effect_id: str, intent_digest: str) -> str:
         commitment = {

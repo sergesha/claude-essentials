@@ -1,22 +1,29 @@
 from __future__ import annotations
-import hashlib, json, os, shutil, stat, tempfile
-from pathlib import Path, PurePosixPath
-from typing import Any
-from lockstep.runtime.locking import file_lock
-from lockstep.runtime.manifests import PathContractError, ProjectWritePath, capture_project, compare_effect, snapshot_from_data, snapshot_to_data
+
+import hashlib
+import os
+import stat
+from pathlib import Path
+
+from lockstep.runtime.manifests import (
+    PathContractError,
+    ProjectWritePath,
+    capture_project,
+    compare_effect,
+)
 from lockstep.runtime.manifests import ProjectSnapshot as FilesystemSnapshot
-from lockstep.runtime.owner_state import InsecureStatePath, seal_owner_file, verify_owner_file
 from lockstep.runtime.project_paths import portable_collision_key, validate_portable_project_paths
-from lockstep.runtime.project_snapshots import ProjectSnapshotRef
-from lockstep.runtime.providers._workspace_core import NoPublishProof, WorkspaceError, WorkspaceLease, WorkspacePurpose, _canonical, _hex, _read_regular_nofollow, _snapshot_ref, _stat_identity, _text, _workspace_digest
+from lockstep.runtime.providers._workspace_core import (
+    WorkspaceContext,
+    WorkspaceError,
+    WorkspaceLease,
+    _stat_identity,
+)
 
 class WorkspaceAttestor:
-    def __init__(self, owner: Any) -> None: self._owner = owner
-    def __getattr__(self, name):
-        try:
-            return getattr(self._owner._record_repository, name)
-        except AttributeError:
-            return getattr(self._owner, name)
+    def __init__(self, context: WorkspaceContext) -> None:
+        self._context = context
+
     def _capture(self, workspace: Path) -> FilesystemSnapshot:
         try:
             return capture_project(workspace)
@@ -39,7 +46,7 @@ class WorkspaceAttestor:
                         if child.name == ".git" and directory == workspace:
                             continue
                         entries += 1
-                        if entries > self._limits.max_entries:
+                        if entries > self._context.limits.max_entries:
                             raise WorkspaceError(
                                 "workspace entries exceed rollover admission limit"
                             )
@@ -47,12 +54,12 @@ class WorkspaceAttestor:
                         if stat.S_ISDIR(metadata.st_mode):
                             pending.append(Path(child.path))
                         elif stat.S_ISREG(metadata.st_mode):
-                            if metadata.st_size > self._limits.max_file_bytes:
+                            if metadata.st_size > self._context.limits.max_file_bytes:
                                 raise WorkspaceError(
                                     "workspace file exceeds rollover admission limit"
                                 )
                             total_bytes += metadata.st_size
-                            if total_bytes > self._limits.max_total_bytes:
+                            if total_bytes > self._context.limits.max_total_bytes:
                                 raise WorkspaceError(
                                     "workspace bytes exceed rollover admission limit"
                                 )
@@ -85,7 +92,7 @@ class WorkspaceAttestor:
                 with os.scandir(directory) as children:
                     for child in children:
                         entries += 1
-                        if entries > self._limits.max_entries:
+                        if entries > self._context.limits.max_entries:
                             raise WorkspaceError(
                                 "Git control entries exceed admission limit"
                             )
@@ -110,7 +117,7 @@ class WorkspaceAttestor:
                         digest.update(str(stat.S_IMODE(item.st_mode)).encode() + b"\0")
                         walk(path, rel, item)
                     elif stat.S_ISREG(item.st_mode):
-                        if item.st_size > self._limits.max_file_bytes:
+                        if item.st_size > self._context.limits.max_file_bytes:
                             raise WorkspaceError(
                                 "Git control file exceeds admission limit"
                             )
@@ -131,11 +138,11 @@ class WorkspaceAttestor:
                             while chunk := os.read(descriptor, 1024 * 1024):
                                 observed_size += len(chunk)
                                 total_bytes += len(chunk)
-                                if observed_size > self._limits.max_file_bytes:
+                                if observed_size > self._context.limits.max_file_bytes:
                                     raise WorkspaceError(
                                         "Git control file exceeds admission limit"
                                     )
-                                if total_bytes > self._limits.max_total_bytes:
+                                if total_bytes > self._context.limits.max_total_bytes:
                                     raise WorkspaceError(
                                         "Git control bytes exceed admission limit"
                                     )
@@ -186,7 +193,7 @@ class WorkspaceAttestor:
                 (entry.path, "directory" if entry.kind == "directory" else "file")
                 for entry in captured.entries
             ),
-            limits=self._limits,
+            limits=self._context.limits,
             label="workspace entries",
         )
         if any(entry.kind == "symlink" for entry in captured.entries):
@@ -298,3 +305,12 @@ class WorkspaceAttestor:
             directories.append(Path(current))
         for directory in reversed(directories):
             self._fsync_directory(directory)
+
+    @staticmethod
+    def _fsync_directory(directory: Path) -> None:
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        descriptor = os.open(directory, flags)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
