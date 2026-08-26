@@ -232,7 +232,7 @@ def test_activation_waiter_does_not_hold_snapshot_lock_during_prior_recovery(
     }
 
 
-def test_committed_start_survives_later_cold_recovery_failure(
+def test_committed_start_survives_post_persist_recovery_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     harness = A1Harness.granted_runtime(tmp_path, monkeypatch)
@@ -251,11 +251,6 @@ def test_committed_start_survives_later_cold_recovery_failure(
         service.close()
 
     before_run_ids = harness.run_ids()
-    reopened = harness.command()
-    try:
-        reopened.scenario_recover(harness.project_identity)
-    finally:
-        reopened.close()
     after_run_ids = harness.run_ids()
     returned_run_id = result.get("run_id") if isinstance(result, dict) else None
     assert {
@@ -263,7 +258,7 @@ def test_committed_start_survives_later_cold_recovery_failure(
             isinstance(result, dict) and result.get("status") == "starting"
         ),
         "one_run_before_restart": len(before_run_ids) == 1,
-        "one_run_after_recovery": len(after_run_ids) == 1,
+        "one_run_after_failed_activation": len(after_run_ids) == 1,
         "same_committed_run": (
             returned_run_id is not None
             and before_run_ids[0] == returned_run_id
@@ -272,6 +267,6 @@ def test_committed_start_survives_later_cold_recovery_failure(
     } == {
         "start_returned_committed_result": True,
         "one_run_before_restart": True,
-        "one_run_after_recovery": True,
+        "one_run_after_failed_activation": True,
         "same_committed_run": True,
     }

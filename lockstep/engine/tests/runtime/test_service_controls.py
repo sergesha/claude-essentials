@@ -30,6 +30,7 @@ def _service_double() -> LockstepCommandService:
     service = object.__new__(LockstepCommandService)
     service._activation_lock = threading.RLock()  # noqa: SLF001
     service._writable_core_active = True  # noqa: SLF001
+    service._initial_recovery_exclusion = None  # noqa: SLF001
     return service
 
 
