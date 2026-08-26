@@ -25,13 +25,13 @@ def test_engine_is_state_free_service_delegate_and_restarts_from_native_checkpoi
     project = tmp_path / "project"
     project.mkdir()
     recipes = _recipes(tmp_path)
-    first = Engine(state, recipes)
+    first = Engine.command(state, recipes)
     started = first.start("native-parent-direct", {}, str(project))
     run_id = started["run_id"]
     sessions.touch(state, run_id, "session-1", 30)
     first.close()
 
-    restarted = Engine(state, recipes)
+    restarted = Engine.command(state, recipes)
     completed = restarted.done(
         run_id,
         "answer",
@@ -40,7 +40,9 @@ def test_engine_is_state_free_service_delegate_and_restarts_from_native_checkpoi
         project=str(project),
     )
     assert completed["status"] == "completed"
-    assert restarted.status(run_id, str(project))["status"] == "completed"
+    assert Engine.observe(state, recipes).status(run_id, str(project))["status"] == (
+        "completed"
+    )
     restarted.close()
 
 
@@ -48,7 +50,7 @@ def test_worker_resume_requires_current_session_binding(tmp_path):
     state = tmp_path / "state"
     project = tmp_path / "project"
     project.mkdir()
-    engine = Engine(state, _recipes(tmp_path))
+    engine = Engine.command(state, _recipes(tmp_path))
     run_id = engine.start("native-parent-direct", {}, str(project))["run_id"]
     sessions.touch(state, run_id, "owner", 30)
 
@@ -60,15 +62,9 @@ def test_worker_resume_requires_current_session_binding(tmp_path):
             session_id="foreign",
             project=str(project),
         )
-    assert engine.status(run_id, str(project))["status"] == "awaiting"
-    engine.close()
-
-
-def test_engine_has_no_workflow_state_fields(tmp_path):
-    project = tmp_path / "project"
-    project.mkdir()
-    engine = Engine(tmp_path / "state", _recipes(tmp_path))
-    assert set(engine.__dict__) == {"_service"}
+    assert Engine.observe(state, engine.recipes_dir).status(
+        run_id, str(project)
+    )["status"] == "awaiting"
     engine.close()
 
 
@@ -118,7 +114,7 @@ def test_manual_protected_recipe_resumes_after_service_restart(tmp_path):
         "  - {from: fail, to: END}\n"
         "  - {from: error, to: END}\n"
     )
-    first = Engine(state, recipes)
+    first = Engine.command(state, recipes)
     started = first.start("protected-manual", {}, str(project))
     assert started["status"] == "awaiting"
     assert started["step"] == "edit"
@@ -126,7 +122,7 @@ def test_manual_protected_recipe_resumes_after_service_restart(tmp_path):
     sessions.touch(state, run_id, "session-1", 30)
     first.close()
 
-    restarted = Engine(state, recipes)
+    restarted = Engine.command(state, recipes)
     completed = restarted.scenario_done(
         run_id,
         "edit",
@@ -136,5 +132,7 @@ def test_manual_protected_recipe_resumes_after_service_restart(tmp_path):
     )
 
     assert completed["status"] == "completed"
-    assert restarted.status(run_id, str(project))["status"] == "completed"
+    assert Engine.observe(state, recipes).status(run_id, str(project))["status"] == (
+        "completed"
+    )
     restarted.close()

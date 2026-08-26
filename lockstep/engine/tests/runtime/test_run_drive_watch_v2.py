@@ -18,11 +18,16 @@ from lockstep.runtime.effects.descriptors import (
 )
 from lockstep.runtime.providers.base import TerminalSafetyObservation
 from lockstep.runtime.providers.manual import ManualSubmission
-from lockstep.runtime.service import LockstepService
+from lockstep.runtime.service import LockstepCommandService
+from lockstep.runtime.engine import Engine
 from lockstep.workflow.compiler import compile_workflow
 from lockstep.workflow.schema import load_workflow, parse_workflow
 from lockstep.workflow.semantics import ResolvedCatalog, validate_semantics
-from tests.runtime.providers.fakes import FakeEffectAuthority, FakeRunner
+from tests.runtime.providers.fakes import (
+    FakeEffectAuthority,
+    FakeRunner,
+    _legacy_command_service,
+)
 
 
 class _AutoGrantAuthority(FakeEffectAuthority):
@@ -38,6 +43,15 @@ class _AutoGrantAuthority(FakeEffectAuthority):
                 raise
             self.authorize(intent)
             return super().resolve(intent)
+
+
+def _legacy_service(state: Path, recipes: Path) -> LockstepCommandService:
+    return _legacy_command_service(
+        state,
+        recipes,
+        runners={"pinned": FakeRunner()},
+        effect_authority=_AutoGrantAuthority(),
+    )
 
 
 def _compile(tmp_path: Path, name: str, flow: str):
@@ -61,7 +75,7 @@ def _compile(tmp_path: Path, name: str, flow: str):
     return recipes, result
 
 
-def _stop_pump(service: LockstepService) -> None:
+def _stop_pump(service: LockstepCommandService) -> None:
     service._pump_stop.set()  # noqa: SLF001 - deterministic recovery boundary
     service._pump_wakeup.set()  # noqa: SLF001
     thread = service._pump_thread  # noqa: SLF001
@@ -79,7 +93,7 @@ class _DecisionCrash:
     thread_id: str
 
 
-def _bound_snapshot(service: LockstepService, crash: _DecisionCrash):
+def _bound_snapshot(service: LockstepCommandService, crash: _DecisionCrash):
     service.runtime.bind(service.catalog.get(crash.run_id))
     return service.runtime.snapshot(crash.run_id, subgraphs=True)
 
@@ -108,7 +122,7 @@ def _manual_to_decision_crash(tmp_path: Path) -> _DecisionCrash:
     project.mkdir()
     (project / "README.md").write_text("unchanged\n")
     state = tmp_path / "state"
-    service = LockstepService(state, recipes)
+    service = _legacy_service(state, recipes)
     _stop_pump(service)
     started = service.start(
         "manual-decision",
@@ -146,7 +160,8 @@ def _manual_to_decision_crash(tmp_path: Path) -> _DecisionCrash:
     return _DecisionCrash(state, recipes, project, run_id, binding.thread_id)
 
 
-def _normalized_facts(service: LockstepService, crash: _DecisionCrash) -> dict:
+def _normalized_facts(service: LockstepCommandService, crash: _DecisionCrash) -> dict:
+    projection = Engine.observe(service.state_dir, service.recipes_dir)
     snapshot = _bound_snapshot(service, crash)
     effects = service.effects.list_for_thread(crash.thread_id)
     return {
@@ -171,11 +186,11 @@ def _normalized_facts(service: LockstepService, crash: _DecisionCrash) -> dict:
         "values": snapshot.values,
         "history": tuple(
             (item["checkpoint_id"], item["status"])
-            for item in service.scenario_history(crash.run_id, str(crash.project))
+            for item in projection.history(crash.run_id, str(crash.project))
         ),
         "events": tuple(
             tuple(sorted(item.items()))
-            for item in service.scenario_events(crash.run_id, str(crash.project))
+            for item in projection.events(crash.run_id, str(crash.project))
         ),
     }
 
@@ -184,7 +199,7 @@ def test_recovery_consumes_rowless_decision_after_manual_delivery_crash(
     tmp_path: Path,
 ) -> None:
     crash = _manual_to_decision_crash(tmp_path)
-    restarted = LockstepService(crash.state, crash.recipes)
+    restarted = _legacy_service(crash.state, crash.recipes)
     try:
         _stop_pump(restarted)
         snapshot = _bound_snapshot(restarted, crash)
@@ -208,7 +223,7 @@ def _managed_park(tmp_path: Path, *, sealed: bool):
     project = tmp_path / "project"
     project.mkdir()
     runner = FakeRunner()
-    service = LockstepService(
+    service = _legacy_command_service(
         tmp_path / "state",
         recipes,
         runners={"pinned": runner},
@@ -266,7 +281,7 @@ def test_drive_watch_survives_every_nonterminal_park(
         )
     elif park == "delivered_to_decision":
         crash = _manual_to_decision_crash(tmp_path)
-        service = LockstepService(crash.state, crash.recipes)
+        service = _legacy_service(crash.state, crash.recipes)
         run_id = crash.run_id
         service.runtime.bind(service.catalog.get(run_id))
     else:
@@ -279,7 +294,7 @@ def test_drive_watch_survives_every_nonterminal_park(
         )
         project = tmp_path / "project"
         project.mkdir()
-        service = LockstepService(tmp_path / "state", recipes)
+        service = _legacy_service(tmp_path / "state", recipes)
         _stop_pump(service)
         started = service.start(
             "manual-park", {}, str(project),
@@ -309,7 +324,7 @@ def test_watch_is_not_removed_at_nonterminal_manual_park(
     )
     project = tmp_path / "project"
     project.mkdir()
-    service = LockstepService(tmp_path / "state", recipes)
+    service = _legacy_service(tmp_path / "state", recipes)
     _stop_pump(service)
     started = service.start(
         "manual-lifetime", {}, str(project),
@@ -368,7 +383,7 @@ def _blocked_then_decision_population(tmp_path: Path, *, revoke: bool = True):
     foreign.mkdir()
     authority = _AutoGrantAuthority()
     runner = FakeRunner()
-    service = LockstepService(
+    service = _legacy_command_service(
         tmp_path / "state", recipes,
         runners={"pinned": runner}, effect_authority=authority,
     )
@@ -413,7 +428,7 @@ def _blocked_then_decision_population(tmp_path: Path, *, revoke: bool = True):
 
 
 def _protected_action_trace(
-    service: LockstepService, managed_id: str, runner: FakeRunner
+    service: LockstepCommandService, managed_id: str, runner: FakeRunner
 ) -> dict:
     binding = service.catalog.get(managed_id)
     record = service.effects.list_for_thread(binding.thread_id)[0]
@@ -632,7 +647,7 @@ def test_start_watch_replays_only_before_first_checkpoint_non_null(
     )
     project = tmp_path / "project"
     project.mkdir()
-    service = LockstepService(tmp_path / "state", recipes)
+    service = _legacy_service(tmp_path / "state", recipes)
     _stop_pump(service)
 
     # Real crash cut after atomic admission but before the native runtime has
@@ -734,7 +749,7 @@ def test_fresh_driver_reaches_decision_after_128_worker_parks(
     project = tmp_path / "project"
     project.mkdir()
     state = tmp_path / "state"
-    service = LockstepService(state, recipes)
+    service = _legacy_service(state, recipes)
     _stop_pump(service)
     for _index in range(128):
         parked = service.start(
@@ -759,7 +774,7 @@ def test_fresh_driver_reaches_decision_after_128_worker_parks(
     assert service.runtime.snapshot(late_id, subgraphs=True).pending
     service.close()
 
-    fresh = LockstepService(state, recipes)
+    fresh = _legacy_service(state, recipes)
     try:
         _stop_pump(fresh)
         fresh.runtime.bind(late_binding)
@@ -771,7 +786,7 @@ def test_fresh_driver_reaches_decision_after_128_worker_parks(
 
 def test_b794_acknowledged_state_backfills_null_input_watch(tmp_path: Path) -> None:
     crash = _manual_to_decision_crash(tmp_path)
-    restarted = LockstepService(crash.state, crash.recipes)
+    restarted = _legacy_service(crash.state, crash.recipes)
     try:
         _stop_pump(restarted)
         snapshot = _bound_snapshot(restarted, crash)
@@ -783,7 +798,7 @@ def test_b794_acknowledged_state_backfills_null_input_watch(tmp_path: Path) -> N
 
 def test_repeated_recovery_is_idempotent(tmp_path: Path) -> None:
     crash = _manual_to_decision_crash(tmp_path)
-    restarted = LockstepService(crash.state, crash.recipes)
+    restarted = _legacy_service(crash.state, crash.recipes)
     try:
         _stop_pump(restarted)
         before = _normalized_facts(restarted, crash)

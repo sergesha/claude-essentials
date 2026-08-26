@@ -81,6 +81,55 @@ class EffectRecord:
     result: EffectResult | ScopeResult | AcceptanceResult | None = None
 
 
+@dataclass(frozen=True)
+class _PreparedEffectFacts:
+    effect_id: str
+    coordinate: NativeCoordinate
+    descriptor_digest: str
+    effect_kind: str
+    deadline_at: datetime | None
+    runner_binding_digest: str | None
+    workspace_ref: str | None
+    request_digest: str | None
+    grant_digest: str | None
+    created_at: datetime
+
+    def insert_values(self) -> dict[str, object]:
+        timestamp = _dump(self.created_at)
+        return {
+            "effect_id": self.effect_id,
+            "thread_id": self.coordinate.thread_id,
+            "checkpoint_ns": self.coordinate.checkpoint_ns,
+            "checkpoint_id": self.coordinate.checkpoint_id,
+            "task_id": self.coordinate.task_id,
+            "interrupt_id": self.coordinate.interrupt_id,
+            "descriptor_digest": self.descriptor_digest,
+            "effect_kind": self.effect_kind,
+            "deadline_at": None if self.deadline_at is None else _dump(self.deadline_at),
+            "phase": "prepared",
+            "lease_epoch": 0,
+            "runner_binding_digest": self.runner_binding_digest,
+            "workspace_ref": self.workspace_ref,
+            "request_digest": self.request_digest,
+            "grant_digest": self.grant_digest,
+            "launch_commitment_digest": None,
+            "result_ref": None,
+            "fixed_error_code": None,
+            "created_at": timestamp,
+            "updated_at": timestamp,
+            "revision": 0,
+        }
+
+    def immutable_values(self) -> dict[str, object]:
+        return {
+            "deadline_at": self.deadline_at,
+            "workspace_ref": self.workspace_ref,
+            "request_digest": self.request_digest,
+            "grant_digest": self.grant_digest,
+            "effect_kind": self.effect_kind,
+        }
+
+
 def _utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("timestamp must include a timezone")
@@ -107,6 +156,69 @@ def _binding_digest(value: str | None) -> str | None:
     if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
         raise ValueError("runner binding must be a lowercase SHA-256 digest")
     return value
+
+
+def _validate_prepare_coordinate(coordinate: NativeCoordinate) -> None:
+    for name in ("thread_id", "checkpoint_id", "task_id", "interrupt_id"):
+        _nonempty(getattr(coordinate, name), name)
+    if not isinstance(coordinate.checkpoint_ns, str):
+        raise TypeError("checkpoint_ns must be a string")
+
+
+def _validate_effect_preparation(
+    descriptor: EffectDescriptor,
+    *,
+    deadline: datetime | None,
+    binding: str | None,
+    request: str | None,
+    now: datetime,
+) -> None:
+    if descriptor.kind == "manual" and deadline is not None:
+        raise ValueError("unmanaged manual effect may not bind a deadline")
+    if descriptor.kind != "manual" and binding is None:
+        raise ValueError("managed effect requires a runner binding")
+    if (
+        descriptor.deadline_seconds is not None or descriptor.scope_state_keys
+    ) and deadline is None:
+        raise ValueError("bounded effect requires its resolved deadline")
+    if (
+        descriptor.runner is not None
+        and request is None
+        and (deadline is None or deadline > now)
+    ):
+        raise ValueError(
+            "runnable effect requires exact request and grant commitments"
+        )
+
+
+def _validate_prepare_descriptor(
+    descriptor: EffectDescriptor | ScopeDescriptor | AcceptDescriptor | PublishDescriptor,
+    *,
+    deadline: datetime | None,
+    binding: str | None,
+    request: str | None,
+    grant: str | None,
+    now: datetime,
+) -> None:
+    if isinstance(descriptor, EffectDescriptor):
+        _validate_effect_preparation(
+            descriptor,
+            deadline=deadline,
+            binding=binding,
+            request=request,
+            now=now,
+        )
+        return
+    if isinstance(descriptor, ScopeDescriptor):
+        if descriptor.scope_kind == "call" and binding is None:
+            raise ValueError("call scope requires a runner binding")
+        return
+    if isinstance(descriptor, AcceptDescriptor):
+        if binding is not None or request is not None or grant is not None:
+            raise ValueError("acceptance has no external launch commitment")
+        return
+    if binding is None or request is None or grant is None:
+        raise ValueError("publication requires exact authority commitments")
 
 
 class EffectLedger:
@@ -406,10 +518,7 @@ class EffectLedger:
         grant_digest: str | None = None,
         lease: Lease | None = None,
     ) -> EffectRecord:
-        for name in ("thread_id", "checkpoint_id", "task_id", "interrupt_id"):
-            _nonempty(getattr(coordinate, name), name)
-        if not isinstance(coordinate.checkpoint_ns, str):
-            raise TypeError("checkpoint_ns must be a string")
+        _validate_prepare_coordinate(coordinate)
         binding = _binding_digest(runner_binding_digest)
         if workspace_ref is not None:
             workspace_ref = _nonempty(workspace_ref, "workspace_ref")
@@ -419,104 +528,308 @@ class EffectLedger:
             raise ValueError("effect request and grant digests must be bound together")
         deadline = None if deadline_at is None else _utc(deadline_at)
         now = self._now()
-        if isinstance(descriptor, EffectDescriptor):
-            if descriptor.kind == "manual" and deadline is not None:
-                raise ValueError("unmanaged manual effect may not bind a deadline")
-            if descriptor.kind != "manual" and binding is None:
-                raise ValueError("managed effect requires a runner binding")
-            if (
-                descriptor.deadline_seconds is not None or descriptor.scope_state_keys
-            ) and deadline is None:
-                raise ValueError("bounded effect requires its resolved deadline")
-            if (
-                descriptor.runner is not None
-                and request is None
-                and (deadline is None or deadline > now)
-            ):
-                raise ValueError(
-                    "runnable effect requires exact request and grant commitments"
-                )
-        elif isinstance(descriptor, ScopeDescriptor):
-            if descriptor.scope_kind == "call" and binding is None:
-                raise ValueError("call scope requires a runner binding")
-        elif isinstance(descriptor, AcceptDescriptor):
-            if binding is not None or request is not None or grant is not None:
-                raise ValueError("acceptance has no external launch commitment")
-        elif isinstance(descriptor, PublishDescriptor):
-            if binding is None or request is None or grant is None:
-                raise ValueError("publication requires exact authority commitments")
-        effect_id = derive_effect_id(coordinate, descriptor.digest)
+        _validate_prepare_descriptor(
+            descriptor,
+            deadline=deadline,
+            binding=binding,
+            request=request,
+            grant=grant,
+            now=now,
+        )
+        facts = _PreparedEffectFacts(
+            effect_id=derive_effect_id(coordinate, descriptor.digest),
+            coordinate=coordinate,
+            descriptor_digest=descriptor.digest,
+            effect_kind=descriptor.kind,
+            deadline_at=deadline,
+            runner_binding_digest=binding,
+            workspace_ref=workspace_ref,
+            request_digest=request,
+            grant_digest=grant,
+            created_at=now,
+        )
+        return self._insert_or_verify_prepared(facts, lease)
+
+    def _insert_or_verify_prepared(
+        self, facts: _PreparedEffectFacts, lease: Lease | None
+    ) -> EffectRecord:
         table = self._store.tables.effects
-        values = {
-            "effect_id": effect_id,
-            "thread_id": coordinate.thread_id,
-            "checkpoint_ns": coordinate.checkpoint_ns,
-            "checkpoint_id": coordinate.checkpoint_id,
-            "task_id": coordinate.task_id,
-            "interrupt_id": coordinate.interrupt_id,
-            "descriptor_digest": descriptor.digest,
-            "effect_kind": descriptor.kind,
-            "deadline_at": None if deadline is None else _dump(deadline),
-            "phase": "prepared",
-            "lease_epoch": 0,
-            "runner_binding_digest": binding,
-            "workspace_ref": workspace_ref,
-            "request_digest": request,
-            "grant_digest": grant,
-            "launch_commitment_digest": None,
-            "result_ref": None,
-            "fixed_error_code": None,
-            "created_at": _dump(now),
-            "updated_at": _dump(now),
-            "revision": 0,
-        }
         coordinate_clause = and_(
-            table.c.thread_id == coordinate.thread_id,
-            table.c.checkpoint_ns == coordinate.checkpoint_ns,
-            table.c.checkpoint_id == coordinate.checkpoint_id,
-            table.c.task_id == coordinate.task_id,
-            table.c.interrupt_id == coordinate.interrupt_id,
+            table.c.thread_id == facts.coordinate.thread_id,
+            table.c.checkpoint_ns == facts.coordinate.checkpoint_ns,
+            table.c.checkpoint_id == facts.coordinate.checkpoint_id,
+            table.c.task_id == facts.coordinate.task_id,
+            table.c.interrupt_id == facts.coordinate.interrupt_id,
         )
         with self._store.write_transaction() as connection:
             if lease is not None:
-                self._validate_live_lease(connection, effect_id, lease)
+                self._validate_live_lease(connection, facts.effect_id, lease)
             existing = connection.execute(
                 select(table).where(coordinate_clause)
             ).first()
             if existing is not None:
                 current = self._from_row(connection, existing)
-                if current.descriptor_digest != descriptor.digest:
+                if current.descriptor_digest != facts.descriptor_digest:
                     raise EffectConflict(
                         "native coordinate already has a different descriptor"
                     )
-                if current.runner_binding_digest != binding:
+                if current.runner_binding_digest != facts.runner_binding_digest:
                     raise EffectConflict(
                         "effect already has a different runner binding"
                     )
-                expected = {
-                    "deadline_at": deadline,
-                    "workspace_ref": workspace_ref,
-                    "request_digest": request,
-                    "grant_digest": grant,
-                    "effect_kind": descriptor.kind,
-                }
                 if any(
-                    getattr(current, key) != value for key, value in expected.items()
+                    getattr(current, key) != value
+                    for key, value in facts.immutable_values().items()
                 ):
                     raise EffectConflict(
                         "effect preparation conflicts with immutable facts"
                     )
                 return current
             try:
-                connection.execute(table.insert().values(**values))
+                connection.execute(table.insert().values(**facts.insert_values()))
             except IntegrityError as exc:
                 raise EffectConflict(
                     "native coordinate or effect identity conflicts"
                 ) from exc
             row = connection.execute(
-                select(table).where(table.c.effect_id == effect_id)
+                select(table).where(table.c.effect_id == facts.effect_id)
             ).one()
             return self._from_row(connection, row)
+
+    @staticmethod
+    def _validate_result_kind(
+        current: EffectRecord,
+        effect_id: str,
+        result: EffectResult | ScopeResult | AcceptanceResult | None,
+    ) -> None:
+        if result is None:
+            return
+        if result.effect_id != effect_id:
+            raise EffectConflict("result effect_id does not match ledger identity")
+        if current.effect_kind == "scope" and not isinstance(result, ScopeResult):
+            raise EffectConflict("effect result kind does not match scope")
+        if current.effect_kind == "accept" and not isinstance(
+            result, AcceptanceResult
+        ):
+            raise EffectConflict("acceptance result kind does not match descriptor")
+        if current.effect_kind not in {"scope", "accept"} and not isinstance(
+            result, EffectResult
+        ):
+            raise EffectConflict("effect result kind does not match descriptor")
+
+    @staticmethod
+    def _validate_scope_seal(
+        current: EffectRecord,
+        result: EffectResult | ScopeResult | AcceptanceResult | None,
+        scope_descriptor: ScopeDescriptor | None,
+    ) -> None:
+        if not isinstance(result, ScopeResult):
+            return
+        if scope_descriptor is None:
+            raise EffectConflict("scope seal requires its validated descriptor")
+        if scope_descriptor.digest != current.descriptor_digest:
+            raise EffectConflict("scope descriptor does not match prepared digest")
+        if result.scope_digest != current.descriptor_digest:
+            raise EffectConflict("scope digest does not match descriptor")
+        if result.scope_kind != scope_descriptor.scope_kind:
+            raise EffectConflict("scope result kind does not match descriptor")
+        if (
+            result.outcome == "PASS"
+            and result.runner_selector != scope_descriptor.runner_selector
+        ):
+            raise EffectConflict("scope runner selector does not match descriptor")
+        if (
+            result.outcome == "PASS"
+            and result.runner_binding_digest != current.runner_binding_digest
+        ):
+            raise EffectConflict(
+                "scope runner binding does not match prepared facts"
+            )
+
+    @staticmethod
+    def _validate_prelaunch_seal(
+        current: EffectRecord,
+        target: str,
+        result: EffectResult | ScopeResult | AcceptanceResult | None,
+    ) -> None:
+        if (
+            target == "sealed"
+            and current.phase == "prepared"
+            and isinstance(result, EffectResult)
+            and current.effect_kind != "manual"
+            and (
+                result.outcome != "ERROR"
+                or result.fixed_error_code not in PRELAUNCH_ERROR_CODES
+            )
+        ):
+            raise IllegalEffectTransition(
+                "managed pre-launch seal requires a fixed pre-launch ERROR"
+            )
+
+    @staticmethod
+    def _terminal_transition_replay(
+        current: EffectRecord,
+        target: str,
+        result: EffectResult | ScopeResult | AcceptanceResult | None,
+    ) -> EffectRecord | None:
+        if current.phase in {"sealed", "indeterminate", "delivered"} and result is not None:
+            if current.result == result:
+                return current
+            raise EffectConflict("effect is already sealed with a different result")
+        if current.phase == "delivered" and target == "delivered":
+            return current
+        return None
+
+    def _validate_transition_edge(
+        self,
+        connection,
+        *,
+        current: EffectRecord,
+        effect_id: str,
+        expected_revision: int,
+        target: str,
+        allowed_sources: set[str],
+        lease: Lease | None,
+    ) -> None:
+        if current.effect_kind == "scope" and target in {"launching", "running"}:
+            raise IllegalEffectTransition("scope effects have no launch lifecycle")
+        if current.revision != expected_revision:
+            raise StaleEffectRevision(
+                f"expected revision {expected_revision}, found {current.revision}"
+            )
+        if current.phase not in allowed_sources:
+            raise IllegalEffectTransition(
+                f"illegal effect phase edge {current.phase} -> {target}"
+            )
+        lease_required = (
+            target in {"launching", "running", "indeterminate"}
+            or (target == "sealed" and current.phase in {"launching", "running"})
+            or lease is not None
+        )
+        if lease_required:
+            if lease is None:
+                raise StaleEffectLease("a current effect lease is required")
+            self._validate_live_lease(connection, effect_id, lease)
+
+    @staticmethod
+    def _validate_transition_facts(
+        current: EffectRecord,
+        *,
+        target: str,
+        runner_binding_digest: str | None,
+        workspace_ref: str | None,
+        launch_commitment_digest: str | None,
+    ) -> tuple[str | None, str | None]:
+        if target == "launching" and (
+            current.request_digest is None
+            or current.grant_digest is None
+            or launch_commitment_digest is None
+        ):
+            raise EffectConflict(
+                "runner launch requires request, grant, and launch commitments"
+            )
+        if (
+            target == "sealed"
+            and current.phase in {"launching", "running"}
+            and runner_binding_digest is None
+        ):
+            raise EffectConflict("active effect seal requires its runner binding")
+        if runner_binding_digest is not None:
+            binding = _binding_digest(runner_binding_digest)
+            if binding != current.runner_binding_digest:
+                raise EffectConflict(
+                    "effect runner binding does not match prepared facts"
+                )
+        normalized_workspace = workspace_ref
+        if workspace_ref is not None:
+            normalized_workspace = _nonempty(workspace_ref, "workspace_ref")
+            if (
+                target == "launching"
+                and current.workspace_ref is not None
+                and current.workspace_ref != normalized_workspace
+            ):
+                raise EffectConflict(
+                    "effect already has a different prepared workspace"
+                )
+        return normalized_workspace, _binding_digest(launch_commitment_digest)
+
+    def _transition_values(
+        self,
+        current: EffectRecord,
+        *,
+        target: str,
+        lease: Lease | None,
+        workspace_ref: str | None,
+        launch_digest: str | None,
+        result: EffectResult | ScopeResult | AcceptanceResult | None,
+    ) -> tuple[dict[str, object], str | None, int, datetime]:
+        revision = current.revision + 1
+        now = self._now()
+        changes: dict[str, object] = {
+            "phase": target,
+            "revision": revision,
+            "updated_at": _dump(now),
+        }
+        if lease is not None:
+            changes["lease_epoch"] = lease.epoch
+        if target == "launching" and workspace_ref is not None:
+            changes["workspace_ref"] = workspace_ref
+        if target == "launching":
+            changes["launch_commitment_digest"] = launch_digest
+        result_json = None
+        if result is not None:
+            changes["result_ref"] = getattr(result, "result_ref", None)
+            changes["fixed_error_code"] = getattr(
+                result, "fixed_error_code", None
+            )
+            result_json = json.dumps(
+                result.to_dict(),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+        return changes, result_json, revision, now
+
+    def _persist_transition(
+        self,
+        connection,
+        *,
+        effect_id: str,
+        expected_revision: int,
+        target: str,
+        changes: dict[str, object],
+        result_json: str | None,
+        revision: int,
+        now: datetime,
+    ) -> EffectRecord:
+        table = self._store.tables.effects
+        observations = self._store.tables.effect_observations
+        updated = connection.execute(
+            update(table)
+            .where(
+                and_(
+                    table.c.effect_id == effect_id,
+                    table.c.revision == expected_revision,
+                )
+            )
+            .values(**changes)
+        )
+        if updated.rowcount != 1:
+            raise StaleEffectRevision("effect revision changed concurrently")
+        connection.execute(
+            observations.insert().values(
+                effect_id=effect_id,
+                revision=revision,
+                phase=target,
+                result_json=result_json,
+                observed_at=_dump(now),
+            )
+        )
+        row = connection.execute(
+            select(table).where(table.c.effect_id == effect_id)
+        ).one()
+        return self._from_row(connection, row)
 
     def _transition(
         self,
@@ -535,7 +848,6 @@ class EffectLedger:
         if type(expected_revision) is not int or expected_revision < 0:
             raise TypeError("expected revision must be a non-negative integer")
         table = self._store.tables.effects
-        observations = self._store.tables.effect_observations
         with self._store.write_transaction() as connection:
             row = connection.execute(
                 select(table).where(table.c.effect_id == effect_id)
@@ -543,167 +855,46 @@ class EffectLedger:
             if row is None:
                 raise KeyError(effect_id)
             current = self._from_row(connection, row)
-            if current.effect_kind == "scope" and target in {"launching", "running"}:
-                raise IllegalEffectTransition("scope effects have no launch lifecycle")
-            if result is not None and result.effect_id != effect_id:
-                raise EffectConflict("result effect_id does not match ledger identity")
-            if result is not None:
-                if current.effect_kind == "scope" and not isinstance(
-                    result, ScopeResult
-                ):
-                    raise EffectConflict("effect result kind does not match scope")
-                if current.effect_kind == "accept" and not isinstance(
-                    result, AcceptanceResult
-                ):
-                    raise EffectConflict("acceptance result kind does not match descriptor")
-                if current.effect_kind not in {"scope", "accept"} and not isinstance(
-                    result, EffectResult
-                ):
-                    raise EffectConflict("effect result kind does not match descriptor")
-            if isinstance(result, ScopeResult):
-                if scope_descriptor is None:
-                    raise EffectConflict("scope seal requires its validated descriptor")
-                if scope_descriptor.digest != current.descriptor_digest:
-                    raise EffectConflict(
-                        "scope descriptor does not match prepared digest"
-                    )
-                if result.scope_digest != current.descriptor_digest:
-                    raise EffectConflict("scope digest does not match descriptor")
-                if result.scope_kind != scope_descriptor.scope_kind:
-                    raise EffectConflict("scope result kind does not match descriptor")
-                if (
-                    result.outcome == "PASS"
-                    and result.runner_selector != scope_descriptor.runner_selector
-                ):
-                    raise EffectConflict(
-                        "scope runner selector does not match descriptor"
-                    )
-                if (
-                    result.outcome == "PASS"
-                    and result.runner_binding_digest != current.runner_binding_digest
-                ):
-                    raise EffectConflict(
-                        "scope runner binding does not match prepared facts"
-                    )
-            if (
-                target == "sealed"
-                and current.phase == "prepared"
-                and isinstance(result, EffectResult)
-                and current.effect_kind != "manual"
-                and (
-                    result.outcome != "ERROR"
-                    or result.fixed_error_code not in PRELAUNCH_ERROR_CODES
-                )
-            ):
-                raise IllegalEffectTransition(
-                    "managed pre-launch seal requires a fixed pre-launch ERROR"
-                )
-            if (
-                current.phase in {"sealed", "indeterminate", "delivered"}
-                and result is not None
-            ):
-                if current.result == result:
-                    return current
-                raise EffectConflict("effect is already sealed with a different result")
-            if current.phase == "delivered" and target == "delivered":
-                return current
-            if current.revision != expected_revision:
-                raise StaleEffectRevision(
-                    f"expected revision {expected_revision}, found {current.revision}"
-                )
-            if current.phase not in allowed_sources:
-                raise IllegalEffectTransition(
-                    f"illegal effect phase edge {current.phase} -> {target}"
-                )
-            lease_required = (
-                target in {"launching", "running", "indeterminate"}
-                or (target == "sealed" and current.phase in {"launching", "running"})
-                or lease is not None
+            self._validate_result_kind(current, effect_id, result)
+            self._validate_scope_seal(current, result, scope_descriptor)
+            self._validate_prelaunch_seal(current, target, result)
+            replay = self._terminal_transition_replay(current, target, result)
+            if replay is not None:
+                return replay
+            self._validate_transition_edge(
+                connection,
+                current=current,
+                effect_id=effect_id,
+                expected_revision=expected_revision,
+                target=target,
+                allowed_sources=allowed_sources,
+                lease=lease,
             )
-            if lease_required:
-                if lease is None:
-                    raise StaleEffectLease("a current effect lease is required")
-                self._validate_live_lease(connection, effect_id, lease)
-            if target == "launching" and (
-                current.request_digest is None
-                or current.grant_digest is None
-                or launch_commitment_digest is None
-            ):
-                raise EffectConflict(
-                    "runner launch requires request, grant, and launch commitments"
-                )
-            if (
-                target == "sealed"
-                and current.phase in {"launching", "running"}
-                and runner_binding_digest is None
-            ):
-                raise EffectConflict("active effect seal requires its runner binding")
-            if runner_binding_digest is not None:
-                binding = _binding_digest(runner_binding_digest)
-                if binding != current.runner_binding_digest:
-                    raise EffectConflict(
-                        "effect runner binding does not match prepared facts"
-                    )
-            if workspace_ref is not None:
-                workspace_ref = _nonempty(workspace_ref, "workspace_ref")
-                if (
-                    target == "launching"
-                    and current.workspace_ref is not None
-                    and current.workspace_ref != workspace_ref
-                ):
-                    raise EffectConflict(
-                        "effect already has a different prepared workspace"
-                    )
-            launch_digest = _binding_digest(launch_commitment_digest)
-            revision = current.revision + 1
-            now = self._now()
-            changes: dict[str, object] = {
-                "phase": target,
-                "revision": revision,
-                "updated_at": _dump(now),
-            }
-            if lease is not None:
-                changes["lease_epoch"] = lease.epoch
-            if target == "launching" and workspace_ref is not None:
-                changes["workspace_ref"] = workspace_ref
-            if target == "launching":
-                changes["launch_commitment_digest"] = launch_digest
-            result_json = None
-            if result is not None:
-                changes["result_ref"] = getattr(result, "result_ref", None)
-                changes["fixed_error_code"] = getattr(result, "fixed_error_code", None)
-                result_json = json.dumps(
-                    result.to_dict(),
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    ensure_ascii=False,
-                    allow_nan=False,
-                )
-            updated = connection.execute(
-                update(table)
-                .where(
-                    and_(
-                        table.c.effect_id == effect_id,
-                        table.c.revision == expected_revision,
-                    )
-                )
-                .values(**changes)
+            workspace_ref, launch_digest = self._validate_transition_facts(
+                current,
+                target=target,
+                runner_binding_digest=runner_binding_digest,
+                workspace_ref=workspace_ref,
+                launch_commitment_digest=launch_commitment_digest,
             )
-            if updated.rowcount != 1:
-                raise StaleEffectRevision("effect revision changed concurrently")
-            connection.execute(
-                observations.insert().values(
-                    effect_id=effect_id,
-                    revision=revision,
-                    phase=target,
-                    result_json=result_json,
-                    observed_at=_dump(now),
-                )
+            changes, result_json, revision, now = self._transition_values(
+                current,
+                target=target,
+                lease=lease,
+                workspace_ref=workspace_ref,
+                launch_digest=launch_digest,
+                result=result,
             )
-            row = connection.execute(
-                select(table).where(table.c.effect_id == effect_id)
-            ).one()
-            return self._from_row(connection, row)
+            return self._persist_transition(
+                connection,
+                effect_id=effect_id,
+                expected_revision=expected_revision,
+                target=target,
+                changes=changes,
+                result_json=result_json,
+                revision=revision,
+                now=now,
+            )
 
     def _validate_live_lease(self, connection, effect_id: str, lease: Lease) -> None:
         if lease.scope != "effect" or lease.key != effect_id:

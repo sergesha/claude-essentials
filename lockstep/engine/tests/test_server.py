@@ -96,7 +96,7 @@ def test_accept_artifact_forwards_only_token_and_ambient_project_without_session
             calls.append((token, project))
             return {"run_id": "run-1", "status": "completed"}
 
-    monkeypatch.setattr(server, "_eng", lambda actual: FakeEngine())
+    monkeypatch.setattr(server, "_command_for", lambda actual: FakeEngine())
     monkeypatch.setattr(
         server,
         "_assert_origin",
@@ -123,7 +123,7 @@ def test_accept_artifact_error_does_not_echo_token(tmp_path, monkeypatch) -> Non
             del token, project
             raise LockstepError("invalid or stale publication consent")
 
-    monkeypatch.setattr(server, "_eng", lambda actual: FakeEngine())
+    monkeypatch.setattr(server, "_command_for", lambda actual: FakeEngine())
     token = "secret-publication-token"
     with pytest.raises(LockstepError) as caught:
         server.scenario_accept_artifact(token, ctx=_ctx(project))
@@ -159,7 +159,7 @@ def test_service_rechecks_session_after_mcp_edge_guard(tmp_path, monkeypatch):
     run_id = server.scenario_start("native-parent-direct", {}, ctx=_ctx(project))["run_id"]
     state = tmp_path / "state"
     sessions.touch(state, run_id, "session-1", 30)
-    service = server._eng(project)._service
+    service = server._command_for(project)
     original = service.require_session
 
     def swap_owner_after_edge_check(checked_run_id, session_id, checked_project):
@@ -182,7 +182,7 @@ def test_session_rebinding_waits_for_verified_native_resume_commit(tmp_path, mon
     run_id = server.scenario_start("native-parent-direct", {}, ctx=_ctx(project))["run_id"]
     state = tmp_path / "state"
     sessions.touch(state, run_id, "owner", 30)
-    service = server._eng(project)._service
+    service = server._command_for(project)
     original_resume = service.runtime.resume
     entered = threading.Event()
     release = threading.Event()
@@ -483,11 +483,11 @@ def test_dryrun_preserves_reserved_evidence_response_contract(tmp_path, monkeypa
 
 def test_engine_singleton_closes_old_instance_before_reconfiguration(tmp_path, monkeypatch):
     project, _recipes = _configure(monkeypatch, tmp_path)
-    first = server._eng(project)
+    first = server._command_for(project)
     monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(tmp_path / "other-state"))
-    second = server._eng(project)
+    second = server._command_for(project)
     assert second is not first
-    assert first._service._closed is True
+    assert first._closed is True
 
 
 def test_dryrun_runs_profile_before_any_persistent_service_init(tmp_path, monkeypatch):

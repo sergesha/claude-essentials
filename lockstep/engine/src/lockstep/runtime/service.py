@@ -7,11 +7,9 @@ import json
 import re
 import tempfile
 import threading
-import time
-import uuid
 from collections import deque
 from collections.abc import Mapping
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -32,7 +30,6 @@ from lockstep.runtime.artifacts import ArtifactRegistry
 from lockstep.runtime.catalog import RunBinding, RunCatalog
 from lockstep.runtime.effects.authority import (
     EffectAuthorityDenied,
-    EffectAuthorityGate,
     EffectAuthorityUnavailable,
 )
 from lockstep.runtime.effects.coordinator import EffectCoordinator
@@ -43,20 +40,22 @@ from lockstep.runtime.effects.descriptors import (
 from lockstep.runtime.effects.ledger import EffectLedger
 from lockstep.runtime.effects.models import EffectDescriptor, ScopeDescriptor
 from lockstep.runtime.effects.models import AcceptDescriptor
+from lockstep.runtime.effects.owner_policy import (
+    RuntimeRequirement,
+)
+from lockstep.runtime.errors import LockstepError
+from lockstep.runtime.engine_drive_service import EngineDriveService
 from lockstep.runtime.effects.owner_consent import (
     IssuedPublicationConsent,
     OwnerConsentAuthority,
 )
 from lockstep.runtime.graph_runtime import (
     GraphRuntime,
-    NativeCoordinateRejected,
-    NativeHistoryLimitExceeded,
 )
 from lockstep.runtime.invocation_lock import InvocationLockStore
 from lockstep.runtime.leases import LeaseStore
 from lockstep.runtime.owner_state import ensure_owner_directory, initialize_owner_state
 from lockstep.runtime.payload_limits import PayloadLimitExceeded, bounded_json
-from lockstep.runtime.providers.base import RunnerAdapter
 from lockstep.runtime.providers.manual import (
     ManualProvider,
     ManualProviderError,
@@ -66,8 +65,9 @@ from lockstep.runtime.project_snapshots import ProjectSnapshotStore
 from lockstep.runtime.snapshot_resolver import (
     RuntimeSnapshotFacts,
     RuntimeSnapshotResolver,
-    capture_authoritative_snapshot,
 )
+from lockstep.runtime.start_service import AuthorizedStartService, plan_authorized_start
+from lockstep.runtime.worker_submission_service import WorkerSubmissionService
 from lockstep.runtime.publication import ProjectPublisher
 from lockstep.runtime.recipe_bundles import RecipeBundleStore
 from lockstep.runtime.status import ScenarioStatus, project_status
@@ -75,10 +75,6 @@ from lockstep.runtime.storage import SQLiteStore
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _RESERVED_START_KEYS = frozenset({"namespace"})
-
-
-class LockstepError(RuntimeError):
-    pass
 
 
 class _UnavailableEffectAuthority:
@@ -199,10 +195,9 @@ def preflight_recipe(
     return authorized
 
 
-class LockstepService:
+class LockstepCommandService:
     _MAX_ENGINE_PROGRESS_DECISIONS = 32
     _MAX_ACTIVE_EFFECT_RUNS = 128
-    _MAX_PUBLIC_EVENTS = 10_000
 
     def __init__(
         self,
@@ -210,62 +205,15 @@ class LockstepService:
         recipes_dir: Path,
         *,
         authority_policy: RecipeAuthorityPolicy | None = None,
-        runners: Mapping[str, RunnerAdapter] | None = None,
-        effect_authority: EffectAuthorityGate | None = None,
     ) -> None:
-        self.state_dir = initialize_owner_state(Path(state_dir).resolve())
+        self.state_dir = Path(state_dir).resolve()
         self.recipes_dir = Path(recipes_dir).resolve()
         self.authority_policy = authority_policy or RecipeAuthorityPolicy()
-        self.store = SQLiteStore(self.state_dir / "runtime.sqlite")
-        self.catalog = RunCatalog(self.store)
-        self.bundle_store = RecipeBundleStore(self.state_dir)
-        self.leases = LeaseStore(self.store)
-        self.effects = EffectLedger(self.store)
-        self.blobs = BlobStore(self.state_dir)
-        self.snapshots = ProjectSnapshotStore(self.state_dir, self.blobs)
-        self.artifacts = ArtifactRegistry(
-            self.state_dir, self.blobs, self.snapshots
-        )
-        self.manual = ManualProvider(self.state_dir, self.blobs)
-        checkpoints = ensure_owner_directory(self.state_dir, "checkpoints")
-        self.checkpoint_path = checkpoints / "native.sqlite"
-        self.runtime = GraphRuntime(
-            bundle_store=self.bundle_store,
-            leases=self.leases,
-            invocations=InvocationLockStore(self.state_dir, timeout=60.0),
-            checkpoint_path=self.checkpoint_path,
-            app_factory=open_native_app,
-        )
-        self.runtime_snapshot_facts = RuntimeSnapshotFacts(self.store)
-        self.snapshot_resolver = RuntimeSnapshotResolver(
-            self.runtime_snapshot_facts,
-            self.snapshots,
-            self.blobs,
-            self.runtime,
-        )
-        self.authority = OwnerConsentAuthority(
-            self.store,
-            delegate=effect_authority or _UnavailableEffectAuthority(),
-        )
-        self.coordinator = EffectCoordinator(
-            runtime=self.runtime,
-            catalog=self.catalog,
-            ledger=self.effects,
-            leases=self.leases,
-            runners={} if runners is None else runners,
-            authority=self.authority,
-            artifacts=self.artifacts,
-            publisher_for=lambda binding: ProjectPublisher(
-                self.state_dir,
-                Path(binding.project_identity),
-                self.artifacts,
-                self.blobs,
-            ),
-            manual=self.manual,
-            snapshot_resolver=self.snapshot_resolver,
-        )
-        self._wait_clock = time.monotonic
-        self._wait_sleep = time.sleep
+        self._configured_runners: dict[str, object] = {}
+        self._configured_effect_authority = None
+        self._activation_lock = threading.RLock()
+        self._writable_core_active = False
+        self._closed = False
         self._pump_stop = threading.Event()
         self._pump_wakeup = threading.Event()
         self._active_effect_runs: set[str] = set()
@@ -283,14 +231,117 @@ class LockstepService:
         self._scenario_recovery_cursors: dict[str, str] = {}
         self._pump_thread: threading.Thread | None = None
         self._pump_failure: BaseException | None = None
-        self._closed = False
-        self._recover_engine_effects()
-        self._pump_thread = threading.Thread(
-            target=self._completion_pump,
-            name="lockstep-effect-completion",
-            daemon=True,
+
+    def _open_writable_stores(self) -> None:
+        self.state_dir = initialize_owner_state(self.state_dir)
+        self.store = SQLiteStore(self.state_dir / "runtime.sqlite")
+        self.catalog = RunCatalog(self.store)
+        self.bundle_store = RecipeBundleStore(self.state_dir)
+        self.leases = LeaseStore(self.store)
+        self.effects = EffectLedger(self.store)
+        self.blobs = BlobStore(self.state_dir)
+        self.snapshots = ProjectSnapshotStore(self.state_dir, self.blobs)
+        self.artifacts = ArtifactRegistry(
+            self.state_dir, self.blobs, self.snapshots
         )
-        self._pump_thread.start()
+        self.manual = ManualProvider(self.state_dir, self.blobs)
+
+    def _open_graph_runtime(self) -> None:
+        checkpoints = ensure_owner_directory(self.state_dir, "checkpoints")
+        self.checkpoint_path = checkpoints / "native.sqlite"
+        self.runtime = GraphRuntime(
+            bundle_store=self.bundle_store,
+            leases=self.leases,
+            invocations=InvocationLockStore(self.state_dir, timeout=60.0),
+            checkpoint_path=self.checkpoint_path,
+            app_factory=open_native_app,
+        )
+        self.runtime_snapshot_facts = RuntimeSnapshotFacts(self.store)
+        self.snapshot_resolver = RuntimeSnapshotResolver(
+            self.runtime_snapshot_facts,
+            self.snapshots,
+            self.blobs,
+            self.runtime,
+        )
+
+    def _open_effect_coordinator(self) -> None:
+        self.authority = OwnerConsentAuthority(
+            self.store,
+            delegate=(
+                self._configured_effect_authority
+                or _UnavailableEffectAuthority()
+            ),
+        )
+        self.coordinator = EffectCoordinator(
+            runtime=self.runtime,
+            catalog=self.catalog,
+            ledger=self.effects,
+            leases=self.leases,
+            runners=self._configured_runners,
+            authority=self.authority,
+            artifacts=self.artifacts,
+            publisher_for=lambda binding: ProjectPublisher(
+                self.state_dir,
+                Path(binding.project_identity),
+                self.artifacts,
+                self.blobs,
+            ),
+            manual=self.manual,
+            snapshot_resolver=self.snapshot_resolver,
+        )
+
+    def _activate_writable_core(self) -> None:
+        """Privately create command resources at the first writable intent."""
+
+        with self._activation_lock:
+            if self._writable_core_active:
+                return
+            if self._closed:
+                raise LockstepError("command service is closed")
+            try:
+                self._open_writable_stores()
+                self._open_graph_runtime()
+                self._open_effect_coordinator()
+                self._recover_engine_effects()
+                self._pump_thread = threading.Thread(
+                    target=self._completion_pump,
+                    name="lockstep-effect-completion",
+                    daemon=True,
+                )
+                self._pump_thread.start()
+            except BaseException:
+                self._rollback_writable_core_activation()
+                raise
+            self._writable_core_active = True
+
+    def _rollback_writable_core_activation(self) -> None:
+        """Return a failed first activation to a clean, retryable state."""
+
+        runtime = getattr(self, "runtime", None)
+        store = getattr(self, "store", None)
+        if runtime is not None:
+            with suppress(Exception):
+                runtime.close()
+        if store is not None:
+            with suppress(Exception):
+                store.close()
+        with self._active_effect_lock:
+            self._active_effect_runs.clear()
+            self._queued_effect_runs.clear()
+            self._active_effect_queue.clear()
+        self._recovery_thread_cursor = None
+        self._pump_thread = None
+        self._pump_failure = None
+        self._pump_stop.clear()
+        self._pump_wakeup.clear()
+        self._writable_core_active = False
+
+    @staticmethod
+    def _require_owner_runtime_policy(
+        requirements: tuple[RuntimeRequirement, ...],
+    ) -> None:
+        if requirements:
+            raise LockstepError("runtime execution policy is unavailable")
 
     def _recover_engine_effects(self) -> None:
         """Adopt durable protected work without a scheduler or status side effect."""
@@ -484,80 +535,33 @@ class LockstepService:
         compiler_provenance: profile.CompilerProvenance | None = None,
     ) -> dict[str, Any]:
         values = validate_start_input(input)
-        compiler_provenance = compiler_provenance or authorized.canonical_match_proof
-        project_root = Path(project).resolve()
-        if self.state_dir == project_root or project_root in self.state_dir.parents:
-            raise LockstepError("owner state must be outside the writable project")
-        if (
-            compiler_provenance is not None
-            and authorized.source_bundle_sha256
-            != compiler_provenance.source_bundle_sha256
-        ):
-            raise LockstepError(
-                "compiler provenance does not bind the exact source bundle"
-            )
-        with tempfile.TemporaryDirectory(prefix="lockstep-start-profile-") as raw:
-            staged = Path(raw)
-            for item in authorized.files:
-                target = staged / item.path
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(item.bytes)
-            errors, _warnings = profile.check_recipe_full(
-                staged / authorized.root,
-                provenance=compiler_provenance,
-            )
-        if errors:
-            raise LockstepError("recipe failed Lockstep profile: " + "; ".join(errors))
-        input_blob = self.blobs.put(self._canonical_start_input(values))
-        admitted = authorized.capture(self.bundle_store)
-        materialized = admitted.materialize(self.bundle_store)
-
-        run_id = f"{recipe}-{uuid.uuid4().hex}"
-        binding = RunBinding(
-            public_run_id=run_id,
-            thread_id=f"thread-{uuid.uuid4().hex}",
-            recipe_digest=admitted.definition_sha256,
-            recipe_snapshot_ref=admitted.bundle.digest,
-            project_identity=str(project_root),
+        plan = plan_authorized_start(
+            state_dir=self.state_dir,
+            authorized=authorized,
+            project=project,
+            compiler_provenance=compiler_provenance,
+            require_runtime_policy=self._require_owner_runtime_policy,
         )
-        start_snapshot_ref = capture_authoritative_snapshot(
-            project_root,
-            self.snapshots,
-            self.blobs,
-            binding,
-            previous=None,
-            purpose="run-start",
+        self._activate_writable_core()
+        return AuthorizedStartService(
+            blobs=self.blobs,
+            bundle_store=self.bundle_store,
+            snapshots=self.snapshots,
+            effects=self.effects,
+            catalog=self.catalog,
+            runtime=self.runtime,
+            runtime_snapshot_facts=self.runtime_snapshot_facts,
+            leases=self.leases,
+            admission_lock=self._admission_recovery_lock,
+            reserve_effect_run=self._reserve_effect_run,
+            deactivate_effect_run=self._deactivate_effect_run,
+            drive_engine_owned=self._drive_engine_owned,
+        ).start(
+            recipe,
+            plan,
+            values,
+            canonical_input=self._canonical_start_input(values),
         )
-        with self._admission_recovery_lock:
-            try:
-                binding, _admission = self.effects.admit_start(
-                    self.catalog,
-                    binding,
-                    input_blob,
-                    on_admit=lambda connection, admitted: (
-                        self.runtime_snapshot_facts.bind_run_start_in_transaction(
-                            connection, admitted, start_snapshot_ref
-                        )
-                    ),
-                )
-                # Catalog admission canonicalizes immutable lineage (including
-                # created_at). Bind only that admitted value so the coordinator
-                # never observes a pre-admission lookalike.
-                self.runtime.bind(binding)
-                if not self._reserve_effect_run(run_id):
-                    snapshot = self.runtime.snapshot(run_id, subgraphs=True)
-                    self.runtime.unbind(run_id)
-                    return project_status(
-                        binding, snapshot, self.leases, self.effects
-                    ).to_dict()
-                snapshot = self.runtime.ensure_started(run_id, values)
-            except BaseException:
-                self._deactivate_effect_run(run_id)
-                self.runtime.unbind(run_id)
-                raise
-            return self._drive_engine_owned(
-                binding.public_run_id, binding=binding, snapshot=snapshot
-            ).to_dict()
 
     def _drive_engine_owned(
         self,
@@ -567,102 +571,19 @@ class LockstepService:
         snapshot=None,
     ) -> ScenarioStatus:
         """Advance only coordinator-owned effects through monotonic decisions."""
-
-        current_binding = binding or self.catalog.get(run_id)
-        current_snapshot = snapshot or self.runtime.snapshot(run_id, subgraphs=True)
-        for _decision in range(self._MAX_ENGINE_PROGRESS_DECISIONS):
-            status = project_status(
-                current_binding, current_snapshot, self.leases, self.effects
-            )
-            protected = tuple(
-                (interrupt, descriptor)
-                for interrupt in current_snapshot.pending
-                if (descriptor := self._protected_interrupt_descriptor(interrupt))
-                is not None
-            )
-            if not protected:
-                cleanup = self.coordinator.reconcile_consumed(run_id)
-                if any(report.action == "busy" for report in cleanup):
-                    self._activate_effect_run(run_id)
-                    return status
-                self._ack_start_if_observable(
-                    current_binding, current_snapshot, protected
-                )
-                self._deactivate_effect_run(run_id)
-                return status
-            if status.status == "awaiting" and status.owner == "worker":
-                self._ack_start_if_observable(
-                    current_binding, current_snapshot, protected
-                )
-                self._deactivate_effect_run(run_id)
-                return status
-            if any(
-                isinstance(descriptor, EffectDescriptor)
-                and descriptor.runner is not None
-                for _interrupt, descriptor in protected
-            ) and not self._reserve_effect_run(run_id):
-                return status
-            reports = self.coordinator.reconcile_pending(run_id)
-            actions = {report.action for report in reports}
-            if "awaiting_delivery" in actions:
-                self.coordinator.deliver_ready(run_id)
-                delivered_snapshot = self.runtime.snapshot(run_id, subgraphs=True)
-                source_coordinates = {
-                    interrupt.coordinate for interrupt, _descriptor in protected
-                }
-                if any(
-                    interrupt.coordinate in source_coordinates
-                    for interrupt in delivered_snapshot.pending
-                ):
-                    self._activate_effect_run(run_id)
-                    return project_status(
-                        current_binding,
-                        delivered_snapshot,
-                        self.leases,
-                        self.effects,
-                    )
-                current_snapshot = delivered_snapshot
-            else:
-                current_snapshot = self.runtime.snapshot(run_id, subgraphs=True)
-            status = project_status(
-                current_binding, current_snapshot, self.leases, self.effects
-            )
-            if status.status == "awaiting" and status.owner == "worker":
-                current_protected = tuple(
-                    (interrupt, descriptor)
-                    for interrupt in current_snapshot.pending
-                    if (descriptor := self._protected_interrupt_descriptor(interrupt))
-                    is not None
-                )
-                self._ack_start_if_observable(
-                    current_binding, current_snapshot, current_protected
-                )
-                self._deactivate_effect_run(run_id)
-                return status
-            if not actions <= {
-                "prepared",
-                "launch_claimed",
-                "sealed",
-                "delivered",
-                "awaiting_delivery",
-            }:
-                if actions & {"running", "quiescence_pending", "busy"}:
-                    self._activate_effect_run(run_id)
-                else:
-                    self._deactivate_effect_run(run_id)
-                current_protected = tuple(
-                    (interrupt, descriptor)
-                    for interrupt in current_snapshot.pending
-                    if (descriptor := self._protected_interrupt_descriptor(interrupt))
-                    is not None
-                )
-                self._ack_start_if_observable(
-                    current_binding, current_snapshot, current_protected
-                )
-                return status
-        raise LockstepError(
-            "engine-owned progress exceeded its bounded decision budget"
-        )
+        return EngineDriveService(
+            runtime=self.runtime,
+            catalog=getattr(self, "catalog", None),
+            leases=self.leases,
+            effects=self.effects,
+            coordinator=self.coordinator,
+            max_decisions=self._MAX_ENGINE_PROGRESS_DECISIONS,
+            protected_descriptor=self._protected_interrupt_descriptor,
+            reserve_effect_run=self._reserve_effect_run,
+            activate_effect_run=self._activate_effect_run,
+            deactivate_effect_run=self._deactivate_effect_run,
+            acknowledge_start=self._ack_start_if_observable,
+        ).drive(run_id, binding=binding, snapshot=snapshot)
 
     def _ack_start_if_observable(
         self,
@@ -721,124 +642,6 @@ class LockstepService:
                 )
         return binding, status
 
-    def status(self, run_id: str, project: str) -> dict[str, Any]:
-        _binding, status = self._snapshot_status(run_id, project)
-        return status.to_dict()
-
-    def scenario_status(self, run_id: str, project: str) -> dict[str, Any]:
-        """Explicit public name for the read-only native status projection."""
-
-        return self.status(run_id, project)
-
-    @staticmethod
-    def _status_revision(value: Mapping[str, Any]) -> str:
-        try:
-            admitted = bounded_json(value, label="scenario wait observation")
-            encoded = json.dumps(
-                admitted,
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=False,
-                allow_nan=False,
-            ).encode("utf-8")
-        except (PayloadLimitExceeded, TypeError, ValueError) as exc:
-            raise LockstepError("scenario wait observation is invalid") from exc
-        return "revision:" + hashlib.sha256(encoded).hexdigest()
-
-    def scenario_wait(
-        self, run_id: str, timeout_seconds: int, project: str
-    ) -> dict[str, Any]:
-        """Observe status changes without invoking any mutation/recovery port."""
-
-        if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 60:
-            raise LockstepError("scenario wait timeout must be an integer from 1 to 60")
-        initial = self.scenario_status(run_id, project)
-        initial_revision = self._status_revision(initial)
-        deadline = self._wait_clock() + timeout_seconds
-        current = initial
-        while True:
-            remaining = deadline - self._wait_clock()
-            if remaining <= 0:
-                return {
-                    **current,
-                    "changed": False,
-                    "revision": initial_revision,
-                }
-            self._wait_sleep(min(0.1, remaining))
-            current = self.scenario_status(run_id, project)
-            revision = self._status_revision(current)
-            if revision != initial_revision:
-                return {**current, "changed": True, "revision": revision}
-
-    def history(self, run_id: str, project: str) -> list[dict[str, Any]]:
-        binding = self._bind_existing(run_id, project)
-        try:
-            return [
-                {
-                    "checkpoint_id": item.checkpoint_id,
-                    "checkpoint_ns": item.checkpoint_ns,
-                    "created_at": item.created_at,
-                    "status": project_status(binding, item, (), ()).status,
-                }
-                for item in self.runtime.history(run_id)
-            ]
-        except NativeHistoryLimitExceeded as exc:
-            raise LockstepError(str(exc)) from exc
-
-    def scenario_history(self, run_id: str, project: str) -> list[dict[str, Any]]:
-        """Closed, bounded native-history projection with no recovery side effect."""
-
-        return self.history(run_id, project)
-
-    def scenario_events(self, run_id: str, project: str) -> list[dict[str, Any]]:
-        """Merge redacted native/effect observations without advancing either."""
-
-        try:
-            binding = self.catalog.get(run_id)
-        except KeyError as exc:
-            raise LockstepError(f"unknown run {run_id!r}") from exc
-        if Path(binding.project_identity).resolve() != Path(project).resolve():
-            raise LockstepError(f"unknown run {run_id!r}")
-        bind = getattr(self.runtime, "bind", None)
-        if callable(bind):
-            bind(binding)
-        try:
-            native = list(self.runtime.history(run_id))
-        except NativeHistoryLimitExceeded as exc:
-            raise LockstepError(str(exc)) from exc
-        if len(native) > self._MAX_PUBLIC_EVENTS:
-            raise LockstepError("event observations exceed public bound")
-        effects = list(self.effects.list_for_thread(binding.thread_id))
-        if len(native) + len(effects) > self._MAX_PUBLIC_EVENTS:
-            raise LockstepError("event observations exceed public bound")
-        observed: list[dict[str, Any]] = [
-            {
-                "source": "native",
-                "checkpoint_id": item.checkpoint_id,
-                "checkpoint_ns": item.checkpoint_ns,
-                "created_at": item.created_at,
-                "next": list(item.next),
-                "pending_count": len(item.pending),
-                "error_count": len(item.task_errors),
-            }
-            for item in native
-        ]
-        observed.extend(
-            {
-                "source": "effect",
-                "effect_id": item.effect_id,
-                "effect_kind": item.effect_kind,
-                "phase": item.phase,
-                "updated_at": (
-                    item.updated_at.isoformat()
-                    if hasattr(item.updated_at, "isoformat")
-                    else item.updated_at
-                ),
-            }
-            for item in effects
-        )
-        return observed
-
     def scenario_recover(
         self, project: str, *, limit: int = 128
     ) -> dict[str, Any]:
@@ -847,6 +650,7 @@ class LockstepService:
         if type(limit) is not int or not 1 <= limit <= self._MAX_ACTIVE_EFFECT_RUNS:
             raise LockstepError("scenario recover limit must be an integer from 1 to 128")
         project_identity = str(Path(project).resolve())
+        self._activate_writable_core()
         recovered: list[str] = []
         with self._admission_recovery_lock:
             cursor = self._scenario_recovery_cursors.get(project_identity)
@@ -923,13 +727,14 @@ class LockstepService:
 
     @staticmethod
     def _protected_descriptor(interrupt) -> EffectDescriptor | None:
-        descriptor = LockstepService._protected_interrupt_descriptor(interrupt)
+        descriptor = LockstepCommandService._protected_interrupt_descriptor(interrupt)
         return descriptor if isinstance(descriptor, EffectDescriptor) else None
 
     def require_session(
         self, run_id: str, session_id: str | None, project: str
     ) -> None:
         """Fail closed at an external mutation edge; resume rechecks it too."""
+        self._activate_writable_core()
         self._bind_existing(run_id, project)
         try:
             with sessions.locked_owner(
@@ -952,51 +757,24 @@ class LockstepService:
         session_id: str | None,
         project: str,
     ) -> dict[str, Any]:
-        with self._admission_recovery_lock:
-            self._bind_existing(run_id, project)
-            try:
-                with sessions.locked_owner(
-                    self.state_dir,
-                    run_id,
-                    session_id,
-                    config.session_stale_minutes(),
-                ):
-                    binding, interrupt = self._worker_interrupt(run_id, step, project)
-                    descriptor = self._protected_descriptor(interrupt)
-                    if descriptor is not None:
-                        if descriptor.kind != "manual" or manual_submission is None:
-                            raise LockstepError(
-                                "worker submission cannot target an engine-owned effect"
-                            )
-                        effect_id = derive_effect_id(
-                            interrupt.coordinate, descriptor.digest
-                        )
-                        assert session_id is not None
-                        session_lease = self.leases.acquire(
-                            "session",
-                            effect_id,
-                            session_id,
-                            config.session_stale_minutes() * 60,
-                        )
-                        try:
-                            self.coordinator.submit_manual(
-                                run_id, interrupt.coordinate, manual_submission
-                            )
-                        finally:
-                            self.leases.release(session_lease)
-                        return self._drive_engine_owned(
-                            run_id, binding=binding
-                        ).to_dict()
-                    snapshot = self.runtime.resume(
-                        run_id,
-                        interrupt.coordinate,
-                        {interrupt.coordinate.interrupt_id: dict(result)},
-                    )
-            except PermissionError as exc:
-                raise LockstepError(str(exc)) from exc
-            except (NativeCoordinateRejected, NativeHistoryLimitExceeded) as exc:
-                raise LockstepError(str(exc)) from exc
-            return project_status(binding, snapshot, (), ()).to_dict()
+        self._activate_writable_core()
+        return WorkerSubmissionService(
+            state_dir=self.state_dir,
+            runtime=self.runtime,
+            manual_effect_resources=lambda: (self.leases, self.coordinator),
+            admission_lock=self._admission_recovery_lock,
+            bind_existing=self._bind_existing,
+            select_interrupt=self._worker_interrupt,
+            protected_descriptor=self._protected_descriptor,
+            drive_engine_owned=self._drive_engine_owned,
+        ).resume(
+            run_id,
+            step,
+            result,
+            manual_submission=manual_submission,
+            session_id=session_id,
+            project=project,
+        )
 
     def scenario_done(
         self,
@@ -1030,6 +808,7 @@ class LockstepService:
     ):
         if not isinstance(step, str) or not step:
             raise LockstepError("acceptance step must be non-empty text")
+        self._activate_writable_core()
         binding = self._bind_existing(run_id, project)
         snapshot = self.runtime.snapshot(run_id, subgraphs=True)
         matches = []
@@ -1084,6 +863,7 @@ class LockstepService:
         """Redeem one owner bearer token within the ambient host project."""
 
         project_identity = str(Path(project).resolve())
+        self._activate_writable_core()
         try:
             stored = self.authority.inspect_token(token)
         except (EffectAuthorityDenied, TypeError, ValueError) as exc:
@@ -1114,6 +894,7 @@ class LockstepService:
             ).to_dict()
 
     def revoke_publication_consents(self, *, project: str) -> int:
+        self._activate_writable_core()
         return self.authority.revoke(str(Path(project).resolve()))
 
     def scenario_escalate(
@@ -1179,19 +960,22 @@ class LockstepService:
     def abort(self, run_id: str, *, session_id: str | None = None, project: str):
         return self.scenario_abort(run_id, session_id=session_id, project=project)
 
-    def list_runs(self, project: str) -> list[dict[str, Any]]:
-        bindings = self.catalog.list(str(Path(project).resolve()))
-        return [self.status(item.public_run_id, project) for item in bindings]
-
     def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        self._pump_stop.set()
-        self._pump_wakeup.set()
-        if self._pump_thread is not None:
-            self._pump_thread.join()
+        with self._activation_lock:
+            if self._closed:
+                return
+            self._closed = True
+            if not self._writable_core_active:
+                return
+            self._writable_core_active = False
+            self._pump_stop.set()
+            self._pump_wakeup.set()
+            pump_thread = self._pump_thread
+            runtime = self.runtime
+            store = self.store
+        if pump_thread is not None:
+            pump_thread.join()
         try:
-            self.runtime.close()
+            runtime.close()
         finally:
-            self.store.close()
+            store.close()

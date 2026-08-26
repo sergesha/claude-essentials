@@ -1,7 +1,8 @@
 from pathlib import Path
 
 from lockstep.runtime import sessions
-from lockstep.runtime.service import LockstepService
+from lockstep.runtime.engine import Engine
+from lockstep.runtime.service import LockstepCommandService
 
 FIXTURES = Path(__file__).parent / "fixtures" / "native"
 
@@ -19,7 +20,7 @@ def test_native_public_roundtrip_survives_service_restart_and_source_deletion(tm
     project.mkdir()
     state = tmp_path / "state"
 
-    first = LockstepService(state, recipes)
+    first = LockstepCommandService(state, recipes)
     started = first.start("native-parent-direct", {"seed": "kept"}, str(project))
     run_id = started["run_id"]
     sessions.touch(state, run_id, "session", 30)
@@ -27,7 +28,7 @@ def test_native_public_roundtrip_survives_service_restart_and_source_deletion(tm
     for path in recipes.iterdir():
         path.unlink()
 
-    restarted = LockstepService(state, recipes)
+    restarted = LockstepCommandService(state, recipes)
     completed = restarted.scenario_done(
         run_id,
         "answer",
@@ -36,5 +37,5 @@ def test_native_public_roundtrip_survives_service_restart_and_source_deletion(tm
         project=str(project),
     )
     assert completed["status"] == "completed"
-    assert restarted.history(run_id, str(project))
+    assert Engine.observe(state, recipes).history(run_id, str(project))
     restarted.close()

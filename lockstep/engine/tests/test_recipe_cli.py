@@ -10,7 +10,7 @@ import pytest
 
 from lockstep import authoring, cli
 from lockstep.mcp import server
-from lockstep.runtime.service import LockstepService, preflight_recipe
+from lockstep.runtime.service import LockstepCommandService, preflight_recipe
 
 
 @dataclass(frozen=True)
@@ -400,7 +400,7 @@ def test_complete_manual_yamlgraph_starts_without_a_template(tmp_path: Path) -> 
     project = tmp_path / "project"
     project.mkdir()
     _write_minimal_manual(project)
-    service = LockstepService(tmp_path / "state", project / ".lockstep/recipes")
+    service = LockstepCommandService(tmp_path / "state", project / ".lockstep/recipes")
     try:
         result = service.start("manual", {}, str(project))
     finally:

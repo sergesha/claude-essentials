@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+import re
 from typing import Literal
 
 from lockstep.runtime.effects.descriptors import parse_effect_result
@@ -18,6 +19,39 @@ from lockstep.runtime.providers.codex import (
 )
 
 
+def validate_pinned_permission_profile(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or "\x00" in value
+        or len(value.encode()) > 4096
+    ):
+        raise CodexProviderError("pinned permission profile must be owner-selected")
+    return value
+
+
+def pinned_runner_binding_digest(
+    installation_digest: str,
+    permission_profile: str,
+) -> str:
+    """Bind one pinned runner to its installation and owner-selected profile."""
+
+    if re.fullmatch(r"[0-9a-f]{64}", installation_digest) is None:
+        raise CodexProviderError("pinned installation digest is invalid")
+    profile = validate_pinned_permission_profile(permission_profile)
+    return hashlib.sha256(
+        _canonical(
+            {
+                "schema": "lockstep.pinned-runner-binding/v1",
+                "installation_digest": installation_digest,
+                "permission_profile": profile,
+                "execution_authority": "os_user_execution",
+                "deployment_profile": "local_unsandboxed",
+            }
+        )
+    ).hexdigest()
+
+
 class _PinnedCodexStrategy(_CodexAttemptDriver):
     """Pinned hooks for Task 6's one durable Codex attempt driver."""
 
@@ -27,28 +61,16 @@ class _PinnedCodexStrategy(_CodexAttemptDriver):
     execution_class: Literal["pinned-command"] = "pinned-command"
 
     def __init__(self, *, permission_profile: str, **kwargs) -> None:
-        if (
-            not isinstance(permission_profile, str)
-            or not permission_profile
-            or "\x00" in permission_profile
-            or len(permission_profile.encode()) > 4096
-        ):
-            raise CodexProviderError("pinned permission profile must be owner-selected")
-        self._pinned_permission_profile = permission_profile
+        self._pinned_permission_profile = validate_pinned_permission_profile(
+            permission_profile
+        )
         super().__init__(**kwargs)
         if self._binding.credential_identity_digest is not None:
             raise CodexProviderError("pinned Codex home must be credential-free")
-        self.binding_digest = hashlib.sha256(
-            _canonical(
-                {
-                    "schema": "lockstep.pinned-runner-binding/v1",
-                    "installation_digest": self._binding.digest,
-                    "permission_profile": permission_profile,
-                    "execution_authority": "os_user_execution",
-                    "deployment_profile": "local_unsandboxed",
-                }
-            )
-        ).hexdigest()
+        self.binding_digest = pinned_runner_binding_digest(
+            self._binding.digest,
+            permission_profile,
+        )
 
     @staticmethod
     def _spec(request: EffectRequest) -> PinnedCommandSpec:

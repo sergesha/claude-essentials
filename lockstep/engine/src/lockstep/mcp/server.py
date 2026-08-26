@@ -13,7 +13,7 @@ in this SDK version at all. Imported here `as FastMCP`; the object is a
 drop-in (`@app.tool()`, `app.run()`, `app._tool_manager.list_tools()` for
 introspection — the SDK's real tool registry).
 
-Lazy singleton (`_eng()` / `_reset_engine()`): the `Engine` is built once,
+Lazy handles (`_command_for()` / `_projection_for()` / `_reset_engine()`) are built once,
 from `LOCKSTEP_STATE_DIR`/`LOCKSTEP_RECIPES` env vars (Global Constraints
 defaults: `~/.lockstep`, `<resolved host project>/.lockstep/recipes`), on first
 tool call — never at import time, so tests can set the env vars and call
@@ -58,8 +58,10 @@ from lockstep.recipe.loader import RecipeLoader
 from lockstep.runtime import evidence as evidence_mod
 from lockstep.runtime import sessions, validators
 from lockstep.runtime.engine import Engine
+from lockstep.runtime.projection import RuntimeProjection
 from lockstep.runtime.recipe_bundles import RecipeBundleStore
 from lockstep.runtime.service import (
+    LockstepCommandService,
     preflight_recipe,
     validate_evidence_payload,
     validate_evidence_shape,
@@ -69,8 +71,10 @@ from lockstep.runtime.service import (
 
 app = FastMCP("lockstep")
 
-_engine: Engine | None = None
-_engine_config: tuple[Path, Path] | None = None
+_command: LockstepCommandService | None = None
+_command_config: tuple[Path, Path] | None = None
+_projection: RuntimeProjection | None = None
+_projection_config: tuple[Path, Path] | None = None
 
 # scenario_dryrun runs ONLY these; command (cmd_ok, git_clean,
 # junit_gate) and baseline (fresh, unchanged, changed_in, diff_only) checks
@@ -100,20 +104,33 @@ def _project_for_context(ctx: Context | None) -> Path:
     return Path.cwd().resolve()
 
 
-def _eng(project: Path | None = None) -> Engine:
-    global _engine, _engine_config
+def _command_for(project: Path | None = None) -> LockstepCommandService:
+    global _command, _command_config
     project_root = (project or Path.cwd()).resolve()
     state_dir, recipes_dir = _configured_paths(project_root)
     config = (state_dir, recipes_dir)
-    if _engine is None or _engine_config != config:
+    if _command is None or _command_config != config:
         # `or`, never a get() default — an unset variable the plugin
         # manifest forwards arrives present and EMPTY, and `Path("")` is
         # the cwd, which would put run state inside the project tree.
-        if _engine is not None:
-            _engine.close()
-        _engine = Engine(state_dir, recipes_dir)
-        _engine_config = config
-    return _engine
+        if _command is not None:
+            _command.close()
+        _command = Engine.command(state_dir, recipes_dir)
+        _command_config = config
+    return _command
+
+
+def _projection_for(project: Path | None = None) -> RuntimeProjection:
+    global _projection, _projection_config
+    project_root = (project or Path.cwd()).resolve()
+    state_dir, recipes_dir = _configured_paths(project_root)
+    config = (state_dir, recipes_dir)
+    if _projection is None or _projection_config != config:
+        if _projection is not None:
+            _projection.close()
+        _projection = Engine.observe(state_dir, recipes_dir)
+        _projection_config = config
+    return _projection
 
 
 def _configured_paths(project_root: Path) -> tuple[Path, Path]:
@@ -122,17 +139,21 @@ def _configured_paths(project_root: Path) -> tuple[Path, Path]:
     recipes_dir = Path(
         os.environ.get("LOCKSTEP_RECIPES") or str(project_root / ".lockstep" / "recipes")
     )
-    return state_dir.resolve(), recipes_dir.resolve()
+    return state_dir.absolute(), recipes_dir.resolve()
 
 
 def _reset_engine() -> None:
-    """Test-only: drop the lazy singleton so the next `_eng()` call rebuilds
+    """Test-only: drop lazy handles so the next capability call rebuilds
     it from the (possibly just-changed) environment."""
-    global _engine, _engine_config
-    if _engine is not None:
-        _engine.close()
-    _engine = None
-    _engine_config = None
+    global _command, _command_config, _projection, _projection_config
+    if _command is not None:
+        _command.close()
+    _command = None
+    _command_config = None
+    if _projection is not None:
+        _projection.close()
+    _projection = None
+    _projection_config = None
 
 
 def _containment_errors(schema: dict | None, evidence: dict, project: str) -> list[str]:
@@ -185,7 +206,7 @@ def _assert_origin(
     rather than authority of its own.
     """
     project_root = (project or Path.cwd()).resolve()
-    _eng(project_root).require_session(run_id, session_id, str(project_root))
+    _command_for(project_root).require_session(run_id, session_id, str(project_root))
 
 
 def _session_for_context(ctx: Context | None) -> str | None:
@@ -228,14 +249,14 @@ def scenario_start(recipe: str, vars: dict | None = None, ctx: Context | None = 
     _state_dir, recipes_dir = _configured_paths(project)
     authorized = preflight_recipe(recipes_dir, recipe)
     return _mark(
-        _eng(project).start_authorized(recipe, authorized, values, str(project))
+        _command_for(project).start_authorized(recipe, authorized, values, str(project))
     )
 
 
 @app.tool()
 def scenario_status(run_id: str, ctx: Context | None = None) -> dict:
     project = _project_for_context(ctx)
-    return _mark(_eng(project).status(run_id, str(project)))
+    return _mark(_projection_for(project).status(run_id, str(project)))
 
 
 @app.tool()
@@ -244,7 +265,7 @@ def scenario_done(run_id: str, step: str, evidence: dict, ctx: Context | None = 
     project = _project_for_context(ctx)
     session_id = _session_for_context(ctx)
     _assert_origin(run_id, session_id, project)
-    return _mark(_eng(project).done(
+    return _mark(_command_for(project).done(
         run_id, step, checked_evidence, session_id=session_id, project=str(project)
     ))
 
@@ -255,7 +276,7 @@ def scenario_escalate(run_id: str, reason: str, ctx: Context | None = None) -> d
     project = _project_for_context(ctx)
     session_id = _session_for_context(ctx)
     _assert_origin(run_id, session_id, project)
-    return _mark(_eng(project).escalate(
+    return _mark(_command_for(project).escalate(
         run_id, checked_reason, session_id=session_id, project=str(project)
     ))
 
@@ -265,7 +286,7 @@ def scenario_abort(run_id: str, ctx: Context | None = None) -> dict:
     project = _project_for_context(ctx)
     session_id = _session_for_context(ctx)
     _assert_origin(run_id, session_id, project)
-    return _mark(_eng(project).abort(
+    return _mark(_command_for(project).abort(
         run_id, session_id=session_id, project=str(project)
     ))
 
@@ -277,7 +298,7 @@ def scenario_accept_artifact(
 ) -> dict:
     project = _project_for_context(ctx)
     return _mark(
-        _eng(project).scenario_accept_artifact(token, project=str(project))
+        _command_for(project).scenario_accept_artifact(token, project=str(project))
     )
 
 
@@ -289,7 +310,7 @@ def scenario_wait(
 
     project = _project_for_context(ctx)
     return _mark(
-        _eng(project).scenario_wait(run_id, timeout_seconds, str(project))
+        _projection_for(project).wait(run_id, timeout_seconds, str(project))
     )
 
 
@@ -298,7 +319,7 @@ def scenario_history(run_id: str, ctx: Context | None = None) -> list[dict]:
     """Return the bounded redacted native checkpoint history."""
 
     project = _project_for_context(ctx)
-    return _eng(project).scenario_history(run_id, str(project))
+    return _projection_for(project).history(run_id, str(project))
 
 
 @app.tool()
@@ -306,7 +327,7 @@ def scenario_events(run_id: str, ctx: Context | None = None) -> list[dict]:
     """Return bounded native/effect observations without advancing the run."""
 
     project = _project_for_context(ctx)
-    return _eng(project).scenario_events(run_id, str(project))
+    return _projection_for(project).events(run_id, str(project))
 
 
 @app.tool()
@@ -314,7 +335,7 @@ def scenario_recover(limit: int = 128, ctx: Context | None = None) -> dict:
     """Explicitly perform one bounded durable-recovery sweep."""
 
     project = _project_for_context(ctx)
-    return _eng(project).scenario_recover(str(project), limit=limit)
+    return _command_for(project).scenario_recover(str(project), limit=limit)
 
 
 @app.tool()
@@ -518,7 +539,7 @@ def list_runs(
     ctx: Context | None = None,
 ) -> list[dict]:
     project_root = _project_for_context(ctx)
-    records = _eng(project_root).list_runs(str(project_root))
+    records = _projection_for(project_root).list_runs(str(project_root))
     if active_only:
         records = [item for item in records if item["status"] in {"starting", "awaiting", "running"}]
     return records
@@ -527,6 +548,4 @@ def list_runs(
 @app.tool()
 def run_trace(run_id: str, ctx: Context | None = None) -> str:
     project = _project_for_context(ctx)
-    return "\n".join(
-        str(item) for item in _eng(project).history(run_id, str(project))
-    )
+    return _projection_for(project).run_trace(run_id, str(project))

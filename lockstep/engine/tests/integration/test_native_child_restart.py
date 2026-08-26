@@ -9,15 +9,20 @@ import pytest
 
 from lockstep.recipe import yamlgraph_adapter as yg
 from lockstep.recipe.authority import RecipeAuthorityPolicy, StrictRecipeIngress
+from lockstep.runtime.engine import Engine
 from lockstep.runtime.recipe_bundles import RecipeBundleStore
-from lockstep.runtime.service import LockstepError, LockstepService
+from lockstep.runtime.service import LockstepError, LockstepCommandService
 from lockstep.runtime.effects.descriptors import (
     derive_effect_id,
     parse_effect_descriptor,
     parse_scope_result,
 )
 from lockstep.runtime.effects.authority import EffectAuthorityDenied
-from ..runtime.providers.fakes import FakeEffectAuthority, FakeRunner
+from ..runtime.providers.fakes import (
+    FakeEffectAuthority,
+    FakeRunner,
+    _legacy_command_service,
+)
 
 
 class _AutoGrantAuthority(FakeEffectAuthority):
@@ -332,9 +337,10 @@ def test_compiler_bundle_enters_service_with_sealed_scope_and_survives_restart(
     authority = _AutoGrantAuthority()
     state = tmp_path / "state"
 
-    first = LockstepService(
+    first = _legacy_command_service(
         state, recipes, runners={"codex": runner}, effect_authority=authority
     )
+    first._activate_writable_core()  # noqa: SLF001 - deterministic test fixture
     first._pump_stop.set()  # noqa: SLF001 - deterministic coordinator oracle
     first._pump_wakeup.set()  # noqa: SLF001
     first._pump_thread.join(timeout=5)  # noqa: SLF001
@@ -359,13 +365,14 @@ def test_compiler_bundle_enters_service_with_sealed_scope_and_survives_restart(
     assert runner.prepare_calls
     assert runner.prepare_calls[0].runner_binding_digest == runner.binding_digest
     assert runner.prepare_calls[0].deadline_at == scope.absolute_deadline
-    projected = first.status(binding.public_run_id, str(project))
+    projection = Engine.observe(first.state_dir, first.recipes_dir)
+    projected = projection.status(binding.public_run_id, str(project))
     child_run_id = projected["child_run_id"]
     assert child_run_id.startswith("child-")
     with pytest.raises(LockstepError, match="unknown run"):
-        first.status(child_run_id, str(project))
+        projection.status(child_run_id, str(project))
     with pytest.raises(LockstepError, match="unknown run"):
-        first.history(child_run_id, str(project))
+        projection.history(child_run_id, str(project))
     with pytest.raises(LockstepError, match="unknown run"):
         first.scenario_done(
             child_run_id,
@@ -378,9 +385,10 @@ def test_compiler_bundle_enters_service_with_sealed_scope_and_survives_restart(
         first.catalog.get(child_run_id)
     first.close()
 
-    restarted = LockstepService(
+    restarted = _legacy_command_service(
         state, recipes, runners={"codex": runner}, effect_authority=authority
     )
+    restarted._activate_writable_core()  # noqa: SLF001 - restart fixture
     after = restarted.runtime.snapshot(binding.public_run_id, subgraphs=True)
     restarted.close()
     assert parse_scope_result(after.values[scope_key]) == scope
@@ -428,7 +436,7 @@ def test_nested_direct_child_uses_inner_runner_and_minimum_ancestor_deadline(
     child_catalog = ResolvedCatalog(children={"leaf": leaf})
     child_ir = workflow_source(
         "child",
-        "  - call:\n      workflow: leaf\n      runner: reviewer\n"
+        "  - call:\n      workflow: leaf\n      runner: pinned\n"
         "      timeout_minutes: 10\n",
     )
     child_result = compile_workflow(
@@ -461,12 +469,13 @@ def test_nested_direct_child_uses_inner_runner_and_minimum_ancestor_deadline(
     codex = FakeRunner(binding_digest="d" * 64)
     reviewer = FakeRunner(binding_digest="e" * 64)
     authority = _AutoGrantAuthority()
-    service = LockstepService(
+    service = _legacy_command_service(
         tmp_path / "nested-state",
         recipes,
-        runners={"codex": codex, "reviewer": reviewer},
+        runners={"codex": codex, "pinned": reviewer},
         effect_authority=authority,
     )
+    service._activate_writable_core()  # noqa: SLF001 - deterministic test fixture
     service._pump_stop.set()  # noqa: SLF001 - deterministic coordinator oracle
     service._pump_wakeup.set()  # noqa: SLF001
     service._pump_thread.join(timeout=5)  # noqa: SLF001
@@ -499,7 +508,7 @@ def test_nested_direct_child_uses_inner_runner_and_minimum_ancestor_deadline(
     service.close()
 
     outer = next(scope for scope in scopes if scope.runner_selector == "codex")
-    inner = next(scope for scope in scopes if scope.runner_selector == "reviewer")
+    inner = next(scope for scope in scopes if scope.runner_selector == "pinned")
     assert inner.absolute_deadline is not None
     assert outer.absolute_deadline is not None
     assert inner.absolute_deadline <= outer.absolute_deadline

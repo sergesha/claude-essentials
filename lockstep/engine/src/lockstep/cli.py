@@ -10,27 +10,15 @@ import sys
 from pathlib import Path
 
 from lockstep import __version__
-from lockstep.authoring import (
-    AuthoringError,
-    check_recipe,
-    diff_recipe,
-    estimate_recipe,
-    initialize_minimal,
-    json_text,
-    project_paths,
-    render_recipe,
-    write_compilation,
-)
+from lockstep.errors import AuthoringError
 from lockstep.runtime.config import recipes_dir, state_dir
-from lockstep.runtime.hooks import (
-    doctor,
-    hook_posttool,
-    hook_pretool,
-    hook_session_start,
-    hook_stop,
-    policy_clear,
-    policy_require,
-)
+
+
+CliError = AuthoringError
+
+
+def json_text(value: object) -> str:
+    return json.dumps(value, sort_keys=True, ensure_ascii=False) + "\n"
 
 
 def _read_stdin_json() -> dict:
@@ -41,6 +29,30 @@ def _read_stdin_json() -> dict:
         return {}
 
 
+def _read_owner_input(path_value: str, *, label: str, max_bytes: int) -> bytes:
+    from lockstep.runtime.bounded_files import read_bounded_regular_file
+
+    path = Path(path_value)
+    error = f"{label} must be an absolute existing regular non-symlink file"
+    if not path.is_absolute() or path.is_symlink():
+        raise CliError(error)
+    try:
+        data = read_bounded_regular_file(
+            path,
+            max_bytes=max_bytes,
+            label=label,
+        )
+    except ValueError as exc:
+        if str(exc) == f"{label} exceeds {max_bytes} bytes":
+            raise CliError(str(exc)) from exc
+        raise CliError(error) from exc
+    except OSError as exc:
+        raise CliError(error) from exc
+    if data is None:  # missing_ok is false; keep the adapter total for typing.
+        raise CliError(error)
+    return data
+
+
 def _cmd_serve(args: argparse.Namespace) -> int:
     from lockstep.mcp.server import app
 
@@ -49,6 +61,8 @@ def _cmd_serve(args: argparse.Namespace) -> int:
 
 
 def _cmd_hook_stop(args: argparse.Namespace) -> int:
+    from lockstep.runtime.hooks import hook_stop
+
     stdin_json = _read_stdin_json()
     _code, out = hook_stop(stdin_json, state_dir(), stdin_json.get("cwd") or os.getcwd())
     if out:
@@ -57,6 +71,8 @@ def _cmd_hook_stop(args: argparse.Namespace) -> int:
 
 
 def _cmd_hook_session_start(args: argparse.Namespace) -> int:
+    from lockstep.runtime.hooks import hook_session_start
+
     stdin_json = _read_stdin_json()
     text = hook_session_start(state_dir(), stdin_json.get("cwd") or os.getcwd())
     if text:
@@ -65,6 +81,8 @@ def _cmd_hook_session_start(args: argparse.Namespace) -> int:
 
 
 def _cmd_hook_pretool(args: argparse.Namespace) -> int:
+    from lockstep.runtime.hooks import hook_pretool
+
     _code, out = hook_pretool(_read_stdin_json(), state_dir())
     if out:
         sys.stdout.write(out)
@@ -72,11 +90,15 @@ def _cmd_hook_pretool(args: argparse.Namespace) -> int:
 
 
 def _cmd_hook_posttool(args: argparse.Namespace) -> int:
+    from lockstep.runtime.hooks import hook_posttool
+
     hook_posttool(_read_stdin_json(), state_dir())
     return 0
 
 
 def _cmd_policy(args: argparse.Namespace) -> int:
+    from lockstep.runtime.hooks import policy_clear, policy_require
+
     if args.action == "require":
         policy_require(state_dir(), args.project, args.recipe)
     elif args.action == "clear":
@@ -88,12 +110,24 @@ def _cmd_policy(args: argparse.Namespace) -> int:
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
+    from lockstep.runtime.hooks import doctor
+
     ok, report = doctor(state_dir(), recipes_dir())
     print(report)
     return 0 if ok else 1
 
 
 def _cmd_recipe(args: argparse.Namespace) -> int:
+    from lockstep.authoring import (
+        check_recipe,
+        diff_recipe,
+        estimate_recipe,
+        initialize_minimal,
+        project_paths,
+        render_recipe,
+        write_compilation,
+    )
+
     project = Path.cwd()
     if args.action == "init":
         initialize_minimal(project, args.name)
@@ -105,13 +139,13 @@ def _cmd_recipe(args: argparse.Namespace) -> int:
         return 0
     if args.action == "check":
         if args.name is None and not args.all:
-            raise AuthoringError("recipe check requires a name or --all")
+            raise CliError("recipe check requires a name or --all")
         names = [args.name] if args.name else sorted(
             path.name.removesuffix(".recipe.yaml")
             for path in (project / ".lockstep" / "recipes").glob("*.recipe.yaml")
         )
         if not names:
-            raise AuthoringError("no recipes found")
+            raise CliError("no recipes found")
         failed = False
         for name in names:
             result = check_recipe(project, name)
@@ -130,7 +164,7 @@ def _cmd_recipe(args: argparse.Namespace) -> int:
         del args.json
         sys.stdout.write(json_text(estimate_recipe(project, args.name)))
         return 0
-    raise AuthoringError("unknown recipe action")
+    raise CliError("unknown recipe action")
 
 
 def _cmd_template(args: argparse.Namespace) -> int:
@@ -147,16 +181,16 @@ def _cmd_template(args: argparse.Namespace) -> int:
         install_template(args.template, args.name, Path.cwd())
         print(f"initialized {args.name}")
         return 0
-    raise AuthoringError("unknown template action")
+    raise CliError("unknown template action")
 
 
 def _decode_object(raw: str, label: str) -> dict:
     try:
         value = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise AuthoringError(f"{label} must be JSON") from exc
+        raise CliError(f"{label} must be JSON") from exc
     if not isinstance(value, dict):
-        raise AuthoringError(f"{label} must be a JSON object")
+        raise CliError(f"{label} must be a JSON object")
     return value
 
 
@@ -164,14 +198,19 @@ def _cmd_scenario(args: argparse.Namespace) -> int:
     from lockstep.runtime.engine import Engine
 
     project = Path.cwd().resolve()
-    engine = Engine(state_dir(), project / ".lockstep" / "recipes")
+    recipes = project / ".lockstep" / "recipes"
+    engine = (
+        Engine.observe(state_dir(), recipes)
+        if args.action in {"status", "wait", "history", "events"}
+        else Engine.command(state_dir(), recipes)
+    )
     try:
         if args.action == "start":
             result = engine.start(
                 args.recipe, _decode_object(args.input, "input"), str(project)
             )
         elif args.action == "status":
-            result = engine.scenario_status(args.run_id, str(project))
+            result = engine.status(args.run_id, str(project))
         elif args.action == "done":
             result = engine.done(
                 args.run_id,
@@ -192,15 +231,15 @@ def _cmd_scenario(args: argparse.Namespace) -> int:
                 args.run_id, session_id=args.session_id, project=str(project)
             )
         elif args.action == "wait":
-            result = engine.scenario_wait(args.run_id, args.timeout, str(project))
+            result = engine.wait(args.run_id, args.timeout, str(project))
         elif args.action == "history":
-            result = engine.scenario_history(args.run_id, str(project))
+            result = engine.history(args.run_id, str(project))
         elif args.action == "events":
-            result = engine.scenario_events(args.run_id, str(project))
+            result = engine.events(args.run_id, str(project))
         elif args.action == "recover":
             result = engine.scenario_recover(str(project), limit=args.limit)
         else:
-            raise AuthoringError("unknown scenario action")
+            raise CliError("unknown scenario action")
         sys.stdout.write(json_text(result))
         return 0
     finally:
@@ -209,7 +248,7 @@ def _cmd_scenario(args: argparse.Namespace) -> int:
 
 def _require_owner_tty() -> None:
     if not sys.stdin.isatty() or not sys.stdout.isatty():
-        raise AuthoringError("owner consent issuance and revocation require a TTY")
+        raise CliError("owner consent issuance and revocation require a TTY")
 
 
 def _read_consent_token() -> str:
@@ -219,9 +258,9 @@ def _read_consent_token() -> str:
         raw = sys.stdin.readline(4098)
         token = raw.rstrip("\r\n")
     if not token:
-        raise AuthoringError("publication consent token is required")
+        raise CliError("publication consent token is required")
     if len(token.encode("utf-8")) > 4096:
-        raise AuthoringError("publication consent token is too long")
+        raise CliError("publication consent token is too long")
     return token
 
 
@@ -231,7 +270,7 @@ def _cmd_consent(args: argparse.Namespace) -> int:
     if args.action in {"issue", "revoke"}:
         _require_owner_tty()
     project = Path.cwd().resolve()
-    engine = Engine(state_dir(), project / ".lockstep" / "recipes")
+    engine = Engine.command(state_dir(), project / ".lockstep" / "recipes")
     try:
         if args.action == "issue":
             preview = engine.preview_publication_consent(
@@ -241,7 +280,7 @@ def _cmd_consent(args: argparse.Namespace) -> int:
             expected = str(preview["digest"])
             entered = input("Type the exact commitment digest to issue consent: ")
             if entered != expected:
-                raise AuthoringError("publication consent issuance cancelled")
+                raise CliError("publication consent issuance cancelled")
             issued = engine.issue_publication_consent(
                 args.run_id,
                 args.step,
@@ -260,13 +299,74 @@ def _cmd_consent(args: argparse.Namespace) -> int:
             expected = f"REVOKE {project}"
             entered = input(f"Type {expected!r} to revoke project publication consent: ")
             if entered != expected:
-                raise AuthoringError("publication consent revocation cancelled")
+                raise CliError("publication consent revocation cancelled")
             epoch = engine.revoke_publication_consents(project=str(project))
             print(f"publication consent epoch {epoch}")
             return 0
-        raise AuthoringError("unknown consent action")
+        raise CliError("unknown consent action")
     finally:
         engine.close()
+
+
+def _cmd_owner(args: argparse.Namespace) -> int:
+    if args.action == "list-runtime-requirements":
+        from lockstep.runtime.effects.owner_policy import RuntimeRequirementIndex
+        from lockstep.runtime.service import preflight_recipe
+
+        project = Path(args.project).resolve()
+        recipes = project / ".lockstep" / "recipes"
+        index = RuntimeRequirementIndex.for_authorized_closures(
+            tuple(preflight_recipe(recipes, name) for name in args.recipe),
+            project_identity=str(project),
+        )
+        sys.stdout.write(json_text(index.listing_document()))
+        return 0
+    if args.action == "provision-runtime":
+        from lockstep.runtime.effects.owner_policy_ingress import (
+            parse_runtime_provision_documents,
+        )
+
+        config_bytes = _read_owner_input(
+            args.config,
+            label="runtime provision config",
+            max_bytes=64 * 1024,
+        )
+        replacement_bytes = _read_owner_input(
+            args.replace_grants,
+            label="runtime replacement grants",
+            max_bytes=512 * 1024,
+        )
+        codex, pinned, replacement_keys = parse_runtime_provision_documents(
+            config_bytes,
+            replacement_bytes,
+        )
+        from lockstep.runtime.effects.owner_snapshot_file import (
+            preflight_runtime_snapshot_file,
+        )
+
+        preflight_runtime_snapshot_file(state_dir())
+        from lockstep.runtime.effects.owner_policy import RuntimeRequirementIndex
+        from lockstep.runtime.effects.owner_provisioning import (
+            provision_runtime_snapshot,
+        )
+        from lockstep.runtime.service import preflight_recipe
+
+        project = Path(args.project).resolve(strict=True)
+        recipes = project / ".lockstep" / "recipes"
+        index = RuntimeRequirementIndex.for_authorized_closures(
+            tuple(preflight_recipe(recipes, name) for name in args.recipe),
+            project_identity=str(project),
+        )
+        provision_runtime_snapshot(
+            state_dir=state_dir(),
+            codex=codex,
+            pinned=pinned,
+            replacement_keys=replacement_keys,
+            index=index,
+            project=project,
+        )
+        return 0
+    raise CliError("unknown owner action")
 
 
 _HANDLERS = {
@@ -281,6 +381,7 @@ _HANDLERS = {
     "template": _cmd_template,
     "scenario": _cmd_scenario,
     "consent": _cmd_consent,
+    "owner": _cmd_owner,
 }
 
 
@@ -359,6 +460,18 @@ def _build_parser() -> argparse.ArgumentParser:
             issue.add_argument("--step", required=True)
             consent.add_parser("accept")
             consent.add_parser("revoke")
+        elif verb == "owner":
+            owner = sub.add_parser("owner").add_subparsers(
+                dest="action", required=True
+            )
+            listing = owner.add_parser("list-runtime-requirements")
+            listing.add_argument("--project", required=True)
+            listing.add_argument("--recipe", action="append", required=True)
+            provision = owner.add_parser("provision-runtime")
+            provision.add_argument("--config", required=True)
+            provision.add_argument("--project", required=True)
+            provision.add_argument("--recipe", action="append", required=True)
+            provision.add_argument("--replace-grants", required=True)
         else:
             sub.add_parser(verb)
     return parser
@@ -374,6 +487,6 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("the following arguments are required: verb")
     try:
         return _HANDLERS[args.verb](args)
-    except (OSError, ValueError, RuntimeError, AuthoringError) as exc:
+    except (OSError, ValueError, RuntimeError) as exc:
         print(str(exc), file=sys.stderr)
         return 2

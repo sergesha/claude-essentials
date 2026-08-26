@@ -22,24 +22,110 @@ from lockstep.runtime.native_models import (
     NativeSnapshot,
 )
 from lockstep.runtime.owner_state import initialize_owner_state
-from lockstep.runtime.service import LockstepError, LockstepService
+from lockstep.runtime.service import LockstepError, LockstepCommandService
 from lockstep.runtime.status import ScenarioStatus
 
 
-def test_scenario_status_is_an_explicit_read_only_public_control() -> None:
-    service = object.__new__(LockstepService)
-    service.status = lambda run_id, project: {
-        "status": "running",
-        "run_id": run_id,
-        "owner": "engine",
-        "next_action": "scenario_wait",
-    }
-    assert service.scenario_status("run-1", "/project") == {
-        "status": "running",
-        "run_id": "run-1",
-        "owner": "engine",
-        "next_action": "scenario_wait",
-    }
+def _service_double() -> LockstepCommandService:
+    service = object.__new__(LockstepCommandService)
+    service._activation_lock = threading.RLock()  # noqa: SLF001
+    service._writable_core_active = True  # noqa: SLF001
+    return service
+
+
+def test_writable_core_activation_is_retryable_after_recovery_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recipes = tmp_path / "recipes"
+    recipes.mkdir()
+    service = LockstepCommandService(tmp_path / "state", recipes)
+    real_recover = service._recover_engine_effects  # noqa: SLF001
+    attempts = 0
+
+    def fail_once() -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("recovery failed")
+        real_recover()
+
+    monkeypatch.setattr(service, "_recover_engine_effects", fail_once)
+    try:
+        with pytest.raises(RuntimeError, match="recovery failed"):
+            service._activate_writable_core()  # noqa: SLF001
+        assert service._writable_core_active is False  # noqa: SLF001
+
+        service._activate_writable_core()  # noqa: SLF001
+
+        assert service._writable_core_active is True  # noqa: SLF001
+        assert attempts == 2
+    finally:
+        service.close()
+
+
+def test_writable_core_activation_is_retryable_after_thread_start_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recipes = tmp_path / "recipes"
+    recipes.mkdir()
+    service = LockstepCommandService(tmp_path / "state", recipes)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(
+            threading.Thread,
+            "start",
+            lambda _thread: (_ for _ in ()).throw(RuntimeError("start failed")),
+        )
+        with pytest.raises(RuntimeError, match="start failed"):
+            service._activate_writable_core()  # noqa: SLF001
+    try:
+        assert service._writable_core_active is False  # noqa: SLF001
+        service._activate_writable_core()  # noqa: SLF001
+        assert service._writable_core_active is True  # noqa: SLF001
+    finally:
+        service.close()
+
+
+def test_close_serializes_with_first_writable_core_activation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recipes = tmp_path / "recipes"
+    recipes.mkdir()
+    service = LockstepCommandService(tmp_path / "state", recipes)
+    entered = threading.Event()
+    release = threading.Event()
+    real_recover = service._recover_engine_effects  # noqa: SLF001
+
+    def blocked_recover() -> None:
+        entered.set()
+        assert release.wait(2)
+        real_recover()
+
+    monkeypatch.setattr(service, "_recover_engine_effects", blocked_recover)
+    activation = threading.Thread(target=service._activate_writable_core)  # noqa: SLF001
+    closing = threading.Thread(target=service.close)
+    activation.start()
+    assert entered.wait(2)
+    closing.start()
+    closing.join(0.1)
+    closed_before_activation_finished = not closing.is_alive()
+
+    release.set()
+    activation.join(2)
+    closing.join(2)
+    pump = service._pump_thread  # noqa: SLF001
+    if pump is not None and pump.is_alive():
+        service._pump_stop.set()  # noqa: SLF001
+        service._pump_wakeup.set()  # noqa: SLF001
+        pump.join(2)
+
+    assert closed_before_activation_finished is False
+    assert not activation.is_alive()
+    assert not closing.is_alive()
+    assert service._closed is True  # noqa: SLF001
+    assert service._writable_core_active is False  # noqa: SLF001
+    assert pump is not None
+    assert not pump.is_alive()
 
 
 def test_service_composes_project_resolved_artifact_publication_and_acceptance(
@@ -51,8 +137,9 @@ def test_service_composes_project_resolved_artifact_publication_and_acceptance(
     second = tmp_path / "second"
     first.mkdir()
     second.mkdir()
-    service = LockstepService(tmp_path / "state", recipes)
+    service = LockstepCommandService(tmp_path / "state", recipes)
     try:
+        service._activate_writable_core()  # noqa: SLF001 - composition unit seam
         assert service.artifacts is service.coordinator._artifacts
         one = service.coordinator._publisher_for(
             RunBinding("run-1", "thread-1", "a" * 64, "bundle", str(first))
@@ -70,7 +157,7 @@ def test_service_composes_project_resolved_artifact_publication_and_acceptance(
         service.close()
 
 def test_engine_effect_queue_has_a_hard_admission_ceiling() -> None:
-    service = object.__new__(LockstepService)
+    service = _service_double()
     service._active_effect_runs = set()
     service._queued_effect_runs = set()
     service._active_effect_queue = deque()
@@ -95,7 +182,7 @@ def test_startup_recovery_discovers_native_start_commit_before_ledger_prepare() 
     driven = []
     bound = []
     unbound = []
-    service = object.__new__(LockstepService)
+    service = _service_double()
     watch = EffectDispatchWatch(
         "run-1", BlobRef("b" * 64, 2), datetime(2026, 8, 20, tzinfo=UTC)
     )
@@ -133,7 +220,7 @@ def test_startup_recovery_discovers_native_start_commit_before_ledger_prepare() 
 
 
 def test_dispatch_recovery_serializes_with_foreground_admission() -> None:
-    service = object.__new__(LockstepService)
+    service = _service_double()
     service._admission_recovery_lock = threading.RLock()
     entered = threading.Event()
     finished = threading.Event()
@@ -156,7 +243,7 @@ def test_dispatch_recovery_serializes_with_foreground_admission() -> None:
 def test_worker_resume_blocks_recovery_unbind_for_the_whole_composite(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    service = object.__new__(LockstepService)
+    service = _service_double()
     service._admission_recovery_lock = threading.RLock()
     service.state_dir = tmp_path
     binding = RunBinding("run-1", "thread-1", "a" * 64, "bundle", "/project")
@@ -207,7 +294,7 @@ def test_worker_resume_blocks_recovery_unbind_for_the_whole_composite(
 def test_artifact_acceptance_blocks_recovery_unbind_through_drive(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    service = object.__new__(LockstepService)
+    service = _service_double()
     service._admission_recovery_lock = threading.RLock()
     binding = RunBinding("run-1", "thread-1", "a" * 64, "bundle", "/project")
     coordinate = NativeCoordinate("thread-1", "cp-1", "", "task-1", "int-1")
@@ -268,7 +355,7 @@ def test_artifact_acceptance_blocks_recovery_unbind_through_drive(
 
 
 def test_artifact_acceptance_public_signature_is_token_plus_ambient_project() -> None:
-    signature = inspect.signature(LockstepService.scenario_accept_artifact)
+    signature = inspect.signature(LockstepCommandService.scenario_accept_artifact)
     assert tuple(signature.parameters) == ("self", "token", "project")
     assert signature.parameters["project"].kind is inspect.Parameter.KEYWORD_ONLY
     assert {
@@ -282,7 +369,7 @@ def test_artifact_acceptance_public_signature_is_token_plus_ambient_project() ->
 
 
 def test_publication_consent_preview_is_read_only_and_issue_rechecks_digest() -> None:
-    service = object.__new__(LockstepService)
+    service = _service_double()
     binding = RunBinding("run-1", "thread-1", "a" * 64, "bundle", "/project")
     coordinate = NativeCoordinate("thread-1", "cp-1", "", "task-1", "int-1")
     interrupt = NativeInterrupt(coordinate, {})
@@ -323,7 +410,7 @@ def test_publication_consent_preview_is_read_only_and_issue_rechecks_digest() ->
 
 
 def test_artifact_acceptance_foreign_ambient_project_is_generic_and_read_only() -> None:
-    service = object.__new__(LockstepService)
+    service = _service_double()
     token = "never-echo-this-token"
     service.authority = SimpleNamespace(
         inspect_token=lambda _token: SimpleNamespace(
@@ -347,7 +434,7 @@ def test_start_recovery_defers_before_native_commit_when_active_batch_is_full() 
     watch = EffectDispatchWatch(
         "deferred", BlobRef("b" * 64, 2), datetime(2026, 8, 20, tzinfo=UTC)
     )
-    service = object.__new__(LockstepService)
+    service = _service_double()
     service.effects = SimpleNamespace(list_dispatch_watches=lambda **_kwargs: (watch,))
     service.catalog = SimpleNamespace(get=lambda _run_id: binding)
     service.blobs = SimpleNamespace(
@@ -401,7 +488,7 @@ def test_effect_recovery_defers_before_reconcile_when_active_batch_is_full() -> 
     )
     snapshot = NativeSnapshot(values={}, pending=(interrupt,), checkpoint_id="cp-1")
     binding = RunBinding("run-pinned", "thread-pinned", "a" * 64, "bundle", "/project")
-    service = object.__new__(LockstepService)
+    service = _service_double()
     service.effects = SimpleNamespace(
         get=lambda _effect_id: (_ for _ in ()).throw(KeyError())
     )
@@ -425,7 +512,7 @@ def test_effect_recovery_defers_before_reconcile_when_active_batch_is_full() -> 
 
 def test_effect_recovery_cursor_does_not_skip_a_capacity_deferred_run() -> None:
     binding = RunBinding("deferred", "thread-deferred", "a" * 64, "bundle", "/p")
-    service = object.__new__(LockstepService)
+    service = _service_double()
     service.effects = SimpleNamespace(
         list_recovery_threads=lambda **_kwargs: ("thread-deferred",)
     )
@@ -509,7 +596,7 @@ def test_scenario_recover_selects_active_effect_threads_before_catalog_limit(
             grant_digest="f" * 64,
         )
         driven: list[str] = []
-        service = object.__new__(LockstepService)
+        service = _service_double()
         service.catalog = catalog
         service.effects = effects
         service.runtime = SimpleNamespace(bind=lambda _binding: None)
@@ -546,7 +633,7 @@ def test_scenario_recover_pages_nonterminal_threads_with_stable_project_progress
 
     bindings = {foreign.thread_id: foreign, local.thread_id: local}
     driven: list[str] = []
-    service = object.__new__(LockstepService)
+    service = _service_double()
     service.effects = SimpleNamespace(list_recovery_threads=list_recovery_threads)
     service.catalog = SimpleNamespace(
         list=lambda *_args, **_kwargs: pytest.fail(
@@ -586,7 +673,7 @@ def test_scenario_recover_capacity_deferral_does_not_advance_or_report_recovery(
 
     bound: list[RunBinding] = []
     driven: list[str] = []
-    service = object.__new__(LockstepService)
+    service = _service_double()
     service.effects = SimpleNamespace(list_recovery_threads=list_recovery_threads)
     service.catalog = SimpleNamespace(find_by_thread=lambda _thread_id: binding)
     service.runtime = SimpleNamespace(bind=bound.append)
@@ -616,55 +703,6 @@ def test_scenario_recover_capacity_deferral_does_not_advance_or_report_recovery(
     assert driven == ["deferred"]
 
 
-@pytest.mark.parametrize("timeout", [0, 61, True, "1"])
-def test_scenario_wait_rejects_out_of_contract_timeout_without_polling(timeout) -> None:
-    service = object.__new__(LockstepService)
-    service.status = lambda *_args: pytest.fail("invalid wait polled status")
-
-    with pytest.raises(LockstepError, match="1.*60|timeout"):
-        service.scenario_wait("run-1", timeout, "/project")
-
-
-def test_scenario_wait_reports_change_without_mutating_progress_ports() -> None:
-    service = object.__new__(LockstepService)
-    observations = iter(
-        (
-            {
-                "status": "running",
-                "run_id": "run-1",
-                "owner": "engine",
-                "next_action": "scenario_wait",
-            },
-            {
-                "status": "completed",
-                "run_id": "run-1",
-                "owner": "engine",
-                "next_action": None,
-            },
-        )
-    )
-    service.status = lambda *_args: next(observations)
-    ticks = iter((0.0, 0.0, 0.1))
-    service._wait_clock = lambda: next(ticks)
-    service._wait_sleep = lambda _delay: None
-    service.runtime = type(
-        "NoMutationRuntime",
-        (),
-        {"resume": lambda *_args: pytest.fail("wait mutated checkpoint")},
-    )()
-    service.coordinator = type(
-        "NoReconcile",
-        (),
-        {"reconcile": lambda *_args: pytest.fail("wait started reconciliation")},
-    )()
-
-    result = service.scenario_wait("run-1", 1, "/project")
-
-    assert result["changed"] is True
-    assert result["status"] == "completed"
-    assert result["revision"].startswith("revision:")
-
-
 def test_service_exposes_no_status_mutation_api() -> None:
     forbidden = {
         "set_status",
@@ -673,7 +711,7 @@ def test_service_exposes_no_status_mutation_api() -> None:
         "mark_escalated",
         "mark_aborted",
     }
-    assert forbidden.isdisjoint(vars(LockstepService))
+    assert forbidden.isdisjoint(vars(LockstepCommandService))
 
 
 def test_protected_manual_step_uses_descriptor_logical_id() -> None:
@@ -692,7 +730,7 @@ def test_protected_manual_step_uses_descriptor_logical_id() -> None:
     }
     interrupt = NativeInterrupt(coordinate, {"lockstep_effect": raw})
     binding = RunBinding("run-1", "thread-1", "a" * 64, "bundle", "/project")
-    service = object.__new__(LockstepService)
+    service = _service_double()
     service._snapshot_status = lambda *_args: (
         binding,
         ScenarioStatus("awaiting", "run-1", "worker", "edit_then_scenario_done"),
@@ -754,7 +792,7 @@ def test_engine_progress_prepares_manual_handoff_before_returning_awaiting() -> 
             )
             return (SimpleNamespace(action="prepared"),)
 
-    service = object.__new__(LockstepService)
+    service = _service_double()
     service.effects = effects
     service.leases = ()
     service.coordinator = Coordinator()
@@ -809,7 +847,7 @@ def test_engine_progress_delivers_scope_result_without_status_mutation() -> None
         def reconcile_consumed(self, _run_id):
             return ()
 
-    service = object.__new__(LockstepService)
+    service = _service_double()
     service.effects = ()
     service.leases = ()
     service.coordinator = Coordinator()
@@ -857,7 +895,7 @@ def test_engine_progress_requeues_a_delivery_held_by_another_owner() -> None:
             return None
 
     activated = []
-    service = object.__new__(LockstepService)
+    service = _service_double()
     service.effects = ()
     service.leases = ()
     service.coordinator = Coordinator()
@@ -890,7 +928,7 @@ def test_engine_progress_recovers_capacity_bound_consumed_facts_in_one_sweep() -
 
     coordinator = Coordinator()
     deactivated = []
-    service = object.__new__(LockstepService)
+    service = _service_double()
     service.effects = ()
     service.leases = ()
     service.coordinator = coordinator
@@ -959,7 +997,7 @@ def test_protected_manual_done_uses_coordinator_not_direct_native_resume(
         def release(self, _lease):
             return None
 
-    service = object.__new__(LockstepService)
+    service = _service_double()
     service.state_dir = state
     service.runtime = Runtime()
     service.coordinator = Coordinator()

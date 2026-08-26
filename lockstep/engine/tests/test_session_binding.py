@@ -4,9 +4,9 @@ from pathlib import Path
 import pytest
 
 from lockstep.runtime import sessions
-from lockstep.runtime.engine import LockstepError
+from lockstep.runtime.engine import Engine, LockstepError
 from lockstep.runtime.hooks import hook_posttool, hook_pretool, policy_require
-from lockstep.runtime.service import LockstepService
+from lockstep.runtime.service import LockstepCommandService
 
 FIXTURES = Path(__file__).parent / "fixtures" / "native"
 
@@ -28,7 +28,7 @@ def _run(tmp_path, monkeypatch=None):
     project = tmp_path / "project"
     project.mkdir()
     state = tmp_path / "state"
-    service = LockstepService(state, recipes)
+    service = LockstepCommandService(state, recipes)
     run_id = service.start("native-parent-direct", {}, str(project))["run_id"]
     service.close()
     return state, project, run_id
@@ -74,6 +74,27 @@ def test_posttool_status_never_refreshes_or_adopts_binding(tmp_path):
     assert path.read_bytes() == before
 
 
+def test_oversize_session_identity_cannot_poison_existing_binding(tmp_path) -> None:
+    state = tmp_path / "state"
+    sessions.touch(state, "run-1", "original", 30)
+    path = sessions.binding_path(state, "run-1")
+    binding = json.loads(path.read_text())
+    binding["last_seen"] = "2000-01-01T00:00:00+00:00"
+    path.write_text(json.dumps(binding, sort_keys=True))
+    before = path.read_bytes()
+
+    with pytest.raises(ValueError, match="session identity exceeds"):
+        sessions.touch(
+            state,
+            "run-1",
+            "x" * (64 * 1024 + 1),
+            30,
+        )
+
+    assert path.read_bytes() == before
+    assert not path.with_name(path.name + ".tmp").exists()
+
+
 def test_pretool_policy_requires_current_native_run_session(tmp_path, monkeypatch):
     state, project, run_id = _run(tmp_path, monkeypatch)
     sessions.touch(state, run_id, "owner", 30)
@@ -102,7 +123,7 @@ def test_pretool_cannot_revive_expired_exact_owner_or_enable_resume(
     assert json.loads(raw)["hookSpecificOutput"]["permissionDecision"] == "deny"
     assert path.read_bytes() == before
 
-    service = LockstepService(state, tmp_path / "recipes")
+    service = LockstepCommandService(state, tmp_path / "recipes")
     with pytest.raises(LockstepError, match="stale"):
         service.scenario_done(
             run_id,
@@ -111,7 +132,9 @@ def test_pretool_cannot_revive_expired_exact_owner_or_enable_resume(
             session_id="expired-owner",
             project=str(project),
         )
-    assert service.status(run_id, str(project))["status"] == "awaiting"
+    assert Engine.observe(state, tmp_path / "recipes").status(
+        run_id, str(project)
+    )["status"] == "awaiting"
     service.close()
 
 

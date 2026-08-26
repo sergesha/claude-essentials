@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from lockstep.runtime.service import LockstepService
+from lockstep.runtime.observation import project_events
 
 
 def _events_module():
@@ -42,97 +42,58 @@ def test_runtime_event_has_the_closed_redacted_observation_shape() -> None:
 
 
 def test_events_merge_native_and_effect_observations_without_invoking_graph() -> None:
-    service = object.__new__(LockstepService)
-    forbidden_calls = []
-
-    def forbidden(name: str):
-        def fail(*_args, **_kwargs):
-            forbidden_calls.append(name)
-            pytest.fail(f"events called authority-bearing port {name}")
-
-        return fail
-
-    service.runtime = SimpleNamespace(
-        history=lambda _run_id: (
-            SimpleNamespace(
-                checkpoint_id="cp-1",
-                checkpoint_ns="",
-                created_at="2026-08-21T12:00:00+00:00",
-                values={},
-                pending=(),
-                next=("verify",),
-                task_errors=(),
-            ),
+    native = (
+        SimpleNamespace(
+            checkpoint_id="cp-1",
+            checkpoint_ns="",
+            created_at="2026-08-21T12:00:00+00:00",
+            values={},
+            pending=(),
+            next=("verify",),
+            task_errors=(),
         ),
-        start=forbidden("runtime.start"),
-        ensure_started=forbidden("runtime.ensure_started"),
-        resume=forbidden("runtime.resume"),
-        stream=forbidden("runtime.stream"),
     )
-    service.effects = SimpleNamespace(
-        list_for_thread=lambda _thread_id: (
-            SimpleNamespace(
-                effect_id="effect-1",
-                effect_kind="verify",
-                phase="sealed",
-                updated_at=datetime(2026, 8, 21, 12, 0, 1, tzinfo=UTC),
-            ),
+    effects = (
+        SimpleNamespace(
+            effect_id="effect-1",
+            effect_kind="verify",
+            phase="sealed",
+            updated_at=datetime(2026, 8, 21, 12, 0, 1, tzinfo=UTC),
         ),
-        prepare=forbidden("effects.prepare"),
-        seal=forbidden("effects.seal"),
-    )
-    service.catalog = SimpleNamespace(
-        get=lambda _run_id: SimpleNamespace(
-            public_run_id="run-1", thread_id="thread-1", project_identity="/project"
-        )
-    )
-    service.coordinator = SimpleNamespace(
-        reconcile_pending=forbidden("coordinator.reconcile_pending")
     )
 
-    result = service.scenario_events("run-1", "/project")
+    result = project_events(native, effects, limit=10_000)
 
     assert [item["source"] for item in result] == ["native", "effect"]
     assert result[0]["checkpoint_id"] == "cp-1"
     assert result[1]["effect_id"] == "effect-1"
-    assert forbidden_calls == []
 
 
 def test_events_whitelist_fields_and_never_expose_state_or_effect_results() -> None:
-    service = object.__new__(LockstepService)
     secret = "owner-secret-must-not-cross-observation-boundary"
-    service.runtime = SimpleNamespace(
-        history=lambda _run_id: (
-            SimpleNamespace(
-                checkpoint_id="cp-1",
-                checkpoint_ns="",
-                created_at="2026-08-21T12:00:00+00:00",
-                values={"prompt": secret, "token": secret},
-                pending=(SimpleNamespace(value={"brief": secret}),),
-                next=("verify",),
-                task_errors=(RuntimeError(secret),),
-            ),
-        )
+    native = (
+        SimpleNamespace(
+            checkpoint_id="cp-1",
+            checkpoint_ns="",
+            created_at="2026-08-21T12:00:00+00:00",
+            values={"prompt": secret, "token": secret},
+            pending=(SimpleNamespace(value={"brief": secret}),),
+            next=("verify",),
+            task_errors=(RuntimeError(secret),),
+        ),
     )
-    service.effects = SimpleNamespace(
-        list_for_thread=lambda _thread_id: (
-            SimpleNamespace(
-                effect_id="effect-1",
-                effect_kind="verify",
-                phase="sealed",
-                updated_at=datetime(2026, 8, 21, 12, 0, 1, tzinfo=UTC),
-                result={"stdout": secret},
-                request_digest=secret,
-            ),
-        )
-    )
-    service.catalog = SimpleNamespace(
-        get=lambda _run_id: SimpleNamespace(
-            public_run_id="run-1", thread_id="thread-1", project_identity="/project"
-        )
+    effects = (
+        SimpleNamespace(
+            effect_id="effect-1",
+            effect_kind="verify",
+            phase="sealed",
+            updated_at=datetime(2026, 8, 21, 12, 0, 1, tzinfo=UTC),
+            result={"stdout": secret},
+            request_digest=secret,
+        ),
     )
 
-    result = service.scenario_events("run-1", "/project")
+    result = project_events(native, effects, limit=10_000)
 
     assert secret not in repr(result)
     assert set(result[0]) == {
@@ -145,21 +106,13 @@ def test_events_whitelist_fields_and_never_expose_state_or_effect_results() -> N
 
 
 def test_events_fail_closed_when_observation_count_exceeds_public_bound() -> None:
-    service = object.__new__(LockstepService)
     item = SimpleNamespace(
         checkpoint_id="cp", checkpoint_ns="", created_at=None, values={},
         pending=(), next=(), task_errors=(),
     )
-    service.runtime = SimpleNamespace(history=lambda _run_id: (item,) * 10_001)
-    service.effects = SimpleNamespace(list_for_thread=lambda _thread_id: ())
-    service.catalog = SimpleNamespace(
-        get=lambda _run_id: SimpleNamespace(
-            public_run_id="run-1", thread_id="thread-1", project_identity="/project"
-        )
-    )
 
     with pytest.raises(Exception, match="event observations exceed"):
-        service.scenario_events("run-1", "/project")
+        project_events((item,) * 10_001, (), limit=10_000)
 
 
 @pytest.mark.parametrize("mode", ["reject", "raise-before", "accept-then-raise"])

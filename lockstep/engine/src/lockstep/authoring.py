@@ -11,6 +11,7 @@ from typing import Literal, Mapping
 
 import yaml
 
+from lockstep.errors import AuthoringError
 from lockstep.recipe.authority import StrictRecipeIngress, canonical_execution_bytes
 from lockstep.recipe.profile import CompilerProvenance, _create_compiler_provenance
 from lockstep.workflow.compiler import CompilationResult, compile_workflow
@@ -25,11 +26,6 @@ from lockstep.workflow.semantics import (
     ResolvedChild,
     validate_semantics,
 )
-
-
-class AuthoringError(ValueError):
-    pass
-
 
 _WORKFLOW_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 

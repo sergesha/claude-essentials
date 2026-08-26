@@ -396,98 +396,90 @@ def _check_loops(
                 )
 
 
-def _check_interrupt_node(
+def _check_protected_interrupt(
     name: str,
     node: dict,
-    edges_by_from: dict[str, list[dict]],
-    nodes: dict[str, dict],
+    message: dict,
     doc: dict,
     errors: list[str],
     *,
     compiler_authorized: bool,
-) -> None:
-    message = node.get("message") or {}
-    if not isinstance(message, dict):
-        # yamlgraph types `message` as `str | dict`; a bare string is legal
-        # there and meaningless here. Report it as the recipe error it is —
-        # unguarded, it escapes `check_recipe` as an AttributeError and an
-        # authoring mistake reads as an engine crash.
-        errors.append(f"interrupt '{name}': message must be a mapping (a brief), not a string")
-        return
-    checks = message.get("checks") or []
-    schema = message.get("evidence_schema")
-
-    # idempotent: false required on EVERY interrupt, work or
-    # escalate-marked (a shared state_key: brief means the default
-    # idempotent: true reuses whichever payload parked first).
-    if node.get("idempotent") is not False:
-        errors.append(f"interrupt '{name}' must declare idempotent: false")
-
-    if "lockstep_effect" in message:
-        try:
-            descriptor = parse_effect_descriptor(
-                message["lockstep_effect"],
-                known_state_keys=set(doc.get("state") or {}),
-            )
-        except (TypeError, ValueError) as exc:
-            errors.append(f"invalid lockstep_effect (interrupt '{name}'): {exc}")
-            return
-        if isinstance(descriptor, ScopeDescriptor) and not compiler_authorized:
-            errors.append(
-                f"scope descriptor (interrupt '{name}') requires compiler provenance"
-            )
-        if (
-            isinstance(descriptor, ScopeDescriptor)
-            and node.get("resume_key") != descriptor.result_state_key
-        ):
-            errors.append(
-                f"scope descriptor (interrupt '{name}') result_state_key must equal resume_key"
-            )
-        # Native protected interrupts route directly on their typed result.  The
-        # legacy python-validator pairing and evidence brief rules below belong
-        # only to ordinary human work interrupts.
-        return
-
-    if not _is_escalate_marker(message):
-        # validator pairing: ALL outgoing edges must target one node, and
-        # that node must be the python validator.
-        targets = sorted(
-            {
-                target
-                for edge in edges_by_from.get(name, [])
-                for target in (
-                    edge.get("to")
-                    if isinstance(edge.get("to"), list)
-                    else [edge.get("to")]
-                )
-            }
+) -> bool:
+    if "lockstep_effect" not in message:
+        return False
+    try:
+        descriptor = parse_effect_descriptor(
+            message["lockstep_effect"],
+            known_state_keys=set(doc.get("state") or {}),
         )
-        if not targets:
-            errors.append(
-                f"no validator: work interrupt '{name}' has no outgoing edge to a validator node"
-            )
-        elif len(targets) > 1:
-            errors.append(
-                f"bypass: work interrupt '{name}' has edges to multiple targets "
-                f"{targets} — only the validator edge is allowed"
-            )
-        else:
-            target_node = nodes.get(targets[0])
-            if target_node is None or target_node.get("type") != "python":
-                errors.append(
-                    f"no validator: work interrupt '{name}' does not lead directly "
-                    f"to a python validator node (target {targets[0]!r})"
-                )
+    except (TypeError, ValueError) as exc:
+        errors.append(f"invalid lockstep_effect (interrupt '{name}'): {exc}")
+        return True
+    if isinstance(descriptor, ScopeDescriptor) and not compiler_authorized:
+        errors.append(
+            f"scope descriptor (interrupt '{name}') requires compiler provenance"
+        )
+    if (
+        isinstance(descriptor, ScopeDescriptor)
+        and node.get("resume_key") != descriptor.result_state_key
+    ):
+        errors.append(
+            f"scope descriptor (interrupt '{name}') result_state_key must equal resume_key"
+        )
+    return True
 
-        for field in ("step", "task", "exit_criterion"):
-            if not message.get(field):
-                errors.append(f"work interrupt '{name}' brief missing required field '{field}'")
-        if not checks:
-            errors.append(f"work interrupt '{name}' brief must declare at least one check")
 
-    # These apply to whatever checks the node's brief carries regardless of
-    # marker status (an escalate marker brief has none, so these are no-ops
-    # there in practice).
+def _check_work_interrupt_route(
+    name: str,
+    message: dict,
+    checks: list,
+    edges_by_from: dict[str, list[dict]],
+    nodes: dict[str, dict],
+    errors: list[str],
+) -> None:
+    if _is_escalate_marker(message):
+        return
+    targets = sorted(
+        {
+            target
+            for edge in edges_by_from.get(name, [])
+            for target in (
+                edge.get("to")
+                if isinstance(edge.get("to"), list)
+                else [edge.get("to")]
+            )
+        }
+    )
+    if not targets:
+        errors.append(
+            f"no validator: work interrupt '{name}' has no outgoing edge to a validator node"
+        )
+    elif len(targets) > 1:
+        errors.append(
+            f"bypass: work interrupt '{name}' has edges to multiple targets "
+            f"{targets} — only the validator edge is allowed"
+        )
+    else:
+        target_node = nodes.get(targets[0])
+        if target_node is None or target_node.get("type") != "python":
+            errors.append(
+                f"no validator: work interrupt '{name}' does not lead directly "
+                f"to a python validator node (target {targets[0]!r})"
+            )
+    for field in ("step", "task", "exit_criterion"):
+        if not message.get(field):
+            errors.append(f"work interrupt '{name}' brief missing required field '{field}'")
+    if not checks:
+        errors.append(f"work interrupt '{name}' brief must declare at least one check")
+
+
+def _check_interrupt_checks(
+    name: str,
+    checks: list,
+    schema: object,
+    doc: dict,
+    errors: list[str],
+) -> None:
     props = {}
     if isinstance(schema, dict):
         props = schema.get("properties") or {}
@@ -514,7 +506,7 @@ def _check_interrupt_node(
     ):
         errors.append(
             f"baseline_globs must be declared when baseline checks are used (interrupt '{name}')"
-        )
+            )
 
     for s in _walk_strings(checks):
         if PLACEHOLDER_RE.search(s):
@@ -523,6 +515,11 @@ def _check_interrupt_node(
                 "reach checks, they must be verbatim"
             )
             break
+
+
+def _check_interrupt_schema(
+    name: str, schema: object, errors: list[str]
+) -> None:
     if schema is not None:
         # A malformed schema raises SchemaError from every later
         # `iter_errors`, i.e. from inside `scenario_done` — after the recipe
@@ -539,6 +536,40 @@ def _check_interrupt_node(
                     f"placeholder found in evidence_schema (interrupt '{name}'): {s!r}"
                 )
                 break
+
+
+def _check_interrupt_node(
+    name: str,
+    node: dict,
+    edges_by_from: dict[str, list[dict]],
+    nodes: dict[str, dict],
+    doc: dict,
+    errors: list[str],
+    *,
+    compiler_authorized: bool,
+) -> None:
+    message = node.get("message") or {}
+    if not isinstance(message, dict):
+        errors.append(
+            f"interrupt '{name}': message must be a mapping (a brief), not a string"
+        )
+        return
+    checks = message.get("checks") or []
+    schema = message.get("evidence_schema")
+    if node.get("idempotent") is not False:
+        errors.append(f"interrupt '{name}' must declare idempotent: false")
+    if _check_protected_interrupt(
+        name,
+        node,
+        message,
+        doc,
+        errors,
+        compiler_authorized=compiler_authorized,
+    ):
+        return
+    _check_work_interrupt_route(name, message, checks, edges_by_from, nodes, errors)
+    _check_interrupt_checks(name, checks, schema, doc, errors)
+    _check_interrupt_schema(name, schema, errors)
 
 
 def check_recipe_bytes(

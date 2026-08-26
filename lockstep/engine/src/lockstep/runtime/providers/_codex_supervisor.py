@@ -237,8 +237,9 @@ def _publish_terminal(
     )
 
 
-def run(path: Path, expected_digest: str) -> int:
-    spec = _read_spec(path, expected_digest)
+def _launch_inputs(
+    spec: dict[str, object],
+) -> tuple[list[str], dict[str, str]]:
     argv = spec["argv"]
     environment = spec["environment"]
     if (
@@ -252,65 +253,53 @@ def run(path: Path, expected_digest: str) -> int:
         )
     ):
         raise ValueError("invalid supervisor argv or environment")
-    alive_descriptor = os.open(
-        Path(str(spec["alive"])), os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600
+    return argv, environment
+
+
+def _publish_prelaunch_terminal(spec: dict[str, object], reason: str) -> None:
+    values = {
+        "cancelled": (130, False),
+        "deadline": (124, True),
+        "spawn_failed": (127, False),
+    }
+    returncode, timed_out = values[reason]
+    _publish_terminal(
+        spec,
+        returncode=returncode,
+        overflow=False,
+        timed_out=timed_out,
+        quiescent=True,
+        termination_reason=reason,
     )
-    fcntl.flock(alive_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    _atomic_json(
-        Path(str(spec["supervisor_ready"])),
-        {"schema": "lockstep.codex-supervisor-ready/v1", "pid": os.getpid()},
-    )
-    go = Path(str(spec["go"]))
-    cancel = Path(str(spec["cancel"]))
+
+
+def _await_launch_permission(
+    spec: dict[str, object],
+    go: Path,
+    cancel: Path,
+) -> str | None:
     while not go.is_file():
         if cancel.is_file():
-            _publish_terminal(
-                spec,
-                returncode=130,
-                overflow=False,
-                timed_out=False,
-                quiescent=True,
-                termination_reason="cancelled",
-            )
-            os.close(alive_descriptor)
-            return 0
+            return "cancelled"
         if time.time() >= float(spec["deadline_epoch"]):
-            _publish_terminal(
-                spec,
-                returncode=124,
-                overflow=False,
-                timed_out=True,
-                quiescent=True,
-                termination_reason="deadline",
-            )
-            os.close(alive_descriptor)
-            return 0
+            return "deadline"
         time.sleep(0.02)
+    return None
+
+
+def _spawn_inner_process(
+    spec: dict[str, object],
+    argv: list[str],
+    environment: dict[str, str],
+    cancel: Path,
+) -> tuple[subprocess.Popen[bytes] | None, bytes, str | None]:
     try:
         stdin_bytes = Path(str(spec["stdin"])).read_bytes()
         _verify_bound_files(spec, argv)
         if time.time() >= float(spec["deadline_epoch"]):
-            _publish_terminal(
-                spec,
-                returncode=124,
-                overflow=False,
-                timed_out=True,
-                quiescent=True,
-                termination_reason="deadline",
-            )
-            os.close(alive_descriptor)
-            return 0
+            return None, b"", "deadline"
         if cancel.is_file():
-            _publish_terminal(
-                spec,
-                returncode=130,
-                overflow=False,
-                timed_out=False,
-                quiescent=True,
-                termination_reason="cancelled",
-            )
-            os.close(alive_descriptor)
-            return 0
+            return None, b"", "cancelled"
         process = subprocess.Popen(
             argv,
             cwd=str(spec["cwd"]),
@@ -322,25 +311,16 @@ def run(path: Path, expected_digest: str) -> int:
             close_fds=True,
             start_new_session=True,
         )
+        return process, stdin_bytes, None
     except (OSError, ValueError, KeyError, TypeError):
-        _publish_terminal(
-            spec,
-            returncode=127,
-            overflow=False,
-            timed_out=False,
-            quiescent=True,
-            termination_reason="spawn_failed",
-        )
-        os.close(alive_descriptor)
-        return 0
-    _atomic_json(
-        Path(str(spec["started"])),
-        {
-            "schema": "lockstep.codex-started/v1",
-            "pid": process.pid,
-            "pgid": process.pid,
-        },
-    )
+        return None, b"", "spawn_failed"
+
+
+def _start_capture(
+    spec: dict[str, object],
+    process: subprocess.Popen[bytes],
+    stdin_bytes: bytes,
+) -> tuple[bool, Event, tuple[Thread, Thread]]:
     assert (
         process.stdin is not None
         and process.stdout is not None
@@ -379,46 +359,106 @@ def run(path: Path, expected_digest: str) -> int:
     )
     for reader in readers:
         reader.start()
-    timed_out = False
-    if stdin_failed:
-        _kill_group(process.pid)
+    return stdin_failed, overflow, readers
+
+
+def _monitor_process(
+    spec: dict[str, object],
+    process: subprocess.Popen[bytes],
+    overflow: Event,
+    cancel: Path,
+) -> bool:
     while process.poll() is None:
         if (
             overflow.is_set()
             or cancel.is_file()
             or time.time() >= float(spec["deadline_epoch"])
         ):
-            timed_out = not overflow.is_set()
-            if cancel.is_file():
-                timed_out = False
+            timed_out = not overflow.is_set() and not cancel.is_file()
             _kill_group(process.pid)
-            break
+            return timed_out
         time.sleep(0.02)
-    returncode = process.wait()
+    return False
+
+
+def _terminal_reason(
+    *,
+    stdin_failed: bool,
+    overflow: bool,
+    cancelled: bool,
+    timed_out: bool,
+) -> str:
     if stdin_failed:
-        returncode = 127
-    _kill_group(process.pid)
-    _finish_capture(process.pid, readers)
-    _publish_terminal(
-        spec,
-        returncode=returncode,
-        overflow=overflow.is_set(),
-        timed_out=timed_out,
-        quiescent=True,
-        termination_reason=(
-            "stdin_failed"
-            if stdin_failed
-            else "output_overflow"
-            if overflow.is_set()
-            else "cancelled"
-            if cancel.is_file()
-            else "deadline"
-            if timed_out
-            else "exited"
-        ),
+        return "stdin_failed"
+    if overflow:
+        return "output_overflow"
+    if cancelled:
+        return "cancelled"
+    if timed_out:
+        return "deadline"
+    return "exited"
+
+
+def run(path: Path, expected_digest: str) -> int:
+    spec = _read_spec(path, expected_digest)
+    argv, environment = _launch_inputs(spec)
+    alive_descriptor = os.open(
+        Path(str(spec["alive"])), os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600
     )
-    os.close(alive_descriptor)
-    return 0
+    try:
+        fcntl.flock(alive_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _atomic_json(
+            Path(str(spec["supervisor_ready"])),
+            {"schema": "lockstep.codex-supervisor-ready/v1", "pid": os.getpid()},
+        )
+        go = Path(str(spec["go"]))
+        cancel = Path(str(spec["cancel"]))
+        prelaunch_reason = _await_launch_permission(spec, go, cancel)
+        if prelaunch_reason is not None:
+            _publish_prelaunch_terminal(spec, prelaunch_reason)
+            return 0
+        process, stdin_bytes, prelaunch_reason = _spawn_inner_process(
+            spec, argv, environment, cancel
+        )
+        if prelaunch_reason is not None:
+            _publish_prelaunch_terminal(spec, prelaunch_reason)
+            return 0
+        assert process is not None
+        _atomic_json(
+            Path(str(spec["started"])),
+            {
+                "schema": "lockstep.codex-started/v1",
+                "pid": process.pid,
+                "pgid": process.pid,
+            },
+        )
+        stdin_failed, overflow, readers = _start_capture(
+            spec, process, stdin_bytes
+        )
+        if stdin_failed:
+            _kill_group(process.pid)
+        timed_out = _monitor_process(spec, process, overflow, cancel)
+        returncode = process.wait()
+        if stdin_failed:
+            returncode = 127
+        _kill_group(process.pid)
+        _finish_capture(process.pid, readers)
+        _publish_terminal(
+            spec,
+            returncode=returncode,
+            overflow=overflow.is_set(),
+            timed_out=timed_out,
+            quiescent=True,
+            termination_reason=_terminal_reason(
+                stdin_failed=stdin_failed,
+                overflow=overflow.is_set(),
+                cancelled=cancel.is_file(),
+                timed_out=timed_out,
+            ),
+        )
+        return 0
+    finally:
+        os.close(alive_descriptor)
 
 
 def main() -> int:

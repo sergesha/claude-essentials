@@ -15,6 +15,15 @@ from lockstep.runtime.providers.workspaces import (
 )
 
 
+def test_workspace_provider_is_composed_from_cohesive_collaborators(tmp_path):
+    provider, _lease = _materialized(tmp_path)
+
+    assert type(provider._materializer).__name__ == "WorkspaceMaterializationTransaction"
+    assert type(provider._rollover).__name__ == "WorkspaceRolloverTransaction"
+    assert type(provider._attestor).__name__ == "WorkspaceAttestor"
+    assert type(provider._record_repository).__name__ == "WorkspaceRecordRepository"
+
+
 def _materialized(tmp_path: Path):
     owner = tmp_path / "owner"
     blobs = BlobStore(owner)

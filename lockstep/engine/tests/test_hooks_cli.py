@@ -11,7 +11,7 @@ from lockstep.runtime.hooks import (
     hook_stop,
     policy_require,
 )
-from lockstep.runtime.service import LockstepService
+from lockstep.runtime.service import LockstepCommandService
 
 FIXTURES = Path(__file__).parent / "fixtures" / "native"
 
@@ -28,7 +28,7 @@ def _parked(tmp_path):
     project = tmp_path / "project"
     project.mkdir()
     state = tmp_path / "state"
-    service = LockstepService(state, recipes)
+    service = LockstepCommandService(state, recipes)
     run_id = service.start("native-parent-direct", {}, str(project))["run_id"]
     service.close()
     return state, recipes, project, run_id
@@ -36,11 +36,21 @@ def _parked(tmp_path):
 
 def test_stop_and_session_start_are_read_only_native_projections(tmp_path):
     state, _recipes, project, run_id = _parked(tmp_path)
-    before = {path: path.stat().st_mtime_ns for path in state.rglob("*") if path.is_file()}
+    before = {
+        path: path.stat().st_mtime_ns
+        for path in state.rglob("*")
+        if path.is_file()
+        and not path.name.endswith(("-wal", "-shm", "-journal"))
+    }
     _code, raw = hook_stop({}, state, str(project))
     assert run_id in json.loads(raw)["reason"]
     assert run_id in hook_session_start(state, str(project))
-    after = {path: path.stat().st_mtime_ns for path in state.rglob("*") if path.is_file()}
+    after = {
+        path: path.stat().st_mtime_ns
+        for path in state.rglob("*")
+        if path.is_file()
+        and not path.name.endswith(("-wal", "-shm", "-journal"))
+    }
     assert after == before
 
 

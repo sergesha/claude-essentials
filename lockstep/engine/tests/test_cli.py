@@ -26,6 +26,13 @@ from lockstep.recipe.loader import RecipeLoader
 FIXTURES = Path(__file__).parent / "fixtures" / "native"
 
 
+def test_cli_preserves_the_public_authoring_error_identity() -> None:
+    from lockstep import authoring
+
+    assert cli.AuthoringError is authoring.AuthoringError
+    assert cli.CliError is authoring.AuthoringError
+
+
 def test_no_verb_prints_argparse_usage_and_exits_nonzero(capsys):
     with pytest.raises(SystemExit) as exit_status:
         cli.main([])
@@ -102,7 +109,7 @@ def test_doctor_exit_code_reflects_health(tmp_path, monkeypatch):
 
     assert cli.main(["doctor"]) == 1  # neither dir exists yet -> issues found
 
-    (tmp_path / "state").mkdir()
+    (tmp_path / "state").mkdir(mode=0o700)
     (tmp_path / "recipes").mkdir()
     assert cli.main(["doctor"]) == 0
 
@@ -115,8 +122,8 @@ def test_consent_issue_and_revoke_require_an_interactive_owner_tty_before_servic
     monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False)
     monkeypatch.setattr(cli.sys.stdout, "isatty", lambda: True)
     monkeypatch.setattr(
-        engine_module,
-        "Engine",
+        engine_module.Engine,
+        "command",
         lambda *_args, **_kwargs: pytest.fail("non-TTY consent constructed service"),
     )
 
@@ -165,7 +172,7 @@ def test_consent_issue_previews_exact_commitment_and_prints_token_once(
         def close(self):
             calls.append(("close",))
 
-    monkeypatch.setattr(engine_module, "Engine", lambda *_args: FakeEngine())
+    monkeypatch.setattr(engine_module.Engine, "command", lambda *_args: FakeEngine())
     monkeypatch.setattr(builtins, "input", lambda _prompt="": digest)
 
     assert cli.main(
@@ -203,7 +210,7 @@ def test_consent_issue_confirmation_mismatch_never_mints(tmp_path, monkeypatch, 
         def close(self):
             calls.append(("close",))
 
-    monkeypatch.setattr(engine_module, "Engine", lambda *_args: FakeEngine())
+    monkeypatch.setattr(engine_module.Engine, "command", lambda *_args: FakeEngine())
     monkeypatch.setattr(builtins, "input", lambda _prompt="": "b" * 64)
 
     assert cli.main(
@@ -258,7 +265,7 @@ def test_consent_accept_reads_hidden_token_and_forwards_only_token_and_cwd(
         def close(self):
             calls.append(("close",))
 
-    monkeypatch.setattr(engine_module, "Engine", lambda *_args: FakeEngine())
+    monkeypatch.setattr(engine_module.Engine, "command", lambda *_args: FakeEngine())
     monkeypatch.setattr(getpass, "getpass", lambda _prompt="": "hidden-token")
 
     assert cli.main(["consent", "accept"]) == 0
@@ -291,7 +298,7 @@ def test_consent_accept_reads_one_bounded_piped_line_and_revoke_scopes_to_cwd(
         def close(self):
             calls.append(("close",))
 
-    monkeypatch.setattr(engine_module, "Engine", lambda *_args: FakeEngine())
+    monkeypatch.setattr(engine_module.Engine, "command", lambda *_args: FakeEngine())
     monkeypatch.setattr(cli.sys, "stdin", io.StringIO("piped-token\nignored\n"))
     assert cli.main(["consent", "accept"]) == 0
     assert calls[:2] == [
@@ -333,7 +340,7 @@ def test_consent_accept_allows_one_maximum_bounded_piped_token(
         def close(self):
             calls.append(("close",))
 
-    monkeypatch.setattr(engine_module, "Engine", lambda *_args: FakeEngine())
+    monkeypatch.setattr(engine_module.Engine, "command", lambda *_args: FakeEngine())
     monkeypatch.setattr(cli.sys, "stdin", io.StringIO(f"{token}\nignored\n"))
 
     assert cli.main(["consent", "accept"]) == 0

@@ -3,13 +3,18 @@ from __future__ import annotations
 from pathlib import Path
 
 from lockstep.runtime.effects.authority import EffectAuthorityDenied
+from lockstep.runtime.engine import Engine
 from lockstep.runtime.project_snapshots import ProjectSnapshotRef
-from lockstep.runtime.service import LockstepService
+from lockstep.runtime.service import LockstepCommandService
 from lockstep.workflow.compiler import compile_workflow
 from lockstep.workflow.schema import load_workflow, parse_workflow
 from lockstep.workflow.semantics import ResolvedCatalog, validate_semantics
 
-from tests.runtime.providers.fakes import FakeEffectAuthority, FakeRunner
+from tests.runtime.providers.fakes import (
+    FakeEffectAuthority,
+    FakeRunner,
+    _legacy_command_service,
+)
 
 
 class _AutoGrantAuthority(FakeEffectAuthority):
@@ -60,7 +65,7 @@ def test_runtime_snapshot_input_is_durable_and_reused_after_restart(
     runner = FakeRunner()
     authority = _AutoGrantAuthority()
 
-    first = LockstepService(
+    first = _legacy_command_service(
         state, recipes, runners={"pinned": runner}, effect_authority=authority
     )
     started = first.start(
@@ -85,10 +90,10 @@ def test_runtime_snapshot_input_is_durable_and_reused_after_restart(
     (project / "tracked.txt").write_text("mutated after durable bind\n")
     first.close()
 
-    restarted = LockstepService(
+    restarted = _legacy_command_service(
         state, recipes, runners={"pinned": runner}, effect_authority=authority
     )
-    restarted.status(started["run_id"], str(project))
+    Engine.observe(state, recipes).status(started["run_id"], str(project))
     restarted.close()
 
     assert all(
@@ -119,7 +124,7 @@ def test_decision_descriptor_executes_without_a_runner_from_exact_snapshots(
     project = tmp_path / "project"
     project.mkdir()
     (project / "README.md").write_text("unchanged\n")
-    service = LockstepService(tmp_path / "state", recipes)
+    service = LockstepCommandService(tmp_path / "state", recipes)
     try:
         result = service.start(
             "route",

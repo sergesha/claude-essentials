@@ -27,6 +27,53 @@ def _executable(path: Path, body: str) -> Path:
     return path
 
 
+def test_binding_capture_rejects_atomic_executable_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from lockstep.runtime.providers import codex as codex_module
+
+    executable = _executable(tmp_path / "codex", "raise SystemExit(0)\n")
+    replacement = _executable(
+        tmp_path / "replacement-codex", "raise SystemExit(1)\n"
+    )
+    home = tmp_path / "codex-home"
+    home.mkdir(mode=0o700)
+    auth = home / "auth.json"
+    auth.write_text("{}", encoding="utf-8")
+    auth.chmod(0o600)
+    private_tmp = tmp_path / "private-tmp"
+    private_tmp.mkdir(mode=0o700)
+    real_open = os.open
+    replaced = False
+
+    def racing_open(path, flags, *args, **kwargs):
+        nonlocal replaced
+        descriptor = real_open(path, flags, *args, **kwargs)
+        if Path(path) == executable and not replaced:
+            replaced = True
+            os.replace(replacement, executable)
+        return descriptor
+
+    monkeypatch.setattr(codex_module.os, "open", racing_open)
+
+    with pytest.raises(codex_module.CodexProviderError, match="identity changed"):
+        codex_module.CodexInstallationBinding.capture(
+            executable=executable,
+            model="model",
+            cli_version="version",
+            permission_profile={"sandbox": "workspace-write", "approval": "never"},
+            codex_home=home,
+            environment={
+                "PATH": "/usr/bin:/bin",
+                "LANG": "C.UTF-8",
+                "LC_ALL": "C.UTF-8",
+                "TMPDIR": str(private_tmp),
+            },
+        )
+    assert replaced
+
+
 @contextmanager
 def _ready_supervisor(adapter, effect_id: str):
     directory = adapter._directory(effect_id)

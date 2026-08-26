@@ -87,7 +87,12 @@ def _canonical(value: object) -> bytes:
 
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    descriptor = os.open(
+        path,
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0),
+    )
     try:
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode):
@@ -104,6 +109,36 @@ def _sha256_file(path: Path) -> str:
 
 def _stat_identity(info: os.stat_result) -> tuple[int, int, int, int, int]:
     return (info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns)
+
+
+def _capture_executable(path: Path) -> tuple[os.stat_result, str]:
+    descriptor = os.open(
+        path,
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0),
+    )
+    digest = hashlib.sha256()
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or not before.st_mode & 0o111:
+            raise CodexProviderError(
+                "Codex executable must be an executable regular file"
+            )
+        identity = _stat_identity(before)
+        while chunk := os.read(descriptor, 1024 * 1024):
+            digest.update(chunk)
+        if _stat_identity(os.fstat(descriptor)) != identity:
+            raise CodexProviderError("Codex executable identity changed")
+    finally:
+        os.close(descriptor)
+    try:
+        current = path.stat()
+    except OSError as exc:
+        raise CodexProviderError("Codex executable identity changed") from exc
+    if _stat_identity(current) != identity:
+        raise CodexProviderError("Codex executable identity changed")
+    return before, digest.hexdigest()
 
 
 def _credential_identity(path: Path) -> str | None:
@@ -193,11 +228,7 @@ class CodexInstallationBinding:
         if not supplied.is_absolute():
             raise CodexProviderError("Codex executable path must be absolute")
         resolved = supplied.resolve(strict=True)
-        info = resolved.stat()
-        if not stat.S_ISREG(info.st_mode) or not os.access(resolved, os.X_OK):
-            raise CodexProviderError(
-                "Codex executable must be an executable regular file"
-            )
+        info, executable_sha256 = _capture_executable(resolved)
         if not model or not cli_version:
             raise CodexProviderError("Codex model and CLI version must be explicit")
         if (
@@ -211,8 +242,13 @@ class CodexInstallationBinding:
         captured_profile = tuple(
             sorted((key, str(value)) for key, value in permission_profile.items())
         )
-        home = Path(codex_home).resolve(strict=True)
-        if home.is_symlink() or not home.is_dir():
+        supplied_home = Path(codex_home)
+        if not supplied_home.is_absolute() or supplied_home.is_symlink():
+            raise CodexProviderError(
+                "CODEX_HOME must be an absolute non-symlink directory"
+            )
+        home = supplied_home.resolve(strict=True)
+        if not home.is_dir():
             raise CodexProviderError("CODEX_HOME must be an owner-selected directory")
         verify_owner_directory(home)
         for entry in home.iterdir():
@@ -239,7 +275,7 @@ class CodexInstallationBinding:
             "executable_inode": info.st_ino,
             "executable_size": info.st_size,
             "executable_mtime_ns": info.st_mtime_ns,
-            "executable_sha256": _sha256_file(resolved),
+            "executable_sha256": executable_sha256,
             "model": model,
             "cli_version": cli_version,
             "permission_profile": [list(item) for item in captured_profile],
@@ -266,13 +302,13 @@ class CodexInstallationBinding:
         )
 
     def revalidate(self) -> None:
-        info = self.executable_path.stat()
+        info, executable_sha256 = _capture_executable(self.executable_path)
         identity = (
             info.st_dev,
             info.st_ino,
             info.st_size,
             info.st_mtime_ns,
-            _sha256_file(self.executable_path),
+            executable_sha256,
         )
         expected = (
             self.executable_device,
@@ -663,7 +699,7 @@ class _CodexAttemptDriver:
         del request
         return workspace
 
-    def prepare(self, request: EffectRequest) -> PreparedLaunch:
+    def _validate_prepare_request(self, request: EffectRequest) -> None:
         if request.grant_digest is None or request.workspace_ref is None:
             raise CodexProviderError(
                 "Codex request requires an exact grant and workspace"
@@ -673,34 +709,56 @@ class _CodexAttemptDriver:
                 f"Codex adapter accepts only {self.effect_kind} effects"
             )
         if request.runner_binding_digest != self.binding_digest:
-            raise CodexProviderError("Codex request uses a different runner binding")
+            raise CodexProviderError(
+                "Codex request uses a different runner binding"
+            )
         if request.deadline_at is None or request.deadline_at <= self._clock():
             raise CodexProviderError("Codex request deadline has expired")
         if not self.required_capabilities.issubset(request.required_capabilities):
-            raise CodexProviderError("Codex request lacks required runner capabilities")
-        self._admit_attempt(request.effect_id)
-        directory = self._directory(request.effect_id)
-        stdin_bytes, snapshot_ref = self._request_payload(request)
-        launch_path = directory / "launch.json"
-        if launch_path.exists():
-            record = self._load_record(request.effect_id)
-            if (
-                record.request_digest != request.request_digest
-                or record.runner_binding_digest != request.runner_binding_digest
-                or record.workspace_ref != request.workspace_ref
-                or record.execution_class != self.execution_class
-                or record.workspace_purpose != self.workspace_purpose
-            ):
-                raise CodexProviderError("same effect has a different prepared launch")
-            self._recover_prepared_launch(record, stdin_bytes=stdin_bytes)
-            return PreparedLaunch(
-                record.effect_id,
-                record.request_digest,
-                record.runner_binding_digest,
-                record.launch_ref,
-                record.workspace_ref,
+            raise CodexProviderError(
+                "Codex request lacks required runner capabilities"
             )
 
+    def _recover_existing_preparation(
+        self,
+        request: EffectRequest,
+        *,
+        launch_path: Path,
+        stdin_bytes: bytes,
+    ) -> PreparedLaunch | None:
+        if not launch_path.exists():
+            return None
+        record = self._load_record(request.effect_id)
+        observed = (
+            record.request_digest,
+            record.runner_binding_digest,
+            record.workspace_ref,
+            record.execution_class,
+            record.workspace_purpose,
+        )
+        expected = (
+            request.request_digest,
+            request.runner_binding_digest,
+            request.workspace_ref,
+            self.execution_class,
+            self.workspace_purpose,
+        )
+        if observed != expected:
+            raise CodexProviderError("same effect has a different prepared launch")
+        self._recover_prepared_launch(record, stdin_bytes=stdin_bytes)
+        return PreparedLaunch(
+            record.effect_id,
+            record.request_digest,
+            record.runner_binding_digest,
+            record.launch_ref,
+            record.workspace_ref,
+        )
+
+    def _prepare_workspace(
+        self,
+        request: EffectRequest,
+        snapshot_ref: str,
+    ):
         workspace = self._workspaces.materialize(
             effect_id=request.effect_id,
             request_digest=request.request_digest,
@@ -711,6 +769,7 @@ class _CodexAttemptDriver:
         )
         try:
             self._assert_no_project_control_surfaces(workspace.workspace_path)
+            return workspace
         except CodexProviderError as exc:
             try:
                 self._workspaces.quarantine_and_rollover(workspace)
@@ -724,6 +783,8 @@ class _CodexAttemptDriver:
             raise DefinitiveProviderFailure(
                 self._error_result(request.effect_id, "prelaunch_failed")
             ) from exc
+
+    def _current_workspace_binding(self, workspace_path: Path):
         binding = self._installation()
         if binding != self._binding:
             raise CodexProviderError(
@@ -731,15 +792,24 @@ class _CodexAttemptDriver:
             )
         binding.revalidate()
         if (
-            binding.executable_path == workspace.workspace_path
-            or workspace.workspace_path in binding.executable_path.parents
+            binding.executable_path == workspace_path
+            or workspace_path in binding.executable_path.parents
         ):
-            raise CodexProviderError("Codex executable may not reside in its workspace")
+            raise CodexProviderError(
+                "Codex executable may not reside in its workspace"
+            )
+        return binding
+
+    def _provisional_launch_record(
+        self,
+        request: EffectRequest,
+        workspace,
+        binding: CodexInstallationBinding,
+    ) -> CodexLaunchRecord:
         environment = dict(binding.environment)
         environment["CODEX_HOME"] = str(binding.codex_home)
         environment["HOME"] = str(binding.codex_home)
-        inner_argv = self._inner_argv(binding, workspace.workspace_path, request)
-        provisional = CodexLaunchRecord(
+        return CodexLaunchRecord(
             effect_id=request.effect_id,
             request_digest=request.request_digest,
             runner_binding_digest=request.runner_binding_digest,
@@ -750,7 +820,9 @@ class _CodexAttemptDriver:
             cwd=self._execution_cwd(workspace.workspace_path, request),
             executable_path=binding.executable_path,
             executable_identity_digest=binding.digest,
-            inner_argv=inner_argv,
+            inner_argv=self._inner_argv(
+                binding, workspace.workspace_path, request
+            ),
             environment=tuple(sorted(environment.items())),
             codex_home=binding.codex_home,
             credential_identity_digest=binding.credential_identity_digest,
@@ -760,25 +832,40 @@ class _CodexAttemptDriver:
             deadline_at=request.deadline_at,
             launch_ref="pending",
         )
+
+    def _attested_launch_record(
+        self,
+        provisional: CodexLaunchRecord,
+    ) -> CodexLaunchRecord:
         policy = self._policy(provisional)
         attestation = verify_attestation(
             policy, self._sandbox.preflight(policy), require_enforced=False
         )
+        attestation_digest = _attestation_digest(attestation)
         commitment = {
             **self._record_data(provisional),
             "sandbox_policy_digest": policy.digest,
-            "sandbox_attestation_digest": _attestation_digest(attestation),
+            "sandbox_attestation_digest": attestation_digest,
         }
         commitment.pop("launch_ref")
         launch_ref = "codex:" + hashlib.sha256(_canonical(commitment)).hexdigest()
-        record = CodexLaunchRecord(
+        return CodexLaunchRecord(
             **{
                 **provisional.__dict__,
                 "sandbox_policy_digest": policy.digest,
-                "sandbox_attestation_digest": _attestation_digest(attestation),
+                "sandbox_attestation_digest": attestation_digest,
                 "launch_ref": launch_ref,
             }
         )
+
+    def _commit_prepared_launch(
+        self,
+        *,
+        directory: Path,
+        launch_path: Path,
+        stdin_bytes: bytes,
+        record: CodexLaunchRecord,
+    ) -> PreparedLaunch:
         self._write_once(launch_path, _canonical(self._record_data(record)))
         self._write_once(directory / "stdin.bin", stdin_bytes)
         self._atomic_json(
@@ -791,6 +878,32 @@ class _CodexAttemptDriver:
             record.runner_binding_digest,
             record.launch_ref,
             record.workspace_ref,
+        )
+
+    def prepare(self, request: EffectRequest) -> PreparedLaunch:
+        self._validate_prepare_request(request)
+        self._admit_attempt(request.effect_id)
+        directory = self._directory(request.effect_id)
+        stdin_bytes, snapshot_ref = self._request_payload(request)
+        launch_path = directory / "launch.json"
+        recovered = self._recover_existing_preparation(
+            request,
+            launch_path=launch_path,
+            stdin_bytes=stdin_bytes,
+        )
+        if recovered is not None:
+            return recovered
+        workspace = self._prepare_workspace(request, snapshot_ref)
+        binding = self._current_workspace_binding(workspace.workspace_path)
+        provisional = self._provisional_launch_record(
+            request, workspace, binding
+        )
+        record = self._attested_launch_record(provisional)
+        return self._commit_prepared_launch(
+            directory=directory,
+            launch_path=launch_path,
+            stdin_bytes=stdin_bytes,
+            record=record,
         )
 
     def _state(self, effect_id: str) -> dict[str, object]:

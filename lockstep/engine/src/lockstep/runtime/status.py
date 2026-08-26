@@ -152,136 +152,154 @@ def _parallel_projection(
     )
 
 
-def project_status(
+def _running_effect_status(
+    binding: RunBinding,
+    logical_id: object,
+    annotations: tuple[tuple[str, Any], ...],
+) -> ScenarioStatus:
+    return ScenarioStatus(
+        "running",
+        binding.public_run_id,
+        "engine",
+        "scenario_wait",
+        step=str(logical_id or "") or None,
+        annotations=annotations,
+    )
+
+
+def _manual_projection(
+    binding: RunBinding,
+    interrupt: NativeInterrupt,
+    descriptor: dict[str, Any],
+    effects: object,
+    child_annotations: tuple[tuple[str, Any], ...],
+) -> ScenarioStatus:
+    try:
+        parsed = parse_effect_descriptor(descriptor)
+        if not isinstance(parsed, EffectDescriptor):
+            raise TypeError("manual descriptor is not an ordinary effect")
+        effect_id = derive_effect_id(interrupt.coordinate, parsed.digest)
+        record = effects.get(effect_id)
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return _running_effect_status(
+            binding,
+            descriptor.get("logical_id"),
+            (("manual_handoff", "preparing"), *child_annotations),
+        )
+    if (
+        record.coordinate != interrupt.coordinate
+        or record.descriptor_digest != parsed.digest
+        or record.effect_kind != "manual"
+        or record.phase != "prepared"
+    ):
+        return _running_effect_status(
+            binding,
+            parsed.logical_id,
+            (("manual_handoff", "not_ready"), *child_annotations),
+        )
+    value = interrupt.value
+    step = value.get("step") if isinstance(value, dict) else None
+    return ScenarioStatus(
+        "awaiting",
+        binding.public_run_id,
+        "worker",
+        "edit_then_scenario_done",
+        step=step or parsed.logical_id,
+        annotations=child_annotations,
+    )
+
+
+def _pinned_projection(
     binding: RunBinding,
     snapshot: NativeSnapshot,
-    leases: object,
+    interrupt: NativeInterrupt,
+    descriptor: dict[str, Any],
+    effects: object,
+    child_annotations: tuple[tuple[str, Any], ...],
+) -> ScenarioStatus:
+    try:
+        parsed = parse_effect_descriptor(descriptor)
+        if not isinstance(parsed, EffectDescriptor):
+            raise TypeError("pinned descriptor is not an ordinary effect")
+        effect_id = derive_effect_id(interrupt.coordinate, parsed.digest)
+        record = effects.get(effect_id)
+        if (
+            record.coordinate != interrupt.coordinate
+            or record.descriptor_digest != parsed.digest
+            or record.effect_kind != "pinned"
+        ):
+            raise ValueError("pinned effect record mismatch")
+        selectors = dict(parsed.inputs)
+        command = PinnedCommandSpec.parse(
+            snapshot.values[selectors["command"].state_key]
+        )
+    except (
+        AttributeError,
+        KeyError,
+        TypeError,
+        ValueError,
+        CodexProviderError,
+    ):
+        return _running_effect_status(
+            binding, descriptor.get("logical_id"), child_annotations
+        )
+    gate_execution = {
+        "operation_id": effect_id,
+        "execution_class": "pinned-validator",
+        "logical_argv": list(command.logical_argv),
+        "logical_cwd": command.logical_cwd,
+        "phase": record.phase,
+    }
+    return _running_effect_status(
+        binding,
+        parsed.logical_id,
+        (("gate_execution", gate_execution), *child_annotations),
+    )
+
+
+def _single_pending_projection(
+    binding: RunBinding,
+    snapshot: NativeSnapshot,
     effects: object,
 ) -> ScenarioStatus:
-    del leases
-    outcome = snapshot.values.get("lockstep_outcome")
-    if snapshot.task_errors:
-        return ScenarioStatus("escalated", binding.public_run_id, "engine", None)
-    if snapshot.pending:
-        parallel = _parallel_projection(binding, snapshot, effects)
-        if parallel is not None:
-            return parallel
-        child_annotations = _child_annotations(binding, snapshot.pending[0])
-        descriptor = _descriptor(snapshot.pending[0])
-        if descriptor is None:
-            value = snapshot.pending[0].value
-            step = value.get("step") if isinstance(value, dict) else None
-            return ScenarioStatus(
-                "awaiting",
-                binding.public_run_id,
-                "worker",
-                "edit_then_scenario_done",
-                step=step,
-                annotations=child_annotations,
-            )
-        if descriptor.get("kind") == "manual":
-            try:
-                parsed = parse_effect_descriptor(descriptor)
-                if not isinstance(parsed, EffectDescriptor):
-                    raise TypeError("manual descriptor is not an ordinary effect")
-                effect_id = derive_effect_id(
-                    snapshot.pending[0].coordinate, parsed.digest
-                )
-                record = effects.get(effect_id)
-            except (AttributeError, KeyError, TypeError, ValueError):
-                return ScenarioStatus(
-                    "running",
-                    binding.public_run_id,
-                    "engine",
-                    "scenario_wait",
-                    step=str(descriptor.get("logical_id") or "") or None,
-                    annotations=(
-                        ("manual_handoff", "preparing"), *child_annotations
-                    ),
-                )
-            if (
-                record.coordinate != snapshot.pending[0].coordinate
-                or record.descriptor_digest != parsed.digest
-                or record.effect_kind != "manual"
-                or record.phase != "prepared"
-            ):
-                return ScenarioStatus(
-                    "running",
-                    binding.public_run_id,
-                    "engine",
-                    "scenario_wait",
-                    step=parsed.logical_id,
-                    annotations=(
-                        ("manual_handoff", "not_ready"), *child_annotations
-                    ),
-                )
-            value = snapshot.pending[0].value
-            step = value.get("step") if isinstance(value, dict) else None
-            return ScenarioStatus(
-                "awaiting",
-                binding.public_run_id,
-                "worker",
-                "edit_then_scenario_done",
-                step=step or parsed.logical_id,
-                annotations=child_annotations,
-            )
-        if descriptor.get("kind") == "pinned":
-            try:
-                parsed = parse_effect_descriptor(descriptor)
-                if not isinstance(parsed, EffectDescriptor):
-                    raise TypeError("pinned descriptor is not an ordinary effect")
-                effect_id = derive_effect_id(
-                    snapshot.pending[0].coordinate, parsed.digest
-                )
-                record = effects.get(effect_id)
-                if (
-                    record.coordinate != snapshot.pending[0].coordinate
-                    or record.descriptor_digest != parsed.digest
-                    or record.effect_kind != "pinned"
-                ):
-                    raise ValueError("pinned effect record mismatch")
-                selectors = dict(parsed.inputs)
-                command = PinnedCommandSpec.parse(
-                    snapshot.values[selectors["command"].state_key]
-                )
-            except (
-                AttributeError,
-                KeyError,
-                TypeError,
-                ValueError,
-                CodexProviderError,
-            ):
-                return ScenarioStatus(
-                    "running",
-                    binding.public_run_id,
-                    "engine",
-                    "scenario_wait",
-                    step=str(descriptor.get("logical_id") or "") or None,
-                    annotations=child_annotations,
-                )
-            gate_execution = {
-                "operation_id": effect_id,
-                "execution_class": "pinned-validator",
-                "logical_argv": list(command.logical_argv),
-                "logical_cwd": command.logical_cwd,
-                "phase": record.phase,
-            }
-            return ScenarioStatus(
-                "running",
-                binding.public_run_id,
-                "engine",
-                "scenario_wait",
-                step=parsed.logical_id,
-                annotations=(("gate_execution", gate_execution), *child_annotations),
-            )
+    interrupt = snapshot.pending[0]
+    child_annotations = _child_annotations(binding, interrupt)
+    descriptor = _descriptor(interrupt)
+    if descriptor is None:
+        value = interrupt.value
+        step = value.get("step") if isinstance(value, dict) else None
         return ScenarioStatus(
-            "running",
+            "awaiting",
             binding.public_run_id,
-            "engine",
-            "scenario_wait",
-            step=str(descriptor.get("logical_id") or "") or None,
+            "worker",
+            "edit_then_scenario_done",
+            step=step,
             annotations=child_annotations,
         )
+    kind = descriptor.get("kind")
+    if kind == "manual":
+        return _manual_projection(
+            binding, interrupt, descriptor, effects, child_annotations
+        )
+    if kind == "pinned":
+        return _pinned_projection(
+            binding,
+            snapshot,
+            interrupt,
+            descriptor,
+            effects,
+            child_annotations,
+        )
+    return _running_effect_status(
+        binding, descriptor.get("logical_id"), child_annotations
+    )
+
+
+def _terminal_projection(
+    binding: RunBinding,
+    snapshot: NativeSnapshot,
+    outcome: object,
+) -> ScenarioStatus:
     if snapshot.next:
         return ScenarioStatus(
             "running", binding.public_run_id, "engine", "scenario_wait"
@@ -305,3 +323,21 @@ def project_status(
             "starting", binding.public_run_id, "engine", "scenario_wait"
         )
     return ScenarioStatus("completed", binding.public_run_id, "engine", None)
+
+
+def project_status(
+    binding: RunBinding,
+    snapshot: NativeSnapshot,
+    leases: object,
+    effects: object,
+) -> ScenarioStatus:
+    del leases
+    outcome = snapshot.values.get("lockstep_outcome")
+    if snapshot.task_errors:
+        return ScenarioStatus("escalated", binding.public_run_id, "engine", None)
+    if snapshot.pending:
+        parallel = _parallel_projection(binding, snapshot, effects)
+        if parallel is not None:
+            return parallel
+        return _single_pending_projection(binding, snapshot, effects)
+    return _terminal_projection(binding, snapshot, outcome)

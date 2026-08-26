@@ -174,7 +174,7 @@ from lockstep.runtime.native_models import (
     NativeInterruptOccurrence,
     NativeSnapshot,
 )
-from lockstep.runtime.owner_state import seal_owner_file
+from lockstep.runtime.owner_state import seal_owner_file, sqlite_readonly_uri
 
 
 def _neutral(value: Any) -> Any:
@@ -541,11 +541,31 @@ def open_native_app_readonly(
         raise TypeError("open_native_app_readonly requires an AuthorizedMaterialization")
     config = load_graph_config(recipe.source_path)
     graph = compile_graph(config)
+    database = Path(db_path)
     connection = sqlite3.connect(
-        f"file:{Path(db_path)}?mode=ro&immutable=1", uri=True, check_same_thread=False
+        sqlite_readonly_uri(database), uri=True, check_same_thread=False
     )
     try:
-        return NativeApp(graph.compile(checkpointer=SqliteSaver(connection)), connection)
+        connection.execute("PRAGMA query_only = ON")
+        connection.execute("BEGIN")
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' "
+                "AND name IN ('checkpoints', 'writes')"
+            )
+        }
+        if tables != {"checkpoints", "writes"}:
+            raise RuntimeError("native checkpoint schema is missing")
+        checkpointer = SqliteSaver(connection)
+        # The schema was verified above.  SqliteSaver otherwise calls setup()
+        # from its first read and attempts DDL/PRAGMA writes on this read-only
+        # connection.
+        checkpointer.is_setup = True
+        return NativeApp(
+            graph.compile(checkpointer=checkpointer),
+            connection,
+        )
     except BaseException:
         connection.close()
         raise

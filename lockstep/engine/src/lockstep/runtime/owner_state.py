@@ -25,6 +25,12 @@ class StorageLimitExceeded(ValueError):
     """Input exceeds a configured trusted-store admission ceiling."""
 
 
+def sqlite_readonly_uri(path: Path) -> str:
+    """Return an escaped URI for one absolute SQLite read-only path."""
+
+    return Path(path).absolute().as_uri() + "?mode=ro"
+
+
 def take_bounded(values: Iterable[_T], max_items: int, label: str) -> tuple[_T, ...]:
     """Consume at most one item beyond a configured cardinality ceiling."""
 

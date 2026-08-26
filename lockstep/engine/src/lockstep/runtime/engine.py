@@ -4,21 +4,28 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from lockstep.runtime.service import LockstepError, LockstepService
+from lockstep.runtime.errors import LockstepError
+from lockstep.runtime.projection import RuntimeProjection
+from lockstep.runtime.service import LockstepCommandService
 
 __all__ = ["Engine", "LockstepError"]
 
 
 class Engine:
-    """Delegate every operation; owns no workflow state or transition logic."""
+    """Explicit selector for passive observation or command capabilities."""
 
-    def __init__(self, state_dir: Path, recipes_dir: Path, memory_only: bool = False) -> None:
-        if memory_only:
-            raise ValueError("memory-only workflow state is not supported by native runtime")
-        self._service = LockstepService(state_dir, recipes_dir)
+    def __new__(cls, *_args, **_kwargs):
+        raise TypeError("use Engine.observe(...) or Engine.command(...)")
 
-    def __getattr__(self, name: str):
-        return getattr(self._service, name)
+    @staticmethod
+    def observe(state_dir: Path, recipes_dir: Path) -> RuntimeProjection:
+        """Select the passive observation capability."""
 
-    def close(self) -> None:
-        self._service.close()
+        return RuntimeProjection(state_dir, recipes_dir)
+
+    @staticmethod
+    def command(
+        state_dir: Path,
+        recipes_dir: Path,
+    ) -> LockstepCommandService:
+        return LockstepCommandService(state_dir, recipes_dir)

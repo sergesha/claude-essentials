@@ -40,6 +40,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from lockstep.runtime.advisory_lock import advisory_file_lock
+from lockstep.runtime.owner_state import ensure_owner_directory, seal_owner_file
 
 # The response marker: the MCP server stamps this key into every tool
 # result that names a `run_id` (server._mark), and the PostToolUse hook
@@ -56,6 +57,8 @@ from lockstep.runtime.advisory_lock import advisory_file_lock
 # the damage ceiling is a binding touch, which never robs a live owner.
 BINDING_MARKER_KEY = "lockstep_protocol"
 BINDING_MARKER_VALUE = 1
+MAX_SESSION_BINDING_BYTES = 64 * 1024
+MAX_SESSION_ID_BYTES = 16 * 1024
 
 
 def binding_path(state_dir: Path, run_id: str) -> Path:
@@ -64,6 +67,18 @@ def binding_path(state_dir: Path, run_id: str) -> Path:
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _validate_session_identity(session_id: str | None) -> str:
+    if not isinstance(session_id, str) or not session_id:
+        raise ValueError("session identity must be a non-empty string")
+    try:
+        size = len(session_id.encode("utf-8"))
+    except UnicodeEncodeError as exc:
+        raise ValueError("session identity contains invalid Unicode") from exc
+    if size > MAX_SESSION_ID_BYTES:
+        raise ValueError("session identity exceeds byte limit")
+    return session_id
 
 
 def read_binding(state_dir: Path, run_id: str) -> dict | None:
@@ -97,14 +112,24 @@ _REFRESH_LOCK_WAIT = 2.0
 @contextmanager
 def _binding_lock(path: Path, *, timeout: float | None = None) -> Iterator[None]:
     """Apply the shared kernel mutex to the hook-owned binding namespace."""
-    path.parent.mkdir(parents=True, exist_ok=True)
+    ensure_owner_directory(path.parent.parent, "bindings")
     with advisory_file_lock(Path(f"{path}.lock"), timeout=timeout):
         yield
 
 
 def _write(path: Path, data: dict) -> None:
+    encoded = json.dumps(
+        data,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    if len(encoded) > MAX_SESSION_BINDING_BYTES:
+        raise ValueError("session binding exceeds byte limit")
     tmp = path.parent / (path.name + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True))
+    tmp.write_bytes(encoded)
+    seal_owner_file(tmp, writable=True)
     os.replace(tmp, path)
 
 
@@ -138,6 +163,7 @@ def refresh_if_owner(
 ) -> bool:
     """True iff the binding names a still-live `session_id`; refreshes `last_seen`.
     Never binds, never adopts — the gate's only verb."""
+    _validate_session_identity(session_id)
     path = binding_path(state_dir, run_id)
     b = read_binding(state_dir, run_id)
     if b is None or b["session_id"] != session_id:
@@ -165,6 +191,7 @@ def touch(state_dir: Path, run_id: str, session_id: str, stale_minutes: float) -
     with `adopted_from` provenance); live foreign owner -> no-op
     (`"foreign"`). Verdict formed UNDER the sidecar lock, so two racing
     adopters resolve to exactly one owner."""
+    session_id = _validate_session_identity(session_id)
     path = binding_path(state_dir, run_id)
     with _binding_lock(path):
         b = read_binding(state_dir, run_id)

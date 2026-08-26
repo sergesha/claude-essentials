@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -17,6 +17,25 @@ from lockstep.runtime.providers.base import (
     RunnerObservation,
     TerminalSafetyObservation,
 )
+
+
+def _legacy_command_service(
+    state_dir,
+    recipes_dir,
+    *,
+    runners: Mapping[str, object],
+    effect_authority: object,
+):
+    """Test-only harness for pre-owner-policy execution behavior."""
+
+    from lockstep.runtime.service import LockstepCommandService
+
+    service = LockstepCommandService(state_dir, recipes_dir)
+    service._configured_runners = dict(runners)  # noqa: SLF001
+    service._configured_effect_authority = effect_authority  # noqa: SLF001
+    service._require_owner_runtime_policy = lambda _requirements: None  # noqa: SLF001
+    service._activate_writable_core()  # noqa: SLF001 - explicit legacy harness
+    return service
 
 
 class FakeRunner:
