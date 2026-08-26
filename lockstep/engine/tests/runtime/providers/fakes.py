@@ -31,9 +31,15 @@ def _legacy_command_service(
     from lockstep.runtime.service import LockstepCommandService
 
     service = LockstepCommandService(state_dir, recipes_dir)
-    service._configured_runners = dict(runners)  # noqa: SLF001
-    service._configured_effect_authority = effect_authority  # noqa: SLF001
     service._require_owner_runtime_policy = lambda _requirements: None  # noqa: SLF001
+
+    def open_test_coordinator() -> None:
+        authority, coordinator = service._effect_coordinator_for(  # noqa: SLF001
+            dict(runners), effect_authority
+        )
+        service.authority, service.coordinator = authority, coordinator
+
+    service._open_effect_coordinator = open_test_coordinator  # noqa: SLF001
     service._activate_writable_core()  # noqa: SLF001 - explicit legacy harness
     return service
 
