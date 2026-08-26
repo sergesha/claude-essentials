@@ -47,7 +47,7 @@ def _documents(
 
 
 def test_runtime_provision_documents_normalize_replacement_keys() -> None:
-    from lockstep.runtime.effects.owner_policy import (
+    from lockstep.runtime.effects.owner_policy_ingress import (
         parse_runtime_provision_documents,
     )
 
@@ -64,7 +64,7 @@ def test_runtime_provision_documents_normalize_replacement_keys() -> None:
 def test_runtime_provision_config_rejects_duplicate_object_members(
     member: str,
 ) -> None:
-    from lockstep.runtime.effects.owner_policy import (
+    from lockstep.runtime.effects.owner_policy_ingress import (
         parse_runtime_provision_documents,
     )
 
@@ -114,7 +114,7 @@ def test_runtime_provision_documents_reject_invalid_domain(
     mutation: str,
     expected: str,
 ) -> None:
-    from lockstep.runtime.effects.owner_policy import (
+    from lockstep.runtime.effects.owner_policy_ingress import (
         parse_runtime_provision_documents,
     )
 

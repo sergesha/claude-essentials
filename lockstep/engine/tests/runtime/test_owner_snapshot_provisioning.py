@@ -279,6 +279,7 @@ def test_owner_policy_does_not_reexport_provisioning_operations() -> None:
 
     assert not hasattr(owner_policy, "provision_runtime_snapshot")
     assert not hasattr(owner_policy, "validate_runtime_provision_inputs")
+    assert not hasattr(owner_policy, "parse_runtime_provision_documents")
     assert not hasattr(owner_policy, "__getattr__")
     assert callable(owner_provisioning.provision_runtime_snapshot)
     assert callable(owner_provisioning.validate_runtime_provision_inputs)

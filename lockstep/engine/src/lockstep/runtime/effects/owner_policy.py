@@ -12,10 +12,6 @@ from typing import TYPE_CHECKING, Literal
 
 from lockstep.runtime.effects.descriptors import parse_effect_descriptor
 from lockstep.runtime.effects.models import EffectDescriptor
-from lockstep.runtime.effects.owner_policy_ingress import (
-    parse_runtime_provision_documents,
-)
-
 if TYPE_CHECKING:
     from lockstep.recipe.authority import AuthorizedRecipe
 
