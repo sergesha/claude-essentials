@@ -200,11 +200,13 @@ class ThreadCall:
     outcome: list[object]
     finished: threading.Event
     thread: threading.Thread
+    start_attempted: threading.Event
 
     @classmethod
-    def launch(cls, name: str, call: Callable[[], object]) -> "ThreadCall":
+    def create(cls, name: str, call: Callable[[], object]) -> "ThreadCall":
         outcome: list[object] = []
         finished = threading.Event()
+        start_attempted = threading.Event()
 
         def invoke() -> None:
             try:
@@ -215,11 +217,19 @@ class ThreadCall:
                 finished.set()
 
         thread = threading.Thread(target=invoke, name=name)
-        result = cls(outcome, finished, thread)
-        thread.start()
-        return result
+        return cls(outcome, finished, thread, start_attempted)
+
+    @property
+    def name(self) -> str:
+        return self.thread.name
+
+    def start(self) -> None:
+        self.start_attempted.set()
+        self.thread.start()
 
     def stop(self, timeout: float = 10.0) -> bool:
+        if not self.start_attempted.is_set() or self.thread.ident is None:
+            return not self.thread.is_alive()
         finished = self.finished.wait(timeout)
         self.thread.join(timeout=1.0)
         return finished and not self.thread.is_alive()
@@ -238,9 +248,10 @@ class A1ConcurrentCleanup:
         return self
 
     def launch(self, name: str, call: Callable[[], object]) -> ThreadCall:
-        started = ThreadCall.launch(name, call)
-        self.calls.append(started)
-        return started
+        registered = ThreadCall.create(name, call)
+        self.calls.append(registered)
+        registered.start()
+        return registered
 
     def __exit__(self, _kind, original: BaseException | None, _traceback) -> bool:
         cleanup_errors: list[BaseException] = []
@@ -253,7 +264,12 @@ class A1ConcurrentCleanup:
                     cleanup_errors.append(exc)
             for call in self.calls:
                 try:
-                    stopped.append(call.stop())
+                    call_stopped = call.stop()
+                    stopped.append(call_stopped)
+                    if not call_stopped:
+                        cleanup_errors.append(
+                            RuntimeError(f"A1 thread {call.name!r} did not stop")
+                        )
                 except BaseException as exc:
                     stopped.append(False)
                     cleanup_errors.append(exc)
