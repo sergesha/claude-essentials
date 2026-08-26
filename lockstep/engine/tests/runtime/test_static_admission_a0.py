@@ -13,6 +13,7 @@ from sqlalchemy import func, select
 
 from lockstep import cli
 from lockstep.runtime.catalog import RunCatalog
+from lockstep.runtime.effects.coordinator import ProviderContractViolation
 from lockstep.runtime.effects.owner_policy import RuntimeRequirementIndex
 from lockstep.runtime.engine import Engine
 from lockstep.runtime.errors import LockstepError
@@ -299,6 +300,12 @@ def _assert_prelaunch_park(
             assert connection.scalar(
                 select(func.count()).select_from(store.tables.effect_observations)
             ) == 0
+            assert connection.scalar(
+                select(func.count()).select_from(store.tables.effect_runtime_inputs)
+            ) == 0
+            assert connection.scalar(
+                select(func.count()).select_from(store.tables.publication_consents)
+            ) == 0
     finally:
         store.close()
     assert not (owner_state / "checkpoints" / "native.sqlite").exists()
@@ -357,6 +364,42 @@ def test_granted_pinned_static_admission_parks_before_native_execution(
     _assert_prelaunch_park(owner_state, project, result, provider_marker)
 
 
+def test_granted_static_admission_remains_parked_after_service_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Durable recovery must preserve the pre-native A0 admission boundary."""
+
+    project = tmp_path / "project"
+    _write_direct_recipe(project, "target", "codex")
+    owner_state = tmp_path / "owner-state"
+    provider_marker = tmp_path / "provider-invoked"
+    granted = tuple(item.grant_selection_key for item in _requirements(project, "target"))
+    assert _provision(
+        tmp_path,
+        monkeypatch,
+        project,
+        owner_state,
+        _config(tmp_path, provider_marker=provider_marker),
+        granted,
+        "target",
+    ) == 0
+    result = _start(project, owner_state, "target")
+    _assert_prelaunch_park(owner_state, project, result, provider_marker)
+
+    reopened = Engine.command(owner_state, project / ".lockstep" / "recipes")
+    try:
+        try:
+            reopened._activate_writable_core()
+        except ProviderContractViolation:
+            # The regression oracle is the durable boundary below: recovery may
+            # report a fail-closed error, but it may never cross into native work.
+            pass
+    finally:
+        reopened.close()
+
+    _assert_prelaunch_park(owner_state, project, result, provider_marker)
+
+
 @pytest.mark.parametrize("configuration_only", (False, True))
 def test_ungranted_or_configuration_only_runtime_start_is_write_free(
     configuration_only: bool,
@@ -403,6 +446,54 @@ def test_real_captured_binding_drift_is_write_free(
     assert isinstance(codex, dict)
     Path(str(codex["codex_home"]), "auth.json").write_text(
         '{"rotated":true}', encoding="utf-8"
+    )
+    before = _owner_state_snapshot(owner_state)
+
+    with pytest.raises(LockstepError):
+        _start(project, owner_state, "target")
+
+    assert _owner_state_snapshot(owner_state) == before
+
+
+def test_unrelated_inconsistent_snapshot_grant_is_write_free(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Opening a snapshot validates every captured grant, not only the target."""
+
+    project = tmp_path / "project"
+    _write_direct_recipe(project, "target", "codex")
+    _write_direct_recipe(project, "other", "pinned")
+    owner_state = tmp_path / "owner-state"
+    target_keys = {
+        item.grant_selection_key for item in _requirements(project, "target")
+    }
+    all_grants = tuple(
+        item.grant_selection_key for item in _requirements(project, "target", "other")
+    )
+    assert len(target_keys) == 1
+    assert len(all_grants) == 2
+    assert _provision(
+        tmp_path,
+        monkeypatch,
+        project,
+        owner_state,
+        _config(tmp_path),
+        all_grants,
+        "target",
+        "other",
+    ) == 0
+    snapshot_path = owner_state / "runtime-owner" / "snapshot.json"
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    unrelated = [
+        grant
+        for grant in snapshot["grants"]
+        if grant["grant_selection_key"] not in target_keys
+    ]
+    assert len(unrelated) == 1
+    unrelated[0]["requirement_digest"] = "0" * 64
+    snapshot_path.write_text(
+        json.dumps(snapshot, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
     )
     before = _owner_state_snapshot(owner_state)
 
