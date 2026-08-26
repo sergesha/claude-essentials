@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import time
+from contextlib import suppress
 
 import pytest
 import yaml
@@ -18,9 +19,11 @@ from lockstep.runtime.engine import Engine
 from lockstep.runtime.providers.base import launch_commitment_digest
 from lockstep.runtime.providers.codex import CodexRunnerAdapter
 from lockstep.runtime.providers.pinned import PinnedRunnerAdapter
+from lockstep.runtime.recipe_bundles import RecipeBundleRef
 from lockstep.templates import install_template
 
 from ._runtime_commitment_harness import (
+    ManagedRestartFifoBarrier,
     provision_managed_closure,
     provision_pinned_verify_closure,
 )
@@ -430,3 +433,95 @@ def test_public_verify_uses_pinned_profile_and_credential_free_lifecycle(
         assert record.workspace_ref is not None
     finally:
         command.close()
+
+
+def test_public_managed_lifecycle_reconstructs_after_command_restart(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A15 RED: restart must reconstruct and continue one admitted effect."""
+
+    provisioned = provision_managed_closure(tmp_path, monkeypatch)
+    barrier = ManagedRestartFifoBarrier.install(provisioned)
+    command = Engine.command(
+        provisioned.owner_state,
+        provisioned.project / ".lockstep" / "recipes",
+    )
+    restarted = None
+    spawned = False
+    terminal_path = None
+    try:
+        started = command.start(
+            provisioned.recipe,
+            {"brief": "continue after a real command-service restart"},
+            str(provisioned.project),
+        )
+        run_id = started["run_id"]
+        binding = command.catalog.get(run_id)
+        records = _await_effect_phase(command, run_id, "running")
+        assert len(records) == 1
+        running = records[0]
+        assert running.phase == "running"
+        runner = command._runtime_execution_composition.runners.codex
+        assert runner.spawn_count == 1
+        spawned = True
+        terminal_path = runner._directory(running.effect_id) / "terminal.json"
+        snapshot_digest, owner_snapshot = open_runtime_snapshot(
+            provisioned.owner_state
+        )
+        assert command._runtime_execution_context.snapshot_digest == snapshot_digest
+        assert command._runtime_execution_context.snapshot == owner_snapshot
+
+        bundle_ref = RecipeBundleRef(binding.recipe_snapshot_ref)
+        manifest = command.bundle_store.read_manifest(bundle_ref)
+        materialized = command.bundle_store.read_materialization(bundle_ref)
+        assert manifest.root == f"{provisioned.recipe}.recipe.yaml"
+        assert (materialized.directory / manifest.root).is_file()
+        live_recipe = (
+            provisioned.project
+            / ".lockstep"
+            / "recipes"
+            / manifest.root
+        )
+        live_recipe.unlink()
+        assert not live_recipe.exists()
+        command.close()
+
+        restarted = Engine.command(
+            provisioned.owner_state,
+            provisioned.project / ".lockstep" / "recipes",
+        )
+        restarted.scenario_recover(str(provisioned.project), limit=128)
+
+        composition = restarted._runtime_execution_composition
+        assert composition is not None
+        assert composition.runners.codex.spawn_count == 0
+        assert (
+            composition.runners.codex.binding_digest
+            == running.runner_binding_digest
+        )
+        assert restarted._runtime_execution_context.snapshot_digest == snapshot_digest
+        assert restarted._runtime_execution_context.snapshot == owner_snapshot
+        actual_argv, actual_environment, terminal = barrier.release(terminal_path)
+        assert actual_argv
+        assert actual_environment == (
+            str(provisioned.codex_home),
+            str(provisioned.codex_home),
+        )
+        assert terminal is True
+
+        delivered = _assert_completed_delivery(restarted, provisioned, run_id)
+        assert delivered.effect_id == running.effect_id
+        assert delivered.effect_kind == "managed"
+        assert delivered.result.result_ref is not None
+        assert delivered.result.snapshot_ref is not None
+        assert restarted.catalog.get(run_id) == binding
+        assert restarted.bundle_store.read_manifest(bundle_ref) == manifest
+        assert not live_recipe.exists()
+    finally:
+        command.close()
+        if spawned and terminal_path is not None:
+            with suppress(Exception):
+                barrier.release(terminal_path)
+        if restarted is not None:
+            restarted.close()

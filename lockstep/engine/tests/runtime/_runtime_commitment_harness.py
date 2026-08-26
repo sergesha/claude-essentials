@@ -6,6 +6,7 @@ import json
 import os
 import shlex
 import stat
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,6 +25,71 @@ class ProvisionedRuntimeClosure:
     pinned_home: Path
     provider_argv_marker: Path
     provider_environment_marker: Path
+
+
+@dataclass(slots=True)
+class ManagedRestartFifoBarrier:
+    """Hold and release the real A15 process at its executable boundary."""
+
+    provisioned: ProvisionedRuntimeClosure
+    _result: tuple[tuple[str, ...], tuple[str, ...], bool] | None = None
+
+    @classmethod
+    def install(
+        cls,
+        provisioned: ProvisionedRuntimeClosure,
+    ) -> ManagedRestartFifoBarrier:
+        os.mkfifo(provisioned.provider_argv_marker)
+        return cls(provisioned)
+
+    def release(
+        self,
+        terminal_path: Path,
+        *,
+        timeout: float = 10.0,
+    ) -> tuple[tuple[str, ...], tuple[str, ...], bool]:
+        if self._result is not None:
+            return self._result
+        descriptor = os.open(
+            self.provisioned.provider_argv_marker,
+            os.O_RDONLY | os.O_NONBLOCK,
+        )
+        chunks = []
+        deadline = time.monotonic() + timeout
+        try:
+            while time.monotonic() < deadline:
+                try:
+                    chunk = os.read(descriptor, 65536)
+                except BlockingIOError:
+                    chunk = b""
+                if chunk:
+                    chunks.append(chunk)
+                if self.provisioned.provider_environment_marker.is_file():
+                    break
+                time.sleep(0.02)
+            while True:
+                try:
+                    chunk = os.read(descriptor, 65536)
+                except BlockingIOError:
+                    break
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        finally:
+            os.close(descriptor)
+        while not terminal_path.is_file() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        environment = ()
+        if self.provisioned.provider_environment_marker.is_file():
+            environment = tuple(
+                self.provisioned.provider_environment_marker.read_text().splitlines()
+            )
+        self._result = (
+            tuple(b"".join(chunks).decode().splitlines()),
+            environment,
+            terminal_path.is_file(),
+        )
+        return self._result
 
 
 def write_managed_recipe(project: Path, *, recipe: str = "managed-work") -> None:
