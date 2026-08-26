@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import json
 import os
+import threading
 import time
 from contextlib import suppress
 
 import pytest
 import yaml
 
+from lockstep import cli
 from lockstep.recipe.authority import RecipeAuthorityPolicy, StrictRecipeIngress
 from lockstep.runtime.effects.owner_policy import (
     RuntimeRequirementIndex,
+    _RuntimeAdmissionChanged,
     requirement_digest,
 )
 from lockstep.runtime.effects.owner_snapshot_store import open_runtime_snapshot
@@ -19,6 +23,7 @@ from lockstep.runtime.engine import Engine
 from lockstep.runtime.providers.base import launch_commitment_digest
 from lockstep.runtime.providers.codex import CodexRunnerAdapter
 from lockstep.runtime.providers.pinned import PinnedRunnerAdapter
+from lockstep.runtime.read_resources import RuntimeReadResources
 from lockstep.runtime.recipe_bundles import RecipeBundleRef
 from lockstep.templates import install_template
 
@@ -27,7 +32,10 @@ from ._runtime_commitment_harness import (
     provision_managed_closure,
     provision_pinned_verify_closure,
 )
-from ._runtime_commitment_observer import RuntimeCommitmentObserver
+from ._runtime_commitment_observer import (
+    OwnerCommitmentBarrier,
+    RuntimeCommitmentObserver,
+)
 
 
 def _await_provider_markers(provisioned, command, *, timeout: float = 10.0):
@@ -439,7 +447,7 @@ def test_public_managed_lifecycle_reconstructs_after_command_restart(
     tmp_path,
     monkeypatch,
 ) -> None:
-    """A15 RED: restart must reconstruct and continue one admitted effect."""
+    """A15 GREEN: restart reconstructs and continues one admitted effect."""
 
     provisioned = provision_managed_closure(tmp_path, monkeypatch)
     barrier = ManagedRestartFifoBarrier.install(provisioned)
@@ -525,3 +533,135 @@ def test_public_managed_lifecycle_reconstructs_after_command_restart(
                 barrier.release(terminal_path)
         if restarted is not None:
             restarted.close()
+
+
+def test_owner_drift_after_resolve_fails_before_spawn(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A16 GREEN: commitment rejects supported drift after real resolution."""
+
+    provisioned = provision_managed_closure(tmp_path, monkeypatch)
+    barrier = OwnerCommitmentBarrier(monkeypatch, provisioned.owner_state)
+    command = Engine.command(
+        provisioned.owner_state,
+        provisioned.project / ".lockstep" / "recipes",
+    )
+    barrier.attach(command)
+    started: list[object] = []
+
+    def start_public_run() -> None:
+        try:
+            started.append(
+                command.start(
+                    provisioned.recipe,
+                    {"brief": "prove owner drift after real resolution"},
+                    str(provisioned.project),
+                )
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            started.append(exc)
+
+    start_thread = threading.Thread(target=start_public_run)
+    start_thread.start()
+    try:
+        assert barrier.reached.wait(10.0)
+        assert len(barrier.calls) == 1
+        call = barrier.calls[0]
+        before = call.record
+        assert before.phase == "launching"
+        assert before.runner_binding_digest == call.owner_snapshot.codex.binding_digest
+        assert before.request_digest == call.request.request_digest
+        assert before.grant_digest == call.grant.digest
+        assert before.workspace_ref == call.request.workspace_ref
+        assert before.launch_commitment_digest == launch_commitment_digest(
+            call.request, call.launch
+        )
+        assert command._runtime_execution_composition.runners.codex.spawn_count == 0
+        assert not provisioned.provider_argv_marker.exists()
+        assert not provisioned.provider_environment_marker.exists()
+        binding = command.catalog.find_by_thread(before.coordinate.thread_id)
+        with RuntimeReadResources(provisioned.owner_state).native_app(binding) as app:
+            native_before = app.snapshot(
+                thread_id=binding.thread_id, subgraphs=True
+            )
+        pending_before = tuple(
+            interrupt.coordinate for interrupt in native_before.pending
+        )
+        assert before.coordinate in pending_before
+
+        config = json.loads((tmp_path / "runtime-config.json").read_text())
+        config["codex"]["model"] = "task12-a16-drifted-model"
+        drift_config = tmp_path / "runtime-config-a16-drift.json"
+        drift_config.write_text(json.dumps(config))
+        assert cli.main(
+            [
+                "owner",
+                "provision-runtime",
+                "--config",
+                str(drift_config),
+                "--project",
+                str(provisioned.project),
+                "--recipe",
+                provisioned.recipe,
+                "--replace-grants",
+                str(tmp_path / "runtime-grants.json"),
+            ]
+        ) == 0
+        drift_digest, drift_snapshot = open_runtime_snapshot(
+            provisioned.owner_state
+        )
+        assert drift_digest != call.owner_digest
+        assert (
+            drift_snapshot.config_generation
+            == call.owner_snapshot.config_generation + 1
+        )
+        assert drift_snapshot.policy_generation == call.owner_snapshot.policy_generation
+        assert drift_snapshot.codex.binding_digest != call.owner_snapshot.codex.binding_digest
+        assert len(call.owner_snapshot.grants) == len(drift_snapshot.grants) == 1
+        old_grant = call.owner_snapshot.grants[0]
+        new_grant = drift_snapshot.grants[0]
+        assert new_grant.grant_selection_key == old_grant.grant_selection_key
+        assert new_grant.requirement_digest != old_grant.requirement_digest
+        assert new_grant.grant_generation == old_grant.grant_generation + 1
+        assert new_grant.config_generation == drift_snapshot.config_generation
+        assert new_grant.policy_generation == old_grant.policy_generation
+
+        barrier.release()
+        deadline = time.monotonic() + 10.0
+        while command._pump_failure is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert isinstance(command._pump_failure, _RuntimeAdmissionChanged)
+        start_thread.join(10.0)
+        assert not start_thread.is_alive()
+        assert len(started) == 1 and isinstance(started[0], dict)
+
+        after = command.effects.get(before.effect_id)
+        assert after == before
+        assert after.result is None
+        assert command._runtime_execution_composition.runners.codex.spawn_count == 0
+        assert not provisioned.provider_argv_marker.exists()
+        assert not provisioned.provider_environment_marker.exists()
+        with RuntimeReadResources(provisioned.owner_state).native_app(binding) as app:
+            native_after = app.snapshot(
+                thread_id=binding.thread_id, subgraphs=True
+            )
+        assert native_after == native_before
+        assert tuple(
+            interrupt.coordinate for interrupt in native_after.pending
+        ) == pending_before
+        observed = Engine.observe(
+            provisioned.owner_state,
+            provisioned.project / ".lockstep" / "recipes",
+        ).status(binding.public_run_id, str(provisioned.project))
+        assert observed == {
+            "status": "running",
+            "run_id": binding.public_run_id,
+            "owner": "engine",
+            "next_action": "scenario_wait",
+            "step": "managed-work",
+        }
+    finally:
+        barrier.release()
+        start_thread.join(10.0)
+        command.close()
