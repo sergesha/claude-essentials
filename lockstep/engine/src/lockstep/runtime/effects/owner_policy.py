@@ -24,6 +24,10 @@ if TYPE_CHECKING:
     )
 
 
+class _RuntimeAdmissionChanged(RuntimeError):
+    """The owner policy no longer matches an admitted immutable decision."""
+
+
 def _canonical_digest(value: dict[str, object]) -> str:
     encoded = json.dumps(
         value,

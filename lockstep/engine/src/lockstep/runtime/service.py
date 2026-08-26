@@ -46,7 +46,6 @@ from lockstep.runtime.effects.owner_consent import (
     IssuedPublicationConsent,
     OwnerConsentAuthority,
 )
-from lockstep.runtime.effects.owner_snapshot_store import _RuntimeSnapshotChanged
 from lockstep.runtime.graph_runtime import (
     GraphRuntime,
 )
@@ -65,9 +64,9 @@ from lockstep.runtime.snapshot_resolver import (
     RuntimeSnapshotResolver,
 )
 from lockstep.runtime.start_service import (
-    AuthorizedStartPlan,
     AuthorizedStartService,
     _StaticAdmissionParkCache,
+    _WritableCoreActivation,
     _preflight_runtime_requirements,
     plan_authorized_start,
 )
@@ -236,6 +235,14 @@ class LockstepCommandService:
         self._scenario_recovery_cursors: dict[str, str] = {}
         self._pump_thread: threading.Thread | None = None
         self._pump_failure: BaseException | None = None
+        self._start_activation = _WritableCoreActivation(
+            lock=self._activation_lock,
+            is_active=lambda: self._writable_core_active,
+            is_closed=lambda: self._closed,
+            prepare=self._prepare_writable_core,
+            finish=self._finish_writable_core_activation,
+            rollback=self._rollback_writable_core_activation,
+        )
 
     def _open_writable_stores(self) -> None:
         self.state_dir = initialize_owner_state(self.state_dir)
@@ -295,29 +302,32 @@ class LockstepCommandService:
             snapshot_resolver=self.snapshot_resolver,
         )
 
+    def _prepare_writable_core(self) -> None:
+        """Open complete writable resources without recovery or background work."""
+
+        self._open_writable_stores()
+        self._open_graph_runtime()
+        self._open_effect_coordinator()
+
+    def _finish_writable_core_activation(self) -> None:
+        """Recover old work and publish one fully active writable core."""
+
+        self._recover_engine_effects()
+        self._pump_thread = threading.Thread(
+            target=self._completion_pump,
+            name="lockstep-effect-completion",
+            daemon=True,
+        )
+        self._pump_thread.start()
+        self._writable_core_active = True
+
     def _activate_writable_core(self) -> None:
         """Privately create command resources at the first writable intent."""
 
         with self._activation_lock:
             if self._writable_core_active:
                 return
-            if self._closed:
-                raise LockstepError("command service is closed")
-            try:
-                self._open_writable_stores()
-                self._open_graph_runtime()
-                self._open_effect_coordinator()
-                self._recover_engine_effects()
-                self._pump_thread = threading.Thread(
-                    target=self._completion_pump,
-                    name="lockstep-effect-completion",
-                    daemon=True,
-                )
-                self._pump_thread.start()
-            except BaseException:
-                self._rollback_writable_core_activation()
-                raise
-            self._writable_core_active = True
+        self._start_activation.activate()
 
     def _rollback_writable_core_activation(self) -> None:
         """Return a failed first activation to a clean, retryable state."""
@@ -555,23 +565,23 @@ class LockstepCommandService:
             compiler_provenance=compiler_provenance,
             require_runtime_policy=self._require_owner_runtime_policy,
         )
-        if plan.runtime_admission is None:
-            return self._persist_authorized_start(recipe, plan, values)
-        try:
-            with plan.runtime_admission.assert_current(self.state_dir):
-                return self._persist_authorized_start(recipe, plan, values)
-        except _RuntimeSnapshotChanged as exc:
-            raise LockstepError(str(exc)) from exc
+        def persist() -> dict[str, Any]:
+            return self._authorized_start_service().start(
+                recipe,
+                plan,
+                values,
+                canonical_input=self._canonical_start_input(values),
+            )
 
-    def _persist_authorized_start(
-        self,
-        recipe: str,
-        plan: AuthorizedStartPlan,
-        values: Mapping[str, Any],
-    ) -> dict[str, Any]:
-        """Activate writable resources and persist one already-planned start."""
+        return self._start_activation.start(
+            self.state_dir,
+            plan.runtime_admission,
+            persist,
+        )
 
-        self._activate_writable_core()
+    def _authorized_start_service(self) -> AuthorizedStartService:
+        """Bind the prepared writable core to the focused start use case."""
+
         return AuthorizedStartService(
             blobs=self.blobs,
             bundle_store=self.bundle_store,
@@ -585,11 +595,6 @@ class LockstepCommandService:
             reserve_effect_run=self._reserve_effect_run,
             deactivate_effect_run=self._deactivate_effect_run,
             drive_engine_owned=self._drive_engine_owned,
-        ).start(
-            recipe,
-            plan,
-            values,
-            canonical_input=self._canonical_start_input(values),
         )
 
     def _drive_engine_owned(

@@ -8,7 +8,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from lockstep.recipe import profile
 from lockstep.recipe.authority import AuthorizedRecipe, recipe_definition_sha256
@@ -17,6 +17,7 @@ from lockstep.runtime.effects.owner_policy import (
     OwnerRuntimeAuthority,
     RuntimeAdmissionDecision,
     RuntimeRequirementIndex,
+    _RuntimeAdmissionChanged,
 )
 from lockstep.runtime.effects.owner_provisioning import (
     capture_runtime_snapshot_bindings,
@@ -36,6 +37,96 @@ class AuthorizedStartPlan:
     project_root: Path
     compiler_provenance: profile.CompilerProvenance | None
     runtime_admission: RuntimeAdmissionDecision | None
+
+
+class _ExclusiveLock(Protocol):
+    def acquire(self) -> bool: ...
+
+    def release(self) -> None: ...
+
+    def __enter__(self) -> object: ...
+
+    def __exit__(self, *args: object) -> object: ...
+
+
+@dataclass(frozen=True)
+class _WritableCoreActivation:
+    """Serialize cold preparation, one start, then unrelated activation work."""
+
+    lock: _ExclusiveLock
+    is_active: Callable[[], bool]
+    is_closed: Callable[[], bool]
+    prepare: Callable[[], None]
+    finish: Callable[[], None]
+    rollback: Callable[[], None]
+
+    def _prepare_locked(self) -> bool:
+        if self.is_active():
+            return False
+        if self.is_closed():
+            raise LockstepError("command service is closed")
+        try:
+            self.prepare()
+        except BaseException:
+            self.rollback()
+            raise
+        return True
+
+    def activate(self) -> None:
+        """Preserve ordinary command activation without an admission guard."""
+
+        with self.lock:
+            prepared = False
+            try:
+                prepared = self._prepare_locked()
+                if prepared:
+                    self.finish()
+            except BaseException:
+                if prepared:
+                    self.rollback()
+                raise
+
+    def admit(
+        self,
+        state_dir: Path,
+        decision: RuntimeAdmissionDecision,
+        persist: Callable[[], dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Linearize currentness and this park before recovery or pump startup."""
+
+        prepared = False
+        acquired = False
+        try:
+            with decision.assert_current(state_dir):
+                self.lock.acquire()
+                acquired = True
+                prepared = self._prepare_locked()
+                result = persist()
+            if prepared:
+                self.finish()
+            return result
+        except _RuntimeAdmissionChanged as exc:
+            raise LockstepError(str(exc)) from exc
+        except BaseException:
+            if prepared:
+                self.rollback()
+            raise
+        finally:
+            if acquired:
+                self.lock.release()
+
+    def start(
+        self,
+        state_dir: Path,
+        decision: RuntimeAdmissionDecision | None,
+        persist: Callable[[], dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Choose ordinary activation or owner-linearized static admission."""
+
+        if decision is None:
+            self.activate()
+            return persist()
+        return self.admit(state_dir, decision, persist)
 
 
 def _preflight_runtime_requirements(

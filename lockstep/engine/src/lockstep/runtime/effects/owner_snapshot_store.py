@@ -16,6 +16,7 @@ from lockstep.runtime.effects.owner_policy import (
     OwnerRuntimeGrant,
     OwnerRuntimeSnapshot,
     RuntimeRequirementIndex,
+    _RuntimeAdmissionChanged,
     _RuntimeBindingFacts,
     requirement_digest,
 )
@@ -30,12 +31,6 @@ from lockstep.runtime.owner_state import (
 
 
 _SNAPSHOT_SCHEMA = "lockstep.runtime-owner/v1"
-
-
-class _RuntimeSnapshotChanged(RuntimeError):
-    """The owner policy no longer matches an admitted immutable decision."""
-
-
 def _binding_document(binding: _RuntimeBindingFacts) -> dict[str, object]:
     return {
         "executable": binding.executable,
@@ -220,11 +215,11 @@ def hold_runtime_snapshot_current(
     with advisory_file_lock(directory / "snapshot.lock"):
         current = _read_snapshot(directory / "snapshot.json")
         if current is None:
-            raise _RuntimeSnapshotChanged("owner runtime snapshot is unavailable")
+            raise _RuntimeAdmissionChanged("owner runtime snapshot is unavailable")
         encoded, snapshot = current
         digest = hashlib.sha256(encoded).hexdigest()
         if digest != expected_digest or snapshot != expected_snapshot:
-            raise _RuntimeSnapshotChanged("owner runtime admission is no longer current")
+            raise _RuntimeAdmissionChanged("owner runtime admission is no longer current")
         yield
 
 
