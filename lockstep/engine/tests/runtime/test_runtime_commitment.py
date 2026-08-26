@@ -151,6 +151,10 @@ def test_public_managed_codex_binds_requirement_through_durable_commitment(
             assert effect_grant.config_epoch == snapshot.config_generation
             assert effect_grant.policy_epoch == snapshot.policy_generation
             assert effect_grant.grant_generation == owner_grant.grant_generation
+            assert (
+                effect_grant.parent_capability_generation
+                == owner_grant.grant_generation
+            )
             assert effect_grant.digest == reference_grant.digest
             assert bound_request.effect_id == reference_request.effect_id
             assert bound_request.request_digest == reference_request.request_digest
