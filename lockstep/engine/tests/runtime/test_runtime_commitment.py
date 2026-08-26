@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import time
+
 import pytest
 import yaml
 
@@ -17,8 +20,73 @@ from lockstep.runtime.providers.codex import CodexRunnerAdapter
 from lockstep.runtime.providers.pinned import PinnedRunnerAdapter
 from lockstep.templates import install_template
 
-from ._runtime_commitment_harness import provision_managed_closure
+from ._runtime_commitment_harness import (
+    provision_managed_closure,
+    provision_pinned_verify_closure,
+)
 from ._runtime_commitment_observer import RuntimeCommitmentObserver
+
+
+def _await_provider_markers(provisioned, command, *, timeout: float = 10.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if (
+            provisioned.provider_argv_marker.is_file()
+            and provisioned.provider_environment_marker.is_file()
+        ):
+            return (
+                tuple(provisioned.provider_argv_marker.read_text().splitlines()),
+                tuple(
+                    provisioned.provider_environment_marker.read_text().splitlines()
+                ),
+            )
+        if command._pump_failure is not None:
+            raise command._pump_failure
+        time.sleep(0.02)
+    pytest.fail("public lifecycle did not reach the owner-captured executable marker")
+
+
+def _await_completed(provisioned, run_id: str, *, timeout: float = 10.0):
+    projection = Engine.observe(
+        provisioned.owner_state,
+        provisioned.project / ".lockstep" / "recipes",
+    )
+    deadline = time.monotonic() + timeout
+    observed = projection.status(run_id, str(provisioned.project))
+    while observed["status"] != "completed" and time.monotonic() < deadline:
+        time.sleep(0.02)
+        observed = projection.status(run_id, str(provisioned.project))
+    return observed
+
+
+def _await_effect_phase(command, run_id: str, phase: str, *, timeout: float = 10.0):
+    binding = command.catalog.get(run_id)
+    deadline = time.monotonic() + timeout
+    records = command.effects.list_for_thread(binding.thread_id)
+    while (
+        (len(records) != 1 or records[0].phase != phase)
+        and time.monotonic() < deadline
+    ):
+        time.sleep(0.02)
+        records = command.effects.list_for_thread(binding.thread_id)
+    return records
+
+
+def _assert_completed_delivery(command, provisioned, run_id: str):
+    final_status = _await_completed(provisioned, run_id)
+    records = _await_effect_phase(command, run_id, "delivered")
+    assert final_status == {
+        "status": "completed",
+        "run_id": run_id,
+        "owner": "engine",
+        "next_action": None,
+    }
+    assert len(records) == 1
+    record = records[0]
+    assert record.phase == "delivered"
+    assert record.result is not None
+    assert record.result.outcome == "PASS"
+    return record
 
 
 @pytest.mark.parametrize(
@@ -232,4 +300,133 @@ def test_active_command_installs_first_protected_runtime_composition(
         assert observer.commitments
     finally:
         observer.release()
+        command.close()
+
+
+def test_public_managed_codex_runs_the_production_lifecycle_to_delivery(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A6 GREEN: public Codex work completes its real managed lifecycle."""
+
+    provisioned = provision_managed_closure(tmp_path, monkeypatch)
+    command = Engine.command(
+        provisioned.owner_state,
+        provisioned.project / ".lockstep" / "recipes",
+    )
+    try:
+        started = command.start(
+            provisioned.recipe,
+            {"brief": "complete the production managed lifecycle"},
+            str(provisioned.project),
+        )
+        run_id = started["run_id"]
+
+        actual_argv, actual_environment = _await_provider_markers(
+            provisioned, command
+        )
+        assert actual_environment == (
+            str(provisioned.codex_home),
+            str(provisioned.codex_home),
+        )
+
+        record = _assert_completed_delivery(command, provisioned, run_id)
+        launch = command._runtime_execution_composition.runners.codex.launch_record(
+            record.effect_id
+        )
+        assert actual_argv == (
+            "--ask-for-approval",
+            "never",
+            "exec",
+            "--json",
+            "--sandbox",
+            "workspace-write",
+            "--model",
+            "task12-r1be-test-model",
+            "--ephemeral",
+            "--ignore-user-config",
+            "--ignore-rules",
+            "-C",
+            str(launch.workspace_path),
+            "-",
+        )
+        assert launch.inner_argv == (str(tmp_path / "codex"), *actual_argv)
+        assert dict(launch.environment) == {
+            "CODEX_HOME": str(provisioned.codex_home),
+            "HOME": str(provisioned.codex_home),
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "TMPDIR": str(tmp_path / "private-tmp"),
+        }
+        assert record.effect_kind == "managed"
+        assert record.result.result_ref is not None
+        assert record.result.snapshot_ref is not None
+    finally:
+        command.close()
+
+
+def test_public_verify_uses_pinned_profile_and_credential_free_lifecycle(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A7 RED: public verify must use the exact pinned lifecycle and binding."""
+
+    provisioned = provision_pinned_verify_closure(tmp_path, monkeypatch)
+    assert tuple(provisioned.pinned_home.iterdir()) == ()
+    command = Engine.command(
+        provisioned.owner_state,
+        provisioned.project / ".lockstep" / "recipes",
+    )
+    try:
+        started = command.start(
+            provisioned.recipe,
+            {},
+            str(provisioned.project),
+        )
+        run_id = started["run_id"]
+
+        actual_argv, actual_environment = _await_provider_markers(
+            provisioned, command
+        )
+        assert actual_environment == (
+            str(provisioned.pinned_home),
+            str(provisioned.pinned_home),
+        )
+        assert str(provisioned.codex_home) not in "\n".join(
+            (*actual_argv, *actual_environment)
+        )
+        assert not (provisioned.pinned_home / "auth.json").exists()
+
+        record = _assert_completed_delivery(command, provisioned, run_id)
+        launch = command._runtime_execution_composition.runners.pinned.launch_record(
+            record.effect_id
+        )
+        assert actual_argv == (
+            "sandbox",
+            "--permission-profile",
+            "task12-pinned-profile",
+            "--cd",
+            str(launch.workspace_path),
+            "--include-managed-config",
+            "--",
+            "python",
+            "-m",
+            "pytest",
+            "-q",
+        )
+        assert launch.inner_argv == (str(tmp_path / "codex"), *actual_argv)
+        assert dict(launch.environment) == {
+            "CODEX_HOME": str(provisioned.pinned_home),
+            "HOME": str(provisioned.pinned_home),
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "TMPDIR": str(tmp_path / "private-tmp"),
+        }
+        assert record.effect_kind == "verify"
+        assert record.result.result_ref is None
+        assert record.result.snapshot_ref is None
+        assert record.workspace_ref is not None
+    finally:
         command.close()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import stat
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,11 +15,15 @@ from lockstep.runtime.service import preflight_recipe
 
 
 @dataclass(frozen=True, slots=True)
-class ProvisionedManagedClosure:
+class ProvisionedRuntimeClosure:
     project: Path
     owner_state: Path
     recipe: str
     requirement_index: RuntimeRequirementIndex
+    codex_home: Path
+    pinned_home: Path
+    provider_argv_marker: Path
+    provider_environment_marker: Path
 
 
 def write_managed_recipe(project: Path, *, recipe: str = "managed-work") -> None:
@@ -76,9 +81,113 @@ def write_managed_recipe(project: Path, *, recipe: str = "managed-work") -> None
     )
 
 
+def write_pinned_verify_recipe(
+    project: Path,
+    *,
+    recipe: str = "pinned-verify",
+) -> None:
+    """Write one complete real verify closure selecting the pinned runner."""
+
+    recipes = project / ".lockstep" / "recipes"
+    recipes.mkdir(parents=True)
+    document = {
+        "version": "1.0",
+        "name": recipe,
+        "state": {
+            "command": "dict",
+            "request": "dict",
+            "result": "dict",
+            "lockstep_outcome": "str",
+        },
+        "nodes": {
+            "command": {
+                "type": "passthrough",
+                "output": {
+                    "command": {
+                        "schema": "lockstep.pinned-command/v1",
+                        "logical_argv": ["python", "-m", "pytest", "-q"],
+                        "logical_cwd": ".",
+                        "result_source": "exit",
+                    }
+                },
+            },
+            "verify": {
+                "type": "interrupt",
+                "message": {
+                    "lockstep_effect": {
+                        "schema": "lockstep.effect/v1",
+                        "kind": "verify",
+                        "logical_id": "pinned-verify",
+                        "runner": {
+                            "selector": "pinned",
+                            "required_capabilities": [
+                                "bounded_result",
+                                "sandbox",
+                                "workspace",
+                            ],
+                        },
+                        "inputs": {
+                            "command": {"state_key": "command"},
+                            "snapshot": {
+                                "runtime_key": "current_project_snapshot"
+                            },
+                        },
+                        "writes": [],
+                        "artifacts": [],
+                        "deadline_seconds": 120,
+                        "scope_state_keys": [],
+                        "result_schema": "lockstep.effect-result/v1",
+                    }
+                },
+                "state_key": "request",
+                "resume_key": "result",
+                "idempotent": False,
+            },
+            "done": {
+                "type": "passthrough",
+                "output": {"lockstep_outcome": "PASS"},
+            },
+        },
+        "edges": [
+            {"from": "START", "to": "command"},
+            {"from": "command", "to": "verify"},
+            {
+                "from": "verify",
+                "to": "done",
+                "condition": "result.outcome == 'PASS'",
+            },
+            {"from": "done", "to": "END"},
+        ],
+    }
+    (recipes / f"{recipe}.recipe.yaml").write_text(
+        json.dumps(document), encoding="utf-8"
+    )
+
+
 def _runtime_config(root: Path) -> dict[str, object]:
     executable = root / "codex"
-    executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    provider_argv_marker = root / "provider-argv.txt"
+    provider_environment_marker = root / "provider-environment.txt"
+    executable.write_text(
+        "#!/bin/sh\n"
+        + "printf '%s\\n' \"$@\" > "
+        + shlex.quote(str(provider_argv_marker))
+        + "\n"
+        + "printf '%s\\n' \"$CODEX_HOME\" \"$HOME\" > "
+        + shlex.quote(str(provider_environment_marker))
+        + "\nprintf '%s\\n' "
+        + shlex.quote(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": "done"},
+                },
+                separators=(",", ":"),
+            )
+        )
+        + "\nexit 0\n",
+        encoding="utf-8",
+    )
     executable.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
     codex_home = root / "codex-home"
     codex_home.mkdir(mode=0o700)
@@ -118,12 +227,23 @@ def provision_managed_closure(
     monkeypatch,
     *,
     recipe: str = "managed-work",
-) -> ProvisionedManagedClosure:
+) -> ProvisionedRuntimeClosure:
     """Create and grant exactly one real protected managed closure."""
 
     project = root / "project"
     project.mkdir()
     write_managed_recipe(project, recipe=recipe)
+    return _provision_written_closure(root, monkeypatch, project, recipe)
+
+
+def _provision_written_closure(
+    root: Path,
+    monkeypatch,
+    project: Path,
+    recipe: str,
+) -> ProvisionedRuntimeClosure:
+    """Provision one already-written real authorized closure through owner CLI."""
+
     recipes = project / ".lockstep" / "recipes"
     index = RuntimeRequirementIndex.for_authorized_closures(
         (preflight_recipe(recipes, recipe),),
@@ -153,4 +273,30 @@ def provision_managed_closure(
             str(grants_path),
         ]
     ) == 0
-    return ProvisionedManagedClosure(project, owner_state, recipe, index)
+    return ProvisionedRuntimeClosure(
+        project,
+        owner_state,
+        recipe,
+        index,
+        root / "codex-home",
+        root / "pinned-home",
+        root / "provider-argv.txt",
+        root / "provider-environment.txt",
+    )
+
+
+def provision_pinned_verify_closure(
+    root: Path,
+    monkeypatch,
+    *,
+    recipe: str = "pinned-verify",
+) -> ProvisionedRuntimeClosure:
+    """Create and grant exactly one real protected pinned verify closure."""
+
+    project = root / "project"
+    project.mkdir()
+    write_pinned_verify_recipe(project, recipe=recipe)
+    provisioned = _provision_written_closure(root, monkeypatch, project, recipe)
+    requirement = provisioned.requirement_index.requirements[0]
+    assert requirement.runner_selector == "pinned"
+    return provisioned
