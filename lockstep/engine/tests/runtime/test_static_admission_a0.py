@@ -1,4 +1,4 @@
-"""R1b-A0: fully granted static admission parks before native execution."""
+"""R1b-A0: exact static admission before any start-side persistence."""
 
 from __future__ import annotations
 
@@ -9,17 +9,21 @@ import shlex
 import stat
 
 import pytest
-from sqlalchemy import func, select
 
 from lockstep import cli
-from lockstep.runtime import start_service as start_service_module
-from lockstep.runtime.catalog import RunCatalog
-from lockstep.runtime.effects.coordinator import ProviderContractViolation
-from lockstep.runtime.effects.owner_policy import RuntimeRequirementIndex
+from lockstep.runtime.effects.owner_policy import (
+    RuntimeAdmissionDecision,
+    RuntimeRequirementIndex,
+    requirement_digest,
+)
+from lockstep.runtime.effects.owner_snapshot_store import open_runtime_snapshot
 from lockstep.runtime.engine import Engine
 from lockstep.runtime.errors import LockstepError
 from lockstep.runtime.service import preflight_recipe
-from lockstep.runtime.storage import SQLiteStore
+from lockstep.runtime.start_service import (
+    _preflight_runtime_requirements,
+    plan_authorized_start,
+)
 
 
 def _managed_effect(logical_id: str, selector: str) -> dict[str, object]:
@@ -277,46 +281,70 @@ def _start(project: Path, owner_state: Path, recipe: str) -> dict[str, object]:
         service.close()
 
 
-def _assert_prelaunch_park(
+def _assert_exact_static_plan(
     owner_state: Path,
     project: Path,
-    result: dict[str, object],
+    recipe: str,
+    selector: str,
+    granted: tuple[str, ...],
     provider_marker: Path,
 ) -> None:
-    run_id = result["run_id"]
-    assert isinstance(run_id, str) and run_id
-    store = SQLiteStore(owner_state / "runtime.sqlite")
-    try:
-        catalog = RunCatalog(store)
-        assert [binding.public_run_id for binding in catalog.list(str(project.resolve()))] == [
-            run_id
-        ]
-        with store.read_connection() as connection:
-            assert connection.scalar(
-                select(func.count()).select_from(store.tables.effect_dispatch_watches)
-            ) == 1
-            assert connection.scalar(
-                select(func.count()).select_from(store.tables.effects)
-            ) == 0
-            assert connection.scalar(
-                select(func.count()).select_from(store.tables.effect_observations)
-            ) == 0
-            assert connection.scalar(
-                select(func.count()).select_from(store.tables.effect_runtime_inputs)
-            ) == 0
-            assert connection.scalar(
-                select(func.count()).select_from(store.tables.publication_consents)
-            ) == 0
-    finally:
-        store.close()
+    authorized = preflight_recipe(project / ".lockstep" / "recipes", recipe)
+    expected_index = RuntimeRequirementIndex.for_authorized_closure(
+        authorized,
+        project_identity=str(project.resolve()),
+    )
+    assert len(expected_index.requirements) == 1
+    expected_requirement = expected_index.requirements[0]
+    snapshot_digest, snapshot = open_runtime_snapshot(owner_state)
+    before = _owner_state_snapshot(owner_state)
+
+    plan = plan_authorized_start(
+        state_dir=owner_state,
+        authorized=authorized,
+        project=str(project),
+        compiler_provenance=None,
+        require_runtime_policy=lambda index: _preflight_runtime_requirements(
+            owner_state, index
+        ),
+    )
+
+    decision = plan.runtime_admission
+    assert isinstance(decision, RuntimeAdmissionDecision)
+    assert plan.authorized == authorized
+    assert plan.project_root == project.resolve()
+    assert decision.snapshot_digest == snapshot_digest
+    assert decision.snapshot == snapshot
+    assert len(decision.requirements) == 1
+    requirement, bound_digest, grant = decision.requirements[0]
+    binding = snapshot.codex if selector == "codex" else snapshot.pinned
+    assert requirement == expected_requirement
+    assert requirement.runner_selector == selector
+    assert granted == (requirement.grant_selection_key,)
+    assert bound_digest == requirement_digest(
+        grant_selection_key=requirement.grant_selection_key,
+        runner_binding_digest=binding.binding_digest,
+        config_generation=snapshot.config_generation,
+    )
+    assert grant == next(
+        item
+        for item in snapshot.grants
+        if item.grant_selection_key == requirement.grant_selection_key
+    )
+    assert grant.requirement_digest == bound_digest
+    assert grant.config_generation == snapshot.config_generation
+    assert grant.policy_generation == snapshot.policy_generation
+    assert grant.grant_generation > 0
+    assert _owner_state_snapshot(owner_state) == before
+    assert not (owner_state / "runtime.sqlite").exists()
     assert not (owner_state / "checkpoints" / "native.sqlite").exists()
     assert not provider_marker.exists()
 
 
-def test_granted_codex_static_admission_parks_before_native_execution(
+def test_granted_codex_static_planning_returns_exact_admission_decision(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Removing the positive static-policy branch must reject this granted run."""
+    """Real Codex provisioning binds one exact write-free admission decision."""
 
     project = tmp_path / "project"
     _write_direct_recipe(project, "codex-workflow", "codex")
@@ -334,15 +362,20 @@ def test_granted_codex_static_admission_parks_before_native_execution(
         "codex-workflow",
     ) == 0
 
-    result = _start(project, owner_state, "codex-workflow")
+    _assert_exact_static_plan(
+        owner_state,
+        project,
+        "codex-workflow",
+        "codex",
+        granted,
+        provider_marker,
+    )
 
-    _assert_prelaunch_park(owner_state, project, result, provider_marker)
 
-
-def test_granted_pinned_static_admission_parks_before_native_execution(
+def test_granted_pinned_static_planning_returns_exact_admission_decision(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Selector-specific pinned binding must use the same static park boundary."""
+    """Real pinned provisioning binds one exact write-free admission decision."""
 
     project = tmp_path / "project"
     _write_direct_recipe(project, "pinned-workflow", "pinned")
@@ -360,89 +393,14 @@ def test_granted_pinned_static_admission_parks_before_native_execution(
         "pinned-workflow",
     ) == 0
 
-    result = _start(project, owner_state, "pinned-workflow")
-
-    _assert_prelaunch_park(owner_state, project, result, provider_marker)
-
-
-def test_granted_static_admission_remains_parked_after_service_restart(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Durable recovery must preserve the pre-native A0 admission boundary."""
-
-    project = tmp_path / "project"
-    _write_direct_recipe(project, "target", "codex")
-    owner_state = tmp_path / "owner-state"
-    provider_marker = tmp_path / "provider-invoked"
-    granted = tuple(item.grant_selection_key for item in _requirements(project, "target"))
-    assert _provision(
-        tmp_path,
-        monkeypatch,
-        project,
+    _assert_exact_static_plan(
         owner_state,
-        _config(tmp_path, provider_marker=provider_marker),
-        granted,
-        "target",
-    ) == 0
-    result = _start(project, owner_state, "target")
-    _assert_prelaunch_park(owner_state, project, result, provider_marker)
-
-    reopened = Engine.command(owner_state, project / ".lockstep" / "recipes")
-    try:
-        try:
-            reopened._activate_writable_core()
-        except ProviderContractViolation:
-            # The regression oracle is the durable boundary below: recovery may
-            # report a fail-closed error, but it may never cross into native work.
-            pass
-    finally:
-        reopened.close()
-
-    _assert_prelaunch_park(owner_state, project, result, provider_marker)
-
-
-def test_repeated_recovery_classifies_one_immutable_static_admission_once(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Positive durable classification is bounded and reused only to park."""
-
-    project = tmp_path / "project"
-    _write_direct_recipe(project, "target", "codex")
-    owner_state = tmp_path / "owner-state"
-    provider_marker = tmp_path / "provider-invoked"
-    granted = tuple(item.grant_selection_key for item in _requirements(project, "target"))
-    assert _provision(
-        tmp_path,
-        monkeypatch,
         project,
-        owner_state,
-        _config(tmp_path, provider_marker=provider_marker),
+        "pinned-workflow",
+        "pinned",
         granted,
-        "target",
-    ) == 0
-    result = _start(project, owner_state, "target")
-
-    original = start_service_module._is_static_runtime_admission
-    classifications = 0
-
-    def counted(binding, bundle_store):
-        nonlocal classifications
-        classifications += 1
-        return original(binding, bundle_store)
-
-    monkeypatch.setattr(
-        start_service_module, "_is_static_runtime_admission", counted
+        provider_marker,
     )
-    reopened = Engine.command(owner_state, project / ".lockstep" / "recipes")
-    try:
-        reopened._activate_writable_core()
-        for _ in range(3):
-            reopened._recover_start_admissions()
-    finally:
-        reopened.close()
-
-    assert classifications == 1
-    _assert_prelaunch_park(owner_state, project, result, provider_marker)
 
 
 @pytest.mark.parametrize("configuration_only", (False, True))
