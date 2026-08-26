@@ -198,3 +198,38 @@ def test_public_managed_codex_binds_requirement_through_durable_commitment(
     finally:
         observer.release()
         command.close()
+
+
+def test_active_command_installs_first_protected_runtime_composition(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A5 RED: prior ordinary activation must not poison protected starts."""
+
+    provisioned = provision_managed_closure(tmp_path, monkeypatch)
+    command = Engine.command(
+        provisioned.owner_state,
+        provisioned.project / ".lockstep" / "recipes",
+    )
+    observer = RuntimeCommitmentObserver(monkeypatch, provisioned.owner_state)
+    observer.attach(command)
+    try:
+        assert command.scenario_recover(str(provisioned.project)) == {
+            "recovered": [],
+            "count": 0,
+            "limit": 128,
+        }
+        started = command.start(
+            provisioned.recipe,
+            {"brief": "review after an ordinary command activation"},
+            str(provisioned.project),
+        )
+        assert started["run_id"]
+        assert observer.reached.wait(timeout=2), (
+            "the active command capability did not install its first exact "
+            "protected runtime composition"
+        )
+        assert observer.commitments
+    finally:
+        observer.release()
+        command.close()
