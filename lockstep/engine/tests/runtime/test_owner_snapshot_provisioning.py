@@ -274,17 +274,14 @@ def test_focused_owner_modules_import_in_a_fresh_interpreter(
     assert result.returncode == 0, result.stderr
 
 
-def test_owner_policy_preserves_provisioning_export_identities() -> None:
+def test_owner_policy_does_not_reexport_provisioning_operations() -> None:
     from lockstep.runtime.effects import owner_policy, owner_provisioning
 
-    assert (
-        owner_policy.provision_runtime_snapshot
-        is owner_provisioning.provision_runtime_snapshot
-    )
-    assert (
-        owner_policy.validate_runtime_provision_inputs
-        is owner_provisioning.validate_runtime_provision_inputs
-    )
+    assert not hasattr(owner_policy, "provision_runtime_snapshot")
+    assert not hasattr(owner_policy, "validate_runtime_provision_inputs")
+    assert not hasattr(owner_policy, "__getattr__")
+    assert callable(owner_provisioning.provision_runtime_snapshot)
+    assert callable(owner_provisioning.validate_runtime_provision_inputs)
 
 
 def test_equal_inputs_are_byte_for_byte_idempotent(tmp_path: Path) -> None:

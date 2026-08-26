@@ -511,4 +511,3 @@ def _profile_document(document: dict[str, Any], logical: str) -> _DocumentProfil
         logical, tool_kinds, tool_descriptors, uses
     )
     return _DocumentProfile(tuple(dependencies), requirements)
-

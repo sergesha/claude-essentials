@@ -18,10 +18,6 @@ from lockstep.runtime.effects.owner_policy_ingress import (
 
 if TYPE_CHECKING:
     from lockstep.recipe.authority import AuthorizedRecipe
-    from lockstep.runtime.effects.owner_provisioning import (
-        provision_runtime_snapshot,
-        validate_runtime_provision_inputs,
-    )
 
 
 class _RuntimeAdmissionChanged(RuntimeError):
@@ -496,24 +492,6 @@ class OwnerRuntimeSnapshot:
             for grant in self.grants
         ):
             raise ValueError("owner runtime grant does not match snapshot generations")
-
-
-def __getattr__(name: str):
-    """Resolve compatibility provisioning exports without an import cycle."""
-
-    if name == "provision_runtime_snapshot":
-        from lockstep.runtime.effects.owner_provisioning import (
-            provision_runtime_snapshot,
-        )
-
-        return provision_runtime_snapshot
-    if name == "validate_runtime_provision_inputs":
-        from lockstep.runtime.effects.owner_provisioning import (
-            validate_runtime_provision_inputs,
-        )
-
-        return validate_runtime_provision_inputs
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 @dataclass(frozen=True, slots=True)

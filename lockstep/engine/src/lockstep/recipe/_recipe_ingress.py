@@ -130,4 +130,3 @@ class StrictRecipeIngress:
             authority_requirements=tuple(sorted(requirements)),
             source_bundle_sha256=source_manifest.hexdigest(),
         )
-
