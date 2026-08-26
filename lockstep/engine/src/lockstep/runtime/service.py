@@ -976,8 +976,8 @@ class LockstepCommandService:
             if self._closed:
                 return
             self._closed = True
-            self._static_admission_classifier.clear()
             if not self._writable_core_active:
+                self._static_admission_classifier.clear()
                 return
             self._writable_core_active = False
             self._pump_stop.set()
@@ -987,6 +987,7 @@ class LockstepCommandService:
             store = self.store
         if pump_thread is not None:
             pump_thread.join()
+        self._static_admission_classifier.clear()
         try:
             runtime.close()
         finally:
