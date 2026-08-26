@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 import tempfile
 
@@ -28,6 +30,12 @@ from lockstep.runtime.owner_state import (
 
 
 _SNAPSHOT_SCHEMA = "lockstep.runtime-owner/v1"
+
+
+class _RuntimeSnapshotChanged(RuntimeError):
+    """The owner policy no longer matches an admitted immutable decision."""
+
+
 def _binding_document(binding: _RuntimeBindingFacts) -> dict[str, object]:
     return {
         "executable": binding.executable,
@@ -194,6 +202,30 @@ def open_runtime_snapshot(state_dir: Path) -> tuple[str, OwnerRuntimeSnapshot]:
         raise FileNotFoundError("owner runtime snapshot is unavailable")
     encoded, snapshot = opened
     return hashlib.sha256(encoded).hexdigest(), snapshot
+
+
+@contextmanager
+def hold_runtime_snapshot_current(
+    state_dir: Path,
+    *,
+    expected_digest: str,
+    expected_snapshot: OwnerRuntimeSnapshot,
+) -> Iterator[None]:
+    """Verify one admitted snapshot and retain its provisioning lock."""
+
+    root = Path(state_dir)
+    verify_owner_directory(root)
+    directory = root / "runtime-owner"
+    verify_owner_directory(directory)
+    with advisory_file_lock(directory / "snapshot.lock"):
+        current = _read_snapshot(directory / "snapshot.json")
+        if current is None:
+            raise _RuntimeSnapshotChanged("owner runtime snapshot is unavailable")
+        encoded, snapshot = current
+        digest = hashlib.sha256(encoded).hexdigest()
+        if digest != expected_digest or snapshot != expected_snapshot:
+            raise _RuntimeSnapshotChanged("owner runtime admission is no longer current")
+        yield
 
 
 def _assert_snapshot_grants_consistent(snapshot: OwnerRuntimeSnapshot) -> None:

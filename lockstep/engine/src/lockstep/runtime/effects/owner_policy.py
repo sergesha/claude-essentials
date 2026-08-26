@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 import hashlib
 import json
+from contextlib import AbstractContextManager
 from pathlib import Path
 import re
 from typing import TYPE_CHECKING, Literal
@@ -551,6 +552,19 @@ class RuntimeAdmissionDecision:
                 or grant.requirement_digest != digest
             ):
                 raise ValueError("runtime admission grant does not match requirement")
+
+    def assert_current(self, state_dir: Path) -> AbstractContextManager[None]:
+        """Hold the owner snapshot boundary while this decision is admitted."""
+
+        from lockstep.runtime.effects.owner_snapshot_store import (
+            hold_runtime_snapshot_current,
+        )
+
+        return hold_runtime_snapshot_current(
+            state_dir,
+            expected_digest=self.snapshot_digest,
+            expected_snapshot=self.snapshot,
+        )
 
 
 @dataclass(frozen=True, slots=True)

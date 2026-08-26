@@ -46,6 +46,7 @@ from lockstep.runtime.effects.owner_consent import (
     IssuedPublicationConsent,
     OwnerConsentAuthority,
 )
+from lockstep.runtime.effects.owner_snapshot_store import _RuntimeSnapshotChanged
 from lockstep.runtime.graph_runtime import (
     GraphRuntime,
 )
@@ -64,6 +65,7 @@ from lockstep.runtime.snapshot_resolver import (
     RuntimeSnapshotResolver,
 )
 from lockstep.runtime.start_service import (
+    AuthorizedStartPlan,
     AuthorizedStartService,
     _StaticAdmissionParkCache,
     _preflight_runtime_requirements,
@@ -553,6 +555,22 @@ class LockstepCommandService:
             compiler_provenance=compiler_provenance,
             require_runtime_policy=self._require_owner_runtime_policy,
         )
+        if plan.runtime_admission is None:
+            return self._persist_authorized_start(recipe, plan, values)
+        try:
+            with plan.runtime_admission.assert_current(self.state_dir):
+                return self._persist_authorized_start(recipe, plan, values)
+        except _RuntimeSnapshotChanged as exc:
+            raise LockstepError(str(exc)) from exc
+
+    def _persist_authorized_start(
+        self,
+        recipe: str,
+        plan: AuthorizedStartPlan,
+        values: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Activate writable resources and persist one already-planned start."""
+
         self._activate_writable_core()
         return AuthorizedStartService(
             blobs=self.blobs,
