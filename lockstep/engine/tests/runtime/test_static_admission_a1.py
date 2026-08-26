@@ -14,6 +14,7 @@ import pytest
 from lockstep import cli
 from lockstep.runtime import service as service_module
 from lockstep.runtime.effects.owner_policy import RuntimeRequirementIndex
+from lockstep.runtime.effects.owner_snapshot_store import open_runtime_snapshot
 from lockstep.runtime.engine import Engine
 from lockstep.runtime.errors import LockstepError
 from lockstep.runtime.service import preflight_recipe
@@ -161,7 +162,7 @@ def _owner_tree(root: Path) -> tuple[tuple[str, str, int, bytes | str], ...]:
 def test_supported_revocation_after_real_preflight_is_write_free(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Deleting currentness must allow stale admission facts to be persisted."""
+    """Currentness must not allow stale admission facts to be persisted."""
 
     project = tmp_path / "project"
     _write_managed_recipe(project)
@@ -185,6 +186,10 @@ def test_supported_revocation_after_real_preflight_is_write_free(
         replacement=granted,
         suffix="grant",
     ) == 0
+    granted_digest, granted_snapshot = open_runtime_snapshot(owner_state)
+    assert tuple(
+        grant.grant_selection_key for grant in granted_snapshot.grants
+    ) == granted
 
     original_plan = service_module.plan_authorized_start
     preflight_finished = threading.Event()
@@ -225,6 +230,19 @@ def test_supported_revocation_after_real_preflight_is_write_free(
             replacement=(),
             suffix="revoke",
         ) == 0
+        revoked_digest, revoked_snapshot = open_runtime_snapshot(owner_state)
+        assert revoked_digest != granted_digest
+        assert (
+            revoked_snapshot.config_generation
+            == granted_snapshot.config_generation
+        )
+        assert (
+            revoked_snapshot.policy_generation
+            == granted_snapshot.policy_generation + 1
+        )
+        assert revoked_snapshot.codex == granted_snapshot.codex
+        assert revoked_snapshot.pinned == granted_snapshot.pinned
+        assert revoked_snapshot.grants == ()
         expected_after_supported_drift = _owner_tree(owner_state)
     finally:
         release_start.set()
