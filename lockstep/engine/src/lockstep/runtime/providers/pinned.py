@@ -55,7 +55,7 @@ def pinned_runner_binding_digest(
 class _PinnedCodexStrategy(_CodexAttemptDriver):
     """Pinned hooks for Task 6's one durable Codex attempt driver."""
 
-    effect_kind = "pinned"
+    accepted_effect_kinds = frozenset({"pinned", "verify"})
     required_capabilities = frozenset({"workspace", "bounded_result", "sandbox"})
     workspace_purpose: Literal["no_publish_operation"] = "no_publish_operation"
     execution_class: Literal["pinned-command"] = "pinned-command"

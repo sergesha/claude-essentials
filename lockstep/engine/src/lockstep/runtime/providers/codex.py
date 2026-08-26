@@ -445,7 +445,7 @@ def _attestation_digest(attestation: SandboxAttestation) -> str:
 class _CodexAttemptDriver:
     required_authorities = ("os_user_execution",)
     reconciliation_boundary = "local_durable_handle"
-    effect_kind = "managed"
+    accepted_effect_kinds = frozenset({"managed"})
     required_capabilities = frozenset(
         {"workspace", "bounded_result", "sandbox", "network", "credentials"}
     )
@@ -709,9 +709,10 @@ class _CodexAttemptDriver:
             raise CodexProviderError(
                 "Codex request requires an exact grant and workspace"
             )
-        if request.effect_kind != self.effect_kind:
+        if request.effect_kind not in self.accepted_effect_kinds:
+            accepted = " or ".join(sorted(self.accepted_effect_kinds))
             raise CodexProviderError(
-                f"Codex adapter accepts only {self.effect_kind} effects"
+                f"Codex adapter accepts only {accepted} effects"
             )
         if request.runner_binding_digest != self.binding_digest:
             raise CodexProviderError(

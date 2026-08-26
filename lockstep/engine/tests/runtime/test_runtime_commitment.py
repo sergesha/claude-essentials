@@ -370,7 +370,7 @@ def test_public_verify_uses_pinned_profile_and_credential_free_lifecycle(
     tmp_path,
     monkeypatch,
 ) -> None:
-    """A7 RED: public verify must use the exact pinned lifecycle and binding."""
+    """A7 GREEN: public verify uses the exact pinned lifecycle and binding."""
 
     provisioned = provision_pinned_verify_closure(tmp_path, monkeypatch)
     assert tuple(provisioned.pinned_home.iterdir()) == ()

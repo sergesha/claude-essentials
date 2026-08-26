@@ -12,6 +12,7 @@ from lockstep.runtime.effects.authority import EffectGrant
 from lockstep.runtime.native_models import NativeCoordinate
 from lockstep.runtime.project_snapshots import ProjectSnapshotStore
 from lockstep.runtime.providers.base import EffectRequest
+from lockstep.runtime.providers.codex import CodexProviderError
 from lockstep.runtime.providers.workspaces import (
     LocalGitWorkspaceProvider,
     WorkspaceError,
@@ -68,7 +69,12 @@ def test_no_publish_quarantine_never_returns_successor_snapshot(tmp_path: Path) 
     assert provider.inspect(lease.workspace_ref).phase == "quarantined"
 
 
-def _pinned_system(tmp_path: Path, *, result_source: str = "exit"):
+def _pinned_system(
+    tmp_path: Path,
+    *,
+    result_source: str = "exit",
+    effect_kind: str = "pinned",
+):
     from lockstep.runtime.providers.codex import (
         CodexInstallationBinding,
         CodexLaunchDecisionGate,
@@ -137,7 +143,7 @@ def _pinned_system(tmp_path: Path, *, result_source: str = "exit"):
         definition_digest="a" * 64,
         coordinate=NativeCoordinate("thread", "checkpoint", "", "task", "interrupt"),
         descriptor_digest="b" * 64,
-        effect_kind="pinned",
+        effect_kind=effect_kind,
         runner_selector="pinned",
         runner_binding_digest=adapter.binding_digest,
         required_capabilities=tuple(capabilities),
@@ -163,6 +169,31 @@ def _pinned_system(tmp_path: Path, *, result_source: str = "exit"):
         expires_at=datetime.now(UTC) + timedelta(minutes=2),
     )
     return adapter, intent.bind_grant(grant), workspaces
+
+
+def test_pinned_prepare_accepts_verify_without_rewriting_effect_kind(
+    tmp_path: Path,
+) -> None:
+    adapter, request, _workspaces = _pinned_system(
+        tmp_path,
+        effect_kind="verify",
+    )
+
+    launch = adapter.prepare(request)
+
+    assert launch.effect_id == request.effect_id
+    assert request.effect_kind == "verify"
+
+
+def test_pinned_prepare_rejects_managed_effect_kind(tmp_path: Path) -> None:
+    adapter, request, _workspaces = _pinned_system(
+        tmp_path,
+        effect_kind="managed",
+    )
+
+    with pytest.raises(CodexProviderError, match="accepts only"):
+        adapter.prepare(request)
+    assert adapter.spawn_count == 0
 
 
 def test_pinned_prepare_commits_safe_logical_and_exact_codex_sandbox_argv(
