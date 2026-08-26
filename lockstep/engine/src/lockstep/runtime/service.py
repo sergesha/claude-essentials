@@ -242,6 +242,7 @@ class LockstepCommandService:
             prepare=self._prepare_writable_core,
             finish=self._finish_writable_core_activation,
             rollback=self._rollback_writable_core_activation,
+            record_degraded=lambda exc: setattr(self, "_pump_failure", exc),
         )
 
     def _open_writable_stores(self) -> None:
@@ -313,6 +314,7 @@ class LockstepCommandService:
         """Recover old work and publish one fully active writable core."""
 
         self._recover_engine_effects()
+        self._pump_failure = None
         self._pump_thread = threading.Thread(
             target=self._completion_pump,
             name="lockstep-effect-completion",

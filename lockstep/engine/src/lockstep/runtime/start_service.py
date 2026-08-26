@@ -40,7 +40,7 @@ class AuthorizedStartPlan:
 
 
 class _ExclusiveLock(Protocol):
-    def acquire(self) -> bool: ...
+    def acquire(self, blocking: bool = True) -> bool: ...
 
     def release(self) -> None: ...
 
@@ -59,6 +59,7 @@ class _WritableCoreActivation:
     prepare: Callable[[], None]
     finish: Callable[[], None]
     rollback: Callable[[], None]
+    record_degraded: Callable[[BaseException], None]
 
     def _prepare_locked(self) -> bool:
         if self.is_active():
@@ -94,26 +95,37 @@ class _WritableCoreActivation:
     ) -> dict[str, Any]:
         """Linearize currentness and this park before recovery or pump startup."""
 
-        prepared = False
-        acquired = False
-        try:
-            with decision.assert_current(state_dir):
-                self.lock.acquire()
-                acquired = True
-                prepared = self._prepare_locked()
-                result = persist()
-            if prepared:
-                self.finish()
-            return result
-        except _RuntimeAdmissionChanged as exc:
-            raise LockstepError(str(exc)) from exc
-        except BaseException:
-            if prepared:
-                self.rollback()
-            raise
-        finally:
-            if acquired:
-                self.lock.release()
+        while True:
+            prepared = False
+            acquired = False
+            persisted = False
+            try:
+                with decision.assert_current(state_dir):
+                    acquired = self.lock.acquire(blocking=False)
+                    if acquired:
+                        prepared = self._prepare_locked()
+                        result = persist()
+                        persisted = True
+                if not acquired:
+                    with self.lock:
+                        pass
+                    continue
+                if prepared:
+                    try:
+                        self.finish()
+                    except BaseException as exc:
+                        self.rollback()
+                        self.record_degraded(exc)
+                return result
+            except _RuntimeAdmissionChanged as exc:
+                raise LockstepError(str(exc)) from exc
+            except BaseException:
+                if prepared and not persisted:
+                    self.rollback()
+                raise
+            finally:
+                if acquired:
+                    self.lock.release()
 
     def start(
         self,
