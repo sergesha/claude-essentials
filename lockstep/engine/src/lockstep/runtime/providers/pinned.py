@@ -60,7 +60,12 @@ class _PinnedCodexStrategy(_CodexAttemptDriver):
     workspace_purpose: Literal["no_publish_operation"] = "no_publish_operation"
     execution_class: Literal["pinned-command"] = "pinned-command"
 
-    def __init__(self, *, permission_profile: str, **kwargs) -> None:
+    def __init__(
+        self,
+        *,
+        permission_profile: str,
+        **kwargs,
+    ) -> None:
         self._pinned_permission_profile = validate_pinned_permission_profile(
             permission_profile
         )
@@ -71,6 +76,11 @@ class _PinnedCodexStrategy(_CodexAttemptDriver):
             self._binding.digest,
             permission_profile,
         )
+
+    def _launcher_binding_digest(
+        self, _binding: CodexInstallationBinding
+    ) -> str:
+        return self.binding_digest
 
     @staticmethod
     def _spec(request: EffectRequest) -> PinnedCommandSpec:

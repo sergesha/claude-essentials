@@ -699,6 +699,11 @@ class _CodexAttemptDriver:
         del request
         return workspace
 
+    def _launcher_binding_digest(
+        self, binding: CodexInstallationBinding
+    ) -> str:
+        return binding.digest
+
     def _validate_prepare_request(self, request: EffectRequest) -> None:
         if request.grant_digest is None or request.workspace_ref is None:
             raise CodexProviderError(
@@ -1043,7 +1048,8 @@ class _CodexAttemptDriver:
                 return self.inspect(record.effect_id)
             body_path, body_digest = self._launch_body(record)
             with self._decision_gate.commitment(
-                binding.digest, record.launcher_decision_generation
+                self._launcher_binding_digest(binding),
+                record.launcher_decision_generation,
             ):
                 if self._clock() >= record.deadline_at:
                     raise CodexProviderError(

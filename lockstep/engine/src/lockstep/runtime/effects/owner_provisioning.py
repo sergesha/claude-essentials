@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 from lockstep.runtime.effects.owner_policy import (
@@ -14,6 +15,16 @@ from lockstep.runtime.effects.owner_snapshot_store import replace_runtime_snapsh
 from lockstep.runtime.owner_state import ensure_owner_directory, verify_owner_directory
 from lockstep.runtime.providers.codex import CodexInstallationBinding
 from lockstep.runtime.providers.pinned import pinned_runner_binding_digest
+
+
+@dataclass(frozen=True, slots=True)
+class CapturedRuntimeBindings:
+    """One validation pass over both snapshot-selected installations."""
+
+    codex_installation: CodexInstallationBinding
+    pinned_installation: CodexInstallationBinding
+    codex_facts: _RuntimeBindingFacts
+    pinned_facts: _RuntimeBindingFacts
 
 
 def _validated_owner_state_root(state_dir: Path, *, project: Path) -> Path:
@@ -133,6 +144,17 @@ def capture_runtime_snapshot_bindings(
 ) -> tuple[_RuntimeBindingFacts, _RuntimeBindingFacts]:
     """Capture each configured installation once and reject binding drift."""
 
+    captured = capture_runtime_execution_bindings(snapshot, project=project)
+    return captured.codex_facts, captured.pinned_facts
+
+
+def capture_runtime_execution_bindings(
+    snapshot: OwnerRuntimeSnapshot,
+    *,
+    project: Path,
+) -> CapturedRuntimeBindings:
+    """Return the exact installations and normalized facts from one capture."""
+
     def member(binding: _RuntimeBindingFacts) -> dict[str, object]:
         return {
             "executable": binding.executable,
@@ -158,7 +180,12 @@ def capture_runtime_snapshot_bindings(
     )
     if codex != snapshot.codex or pinned != snapshot.pinned:
         raise ValueError("owner runtime binding changed after provisioning")
-    return codex, pinned
+    return CapturedRuntimeBindings(
+        codex_installation=codex_binding,
+        pinned_installation=pinned_binding,
+        codex_facts=codex,
+        pinned_facts=pinned,
+    )
 
 
 def provision_runtime_snapshot(

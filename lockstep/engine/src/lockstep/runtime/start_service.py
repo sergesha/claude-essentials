@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import tempfile
 import uuid
-from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
 from lockstep.recipe import profile
-from lockstep.recipe.authority import AuthorizedRecipe, recipe_definition_sha256
+from lockstep.recipe.authority import AuthorizedRecipe
 from lockstep.runtime.catalog import RunBinding
 from lockstep.runtime.effects.owner_policy import (
     OwnerRuntimeAuthority,
@@ -24,9 +23,10 @@ from lockstep.runtime.effects.owner_provisioning import (
 )
 from lockstep.runtime.effects.owner_snapshot_store import open_runtime_snapshot
 from lockstep.runtime.errors import LockstepError
-from lockstep.runtime.recipe_bundles import RecipeBundleRef, RecipeBundleStore
+from lockstep.runtime.recipe_bundles import RecipeBundleStore
 from lockstep.runtime.snapshot_resolver import capture_authoritative_snapshot
 from lockstep.runtime.status import ScenarioStatus, project_status
+from lockstep.runtime.runtime_execution import RuntimeExecutionAdmission
 
 
 @dataclass(frozen=True)
@@ -37,6 +37,7 @@ class AuthorizedStartPlan:
     project_root: Path
     compiler_provenance: profile.CompilerProvenance | None
     runtime_admission: RuntimeAdmissionDecision | None
+    runtime_execution: RuntimeExecutionAdmission | None = None
 
 
 class _ExclusiveLock(Protocol):
@@ -92,6 +93,8 @@ class _WritableCoreActivation:
         state_dir: Path,
         decision: RuntimeAdmissionDecision,
         persist: Callable[[], dict[str, Any]],
+        configure: Callable[[], None] | None = None,
+        complete_activation: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         """Linearize currentness and this park before recovery or pump startup."""
 
@@ -103,6 +106,8 @@ class _WritableCoreActivation:
                 with decision.assert_current(state_dir):
                     acquired = self.lock.acquire(blocking=False)
                     if acquired:
+                        if configure is not None:
+                            configure()
                         prepared = self._prepare_locked()
                         result = persist()
                         persisted = True
@@ -112,7 +117,7 @@ class _WritableCoreActivation:
                     continue
                 if prepared:
                     try:
-                        self.finish()
+                        (complete_activation or self.finish)()
                     except BaseException as exc:
                         self.rollback()
                         self.record_degraded(exc)
@@ -132,13 +137,21 @@ class _WritableCoreActivation:
         state_dir: Path,
         decision: RuntimeAdmissionDecision | None,
         persist: Callable[[], dict[str, Any]],
+        configure: Callable[[], None] | None = None,
+        complete_activation: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         """Choose ordinary activation or owner-linearized static admission."""
 
         if decision is None:
             self.activate()
             return persist()
-        return self.admit(state_dir, decision, persist)
+        return self.admit(
+            state_dir,
+            decision,
+            persist,
+            configure,
+            complete_activation,
+        )
 
 
 def _preflight_runtime_requirements(
@@ -165,75 +178,6 @@ def _preflight_runtime_requirements(
         raise LockstepError(str(exc)) from exc
 
 
-def _is_static_runtime_admission(
-    binding: RunBinding,
-    bundle_store: RecipeBundleStore,
-) -> bool:
-    """Classify one durable admission from its verified immutable bundle."""
-
-    try:
-        ref = RecipeBundleRef(binding.recipe_snapshot_ref)
-        manifest = bundle_store.read_manifest(ref)
-        materialized = bundle_store.read_materialization(ref)
-        observed_definition = recipe_definition_sha256(
-            manifest.root,
-            ((entry.path, entry.sha256, entry.size) for entry in manifest.files),
-        )
-        if observed_definition != binding.recipe_digest:
-            raise ValueError("catalog recipe digest does not match admitted bundle")
-        documents = tuple(
-            (entry.path, (materialized.directory / entry.path).read_bytes())
-            for entry in manifest.files
-        )
-        return bool(
-            RuntimeRequirementIndex._for_recipe_documents(
-                documents,
-                definition_digest=binding.recipe_digest,
-                project_identity=binding.project_identity,
-            ).requirements
-        )
-    except (KeyError, OSError, RuntimeError, TypeError, ValueError) as exc:
-        raise LockstepError("durable start admission integrity failure") from exc
-
-
-class _StaticAdmissionParkCache:
-    """Bounded positive cache that can only preserve a pre-native park."""
-
-    _MAX_ENTRIES = 128
-
-    def __init__(self) -> None:
-        self._parks: OrderedDict[tuple[str, ...], None] = OrderedDict()
-
-    @staticmethod
-    def _identity(binding: RunBinding) -> tuple[str, ...]:
-        return (
-            binding.public_run_id,
-            binding.thread_id,
-            binding.recipe_digest,
-            binding.recipe_snapshot_ref,
-            binding.project_identity,
-        )
-
-    def requires_park(
-        self,
-        binding: RunBinding,
-        bundle_store: RecipeBundleStore,
-    ) -> bool:
-        identity = self._identity(binding)
-        if identity in self._parks:
-            self._parks.move_to_end(identity)
-            return True
-        if not _is_static_runtime_admission(binding, bundle_store):
-            return False
-        self._parks[identity] = None
-        if len(self._parks) > self._MAX_ENTRIES:
-            self._parks.popitem(last=False)
-        return True
-
-    def clear(self) -> None:
-        self._parks.clear()
-
-
 def plan_authorized_start(
     *,
     state_dir: Path,
@@ -241,7 +185,8 @@ def plan_authorized_start(
     project: str,
     compiler_provenance: profile.CompilerProvenance | None,
     require_runtime_policy: Callable[
-        [RuntimeRequirementIndex], RuntimeAdmissionDecision | None
+        [RuntimeRequirementIndex],
+        RuntimeAdmissionDecision | RuntimeExecutionAdmission | None,
     ],
 ) -> AuthorizedStartPlan:
     provenance = compiler_provenance or authorized.canonical_match_proof
@@ -273,13 +218,20 @@ def plan_authorized_start(
     except ValueError as exc:
         raise LockstepError(str(exc)) from exc
     runtime_admission = None
+    runtime_execution = None
     if index.requirements:
-        runtime_admission = require_runtime_policy(index)
+        policy = require_runtime_policy(index)
+        if isinstance(policy, RuntimeExecutionAdmission):
+            runtime_execution = policy
+            runtime_admission = policy.decision
+        else:
+            runtime_admission = policy
     return AuthorizedStartPlan(
         authorized,
         project_root,
         provenance,
         runtime_admission,
+        runtime_execution,
     )
 
 

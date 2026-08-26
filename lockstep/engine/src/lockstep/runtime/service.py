@@ -30,6 +30,7 @@ from lockstep.runtime.artifacts import ArtifactRegistry
 from lockstep.runtime.catalog import RunBinding, RunCatalog
 from lockstep.runtime.effects.authority import (
     EffectAuthorityDenied,
+    EffectAuthorityGate,
     EffectAuthorityUnavailable,
 )
 from lockstep.runtime.effects.coordinator import EffectCoordinator
@@ -58,6 +59,7 @@ from lockstep.runtime.providers.manual import (
     ManualProviderError,
     ManualSubmission,
 )
+from lockstep.runtime.providers.base import RunnerAdapter
 from lockstep.runtime.project_snapshots import ProjectSnapshotStore
 from lockstep.runtime.snapshot_resolver import (
     RuntimeSnapshotFacts,
@@ -65,14 +67,18 @@ from lockstep.runtime.snapshot_resolver import (
 )
 from lockstep.runtime.start_service import (
     AuthorizedStartService,
-    _StaticAdmissionParkCache,
     _WritableCoreActivation,
-    _preflight_runtime_requirements,
     plan_authorized_start,
 )
 from lockstep.runtime.worker_submission_service import WorkerSubmissionService
 from lockstep.runtime.publication import ProjectPublisher
 from lockstep.runtime.recipe_bundles import RecipeBundleStore
+from lockstep.runtime.runtime_execution import (
+    RuntimeExecutionAdmission,
+    RuntimeExecutionContext,
+    build_runtime_execution_composition,
+    capture_runtime_execution_admission,
+)
 from lockstep.runtime.status import ScenarioStatus, project_status
 from lockstep.runtime.storage import SQLiteStore
 
@@ -212,15 +218,15 @@ class LockstepCommandService:
         self.state_dir = Path(state_dir).resolve()
         self.recipes_dir = Path(recipes_dir).resolve()
         self.authority_policy = authority_policy or RecipeAuthorityPolicy()
-        self._configured_runners: dict[str, object] = {}
-        self._configured_effect_authority = None
+        self._runtime_execution_context: RuntimeExecutionContext | None = None
+        self._runtime_execution_composition = None
         self._activation_lock = threading.RLock()
         self._writable_core_active = False
         self._closed = False
         self._pump_stop = threading.Event()
         self._pump_wakeup = threading.Event()
         self._active_effect_runs: set[str] = set()
-        self._static_admission_classifier = _StaticAdmissionParkCache()
+        self._initial_recovery_exclusion: str | None = None
         self._queued_effect_runs: set[str] = set()
         self._active_effect_queue: deque[str] = deque()
         self._active_effect_lock = threading.Lock()
@@ -277,21 +283,22 @@ class LockstepCommandService:
             self.runtime,
         )
 
-    def _open_effect_coordinator(self) -> None:
-        self.authority = OwnerConsentAuthority(
+    def _effect_coordinator_for(
+        self,
+        runners: Mapping[str, RunnerAdapter],
+        delegate: EffectAuthorityGate,
+    ) -> tuple[OwnerConsentAuthority, EffectCoordinator]:
+        authority = OwnerConsentAuthority(
             self.store,
-            delegate=(
-                self._configured_effect_authority
-                or _UnavailableEffectAuthority()
-            ),
+            delegate=delegate,
         )
-        self.coordinator = EffectCoordinator(
+        coordinator = EffectCoordinator(
             runtime=self.runtime,
             catalog=self.catalog,
             ledger=self.effects,
             leases=self.leases,
-            runners=self._configured_runners,
-            authority=self.authority,
+            runners=runners,
+            authority=authority,
             artifacts=self.artifacts,
             publisher_for=lambda binding: ProjectPublisher(
                 self.state_dir,
@@ -302,6 +309,36 @@ class LockstepCommandService:
             manual=self.manual,
             snapshot_resolver=self.snapshot_resolver,
         )
+        return authority, coordinator
+
+    def _install_runtime_execution(
+        self, context: RuntimeExecutionContext
+    ) -> None:
+        composition = build_runtime_execution_composition(
+            state_dir=self.state_dir,
+            context=context,
+            catalog=self.catalog,
+            bundles=self.bundle_store,
+            blobs=self.blobs,
+            snapshots=self.snapshots,
+        )
+        released = composition.runners
+        runners = {"codex": released.codex, "pinned": released.pinned}
+        authority, coordinator = self._effect_coordinator_for(
+            runners, composition.authority
+        )
+        self._runtime_execution_composition = composition
+        self._runtime_execution_context = context
+        self.authority, self.coordinator = authority, coordinator
+
+    def _open_effect_coordinator(self) -> None:
+        context = self._runtime_execution_context
+        if context is not None:
+            self._install_runtime_execution(context)
+            return
+        self.authority, self.coordinator = self._effect_coordinator_for(
+            {}, _UnavailableEffectAuthority()
+        )
 
     def _prepare_writable_core(self) -> None:
         """Open complete writable resources without recovery or background work."""
@@ -310,10 +347,16 @@ class LockstepCommandService:
         self._open_graph_runtime()
         self._open_effect_coordinator()
 
-    def _finish_writable_core_activation(self) -> None:
+    def _finish_writable_core_activation(
+        self, deferred_start_run_id: str | None = None
+    ) -> None:
         """Recover old work and publish one fully active writable core."""
 
-        self._recover_engine_effects()
+        self._initial_recovery_exclusion = deferred_start_run_id
+        try:
+            self._recover_engine_effects()
+        finally:
+            self._initial_recovery_exclusion = None
         self._pump_failure = None
         self._pump_thread = threading.Thread(
             target=self._completion_pump,
@@ -351,13 +394,36 @@ class LockstepCommandService:
         self._pump_failure = None
         self._pump_stop.clear()
         self._pump_wakeup.clear()
-        self._static_admission_classifier.clear()
+        self._initial_recovery_exclusion = None
+        self._runtime_execution_composition = None
+        self._runtime_execution_context = None
         self._writable_core_active = False
 
     def _require_owner_runtime_policy(self, index):
         """Use the production owner snapshot boundary for static admission."""
 
-        return _preflight_runtime_requirements(self.state_dir, index)
+        try:
+            return capture_runtime_execution_admission(self.state_dir, index)
+        except FileNotFoundError as exc:
+            raise LockstepError("runtime execution policy is unavailable") from exc
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise LockstepError(str(exc)) from exc
+
+    def _configure_runtime_execution(
+        self, admission: RuntimeExecutionAdmission | None
+    ) -> None:
+        if admission is None:
+            return
+        context = admission.context
+        current = self._runtime_execution_context
+        if current is not None and current != context:
+            raise LockstepError("command runtime execution snapshot changed")
+        if current is not None:
+            return
+        if self._writable_core_active:
+            self._install_runtime_execution(context)
+        else:
+            self._runtime_execution_context = context
 
     def _recover_engine_effects(self) -> None:
         """Adopt durable protected work without a scheduler or status side effect."""
@@ -395,13 +461,7 @@ class LockstepCommandService:
             if not self._reserve_effect_run(binding.public_run_id):
                 return
             try:
-                bundle_store = getattr(self, "bundle_store", None)
-                classifier = getattr(self, "_static_admission_classifier", None)
-                if (
-                    bundle_store is not None
-                    and classifier is not None
-                    and classifier.requires_park(binding, bundle_store)
-                ):
+                if binding.public_run_id == self._initial_recovery_exclusion:
                     self._deactivate_effect_run(binding.public_run_id)
                     continue
                 encoded = self.blobs.read(watch.input_blob)
@@ -567,18 +627,28 @@ class LockstepCommandService:
             compiler_provenance=compiler_provenance,
             require_runtime_policy=self._require_owner_runtime_policy,
         )
+        deferred_start_run_id: str | None = None
+
         def persist() -> dict[str, Any]:
-            return self._authorized_start_service().start(
+            nonlocal deferred_start_run_id
+            result = self._authorized_start_service().start(
                 recipe,
                 plan,
                 values,
                 canonical_input=self._canonical_start_input(values),
             )
+            run_id = result.get("run_id")
+            if not isinstance(run_id, str) or not run_id:
+                raise LockstepError("durable start did not return its run identity")
+            deferred_start_run_id = run_id
+            return result
 
         return self._start_activation.start(
             self.state_dir,
             plan.runtime_admission,
             persist,
+            lambda: self._configure_runtime_execution(plan.runtime_execution),
+            lambda: self._finish_writable_core_activation(deferred_start_run_id),
         )
 
     def _authorized_start_service(self) -> AuthorizedStartService:
@@ -1002,7 +1072,6 @@ class LockstepCommandService:
                 return
             self._closed = True
             if not self._writable_core_active:
-                self._static_admission_classifier.clear()
                 return
             self._writable_core_active = False
             self._pump_stop.set()
@@ -1012,7 +1081,6 @@ class LockstepCommandService:
             store = self.store
         if pump_thread is not None:
             pump_thread.join()
-        self._static_admission_classifier.clear()
         try:
             runtime.close()
         finally:
