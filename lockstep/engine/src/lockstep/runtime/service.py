@@ -40,9 +40,6 @@ from lockstep.runtime.effects.descriptors import (
 from lockstep.runtime.effects.ledger import EffectLedger
 from lockstep.runtime.effects.models import EffectDescriptor, ScopeDescriptor
 from lockstep.runtime.effects.models import AcceptDescriptor
-from lockstep.runtime.effects.owner_policy import (
-    RuntimeRequirement,
-)
 from lockstep.runtime.errors import LockstepError
 from lockstep.runtime.engine_drive_service import EngineDriveService
 from lockstep.runtime.effects.owner_consent import (
@@ -66,7 +63,11 @@ from lockstep.runtime.snapshot_resolver import (
     RuntimeSnapshotFacts,
     RuntimeSnapshotResolver,
 )
-from lockstep.runtime.start_service import AuthorizedStartService, plan_authorized_start
+from lockstep.runtime.start_service import (
+    AuthorizedStartService,
+    _preflight_runtime_requirements,
+    plan_authorized_start,
+)
 from lockstep.runtime.worker_submission_service import WorkerSubmissionService
 from lockstep.runtime.publication import ProjectPublisher
 from lockstep.runtime.recipe_bundles import RecipeBundleStore
@@ -217,6 +218,7 @@ class LockstepCommandService:
         self._pump_stop = threading.Event()
         self._pump_wakeup = threading.Event()
         self._active_effect_runs: set[str] = set()
+        self._static_prelaunch_parks: set[str] = set()
         self._queued_effect_runs: set[str] = set()
         self._active_effect_queue: deque[str] = deque()
         self._active_effect_lock = threading.Lock()
@@ -336,12 +338,10 @@ class LockstepCommandService:
         self._pump_wakeup.clear()
         self._writable_core_active = False
 
-    @staticmethod
-    def _require_owner_runtime_policy(
-        requirements: tuple[RuntimeRequirement, ...],
-    ) -> None:
-        if requirements:
-            raise LockstepError("runtime execution policy is unavailable")
+    def _require_owner_runtime_policy(self, index):
+        """Use the production owner snapshot boundary for static admission."""
+
+        return _preflight_runtime_requirements(self.state_dir, index)
 
     def _recover_engine_effects(self) -> None:
         """Adopt durable protected work without a scheduler or status side effect."""
@@ -375,6 +375,8 @@ class LockstepCommandService:
         for watch in self.effects.list_dispatch_watches(
             limit=self._MAX_ACTIVE_EFFECT_RUNS
         ):
+            if watch.public_run_id in getattr(self, "_static_prelaunch_parks", ()):
+                continue
             binding = self.catalog.get(watch.public_run_id)
             if not self._reserve_effect_run(binding.public_run_id):
                 return
@@ -555,6 +557,7 @@ class LockstepCommandService:
             admission_lock=self._admission_recovery_lock,
             reserve_effect_run=self._reserve_effect_run,
             deactivate_effect_run=self._deactivate_effect_run,
+            park_prelaunch=self._static_prelaunch_parks.add,
             drive_engine_owned=self._drive_engine_owned,
         ).start(
             recipe,

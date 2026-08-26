@@ -12,10 +12,18 @@ from typing import Any
 from lockstep.recipe import profile
 from lockstep.recipe.authority import AuthorizedRecipe
 from lockstep.runtime.catalog import RunBinding
-from lockstep.runtime.effects.owner_policy import RuntimeRequirementIndex
+from lockstep.runtime.effects.owner_policy import (
+    OwnerRuntimeAuthority,
+    RuntimeAdmissionDecision,
+    RuntimeRequirementIndex,
+)
+from lockstep.runtime.effects.owner_provisioning import (
+    capture_runtime_snapshot_bindings,
+)
+from lockstep.runtime.effects.owner_snapshot_store import open_runtime_snapshot
 from lockstep.runtime.errors import LockstepError
 from lockstep.runtime.snapshot_resolver import capture_authoritative_snapshot
-from lockstep.runtime.status import project_status
+from lockstep.runtime.status import ScenarioStatus, project_status
 
 
 @dataclass(frozen=True)
@@ -25,6 +33,31 @@ class AuthorizedStartPlan:
     authorized: AuthorizedRecipe
     project_root: Path
     compiler_provenance: profile.CompilerProvenance | None
+    runtime_admission: RuntimeAdmissionDecision | None
+
+
+def _preflight_runtime_requirements(
+    state_dir: Path,
+    index: RuntimeRequirementIndex,
+) -> RuntimeAdmissionDecision:
+    """Open, capture, bind, and authorize one complete static inventory."""
+
+    try:
+        snapshot_digest, snapshot = open_runtime_snapshot(state_dir)
+        codex_binding, pinned_binding = capture_runtime_snapshot_bindings(
+            snapshot,
+            project=Path(index.project_identity),
+        )
+        return OwnerRuntimeAuthority(
+            snapshot_digest=snapshot_digest,
+            snapshot=snapshot,
+            codex_binding=codex_binding,
+            pinned_binding=pinned_binding,
+        ).preflight(index)
+    except FileNotFoundError as exc:
+        raise LockstepError("runtime execution policy is unavailable") from exc
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise LockstepError(str(exc)) from exc
 
 
 def plan_authorized_start(
@@ -33,7 +66,9 @@ def plan_authorized_start(
     authorized: AuthorizedRecipe,
     project: str,
     compiler_provenance: profile.CompilerProvenance | None,
-    require_runtime_policy: Callable[[tuple[object, ...]], None],
+    require_runtime_policy: Callable[
+        [RuntimeRequirementIndex], RuntimeAdmissionDecision | None
+    ],
 ) -> AuthorizedStartPlan:
     provenance = compiler_provenance or authorized.canonical_match_proof
     project_root = Path(project).resolve()
@@ -57,14 +92,21 @@ def plan_authorized_start(
     if errors:
         raise LockstepError("recipe failed Lockstep profile: " + "; ".join(errors))
     try:
-        requirements = RuntimeRequirementIndex.for_authorized_closure(
+        index = RuntimeRequirementIndex.for_authorized_closure(
             authorized,
             project_identity=str(project_root),
-        ).requirements
+        )
     except ValueError as exc:
         raise LockstepError(str(exc)) from exc
-    require_runtime_policy(requirements)
-    return AuthorizedStartPlan(authorized, project_root, provenance)
+    runtime_admission = None
+    if index.requirements:
+        runtime_admission = require_runtime_policy(index)
+    return AuthorizedStartPlan(
+        authorized,
+        project_root,
+        provenance,
+        runtime_admission,
+    )
 
 
 class AuthorizedStartService:
@@ -84,6 +126,7 @@ class AuthorizedStartService:
         admission_lock: object,
         reserve_effect_run: Callable[[str], bool],
         deactivate_effect_run: Callable[[str], None],
+        park_prelaunch: Callable[[str], None],
         drive_engine_owned: Callable[..., object],
     ) -> None:
         self._blobs = blobs
@@ -97,6 +140,7 @@ class AuthorizedStartService:
         self._admission_lock = admission_lock
         self._reserve_effect_run = reserve_effect_run
         self._deactivate_effect_run = deactivate_effect_run
+        self._park_prelaunch = park_prelaunch
         self._drive_engine_owned = drive_engine_owned
 
     @staticmethod
@@ -151,6 +195,33 @@ class AuthorizedStartService:
                 binding.public_run_id, binding=binding, snapshot=snapshot
             ).to_dict()
 
+    def _admit_and_park(
+        self,
+        binding: RunBinding,
+        input_blob: object,
+        start_snapshot_ref: object,
+    ) -> dict[str, Any]:
+        """Persist admission while deliberately stopping before native start."""
+
+        with self._admission_lock:
+            binding, _admission = self._effects.admit_start(
+                self._catalog,
+                binding,
+                input_blob,
+                on_admit=lambda connection, admitted: (
+                    self._runtime_snapshot_facts.bind_run_start_in_transaction(
+                        connection, admitted, start_snapshot_ref
+                    )
+                ),
+            )
+            self._park_prelaunch(binding.public_run_id)
+        return ScenarioStatus(
+            "starting",
+            binding.public_run_id,
+            "engine",
+            "scenario_wait",
+        ).to_dict()
+
     def start(
         self,
         recipe: str,
@@ -176,6 +247,11 @@ class AuthorizedStartService:
             previous=None,
             purpose="run-start",
         )
+        if plan.runtime_admission is not None:
+            return self._admit_and_park(binding, input_blob, start_snapshot_ref)
         return self._admit_and_drive(
-            binding, input_blob, dict(values), start_snapshot_ref
+            binding,
+            input_blob,
+            dict(values),
+            start_snapshot_ref,
         )

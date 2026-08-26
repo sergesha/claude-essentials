@@ -126,6 +126,41 @@ def validate_runtime_provision_inputs(
     )
 
 
+def capture_runtime_snapshot_bindings(
+    snapshot: OwnerRuntimeSnapshot,
+    *,
+    project: Path,
+) -> tuple[_RuntimeBindingFacts, _RuntimeBindingFacts]:
+    """Capture each configured installation once and reject binding drift."""
+
+    def member(binding: _RuntimeBindingFacts) -> dict[str, object]:
+        return {
+            "executable": binding.executable,
+            "model": binding.model,
+            "cli_version": binding.cli_version,
+            "permission_profile": dict(binding.permission_profile),
+            "codex_home": binding.codex_home,
+            "environment": dict(binding.environment),
+        }
+
+    codex_binding = _capture_provision_binding(member(snapshot.codex))
+    pinned_binding = _capture_provision_binding(member(snapshot.pinned))
+    _validate_provision_tmpdir(codex_binding, project=project)
+    _validate_provision_tmpdir(pinned_binding, project=project)
+    codex = _runtime_binding_facts(codex_binding, pinned_permission_profile=None)
+    pinned = _runtime_binding_facts(
+        pinned_binding,
+        pinned_permission_profile=snapshot.pinned.pinned_permission_profile,
+        binding_digest=pinned_runner_binding_digest(
+            pinned_binding.digest,
+            snapshot.pinned.pinned_permission_profile,
+        ),
+    )
+    if codex != snapshot.codex or pinned != snapshot.pinned:
+        raise ValueError("owner runtime binding changed after provisioning")
+    return codex, pinned
+
+
 def provision_runtime_snapshot(
     *,
     state_dir: Path,

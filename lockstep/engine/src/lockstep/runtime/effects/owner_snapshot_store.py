@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -20,7 +21,10 @@ from lockstep.runtime.effects.owner_policy_ingress import _json_document
 from lockstep.runtime.effects.owner_snapshot_file import (
     MAX_OWNER_RUNTIME_SNAPSHOT_BYTES,
 )
-from lockstep.runtime.owner_state import fsync_owner_directory
+from lockstep.runtime.owner_state import (
+    fsync_owner_directory,
+    verify_owner_directory,
+)
 
 
 _SNAPSHOT_SCHEMA = "lockstep.runtime-owner/v1"
@@ -174,6 +178,22 @@ def _read_snapshot(path: Path) -> tuple[bytes, OwnerRuntimeSnapshot] | None:
     if encoded is None:
         return None
     return encoded, _snapshot_from_bytes(encoded)
+
+
+def open_runtime_snapshot(state_dir: Path) -> tuple[str, OwnerRuntimeSnapshot]:
+    """Open one existing verified snapshot without creating owner state."""
+
+    root = Path(state_dir)
+    verify_owner_directory(root)
+    directory = root / "runtime-owner"
+    verify_owner_directory(directory)
+    opened = _read_snapshot(directory / "snapshot.json")
+    if opened is None:
+        raise FileNotFoundError("owner runtime snapshot is unavailable")
+    encoded, snapshot = opened
+    return hashlib.sha256(encoded).hexdigest(), snapshot
+
+
 def _assert_predecessor_consistent(
     snapshot: OwnerRuntimeSnapshot,
     index: RuntimeRequirementIndex,
