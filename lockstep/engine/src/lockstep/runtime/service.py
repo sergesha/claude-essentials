@@ -240,7 +240,9 @@ class LockstepCommandService:
 
     def _open_writable_stores(self) -> None:
         self.state_dir = initialize_owner_state(self.state_dir)
-        self.store = SQLiteStore(self.state_dir / "runtime.sqlite")
+        database = self.state_dir / "runtime.sqlite"
+        RuntimeSchemaMigrator.transition_legacy_to_v2(database)
+        self.store = SQLiteStore(database)
         self.catalog = RunCatalog(self.store)
         self.bundle_store = RecipeBundleStore(self.state_dir)
         self.leases = LeaseStore(self.store)
