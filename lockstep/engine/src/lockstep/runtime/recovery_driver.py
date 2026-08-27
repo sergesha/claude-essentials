@@ -173,6 +173,13 @@ class RecoveryDriver:
         binding = self._catalog.get(watch.public_run_id)
         return binding.project_identity == project_identity
 
+    def _settle_terminal_watch(self, run_id: str) -> bool:
+        reports = self._coordinator.reconcile_consumed(run_id)
+        if any(report.action != "delivered" for report in reports):
+            return False
+        self._effects.acknowledge_run_drive_watch(run_id)
+        return True
+
     def _drive_run_watch(self, watch: RunDriveWatch) -> bool:
         binding = self._catalog.get(watch.public_run_id)
         with _bound_runtime(self._runtime, binding) as available:
@@ -193,6 +200,8 @@ class RecoveryDriver:
                     watch.public_run_id,
                     decode_canonical_start_input(encoded),
                 )
+            if not snapshot.pending and not snapshot.next:
+                return self._settle_terminal_watch(watch.public_run_id)
             if len(snapshot.pending) != 1:
                 return False
             interrupt = snapshot.pending[0]
