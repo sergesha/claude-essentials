@@ -218,6 +218,101 @@ def _checkpoint_ancestors(snapshot: Any) -> tuple[tuple[str, str], ...]:
     return tuple(sorted((str(key), str(value)) for key, value in ancestors.items()))
 
 
+def _config_checkpoint(config: Any) -> tuple[str, str, str]:
+    configurable = (config or {}).get("configurable", {})
+    return (
+        str(configurable.get("thread_id") or ""),
+        str(configurable.get("checkpoint_id") or ""),
+        str(configurable.get("checkpoint_ns") or ""),
+    )
+
+
+def _completed_subgraph_snapshots(
+    snapshot: Any, parent: tuple[str, str, str]
+) -> tuple[Any, ...]:
+    parent_thread, parent_checkpoint_id, parent_checkpoint_ns = parent
+    completed = []
+    for task in getattr(snapshot, "tasks", ()) or ():
+        child = getattr(task, "state", None)
+        if (
+            getattr(task, "result", None) is None
+            or not hasattr(child, "tasks")
+            or not hasattr(child, "config")
+        ):
+            continue
+        child_thread, _child_checkpoint_id, _child_checkpoint_ns = (
+            _snapshot_config(child)
+        )
+        configurable = (getattr(child, "config", None) or {}).get(
+            "configurable", {}
+        )
+        checkpoint_map = dict(configurable.get("checkpoint_map") or {})
+        if (
+            child_thread == parent_thread
+            and str(checkpoint_map.get(parent_checkpoint_ns) or "")
+            == parent_checkpoint_id
+        ):
+            completed.append(child)
+    return tuple(completed)
+
+
+def _checkpoint_path_contains(
+    app: Any,
+    *,
+    thread_id: str,
+    ancestor_checkpoint_ns: str,
+    ancestor_checkpoint_id: str,
+    descendant_checkpoint_ns: str,
+    descendant_checkpoint_id: str,
+    snapshot_limit: int,
+) -> bool:
+    pending: list[Any] = [
+        {
+            "configurable": {
+                "thread_id": thread_id,
+                "checkpoint_ns": descendant_checkpoint_ns,
+                "checkpoint_id": descendant_checkpoint_id,
+            }
+        }
+    ]
+    visited: set[tuple[str, str, str]] = set()
+    examined = 0
+    while pending:
+        candidate = pending.pop()
+        expected = (
+            _config_checkpoint(candidate)
+            if isinstance(candidate, dict)
+            else _snapshot_config(candidate)
+        )
+        if expected in visited:
+            continue
+        if examined >= snapshot_limit:
+            raise NativeHistoryLimitExceeded(
+                "native ancestry traversal exceeds validation limit"
+            )
+        snapshot = (
+            app.get_state(candidate, subgraphs=True)
+            if isinstance(candidate, dict)
+            else candidate
+        )
+        current = _snapshot_config(snapshot)
+        examined += 1
+        if current != expected or current[0] != thread_id or not current[1]:
+            return False
+        visited.add(current)
+        _current_thread, checkpoint_id, checkpoint_ns = current
+        if (
+            checkpoint_ns == ancestor_checkpoint_ns
+            and checkpoint_id == ancestor_checkpoint_id
+        ):
+            return True
+        parent = getattr(snapshot, "parent_config", None)
+        if isinstance(parent, dict):
+            pending.append(parent)
+        pending.extend(_completed_subgraph_snapshots(snapshot, current))
+    return False
+
+
 def _pending_interrupts(snapshot: Any) -> tuple[NativeInterrupt, ...]:
     pending: list[NativeInterrupt] = []
     seen: set[str] = set()
@@ -454,39 +549,18 @@ class NativeApp:
         descendant_checkpoint_id: str,
         snapshot_limit: int,
     ) -> bool:
-        """Use public namespace history anchored at one exact descendant."""
+        """Traverse bounded public parent and completed-subgraph checkpoints."""
 
         self._ensure_open()
-        if ancestor_checkpoint_ns != descendant_checkpoint_ns:
-            return False
-        config = {
-            "configurable": {
-                "thread_id": thread_id,
-                "checkpoint_ns": descendant_checkpoint_ns,
-                "checkpoint_id": descendant_checkpoint_id,
-            }
-        }
         try:
-            current_config = config
-            for _index in range(snapshot_limit):
-                snapshot = self._app.get_state(current_config)
-                current_thread, checkpoint_id, namespace = _snapshot_config(snapshot)
-                if (
-                    current_thread != thread_id
-                    or namespace != descendant_checkpoint_ns
-                ):
-                    return False
-                if (
-                    namespace == ancestor_checkpoint_ns
-                    and checkpoint_id == ancestor_checkpoint_id
-                ):
-                    return True
-                parent = getattr(snapshot, "parent_config", None)
-                if not isinstance(parent, dict):
-                    return False
-                current_config = parent
-            raise NativeHistoryLimitExceeded(
-                "native ancestry parent chain exceeds validation limit"
+            return _checkpoint_path_contains(
+                self._app,
+                thread_id=thread_id,
+                ancestor_checkpoint_ns=ancestor_checkpoint_ns,
+                ancestor_checkpoint_id=ancestor_checkpoint_id,
+                descendant_checkpoint_ns=descendant_checkpoint_ns,
+                descendant_checkpoint_id=descendant_checkpoint_id,
+                snapshot_limit=snapshot_limit,
             )
         finally:
             self._seal_sqlite_files()

@@ -316,13 +316,15 @@ class GraphRuntime:
                     )
                 if occurrence.coordinate == source:
                     matches.append(occurrence)
-            if len(matches) != 1:
-                return None
-            return NativeLineageProof("descended", matches[0])
+        except ValueError:
+            return None
         finally:
             close = getattr(history, "close", None)
             if close is not None:
                 close()
+        if len(matches) != 1:
+            return None
+        return NativeLineageProof("descended", matches[0])
 
     def coordinate_lineage(self, run_id: str, source: NativeCoordinate) -> str:
         """Classify an exact source using only public snapshot/history APIs."""
@@ -353,9 +355,15 @@ class GraphRuntime:
             )
             if len(exact) != 1:
                 return False
+            if self._interrupt_lineage(binding, app, ancestor) is None:
+                return False
             anchors = dict(exact[0].ancestor_checkpoints)
             descendant_checkpoint_id = anchors.get(ancestor.checkpoint_ns)
+            descendant_checkpoint_ns = ancestor.checkpoint_ns
             if ancestor.checkpoint_ns == descendant.coordinate.checkpoint_ns:
+                descendant_checkpoint_id = descendant.coordinate.checkpoint_id
+            elif not descendant_checkpoint_id:
+                descendant_checkpoint_ns = descendant.coordinate.checkpoint_ns
                 descendant_checkpoint_id = descendant.coordinate.checkpoint_id
             if not descendant_checkpoint_id:
                 return False
@@ -363,7 +371,7 @@ class GraphRuntime:
                 thread_id=binding.thread_id,
                 ancestor_checkpoint_ns=ancestor.checkpoint_ns,
                 ancestor_checkpoint_id=ancestor.checkpoint_id,
-                descendant_checkpoint_ns=ancestor.checkpoint_ns,
+                descendant_checkpoint_ns=descendant_checkpoint_ns,
                 descendant_checkpoint_id=descendant_checkpoint_id,
                 snapshot_limit=MAX_HISTORY_SNAPSHOTS,
             )
