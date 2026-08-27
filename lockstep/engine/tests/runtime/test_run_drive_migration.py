@@ -86,6 +86,47 @@ def test_runtime_schema_epoch_has_singleton_check_constraint(tmp_path: Path) -> 
         store.close()
 
 
+def test_v2_write_transaction_rejects_legacy_epoch_before_yield_write_free(
+    tmp_path: Path,
+) -> None:
+    from lockstep.runtime.storage import SQLiteStore
+
+    store = SQLiteStore(tmp_path / "runtime.db")
+    try:
+        epoch = store.tables.runtime_schema_epoch
+        migrations = store.tables.runtime_schema_migrations
+        with store.engine.begin() as connection:
+            connection.execute(epoch.update().values(epoch=1))
+
+        entered = False
+        with pytest.raises(
+            RuntimeError,
+            match="^runtime schema epoch 2 is required for v2 writes$",
+        ):
+            with store._v2_write_transaction() as connection:
+                entered = True
+                connection.execute(
+                    migrations.insert().values(
+                        name="must-not-commit",
+                        schema_version=2,
+                        after_public_run_id=None,
+                        completed_at=None,
+                        updated_at="2026-08-27T00:00:00+00:00",
+                    )
+                )
+        assert entered is False
+
+        with store.read_connection() as connection:
+            observed_epoch = connection.execute(epoch.select()).one().epoch
+            forbidden = connection.execute(
+                migrations.select().where(migrations.c.name == "must-not-commit")
+            ).first()
+        assert observed_epoch == 1
+        assert forbidden is None
+    finally:
+        store.close()
+
+
 def _migration_type(name: str):
     from lockstep.runtime import storage as storage_module
 
