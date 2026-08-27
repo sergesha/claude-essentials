@@ -461,3 +461,78 @@ def test_apply_run_drive_watch_page_durably_initializes_empty_non_exhausted_prog
         if reopened is not None:
             reopened.close()
         store.close()
+
+
+def test_apply_run_drive_watch_page_advances_terminal_and_malformed_without_watches(
+    tmp_path: Path,
+) -> None:
+    from lockstep.runtime.catalog import RunBinding, RunCatalog
+    from lockstep.runtime.storage import (
+        LegacyRunDriveClassification,
+        MigrationProgress,
+        RuntimeSchemaMigrator,
+        SQLiteStore,
+    )
+
+    database_path = tmp_path / "runtime.db"
+    store = SQLiteStore(database_path)
+    reopened = None
+    try:
+        catalog = RunCatalog(store)
+        for index in (1, 2):
+            catalog.create(
+                RunBinding(
+                    f"run-{index:03d}",
+                    f"thread-{index:03d}",
+                    "a" * 64,
+                    "bundle:" + "b" * 64,
+                    "/project",
+                )
+            )
+        migrator = RuntimeSchemaMigrator(store)
+        migrator.apply_run_drive_watch_page(
+            expected_after_public_run_id=None,
+            classified=(),
+            exhausted=False,
+        )
+
+        before = datetime.now(UTC)
+        progress = migrator.apply_run_drive_watch_page(
+            expected_after_public_run_id=None,
+            classified=(
+                LegacyRunDriveClassification("run-001", "terminal"),
+                LegacyRunDriveClassification("run-002", "malformed"),
+            ),
+            exhausted=False,
+        )
+        after = datetime.now(UTC)
+        assert progress == MigrationProgress(
+            after_public_run_id="run-002",
+            completed=False,
+            inserted_public_run_ids=(),
+            malformed_public_run_ids=("run-002",),
+        )
+
+        store.close()
+        reopened = SQLiteStore(database_path)
+        with reopened.read_connection() as connection:
+            rows = connection.execute(
+                reopened.tables.runtime_schema_migrations.select()
+            ).all()
+            watches = connection.execute(
+                reopened.tables.run_drive_watches.select()
+            ).all()
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.name == "run-drive-watch-v2"
+        assert row.schema_version == 2
+        assert row.after_public_run_id == "run-002"
+        assert row.completed_at is None
+        updated_at = datetime.fromisoformat(row.updated_at)
+        assert row.updated_at == updated_at.astimezone(UTC).isoformat()
+        assert before <= updated_at <= after
+        assert watches == []
+    finally:
+        if reopened is not None:
+            reopened.close()
+        store.close()
