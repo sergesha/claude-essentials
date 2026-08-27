@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta, timezone
 from inspect import Parameter, signature
 from pathlib import Path
 from types import NoneType
@@ -826,6 +827,67 @@ def test_run_drive_watch_public_dto_contract() -> None:
         "input_blob_size",
         "admitted_at",
     )
+
+
+def test_run_drive_watch_validates_frozen_value_domain() -> None:
+    from lockstep.runtime.effects.ledger import RunDriveWatch
+
+    utc_instant = datetime(2026, 8, 20, 10, tzinfo=UTC)
+    migrated = RunDriveWatch(1, "run-1", None, None, utc_instant)
+    assert migrated == RunDriveWatch(1, "run-1", None, None, utc_instant)
+
+    offset_instant = datetime(
+        2026,
+        8,
+        20,
+        12,
+        tzinfo=timezone(timedelta(hours=2)),
+    )
+    admitted = RunDriveWatch(2, "run-2", "a" * 64, 1, offset_instant)
+    assert admitted.input_blob_size == 1
+    assert admitted.admitted_at == utc_instant
+    assert admitted.admitted_at.tzinfo is UTC
+
+    for admission_seq in (0, -1, True, 1.0):
+        with pytest.raises(
+            ValueError,
+            match="^admission_seq must be a positive integer$",
+        ):
+            RunDriveWatch(admission_seq, "run-1", None, None, utc_instant)
+    for public_run_id in ("", 1):
+        with pytest.raises(
+            ValueError,
+            match="^public_run_id must be a non-empty string$",
+        ):
+            RunDriveWatch(1, public_run_id, None, None, utc_instant)
+
+    for digest, size in ((None, 1), ("a" * 64, None)):
+        with pytest.raises(
+            ValueError,
+            match=(
+                "^input blob digest and size must both be null or both be non-null$"
+            ),
+        ):
+            RunDriveWatch(1, "run-1", digest, size, utc_instant)
+    for digest in ("a" * 63, "A" * 64, "g" * 64, 1):
+        with pytest.raises(
+            ValueError,
+            match="^input_blob_sha256 must be a lowercase SHA-256 digest$",
+        ):
+            RunDriveWatch(1, "run-1", digest, 1, utc_instant)
+    for size in (0, -1, True, 1.0):
+        with pytest.raises(
+            ValueError,
+            match="^input_blob_size must be a positive integer$",
+        ):
+            RunDriveWatch(1, "run-1", "a" * 64, size, utc_instant)
+
+    for admitted_at in (datetime(2026, 8, 20, 10), "2026-08-20T10:00:00Z"):
+        with pytest.raises(
+            ValueError,
+            match="^admitted_at must be a timezone-aware datetime$",
+        ):
+            RunDriveWatch(1, "run-1", None, None, admitted_at)
 
 
 def test_run_drive_watch_ddl_contract(tmp_path: Path) -> None:
