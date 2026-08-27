@@ -92,10 +92,14 @@ def test_migration_metadata_is_not_scheduler_state(tmp_path: Path) -> None:
     finally:
         store.close()
     from tests.runtime._run_drive_recovery_metadata_b1 import (
+        assert_completed_recovery_ignores_migration_metadata,
         assert_neutral_recovery_ignores_migration_metadata,
     )
 
     assert_neutral_recovery_ignores_migration_metadata(tmp_path / "recovery")
+    assert_completed_recovery_ignores_migration_metadata(
+        tmp_path / "completed-recovery"
+    )
 
 
 def test_runtime_schema_epoch_singleton_is_v2(tmp_path: Path) -> None:

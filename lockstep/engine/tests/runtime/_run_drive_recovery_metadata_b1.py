@@ -10,6 +10,11 @@ from sqlalchemy.engine import Engine as SQLAlchemyEngine
 
 from lockstep.runtime.engine import Engine
 from lockstep.runtime.storage import RuntimeSchemaMigrator
+from tests.runtime._run_drive_b1_harness import prepared_native_reopen
+from tests.runtime._run_drive_backfill_b1_harness import (
+    complete_backfill_with_driver,
+    seed_backfill_population,
+)
 
 
 @contextmanager
@@ -129,3 +134,55 @@ def assert_neutral_recovery_ignores_migration_metadata(tmp_path: Path) -> None:
             "row_unchanged": True,
             "explicit_result": {"recovered": [], "count": 0, "limit": 7},
         }
+
+
+def assert_completed_recovery_ignores_migration_metadata(tmp_path: Path) -> None:
+    tmp_path.mkdir(parents=True)
+    population = seed_backfill_population(tmp_path)
+    complete_backfill_with_driver(population)
+    with prepared_native_reopen(
+        population.state_dir,
+        population.recipes_dir,
+        population.runtime_context,
+    ) as command:
+        progress = RuntimeSchemaMigrator(
+            command.store
+        ).run_drive_watch_migration_state()
+        assert progress is not None and progress.completed
+        assert progress.after_public_run_id == population.target_id
+        high_water = command.effects.max_run_drive_admission_seq()
+        assert high_water is not None
+        command.effects.acknowledge_run_drive_watch(population.target_id)
+        assert command.effects.list_run_drive_watches(
+            after_admission_seq=0,
+            high_water=high_water,
+            limit=128,
+        ) == ()
+
+    with prepared_native_reopen(
+        population.state_dir,
+        population.recipes_dir,
+        population.runtime_context,
+    ) as command:
+        before = _migration_row(command)
+        command._pump_stop.set()
+        with _observe_recovery(command) as (
+            phase,
+            metadata_sql,
+            sweep_calls,
+        ):
+            command._finish_writable_core_activation()
+            _stop_pump(command)
+            phase[0] = "explicit"
+            result = command.scenario_recover(
+                str(population.project.resolve()), limit=7
+            )
+        after = _migration_row(command)
+
+        assert metadata_sql == []
+        assert sweep_calls == [
+            ("automatic", None, command._MAX_ACTIVE_EFFECT_RUNS),
+            ("explicit", str(population.project.resolve()), 7),
+        ]
+        assert after == before
+        assert result == {"recovered": [], "count": 0, "limit": 7}

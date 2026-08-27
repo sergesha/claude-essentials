@@ -12,7 +12,10 @@ from lockstep.runtime.providers.manual import ManualSubmission
 from lockstep.workflow.compiler import compile_workflow
 from lockstep.workflow.schema import load_workflow, parse_workflow
 from lockstep.workflow.semantics import ResolvedCatalog, validate_semantics
-from tests.runtime._run_drive_b1_harness import active_native_command
+from tests.runtime._run_drive_b1_harness import (
+    active_native_command,
+    prepared_native_reopen,
+)
 
 
 @dataclass(frozen=True)
@@ -25,6 +28,19 @@ class BackfillPopulation:
     target_id: str
     target_thread_id: str
     runtime_context: object | None
+
+
+def complete_backfill_with_driver(population: BackfillPopulation) -> None:
+    for _page in range(2):
+        with prepared_native_reopen(
+            population.state_dir,
+            population.recipes_dir,
+            population.runtime_context,
+        ) as command:
+            command._recovery_driver._sweep_run_drive_watches(
+                project_identity=str(population.project.resolve()),
+                limit=128,
+            )
 
 
 def _install_decision_recipe(tmp_path: Path):

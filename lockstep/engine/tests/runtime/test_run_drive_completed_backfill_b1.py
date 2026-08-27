@@ -9,21 +9,15 @@ from lockstep.runtime.graph_runtime import GraphRuntime
 from lockstep.runtime.recovery_driver import _RunDriveBackfill
 from lockstep.runtime.storage import RuntimeSchemaMigrator
 from tests.runtime._run_drive_b1_harness import prepared_native_reopen
-from tests.runtime._run_drive_backfill_b1_harness import seed_backfill_population
+from tests.runtime._run_drive_backfill_b1_harness import (
+    complete_backfill_with_driver,
+    seed_backfill_population,
+)
 from tests.runtime._sqlite_store_image import StoreImage
 
 
-def _complete_backfill(population) -> None:
-    for _page in range(2):
-        with prepared_native_reopen(
-            population.state_dir,
-            population.recipes_dir,
-            population.runtime_context,
-        ) as command:
-            command._recovery_driver._sweep_run_drive_watches(
-                project_identity=str(population.project.resolve()),
-                limit=128,
-            )
+def _prepare_completed_baseline(population) -> None:
+    complete_backfill_with_driver(population)
     with prepared_native_reopen(
         population.state_dir,
         population.recipes_dir,
@@ -48,7 +42,7 @@ def test_completed_backfill_never_rescans_or_rearms_terminal_runs(
     tmp_path: Path, monkeypatch
 ) -> None:
     population = seed_backfill_population(tmp_path)
-    _complete_backfill(population)
+    _prepare_completed_baseline(population)
     database = population.state_dir / "runtime.sqlite"
     before = StoreImage.capture(database)
 
