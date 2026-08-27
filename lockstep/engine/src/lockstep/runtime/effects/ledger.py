@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import and_, delete, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from lockstep.runtime.blobs import BlobRef
@@ -364,7 +364,11 @@ class EffectLedger:
         return result.rowcount == 1
 
     def max_run_drive_admission_seq(self) -> int | None:
-        raise NotImplementedError("run-drive-watch queries are staged in R2")
+        table = self._store.tables.run_drive_watches
+        with self._store.read_connection() as connection:
+            return connection.execute(
+                select(func.max(table.c.admission_seq))
+            ).scalar_one()
 
     def list_run_drive_watches(
         self,
