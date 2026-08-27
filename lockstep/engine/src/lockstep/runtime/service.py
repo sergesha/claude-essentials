@@ -478,6 +478,10 @@ class LockstepCommandService:
             after_thread_id=self._recovery_thread_cursor
         )
         with self._admission_recovery_lock:
+            self._recovery_driver._sweep_run_drive_watches(
+                project_identity=None,
+                limit=self._MAX_ACTIVE_EFFECT_RUNS,
+            )
             self._recover_start_admissions()
             self._recover_effect_batch()
 

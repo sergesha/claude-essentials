@@ -22,6 +22,7 @@ from lockstep.runtime.native_models import (
     NativeSnapshot,
 )
 from lockstep.runtime.owner_state import initialize_owner_state
+from lockstep.runtime.recovery_driver import RecoveryDriver as _RecoveryDriver
 from lockstep.runtime.service import LockstepError, LockstepCommandService
 from lockstep.runtime.status import ScenarioStatus
 
@@ -32,6 +33,7 @@ def _service_double() -> LockstepCommandService:
     service._writable_core_active = True  # noqa: SLF001
     service._initial_recovery_exclusion = None  # noqa: SLF001
     service._recovery_thread_cursor = None  # noqa: SLF001
+    service._recovery_driver = _RecoveryDriver()  # noqa: SLF001
     # These focused doubles model a service whose coordinator is already open.
     service._runtime_execution_context = object()  # noqa: SLF001
     service._reconstruct_runtime_execution_context = (  # noqa: SLF001
