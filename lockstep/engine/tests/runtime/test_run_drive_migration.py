@@ -903,3 +903,61 @@ def test_apply_run_drive_watch_page_rejects_completed_replay_write_free(
         if reopened is not None:
             reopened.close()
         store.close()
+
+
+def test_apply_run_drive_watch_page_rejects_wrong_stored_schema_version_write_free(
+    tmp_path: Path,
+) -> None:
+    from lockstep.runtime.storage import (
+        LegacyRunDriveClassification,
+        RuntimeSchemaMigrator,
+        SQLiteStore,
+    )
+
+    database_path = tmp_path / "runtime.db"
+    store = SQLiteStore(database_path)
+    reopened = None
+    try:
+        _create_catalog_bindings(store, "run-001", "run-002")
+        migrator = RuntimeSchemaMigrator(store)
+        migrator.apply_run_drive_watch_page(
+            expected_after_public_run_id=None,
+            classified=(
+                LegacyRunDriveClassification("run-001", "nonterminal"),
+            ),
+            exhausted=False,
+        )
+
+        migration_table = store.tables.runtime_schema_migrations
+        with store.write_transaction() as connection:
+            result = connection.execute(
+                migration_table.update()
+                .where(migration_table.c.name == "run-drive-watch-v2")
+                .values(schema_version=3)
+            )
+        assert result.rowcount == 1
+        migration_before, watches_before = _run_drive_migration_state(store)
+        assert migration_before[0]["schema_version"] == 3
+
+        with pytest.raises(RuntimeError) as raised:
+            migrator.apply_run_drive_watch_page(
+                expected_after_public_run_id="run-001",
+                classified=(
+                    LegacyRunDriveClassification("run-002", "nonterminal"),
+                ),
+                exhausted=False,
+            )
+
+        store.close()
+        reopened = SQLiteStore(database_path)
+        migration_after, watches_after = _run_drive_migration_state(reopened)
+        assert migration_after == migration_before
+        assert watches_after == watches_before
+        assert type(raised.value) is RuntimeError
+        assert str(raised.value) == (
+            "run-drive-watch migration schema version must be 2"
+        )
+    finally:
+        if reopened is not None:
+            reopened.close()
+        store.close()
