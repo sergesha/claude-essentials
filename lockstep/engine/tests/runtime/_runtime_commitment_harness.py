@@ -11,7 +11,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from lockstep import cli
+from lockstep.recipe.profile import CompilerProvenance
 from lockstep.runtime.effects.owner_policy import RuntimeRequirementIndex
+from lockstep.runtime.effects.owner_provisioning import provision_runtime_snapshot
 from lockstep.runtime.service import preflight_recipe
 
 
@@ -366,3 +368,55 @@ def provision_pinned_verify_closure(
     requirement = provisioned.requirement_index.requirements[0]
     assert requirement.runner_selector == "pinned"
     return provisioned
+
+
+def provision_compiled_managed_closure(
+    root: Path,
+    monkeypatch,
+    *,
+    project: Path,
+    recipe: str,
+    compiler_provenance: CompilerProvenance,
+) -> ProvisionedRuntimeClosure:
+    """Provision one compiler-authorized managed closure through owner storage."""
+
+    recipes = project / ".lockstep" / "recipes"
+    index = RuntimeRequirementIndex.for_authorized_closures(
+        (
+            preflight_recipe(
+                recipes,
+                recipe,
+                compiler_provenance=compiler_provenance,
+            ),
+        ),
+        project_identity=str(project.resolve()),
+    )
+    assert len(index.requirements) == 1
+    selection_keys = tuple(
+        requirement.grant_selection_key for requirement in index.requirements
+    )
+    config = _runtime_config(root)
+    codex = config["codex"]
+    pinned = config["pinned"]
+    assert isinstance(codex, dict)
+    assert isinstance(pinned, dict)
+    owner_state = root / "owner-state"
+    provision_runtime_snapshot(
+        state_dir=owner_state,
+        codex=codex,
+        pinned=pinned,
+        replacement_keys=selection_keys,
+        index=index,
+        project=project,
+    )
+    monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(owner_state))
+    return ProvisionedRuntimeClosure(
+        project,
+        owner_state,
+        recipe,
+        index,
+        root / "codex-home",
+        root / "pinned-home",
+        root / "provider-argv.txt",
+        root / "provider-environment.txt",
+    )

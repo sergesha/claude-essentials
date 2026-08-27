@@ -18,6 +18,7 @@ from lockstep.runtime.effects.descriptors import (
     parse_scope_result,
 )
 from lockstep.runtime.effects.authority import EffectAuthorityDenied
+from ..fixtures.native_child_artifact import materialize_managed_child_artifact
 from ..runtime.providers.fakes import (
     FakeEffectAuthority,
     FakeRunner,
@@ -39,7 +40,6 @@ from lockstep.workflow.schema import load_workflow, parse_workflow
 from lockstep.workflow.semantics import (
     CanonicalCompiledBundle,
     CatalogFile,
-    ChildArtifactContract,
     ChildWorkflowContract,
     ResolvedCatalog,
     ResolvedChild,
@@ -160,65 +160,9 @@ def test_child_artifact_ref_bridge_survives_restart_before_publish(
     tmp_path: Path,
 ) -> None:
     """Catches exporting a live path or losing the delivered result at restart."""
-    child_bytes = (
-        b"version: '1.0'\nname: child\n"
-        b"state: {review_result: dict, lockstep_outcome: str}\n"
-        b"nodes:\n  review:\n    type: interrupt\n"
-        b"    state_key: review_request\n    resume_key: review_result\n"
-        b"    idempotent: false\n    message:\n"
-        b"      lockstep_effect:\n        schema: lockstep.effect/v1\n"
-        b"        kind: manual\n        logical_id: review\n        runner: null\n"
-        b"        inputs: {}\n        writes: [review.md]\n"
-        b"        artifacts:\n"
-        b"          - {name: review, source_path: review.md, media_type: text/markdown, required: true}\n"
-        b"        deadline_seconds: null\n        scope_state_keys: []\n"
-        b"        result_schema: lockstep.effect-result/v1\n"
-        b"  pass: {type: passthrough, output: {lockstep_outcome: PASS}}\n"
-        b"edges: [{from: START, to: review}, {from: review, to: pass}, "
-        b"{from: pass, to: END}]\n"
-    )
-    child_file = CatalogFile.build("child.recipe.yaml", child_bytes)
-    catalog = ResolvedCatalog(
-        children={
-            "child": ResolvedChild(
-                "child",
-                ChildWorkflowContract(
-                    ("pass", "fail", "error"),
-                    exports={
-                        "review": ChildArtifactContract(
-                            "review", "review.md", "review", "text/markdown",
-                            "review", "review_result"
-                        )
-                    },
-                ),
-                "6" * 64,
-                CanonicalCompiledBundle.build(
-                    root_relative_path="child.recipe.yaml",
-                    files=(child_file,),
-                    compiler_version="1",
-                ),
-            )
-        }
-    )
-    source = tmp_path / "artifact-parent.workflow.yaml"
-    source.write_text(
-        "workflow_version: '1'\nname: artifact-parent\n"
-        "description: artifact child restart\nprotect: ['**']\nflow:\n"
-        "  - call:\n      id: review-call\n      workflow: child\n"
-        "      runner: codex\n"
-        "      artifacts: {review: .lockstep/review.md}\n"
-        "  - accept:\n"
-        "      artifact_from: review-call.review\n"
-        "      verdict: PASS\n"
-    )
-    workflow = parse_workflow(load_workflow(source))
-    result = compile_workflow(validate_semantics(workflow, catalog), catalog)
-    for relative_path, content in result.executable_files.items():
-        target = tmp_path / relative_path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(content)
+    fixture = materialize_managed_child_artifact(tmp_path)
     database = tmp_path / "artifact-native.sqlite"
-    root = tmp_path / result.root_relative_path
+    root = fixture.root_recipe
 
     first = yg._open_native_path(root, database)  # noqa: SLF001 - restart oracle
     scope_parked = first.invoke({}, thread_id="artifact-child")
