@@ -16,10 +16,9 @@ from lockstep.runtime.effects.descriptors import (
 from lockstep.runtime.effects.ledger import EffectLedger
 from lockstep.runtime.effects.owner_consent import OwnerConsentAuthority
 from lockstep.runtime.leases import LeaseStore
-from lockstep.runtime.native_models import NativeCoordinate, NativeSnapshot
+from lockstep.runtime.native_models import NativeCoordinate
 from lockstep.runtime.project_snapshots import ProjectSnapshotRef, ProjectSnapshotStore
 from lockstep.runtime.publication import PreparedPublication
-from lockstep.runtime.service import LockstepCommandService
 from lockstep.runtime.snapshot_resolver import RuntimeSnapshotFacts
 from lockstep.runtime.storage import RuntimeSchemaMigrator, SQLiteStore
 from tests.runtime._sqlite_store_image import StoreImage
@@ -113,16 +112,6 @@ def admission_case(store: SQLiteStore) -> FenceCase:
                 connection, admitted, snapshot_ref
             ),
         )
-    )
-
-
-def command_watch_delete_case(store: SQLiteStore) -> FenceCase:
-    ledger, binding = _seed_admission(store)
-    command = object.__new__(LockstepCommandService)
-    command.effects = ledger
-    terminal = NativeSnapshot(values={})
-    return FenceCase(
-        lambda: command._ack_start_if_observable(binding, terminal, ())
     )
 
 
@@ -351,7 +340,6 @@ def consent_commitment_case(store: SQLiteStore) -> FenceCase:
 
 CASE_FACTORIES = {
     "admission-ledger": admission_case,
-    "watch-delete-command-route": command_watch_delete_case,
     "watch-delete-v2-storage-control": storage_watch_delete_case,
     "recovery-repair-v2-storage-control": recovery_repair_case,
     "effect-prepare": effect_prepare_case,

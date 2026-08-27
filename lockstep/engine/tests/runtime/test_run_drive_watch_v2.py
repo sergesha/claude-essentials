@@ -16,6 +16,7 @@ from lockstep.runtime.effects.descriptors import (
     parse_effect_descriptor,
     parse_effect_result,
 )
+from lockstep.runtime.blobs import BlobRef
 from lockstep.runtime.providers.base import TerminalSafetyObservation
 from lockstep.runtime.providers.manual import ManualSubmission
 from lockstep.runtime.service import LockstepCommandService
@@ -46,7 +47,20 @@ def _bound_snapshot(service: LockstepCommandService, crash: _DecisionCrash):
     return service.runtime.snapshot(crash.run_id, subgraphs=True)
 
 
-def _manual_to_decision_crash(tmp_path: Path) -> _DecisionCrash:
+def _run_drive_watches(service: LockstepCommandService):
+    high_water = service.effects.max_run_drive_admission_seq()
+    if high_water is None:
+        return ()
+    return service.effects.list_run_drive_watches(
+        after_admission_seq=0,
+        high_water=high_water,
+        limit=128,
+    )
+
+
+def _create_manual_to_decision_park(
+    tmp_path: Path,
+) -> tuple[LockstepCommandService, _DecisionCrash]:
     recipes, compiled = _compile(
         tmp_path,
         "manual-decision",
@@ -100,12 +114,26 @@ def _manual_to_decision_crash(tmp_path: Path) -> _DecisionCrash:
         decision.pending[0].value["lockstep_effect"]
     )
     assert decision_descriptor.__class__.__name__ == "DecisionDescriptor"
-    assert service.effects.list_dispatch_watches(limit=128) == ()
     effects = service.effects.list_for_thread(binding.thread_id)
     assert [record.effect_kind for record in effects] == ["manual"]
     assert effects[0].phase == "delivered"
+    return service, _DecisionCrash(
+        state,
+        recipes,
+        project,
+        run_id,
+        binding.thread_id,
+    )
+
+
+def _manual_to_decision_crash(tmp_path: Path) -> _DecisionCrash:
+    """Create the historical acknowledged/no-watch b794 crash state."""
+
+    service, crash = _create_manual_to_decision_park(tmp_path)
+    service.effects.acknowledge_run_drive_watch(crash.run_id)
+    assert _run_drive_watches(service) == ()
     service.close()
-    return _DecisionCrash(state, recipes, project, run_id, binding.thread_id)
+    return crash
 
 
 def _normalized_facts(service: LockstepCommandService, crash: _DecisionCrash) -> dict:
@@ -115,8 +143,8 @@ def _normalized_facts(service: LockstepCommandService, crash: _DecisionCrash) ->
     return {
         "catalog": service.catalog.get(crash.run_id),
         "watch": tuple(
-            (item.public_run_id, item.input_blob.sha256, item.input_blob.size)
-            for item in service.effects.list_dispatch_watches(limit=128)
+            (item.public_run_id, item.input_blob_sha256, item.input_blob_size)
+            for item in _run_drive_watches(service)
         ),
         "effects": tuple(
             (
@@ -228,10 +256,8 @@ def test_drive_watch_survives_every_nonterminal_park(
             tmp_path, sealed=park == "sealed_external"
         )
     elif park == "delivered_to_decision":
-        crash = _manual_to_decision_crash(tmp_path)
-        service = _legacy_service(crash.state, crash.recipes)
+        service, crash = _create_manual_to_decision_park(tmp_path)
         run_id = crash.run_id
-        service.runtime.bind(service.catalog.get(run_id))
     else:
         recipes, compiled = _compile(
             tmp_path,
@@ -254,7 +280,7 @@ def test_drive_watch_survives_every_nonterminal_park(
         assert service.runtime.snapshot(run_id, subgraphs=True).pending
         assert tuple(
             watch.public_run_id
-            for watch in service.effects.list_dispatch_watches(limit=128)
+            for watch in _run_drive_watches(service)
         ) == (run_id,)
     finally:
         service.close()
@@ -284,7 +310,7 @@ def test_watch_is_not_removed_at_nonterminal_manual_park(
         assert snapshot.pending and snapshot.next
         assert tuple(
             watch.public_run_id
-            for watch in service.effects.list_dispatch_watches(limit=128)
+            for watch in _run_drive_watches(service)
         ) == (run_id,)
     finally:
         service.close()
@@ -613,9 +639,12 @@ def test_start_watch_replays_only_before_first_checkpoint_non_null(
             compiler_provenance=compiled.compiler_provenance,
         )
     service.runtime.ensure_started = real_start
-    admission = service.effects.list_dispatch_watches(limit=128)
+    admission = _run_drive_watches(service)
     assert len(admission) == 1
-    no_checkpoint_blob = admission[0].input_blob
+    no_checkpoint_blob = BlobRef(
+        admission[0].input_blob_sha256,
+        admission[0].input_blob_size,
+    )
 
     blob_reads = []
     starts = []
@@ -624,7 +653,10 @@ def test_start_watch_replays_only_before_first_checkpoint_non_null(
     service.runtime.ensure_started = lambda rid, values: (
         starts.append((rid, values)), real_start(rid, values)
     )[1]
-    service._recover_start_admissions()  # noqa: SLF001 - b794 oracle
+    service._recovery_driver._sweep_run_drive_watches(  # noqa: SLF001
+        project_identity=None,
+        limit=128,
+    )
     before_checkpoint_trace = {
         "input_reads": sum(ref == no_checkpoint_blob for ref in blob_reads),
         "starts": len(starts),
@@ -632,29 +664,22 @@ def test_start_watch_replays_only_before_first_checkpoint_non_null(
 
     blob_reads.clear()
     starts.clear()
-    started = service.start(
-        "manual-checkpoint", {}, str(project),
-        compiler_provenance=compiled.compiler_provenance,
-    )
-    run_id = started["run_id"]
-    input_blob = service.blobs.put(b"{}")
-    table = service.store.tables.run_drive_watches
-    with service.store.write_transaction() as connection:
-        connection.execute(table.insert().values(
-            public_run_id=run_id,
-            input_blob_sha256=input_blob.sha256,
-            input_blob_size=input_blob.size,
-            admitted_at="2026-08-25T00:00:00+00:00",
-        ))
-    blob_reads.clear()
-    starts.clear()
     try:
-        assert service.runtime.snapshot(run_id, subgraphs=True).checkpoint_id
-        service._recover_start_admissions()  # noqa: SLF001 - b794 oracle
+        service.runtime.bind(service.catalog.get(admission[0].public_run_id))
+        assert service.runtime.snapshot(
+            admission[0].public_run_id,
+            subgraphs=True,
+        ).checkpoint_id
+        service._recovery_driver._sweep_run_drive_watches(  # noqa: SLF001
+            project_identity=None,
+            limit=128,
+        )
         assert {
             "before_checkpoint": before_checkpoint_trace,
             "after_checkpoint": {
-                "input_reads": sum(ref == input_blob for ref in blob_reads),
+                "input_reads": sum(
+                    ref == no_checkpoint_blob for ref in blob_reads
+                ),
                 "starts": len(starts),
             },
         } == {
@@ -739,7 +764,7 @@ def test_b794_acknowledged_state_backfills_null_input_watch(tmp_path: Path) -> N
         _stop_pump(restarted)
         snapshot = _bound_snapshot(restarted, crash)
         assert snapshot.pending == ()
-        assert restarted.effects.list_dispatch_watches(limit=128) == ()
+        assert _run_drive_watches(restarted) == ()
     finally:
         restarted.close()
 
@@ -794,6 +819,16 @@ def test_run_drive_watch_validates_frozen_value_domain() -> None:
     assert admitted.input_blob_size == 1
     assert admitted.admitted_at == utc_instant
     assert admitted.admitted_at.tzinfo is UTC
+    zero_byte = RunDriveWatch(3, "run-3", "b" * 64, 0, utc_instant)
+    assert zero_byte.input_blob_size == 0
+    max_byte = RunDriveWatch(
+        4,
+        "run-4",
+        "c" * 64,
+        64 * 1024 * 1024,
+        utc_instant,
+    )
+    assert max_byte.input_blob_size == 64 * 1024 * 1024
 
     for admission_seq in (0, -1, True, 1.0):
         with pytest.raises(
@@ -822,10 +857,13 @@ def test_run_drive_watch_validates_frozen_value_domain() -> None:
             match="^input_blob_sha256 must be a lowercase SHA-256 digest$",
         ):
             RunDriveWatch(1, "run-1", digest, 1, utc_instant)
-    for size in (0, -1, True, 1.0):
+    for size in (-1, 64 * 1024 * 1024 + 1, True, 1.0):
         with pytest.raises(
             ValueError,
-            match="^input_blob_size must be a positive integer$",
+            match=(
+                "^input_blob_size must be a non-negative integer "
+                "not exceeding 64 MiB$"
+            ),
         ):
             RunDriveWatch(1, "run-1", "a" * 64, size, utc_instant)
 
@@ -935,6 +973,29 @@ def test_run_drive_watch_ack_api_exact_signature() -> None:
         ),
         NoneType,
     )
+
+
+def test_legacy_watch_lifecycle_surface_is_retired() -> None:
+    from lockstep.runtime import engine_drive_service, service
+    from lockstep.runtime.effects import ledger
+
+    remaining = {
+        name
+        for owner, name in (
+            (ledger, "EffectDispatchWatch"),
+            (ledger.EffectLedger, "list_dispatch_watches"),
+            (ledger.EffectLedger, "acknowledge_dispatch_watch"),
+            (service.LockstepCommandService, "_recover_start_admissions"),
+            (service.LockstepCommandService, "_ack_start_if_observable"),
+        )
+        if hasattr(owner, name)
+    }
+    if "acknowledge_start" in signature(
+        engine_drive_service.EngineDriveService
+    ).parameters:
+        remaining.add("EngineDriveService.acknowledge_start")
+
+    assert remaining == set()
 
 
 def test_v2_write_transaction_is_exact_context_contract(tmp_path: Path) -> None:

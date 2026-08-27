@@ -8,7 +8,6 @@ from pathlib import Path
 import lockstep.runtime.service as service_module
 from lockstep.runtime.artifacts import ArtifactRecord
 from lockstep.runtime.effects.descriptors import parse_effect_result
-from lockstep.runtime.effects.ledger import EffectLedger
 from lockstep.runtime.effects.owner_policy import OwnerRuntimeSnapshot
 from lockstep.runtime.effects.owner_snapshot_store import open_runtime_snapshot
 from lockstep.runtime.engine import Engine
@@ -26,14 +25,6 @@ from tests.runtime._runtime_commitment_harness import (
     provision_compiled_managed_closure,
 )
 from tests.runtime.providers.fakes import FakeRunner
-
-
-@dataclass(frozen=True, slots=True)
-class _WatchAcknowledgement:
-    run_id: str
-    before: tuple[str, ...]
-    after: tuple[str, ...]
-    pending_kinds: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,7 +52,6 @@ class _PendingArtifactAcceptance:
     consent_digest: str
     owner_snapshot_digest: str
     owner_snapshot: OwnerRuntimeSnapshot
-    acknowledgement_trace: tuple[_WatchAcknowledgement, ...]
 
 
 class _OwnerBoundFakeRunner(FakeRunner):
@@ -82,9 +72,16 @@ def _stop_pump(command: LockstepCommandService) -> None:
 
 
 def _watch_ids(command: LockstepCommandService) -> tuple[str, ...]:
+    high_water = command.effects.max_run_drive_admission_seq()
+    if high_water is None:
+        return ()
     return tuple(
         watch.public_run_id
-        for watch in command.effects.list_dispatch_watches(limit=128)
+        for watch in command.effects.list_run_drive_watches(
+            after_admission_seq=0,
+            high_water=high_water,
+            limit=128,
+        )
     )
 
 
@@ -112,45 +109,6 @@ def _substitute_exact_binding_runner(monkeypatch) -> list[_OwnerBoundFakeRunner]
         build,
     )
     return runners
-
-
-def _observe_watch_acknowledgements(
-    monkeypatch,
-    command: LockstepCommandService,
-) -> list[_WatchAcknowledgement]:
-    """Observe the old deletion without making it a setup precondition."""
-
-    acknowledge = EffectLedger.acknowledge_dispatch_watch
-    trace: list[_WatchAcknowledgement] = []
-
-    def observed(ledger: EffectLedger, run_id: str) -> bool:
-        if getattr(command, "effects", None) is not ledger:
-            return acknowledge(ledger, run_id)
-        snapshot = command.runtime.snapshot(run_id, subgraphs=True)
-        pending_kinds = tuple(
-            descriptor.kind
-            for interrupt in snapshot.pending
-            if (
-                descriptor := command._protected_interrupt_descriptor(  # noqa: SLF001
-                    interrupt
-                )
-            )
-            is not None
-        )
-        before = _watch_ids(command)
-        acknowledged = acknowledge(ledger, run_id)
-        trace.append(
-            _WatchAcknowledgement(
-                run_id,
-                before,
-                _watch_ids(command),
-                pending_kinds,
-            )
-        )
-        return acknowledged
-
-    monkeypatch.setattr(EffectLedger, "acknowledge_dispatch_watch", observed)
-    return trace
 
 
 def _complete_managed_attempt(
@@ -282,7 +240,6 @@ def _close_at_pending_artifact_acceptance(
     fake_runners = _substitute_exact_binding_runner(monkeypatch)
     owner_digest, owner_snapshot = open_runtime_snapshot(provisioned.owner_state)
     command = Engine.command(provisioned.owner_state, fixture.recipes_dir)
-    acknowledgement_trace = _observe_watch_acknowledgements(monkeypatch, command)
     try:
         _stop_pump(command)
         started = command.start(
@@ -332,7 +289,6 @@ def _close_at_pending_artifact_acceptance(
             consent_digest=preview["digest"],
             owner_snapshot_digest=owner_digest,
             owner_snapshot=owner_snapshot,
-            acknowledgement_trace=tuple(acknowledgement_trace),
         )
     finally:
         command.close()
@@ -389,9 +345,6 @@ def test_watch_survives_real_child_artifact_until_pending_acceptance_after_resta
             restarted.authority.inspect_token(crash.consent_token).commitment.digest
             == crash.consent_digest
         )
-        assert watch_ids == (crash.run_id,), (
-            "watch acknowledgement diagnostics: "
-            f"{crash.acknowledgement_trace!r}"
-        )
+        assert watch_ids == (crash.run_id,)
     finally:
         restarted.close()

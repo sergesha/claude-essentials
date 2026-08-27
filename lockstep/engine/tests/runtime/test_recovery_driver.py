@@ -228,6 +228,7 @@ def test_sweep_limit_counts_accepted_drives_not_scanned_rows(
         return True
 
     driver = object.__new__(RecoveryDriver)
+    driver._exclude_run_drive = lambda _run_id: False
     driver._backfill = SimpleNamespace(apply_next_page=apply_backfill_page)
     driver._effects = SimpleNamespace(
         max_run_drive_admission_seq=capture_max,
@@ -251,6 +252,66 @@ def test_sweep_limit_counts_accepted_drives_not_scanned_rows(
     assert driven == list(range(1, 131))
 
 
+def test_sweep_excludes_fresh_admission_without_stopping_other_work(
+    monkeypatch,
+) -> None:
+    from lockstep.runtime.effects.ledger import RunDriveWatch
+    from lockstep.runtime.recovery_driver import RecoveryDriver
+
+    admitted_at = datetime(2026, 8, 27, tzinfo=UTC)
+    watches = (
+        RunDriveWatch(1, "fresh", None, None, admitted_at),
+        RunDriveWatch(2, "other-work", None, None, admitted_at),
+    )
+    driver = object.__new__(RecoveryDriver)
+    driver._exclude_run_drive = lambda run_id: run_id == "fresh"
+    driver._backfill = SimpleNamespace(apply_next_page=lambda: True)
+    driver._effects = SimpleNamespace(
+        max_run_drive_admission_seq=lambda: 2,
+        list_run_drive_watches=lambda **_kwargs: watches,
+    )
+    driven = []
+    monkeypatch.setattr(driver, "_matches_project", lambda *_args: True)
+    monkeypatch.setattr(
+        driver,
+        "_drive_run_watch",
+        lambda watch: driven.append(watch.public_run_id) or True,
+    )
+
+    assert driver._sweep_run_drive_watches(
+        project_identity=None,
+        limit=1,
+    ) == ("other-work",)
+    assert driven == ["other-work"]
+
+
+def test_prepared_command_driver_observes_dynamic_fresh_admission_exclusion(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from lockstep.runtime.effects.ledger import RunDriveWatch
+
+    admitted_at = datetime(2026, 8, 27, tzinfo=UTC)
+    watch = RunDriveWatch(1, "fresh", None, None, admitted_at)
+    with _prepared_command(tmp_path) as command:
+        driver = command._recovery_driver  # noqa: SLF001 - composition contract
+        driven = []
+        monkeypatch.setattr(driver, "_matches_project", lambda *_args: True)
+        monkeypatch.setattr(
+            driver,
+            "_drive_run_watch",
+            lambda item: driven.append(item.public_run_id) or True,
+        )
+
+        command._initial_recovery_exclusion = "fresh"  # noqa: SLF001
+        assert driver._try_drive_run_watch(watch, None) is False  # noqa: SLF001
+        assert driven == []
+
+        command._initial_recovery_exclusion = None  # noqa: SLF001
+        assert driver._try_drive_run_watch(watch, None) is True  # noqa: SLF001
+        assert driven == ["fresh"]
+
+
 def test_sweep_isolates_only_known_per_run_integrity_errors(
     monkeypatch, caplog
 ) -> None:
@@ -266,6 +327,7 @@ def test_sweep_isolates_only_known_per_run_integrity_errors(
         for index in (1, 2)
     )
     driver = object.__new__(RecoveryDriver)
+    driver._exclude_run_drive = lambda _run_id: False
     driver._backfill = SimpleNamespace(apply_next_page=lambda: True)
     driver._effects = SimpleNamespace(
         max_run_drive_admission_seq=lambda: 2,

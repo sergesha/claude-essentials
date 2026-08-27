@@ -27,7 +27,8 @@ def test_durable_recovery_page_uses_cursor_and_rejects_overflow() -> None:
     binding = RunBinding("run", "thread-129", "a" * 64, "bundle", "/project")
     observed = []
     effects = SimpleNamespace(
-        list_dispatch_watches=lambda **_kwargs: (),
+        max_run_drive_admission_seq=lambda: None,
+        list_run_drive_watches=lambda **_kwargs: (),
         list_recovery_threads=lambda **kwargs: (
             observed.append(kwargs) or ("thread-129",)
         ),
@@ -44,6 +45,37 @@ def test_durable_recovery_page_uses_cursor_and_rejects_overflow() -> None:
         recovery._durable_runs(limit=2, after_thread_id="thread-128")
 
     assert observed == [{"limit": 2, "after_thread_id": "thread-128"}]
+
+
+def test_durable_recovery_discovers_null_input_v2_watch() -> None:
+    binding = RunBinding("run", "thread", "a" * 64, "bundle", "/project")
+    observed = []
+    effects = SimpleNamespace(
+        max_run_drive_admission_seq=lambda: 1,
+        list_run_drive_watches=lambda **kwargs: (
+            observed.append(kwargs)
+            or (
+                SimpleNamespace(
+                    admission_seq=1,
+                    public_run_id="run",
+                    input_blob_sha256=None,
+                    input_blob_size=None,
+                ),
+            )
+        ),
+        list_recovery_threads=lambda **_kwargs: (),
+    )
+    recovery = _recovery(
+        effects=effects,
+        catalog=SimpleNamespace(get=lambda run_id: binding),
+    )
+
+    assert recovery._durable_runs(limit=128, after_thread_id=None) == (
+        (binding, True, ()),
+    )
+    assert observed == [
+        {"after_admission_seq": 0, "high_water": 1, "limit": 128}
+    ]
 
 
 @pytest.mark.parametrize(

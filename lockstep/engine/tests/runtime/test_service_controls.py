@@ -184,57 +184,14 @@ def test_engine_effect_queue_has_a_hard_admission_ceiling() -> None:
     assert "one-too-many" not in service._active_effect_runs
 
 
-def test_startup_recovery_discovers_native_start_commit_before_ledger_prepare() -> None:
-    from lockstep.runtime.blobs import BlobRef
-    from lockstep.runtime.effects.ledger import EffectDispatchWatch
-
-    binding = RunBinding("run-1", "thread-1", "a" * 64, "bundle", "/project")
-    driven = []
-    bound = []
-    unbound = []
-    service = _service_double()
-    watch = EffectDispatchWatch(
-        "run-1", BlobRef("b" * 64, 2), datetime(2026, 8, 20, tzinfo=UTC)
-    )
-    service.effects = SimpleNamespace(
-        list_dispatch_watches=lambda **_kwargs: (watch,),
-        list_recovery_threads=lambda **_kwargs: (),
-    )
-    service.catalog = SimpleNamespace(
-        get=lambda _run_id: binding,
-        find_by_thread=lambda _thread_id: pytest.fail("ledger unexpectedly populated"),
-    )
-    service.blobs = SimpleNamespace(read=lambda _ref: b"{}")
-    service.runtime = SimpleNamespace(
-        bind=bound.append,
-        unbind=unbound.append,
-        ensure_started=lambda _run_id, _values: SimpleNamespace(),
-    )
-    service._active_effect_runs = set()
-    service._queued_effect_runs = set()
-    service._active_effect_lock = threading.Lock()
-    service._admission_recovery_lock = threading.RLock()
-    service._recovery_thread_cursor = None
-
-    def drive(run_id, **_kwargs):
-        driven.append(run_id)
-        service._deactivate_effect_run(run_id)
-
-    service._drive_engine_owned = drive
-
-    service._recover_engine_effects()
-
-    assert bound == [binding]
-    assert driven == ["run-1"]
-    assert unbound == ["run-1"]
-
-
 def test_dispatch_recovery_serializes_with_foreground_admission() -> None:
     service = _service_double()
     service._admission_recovery_lock = threading.RLock()
     entered = threading.Event()
     finished = threading.Event()
-    service._recover_start_admissions = entered.set
+    service._recovery_driver = SimpleNamespace(
+        _sweep_run_drive_watches=lambda **_kwargs: entered.set()
+    )
     service._recover_effect_batch = lambda: None
 
     with service._admission_recovery_lock:
@@ -261,7 +218,9 @@ def test_runtime_reconstruction_tracks_the_bounded_recovery_page() -> None:
             (after_thread_id, limit)
         )
     )
-    service._recover_start_admissions = lambda: None
+    service._recovery_driver = SimpleNamespace(
+        _sweep_run_drive_watches=lambda **_kwargs: ()
+    )
     service._recover_effect_batch = lambda: None
 
     service._recover_engine_effects()
@@ -288,7 +247,9 @@ def test_parallel_recovery_installs_one_runtime_composition() -> None:
 
     service._reconstruct_runtime_execution_context = reconstruct
     service._install_runtime_execution = install
-    service._recover_start_admissions = lambda: None
+    service._recovery_driver = SimpleNamespace(
+        _sweep_run_drive_watches=lambda **_kwargs: ()
+    )
     service._recover_effect_batch = lambda: None
 
     workers = [threading.Thread(target=service._recover_engine_effects) for _ in range(2)]
@@ -339,7 +300,9 @@ def test_worker_resume_blocks_recovery_unbind_for_the_whole_composite(
         resume=resume,
         unbind=lambda _run_id: recovery_unbound.set(),
     )
-    service._recover_start_admissions = lambda: service.runtime.unbind("run-1")
+    service._recovery_driver = SimpleNamespace(
+        _sweep_run_drive_watches=lambda **_kwargs: service.runtime.unbind("run-1")
+    )
     service._recover_effect_batch = lambda: None
     monkeypatch.setattr(sessions, "locked_owner", lambda *_args, **_kwargs: nullcontext())
 
@@ -398,7 +361,9 @@ def test_artifact_acceptance_blocks_recovery_unbind_through_drive(
 
     service._drive_engine_owned = drive
     service.runtime = SimpleNamespace(unbind=lambda _run_id: recovery_unbound.set())
-    service._recover_start_admissions = lambda: service.runtime.unbind("run-1")
+    service._recovery_driver = SimpleNamespace(
+        _sweep_run_drive_watches=lambda **_kwargs: service.runtime.unbind("run-1")
+    )
     service._recover_effect_batch = lambda: None
     monkeypatch.setattr(
         sessions,
@@ -541,37 +506,6 @@ def test_artifact_acceptance_foreign_ambient_project_is_generic_and_read_only() 
     with pytest.raises(LockstepError, match="invalid or stale") as exc:
         service.scenario_accept_artifact(token, project="/foreign-project")
     assert token not in str(exc.value)
-
-
-def test_start_recovery_defers_before_native_commit_when_active_batch_is_full() -> None:
-    from lockstep.runtime.blobs import BlobRef
-    from lockstep.runtime.effects.ledger import EffectDispatchWatch
-
-    binding = RunBinding("deferred", "thread-deferred", "a" * 64, "bundle", "/p")
-    watch = EffectDispatchWatch(
-        "deferred", BlobRef("b" * 64, 2), datetime(2026, 8, 20, tzinfo=UTC)
-    )
-    service = _service_double()
-    service.effects = SimpleNamespace(list_dispatch_watches=lambda **_kwargs: (watch,))
-    service.catalog = SimpleNamespace(get=lambda _run_id: binding)
-    service.blobs = SimpleNamespace(
-        read=lambda _ref: pytest.fail("capacity rejection consumed start input")
-    )
-    service.runtime = SimpleNamespace(
-        bind=lambda _binding: pytest.fail("capacity rejection bound native app"),
-        ensure_started=lambda *_args: pytest.fail("capacity rejection invoked native"),
-    )
-    service._active_effect_runs = {
-        f"run-{index}" for index in range(service._MAX_ACTIVE_EFFECT_RUNS)
-    }
-    service._queued_effect_runs = set(service._active_effect_runs)
-    service._active_effect_lock = threading.Lock()
-    service._pump_wakeup = threading.Event()
-
-    service._recover_start_admissions()
-
-    assert "deferred" not in service._active_effect_runs
-    assert not service._pump_wakeup.is_set()
 
 
 def test_effect_recovery_defers_before_reconcile_when_active_batch_is_full() -> None:
@@ -922,7 +856,6 @@ def test_engine_progress_prepares_manual_handoff_before_returning_awaiting() -> 
     service.coordinator = Coordinator()
     service.runtime = SimpleNamespace(snapshot=lambda *_args, **_kwargs: snapshot)
     service._deactivate_effect_run = lambda _run_id: None
-    service._ack_start_if_observable = lambda *_args: None
 
     status = service._drive_engine_owned("run-1", binding=binding, snapshot=snapshot)
 
@@ -979,7 +912,6 @@ def test_engine_progress_delivers_scope_result_without_status_mutation() -> None
         snapshot=lambda *_args, **_kwargs: state["snapshot"]
     )
     service._deactivate_effect_run = lambda _run_id: None
-    service._ack_start_if_observable = lambda *_args: None
 
     status = service._drive_engine_owned("run-1", binding=binding, snapshot=pending)
 
@@ -1052,15 +984,22 @@ def test_engine_progress_recovers_capacity_bound_consumed_facts_in_one_sweep() -
 
     coordinator = Coordinator()
     deactivated = []
+
+    class NoWatchAcknowledgement:
+        def acknowledge_dispatch_watch(self, _run_id):
+            pytest.fail("EngineDriveService used the retired watch acknowledgement")
+
+        def acknowledge_run_drive_watch(self, _run_id):
+            pytest.fail("EngineDriveService bypassed RecoveryDriver cleanup")
+
     service = _service_double()
-    service.effects = ()
+    service.effects = NoWatchAcknowledgement()
     service.leases = ()
     service.coordinator = coordinator
     service.runtime = SimpleNamespace(
         snapshot=lambda *_args, **_kwargs: completed
     )
     service._deactivate_effect_run = deactivated.append
-    service._ack_start_if_observable = lambda *_args: None
 
     status = service._drive_engine_owned(
         "run-1", binding=binding, snapshot=completed

@@ -69,7 +69,13 @@ def _seed_recoverable_run(project: Path, state: Path, recipes: Path) -> str:
             service.start("native-parent-direct", {}, str(project))
         bindings = service.catalog.list(str(project.resolve()))
         assert len(bindings) == 1
-        watches = service.effects.list_dispatch_watches(limit=2)
+        high_water = service.effects.max_run_drive_admission_seq()
+        assert high_water is not None
+        watches = service.effects.list_run_drive_watches(
+            after_admission_seq=0,
+            high_water=high_water,
+            limit=2,
+        )
         assert [watch.public_run_id for watch in watches] == [
             bindings[0].public_run_id
         ]
