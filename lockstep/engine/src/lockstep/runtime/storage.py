@@ -321,6 +321,40 @@ class RuntimeSchemaMigrator:
         classified: tuple[LegacyRunDriveClassification, ...],
         exhausted: bool,
     ) -> MigrationProgress:
+        if expected_after_public_run_id is not None and (
+            type(expected_after_public_run_id) is not str
+            or not expected_after_public_run_id
+        ):
+            raise ValueError(
+                "expected_after_public_run_id must be a non-empty string"
+            )
+        if type(classified) is not tuple:
+            raise TypeError("classified must be a tuple")
+        if any(
+            not isinstance(record, LegacyRunDriveClassification)
+            for record in classified
+        ):
+            raise TypeError(
+                "classified must contain LegacyRunDriveClassification records"
+            )
+        if len(classified) > 128:
+            raise ValueError("classified must contain at most 128 records")
+        public_run_ids = tuple(record.public_run_id for record in classified)
+        if public_run_ids != tuple(sorted(set(public_run_ids))):
+            raise ValueError(
+                "classified public_run_ids must be sorted and unique"
+            )
+        if (
+            expected_after_public_run_id is not None
+            and public_run_ids
+            and public_run_ids[0] <= expected_after_public_run_id
+        ):
+            raise ValueError(
+                "classified public_run_ids must be strictly after "
+                "expected_after_public_run_id"
+            )
+        if type(exhausted) is not bool:
+            raise TypeError("exhausted must be a boolean")
         raise NotImplementedError(
             "run-drive-watch migration behavior is staged in R2"
         )
