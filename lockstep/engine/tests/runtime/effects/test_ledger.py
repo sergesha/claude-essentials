@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
@@ -254,6 +255,84 @@ def test_list_run_drive_watches_validates_and_returns_bounded_ordered_page(
                 high_water=3,
                 limit=limit,
             )
+
+
+def test_acknowledge_run_drive_watch_validates_and_converges_after_post_commit_crash(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    from lockstep.runtime.blobs import BlobRef
+    from lockstep.runtime.catalog import RunBinding, RunCatalog
+    from lockstep.runtime.effects.ledger import EffectLedger
+    from lockstep.runtime.storage import SQLiteStore
+
+    database_path = tmp_path / "runtime.db"
+    storage = SQLiteStore(database_path)
+    reopened = None
+    try:
+        effect_ledger = EffectLedger(storage)
+        catalog = RunCatalog(storage)
+        for index in (1, 2):
+            effect_ledger.admit_start(
+                catalog,
+                RunBinding(
+                    f"run-{index}",
+                    f"thread-{index}",
+                    "a" * 64,
+                    "bundle:" + "b" * 64,
+                    "/project",
+                ),
+                BlobRef("c" * 64, index),
+            )
+
+        def remaining_ids(ledger: EffectLedger) -> tuple[str, ...]:
+            return tuple(
+                watch.public_run_id
+                for watch in ledger.list_run_drive_watches(
+                    after_admission_seq=0,
+                    high_water=2,
+                    limit=128,
+                )
+            )
+
+        for public_run_id in ("", 1):
+            with pytest.raises(
+                ValueError,
+                match="^public_run_id must be a non-empty string$",
+            ):
+                effect_ledger.acknowledge_run_drive_watch(public_run_id)
+        assert remaining_ids(effect_ledger) == ("run-1", "run-2")
+
+        transaction_entries = 0
+        real_transaction = storage._v2_write_transaction
+
+        @contextmanager
+        def observed_transaction():
+            nonlocal transaction_entries
+            transaction_entries += 1
+            with real_transaction() as connection:
+                yield connection
+
+        monkeypatch.setattr(storage, "_v2_write_transaction", observed_transaction)
+
+        class SimulatedPostCommitCrash(RuntimeError):
+            pass
+
+        with pytest.raises(SimulatedPostCommitCrash):
+            assert effect_ledger.acknowledge_run_drive_watch("run-1") is None
+            assert transaction_entries == 1
+            raise SimulatedPostCommitCrash
+
+        storage.close()
+        reopened = SQLiteStore(database_path)
+        reopened_ledger = EffectLedger(reopened)
+        assert remaining_ids(reopened_ledger) == ("run-2",)
+        assert reopened_ledger.acknowledge_run_drive_watch("run-1") is None
+        assert remaining_ids(reopened_ledger) == ("run-2",)
+    finally:
+        if reopened is not None:
+            reopened.close()
+        storage.close()
 
 
 def test_dispatch_watch_limit_is_a_batch_not_a_correctness_cap(ledger) -> None:
