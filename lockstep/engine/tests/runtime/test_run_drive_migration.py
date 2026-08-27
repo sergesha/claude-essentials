@@ -298,3 +298,116 @@ def test_run_drive_migration_page_api_exact_signature() -> None:
     progress_type = getattr(storage_module, "MigrationProgress", None)
     assert progress_type is not None
     assert get_type_hints(method)["return"] == progress_type
+
+
+def test_apply_run_drive_watch_page_rejects_invalid_page_domain_write_free(
+    tmp_path: Path,
+) -> None:
+    from lockstep.runtime.storage import (
+        LegacyRunDriveClassification,
+        RuntimeSchemaMigrator,
+        SQLiteStore,
+    )
+
+    store = SQLiteStore(tmp_path / "runtime.db")
+    try:
+        migrator = RuntimeSchemaMigrator(store)
+        valid_record = LegacyRunDriveClassification("run-001", "nonterminal")
+
+        with pytest.raises(TypeError, match="^classified must be a tuple$"):
+            migrator.apply_run_drive_watch_page(
+                expected_after_public_run_id=None,
+                classified=[valid_record],
+                exhausted=False,
+            )
+        with pytest.raises(
+            TypeError,
+            match=(
+                "^classified must contain LegacyRunDriveClassification records$"
+            ),
+        ):
+            migrator.apply_run_drive_watch_page(
+                expected_after_public_run_id=None,
+                classified=("run-001",),
+                exhausted=False,
+            )
+
+        too_many = tuple(
+            LegacyRunDriveClassification(f"run-{index:03d}", "nonterminal")
+            for index in range(129)
+        )
+        with pytest.raises(
+            ValueError,
+            match="^classified must contain at most 128 records$",
+        ):
+            migrator.apply_run_drive_watch_page(
+                expected_after_public_run_id=None,
+                classified=too_many,
+                exhausted=False,
+            )
+
+        for ids in (
+            ("run-002", "run-001"),
+            ("run-001", "run-001"),
+        ):
+            classified = tuple(
+                LegacyRunDriveClassification(public_run_id, "nonterminal")
+                for public_run_id in ids
+            )
+            with pytest.raises(
+                ValueError,
+                match="^classified public_run_ids must be sorted and unique$",
+            ):
+                migrator.apply_run_drive_watch_page(
+                    expected_after_public_run_id=None,
+                    classified=classified,
+                    exhausted=False,
+                )
+
+        for first_id in ("run-002", "run-001"):
+            with pytest.raises(
+                ValueError,
+                match=(
+                    "^classified public_run_ids must be strictly after "
+                    "expected_after_public_run_id$"
+                ),
+            ):
+                migrator.apply_run_drive_watch_page(
+                    expected_after_public_run_id="run-002",
+                    classified=(
+                        LegacyRunDriveClassification(first_id, "nonterminal"),
+                    ),
+                    exhausted=False,
+                )
+
+        for expected_after_public_run_id in ("", 1):
+            with pytest.raises(
+                ValueError,
+                match=(
+                    "^expected_after_public_run_id must be a non-empty string$"
+                ),
+            ):
+                migrator.apply_run_drive_watch_page(
+                    expected_after_public_run_id=expected_after_public_run_id,
+                    classified=(),
+                    exhausted=False,
+                )
+        for exhausted in (0, 1, None):
+            with pytest.raises(TypeError, match="^exhausted must be a boolean$"):
+                migrator.apply_run_drive_watch_page(
+                    expected_after_public_run_id=None,
+                    classified=(),
+                    exhausted=exhausted,
+                )
+
+        with store.read_connection() as connection:
+            migration_rows = connection.execute(
+                store.tables.runtime_schema_migrations.select()
+            ).all()
+            watch_rows = connection.execute(
+                store.tables.run_drive_watches.select()
+            ).all()
+        assert migration_rows == []
+        assert watch_rows == []
+    finally:
+        store.close()
