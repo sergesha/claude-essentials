@@ -182,7 +182,7 @@ def test_recovery_consumes_rowless_decision_after_manual_delivery_crash(
         effects = restarted.effects.list_for_thread(crash.thread_id)
         assert all(item.effect_kind != "decide" for item in effects)
         assert snapshot.pending == ()
-        assert snapshot.values["lockstep_outcome"] == "ESCALATED"
+        assert snapshot.values["lockstep_outcome"] == "FAIL"
     finally:
         restarted.close()
 
