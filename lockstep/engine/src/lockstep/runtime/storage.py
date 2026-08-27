@@ -74,6 +74,19 @@ class MigrationProgress:
                 raise TypeError(f"{name} must be a tuple")
             if any(type(value) is not str or not value for value in values):
                 raise ValueError(f"{name} must contain non-empty strings")
+            if values != tuple(sorted(set(values))):
+                raise ValueError(f"{name} must be sorted and unique")
+        if not set(self.inserted_public_run_ids).isdisjoint(
+            self.malformed_public_run_ids
+        ):
+            raise ValueError("migration progress result IDs must be disjoint")
+        if (
+            len(self.inserted_public_run_ids) + len(self.malformed_public_run_ids)
+            > 128
+        ):
+            raise ValueError(
+                "migration progress result IDs must contain at most 128 entries"
+            )
 
 
 @dataclass(frozen=True)
