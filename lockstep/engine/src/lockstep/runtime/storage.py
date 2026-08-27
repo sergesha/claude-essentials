@@ -8,7 +8,7 @@ LangGraph state remains in the configured saver.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -24,10 +24,12 @@ from sqlalchemy import (
     UniqueConstraint,
     create_engine,
     inspect as sa_inspect,
+    select,
 )
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.engine.url import make_url
 
+from lockstep.runtime.advisory_lock import advisory_file_lock
 from lockstep.runtime.owner_state import (
     initialize_owner_state,
     seal_owner_file,
@@ -427,10 +429,25 @@ class SQLiteStore:
 
     @contextmanager
     def _v2_write_transaction(self) -> Iterator[Connection]:
-        """Staged surface; exact epoch fencing follows in its own cycle."""
+        """Write only under the shared schema fence and exact v2 epoch."""
 
-        with self.write_transaction() as connection:
-            yield connection
+        fence = (
+            nullcontext()
+            if self.database_path is None
+            else advisory_file_lock(self.database_path.parent / "runtime-schema.lock")
+        )
+        with fence:
+            with self.write_transaction() as connection:
+                epoch = connection.execute(
+                    select(self.tables.runtime_schema_epoch.c.epoch).where(
+                        self.tables.runtime_schema_epoch.c.singleton == 1
+                    )
+                ).scalar_one_or_none()
+                if type(epoch) is not int or epoch != 2:
+                    raise RuntimeError(
+                        "runtime schema epoch 2 is required for v2 writes"
+                    )
+                yield connection
 
     def close(self) -> None:
         self.engine.dispose()
