@@ -722,3 +722,74 @@ def test_apply_run_drive_watch_page_continues_from_matching_non_null_cursor(
         if reopened is not None:
             reopened.close()
         store.close()
+
+
+def test_apply_run_drive_watch_page_rejects_cursor_mismatch_replay_write_free(
+    tmp_path: Path,
+) -> None:
+    from lockstep.runtime.storage import (
+        LegacyRunDriveClassification,
+        RuntimeSchemaMigrator,
+        SQLiteStore,
+    )
+
+    database_path = tmp_path / "runtime.db"
+    store = SQLiteStore(database_path)
+    reopened = None
+    try:
+        _create_catalog_bindings(store, "run-001")
+        migrator = RuntimeSchemaMigrator(store)
+        migrator.apply_run_drive_watch_page(
+            expected_after_public_run_id=None,
+            classified=(),
+            exhausted=False,
+        )
+        committed_page = (
+            LegacyRunDriveClassification("run-001", "nonterminal"),
+        )
+        migrator.apply_run_drive_watch_page(
+            expected_after_public_run_id=None,
+            classified=committed_page,
+            exhausted=False,
+        )
+
+        migration_table = store.tables.runtime_schema_migrations
+        watch_table = store.tables.run_drive_watches
+        with store.read_connection() as connection:
+            migration_before = tuple(
+                dict(row._mapping)
+                for row in connection.execute(migration_table.select()).all()
+            )
+            watches_before = tuple(
+                dict(row._mapping)
+                for row in connection.execute(watch_table.select()).all()
+            )
+        assert migration_before[0]["after_public_run_id"] == "run-001"
+        assert watches_before[0]["admission_seq"] == 1
+
+        with pytest.raises(RuntimeError) as raised:
+            migrator.apply_run_drive_watch_page(
+                expected_after_public_run_id=None,
+                classified=committed_page,
+                exhausted=False,
+            )
+
+        store.close()
+        reopened = SQLiteStore(database_path)
+        with reopened.read_connection() as connection:
+            migration_after = tuple(
+                dict(row._mapping)
+                for row in connection.execute(migration_table.select()).all()
+            )
+            watches_after = tuple(
+                dict(row._mapping)
+                for row in connection.execute(watch_table.select()).all()
+            )
+        assert migration_after == migration_before
+        assert watches_after == watches_before
+        assert type(raised.value) is RuntimeError
+        assert str(raised.value) == "run-drive-watch migration cursor mismatch"
+    finally:
+        if reopened is not None:
+            reopened.close()
+        store.close()
