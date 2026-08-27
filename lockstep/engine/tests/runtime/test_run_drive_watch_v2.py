@@ -12,7 +12,6 @@ from typing import get_type_hints
 import pytest
 from sqlalchemy import Integer, inspect as sa_inspect
 
-from lockstep.runtime.effects.authority import EffectAuthorityDenied
 from lockstep.runtime.effects.descriptors import (
     parse_effect_descriptor,
     parse_effect_result,
@@ -21,68 +20,16 @@ from lockstep.runtime.providers.base import TerminalSafetyObservation
 from lockstep.runtime.providers.manual import ManualSubmission
 from lockstep.runtime.service import LockstepCommandService
 from lockstep.runtime.engine import Engine
-from lockstep.workflow.compiler import compile_workflow
-from lockstep.workflow.schema import load_workflow, parse_workflow
-from lockstep.workflow.semantics import ResolvedCatalog, validate_semantics
+from tests.runtime._legacy_run_drive_fixtures import (
+    AutoGrantAuthority as _AutoGrantAuthority,
+    compile_recipe as _compile,
+    legacy_service as _legacy_service,
+    stop_pump as _stop_pump,
+)
 from tests.runtime.providers.fakes import (
-    FakeEffectAuthority,
     FakeRunner,
     _legacy_command_service,
 )
-
-
-class _AutoGrantAuthority(FakeEffectAuthority):
-    def __init__(self) -> None:
-        super().__init__()
-        self.auto_authorize = True
-
-    def resolve(self, intent):
-        try:
-            return super().resolve(intent)
-        except EffectAuthorityDenied:
-            if not self.auto_authorize:
-                raise
-            self.authorize(intent)
-            return super().resolve(intent)
-
-
-def _legacy_service(state: Path, recipes: Path) -> LockstepCommandService:
-    return _legacy_command_service(
-        state,
-        recipes,
-        runners={"pinned": FakeRunner()},
-        effect_authority=_AutoGrantAuthority(),
-    )
-
-
-def _compile(tmp_path: Path, name: str, flow: str):
-    source = tmp_path / f"{name}.workflow.yaml"
-    source.write_text(
-        "workflow_version: '1'\n"
-        f"name: {name}\n"
-        "description: Gate B durable recovery state\n"
-        "protect: ['**']\n"
-        f"flow:\n{flow}"
-    )
-    catalog = ResolvedCatalog()
-    workflow = parse_workflow(load_workflow(source))
-    result = compile_workflow(validate_semantics(workflow, catalog), catalog)
-    recipes = tmp_path / "recipes"
-    recipes.mkdir(exist_ok=True)
-    for relative_path, content in result.executable_files.items():
-        target = recipes / relative_path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(content)
-    return recipes, result
-
-
-def _stop_pump(service: LockstepCommandService) -> None:
-    service._pump_stop.set()  # noqa: SLF001 - deterministic recovery boundary
-    service._pump_wakeup.set()  # noqa: SLF001
-    thread = service._pump_thread  # noqa: SLF001
-    if thread is not None:
-        thread.join(timeout=5)
-        assert not thread.is_alive()
 
 
 @dataclass(frozen=True)
