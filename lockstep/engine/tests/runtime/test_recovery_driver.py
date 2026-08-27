@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from contextlib import contextmanager
 from importlib import import_module
 from inspect import Parameter, signature
@@ -123,6 +124,54 @@ def test_recovery_driver_has_exact_private_sweep_surface() -> None:
         "limit": int,
         "return": tuple[str, ...],
     }
+
+
+def test_automatic_recovery_reaches_inert_sweep_once(tmp_path: Path) -> None:
+    with _prepared_command(tmp_path) as command:
+        durable_before = _durable_command_state(command)
+        drive_before = _command_drive_state(command)
+        driver = command._recovery_driver
+        driver_before = dict(vars(driver))
+        sweep = driver._sweep_run_drive_watches
+        calls: list[tuple[str | None, int, bool]] = []
+
+        def observe_sweep(
+            *,
+            project_identity: str | None,
+            limit: int,
+        ) -> tuple[str, ...]:
+            contender_acquired: list[bool] = []
+
+            def probe_recovery_lock() -> None:
+                acquired = command._admission_recovery_lock.acquire(blocking=False)
+                contender_acquired.append(acquired)
+                if acquired:
+                    command._admission_recovery_lock.release()
+
+            contender = threading.Thread(target=probe_recovery_lock)
+            contender.start()
+            contender.join(timeout=5)
+            assert not contender.is_alive()
+            calls.append((project_identity, limit, contender_acquired[0]))
+            return sweep(project_identity=project_identity, limit=limit)
+
+        driver._sweep_run_drive_watches = observe_sweep
+        try:
+            command._recover_engine_effects()
+        finally:
+            del driver._sweep_run_drive_watches
+
+        assert {
+            "durable_unchanged": _durable_command_state(command) == durable_before,
+            "drive_unchanged": _command_drive_state(command) == drive_before,
+            "driver_unchanged": dict(vars(driver)) == driver_before,
+            "sweep_calls": calls,
+        } == {
+            "durable_unchanged": True,
+            "drive_unchanged": True,
+            "driver_unchanged": True,
+            "sweep_calls": [(None, command._MAX_ACTIVE_EFFECT_RUNS, False)],
+        }
 
 
 def test_recovery_driver_returns_false_without_sql_or_state_change(
