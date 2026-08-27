@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import stat
 from dataclasses import dataclass
@@ -53,6 +54,37 @@ def tree_image(root: Path) -> dict[str, TreeEntry]:
         path.relative_to(root).as_posix(): _tree_entry(path)
         for path in sorted(root.rglob("*"))
     }}
+
+
+def assert_source_identity(source: object, project: Path, source_path: Path) -> None:
+    """Assert one planned workflow source has its exact stable capture."""
+
+    source_info = source_path.lstat()
+    assert source.resolved_path == source_path.resolve()
+    assert source.content == source_path.read_bytes()
+    assert source.sha256 == hashlib.sha256(source.content).hexdigest()
+    assert (
+        source.leaf.device,
+        source.leaf.inode,
+        source.leaf.mode,
+        source.leaf.size,
+        source.leaf.mtime_ns,
+    ) == (
+        source_info.st_dev,
+        source_info.st_ino,
+        source_info.st_mode,
+        source_info.st_size,
+        source_info.st_mtime_ns,
+    )
+    expected_paths = (
+        project.resolve(),
+        (project / ".lockstep").resolve(),
+        source_path.parent.resolve(),
+    )
+    assert tuple(item.resolved_path for item in source.ancestors) == expected_paths
+    assert tuple((item.device, item.inode) for item in source.ancestors) == tuple(
+        (path.lstat().st_dev, path.lstat().st_ino) for path in expected_paths
+    )
 
 
 def write_workflow(

@@ -6,7 +6,6 @@ import hashlib
 import inspect
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -19,6 +18,7 @@ from lockstep.authoring import (
 )
 
 from tests._authoring_gate import (
+    assert_source_identity,
     compile_closure,
     expected_compilation_image,
     observed_compilation_image,
@@ -71,32 +71,7 @@ def _assert_leaf_source_identity(bundle, project: Path, source_path: Path) -> No
     )
     assert tuple(source.role for source in bundle.sources) == ("leaf",)
     source = bundle.sources[0]
-    source_info = source_path.lstat()
-    assert source.resolved_path == source_path.resolve()
-    assert source.content == source_path.read_bytes()
-    assert source.sha256 == hashlib.sha256(source.content).hexdigest()
-    assert (
-        source.leaf.device,
-        source.leaf.inode,
-        source.leaf.mode,
-        source.leaf.size,
-        source.leaf.mtime_ns,
-    ) == (
-        source_info.st_dev,
-        source_info.st_ino,
-        source_info.st_mode,
-        source_info.st_size,
-        source_info.st_mtime_ns,
-    )
-    expected_paths = (
-        project.resolve(),
-        (project / ".lockstep").resolve(),
-        source_path.parent.resolve(),
-    )
-    assert tuple(item.resolved_path for item in source.ancestors) == expected_paths
-    assert tuple(
-        (item.device, item.inode) for item in source.ancestors
-    ) == tuple((path.lstat().st_dev, path.lstat().st_ino) for path in expected_paths)
+    assert_source_identity(source, project, source_path)
     assert bundle.dependency_edges == (("leaf", ()),)
 
 
@@ -324,23 +299,6 @@ def test_project_compilation_bundle_rejects_mismatched_paired_ancestors(
 
     with pytest.raises(ValueError, match="paired destination ancestors"):
         replace(bundle, after_images=(changed_after, *bundle.after_images[1:]))
-
-
-def test_leaf_only_planner_temporarily_rejects_compiler_generated_files(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import lockstep.authoring_bundle as bundle_module
-
-    project = tmp_path / "project"
-    write_workflow(project, "leaf")
-    monkeypatch.setattr(
-        bundle_module,
-        "compile_workflow_document",
-        lambda _document, _catalog: (None, SimpleNamespace(generated_files=(object(),))),
-    )
-
-    with pytest.raises(AuthoringError, match="generated files"):
-        bundle_module.plan_project_compilation(project_paths(project, "leaf"))
 
 
 @pytest.mark.parametrize("template", ("reviewed-change", "parallel-review"))
