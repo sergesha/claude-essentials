@@ -7,7 +7,7 @@ import re
 import tempfile
 import threading
 from collections import deque
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import replace
 from pathlib import Path
@@ -34,14 +34,16 @@ from lockstep.runtime.effects.authority import (
 )
 from lockstep.runtime.effects.coordinator import EffectCoordinator
 from lockstep.runtime.effects.descriptors import (
-    derive_effect_id,
     parse_effect_descriptor,
 )
 from lockstep.runtime.effects.ledger import EffectLedger
-from lockstep.runtime.effects.models import EffectDescriptor, ScopeDescriptor
+from lockstep.runtime.effects.models import EffectDescriptor
 from lockstep.runtime.effects.models import AcceptDescriptor
 from lockstep.runtime.errors import LockstepError
-from lockstep.runtime.engine_drive_service import EngineDriveService
+from lockstep.runtime.engine_drive_service import (
+    EngineDriveService,
+    ProtectedDescriptor,
+)
 from lockstep.runtime.effects.owner_consent import (
     IssuedPublicationConsent,
     OwnerConsentAuthority,
@@ -55,7 +57,6 @@ from lockstep.runtime.owner_state import ensure_owner_directory, initialize_owne
 from lockstep.runtime.payload_limits import PayloadLimitExceeded, bounded_json
 from lockstep.runtime.providers.manual import (
     ManualProvider,
-    ManualProviderError,
     ManualSubmission,
 )
 from lockstep.runtime.providers.base import RunnerAdapter
@@ -84,7 +85,6 @@ from lockstep.runtime.status import ScenarioStatus, project_status
 from lockstep.runtime.storage import RuntimeSchemaMigrator, SQLiteStore
 from lockstep.runtime.start_input import (
     canonical_start_input,
-    decode_canonical_start_input,
     validate_start_input,
 )
 
@@ -213,6 +213,7 @@ class LockstepCommandService:
         self._pump_stop = threading.Event()
         self._pump_wakeup = threading.Event()
         self._active_effect_runs: set[str] = set()
+        self._owned_effect_bindings: set[str] = set()
         self._initial_recovery_exclusion: str | None = None
         self._queued_effect_runs: set[str] = set()
         self._active_effect_queue: deque[str] = deque()
@@ -221,11 +222,6 @@ class LockstepCommandService:
         # Serialize foreground admission with recovery enumeration so the pump
         # cannot finish and unbind a run between two foreground app uses.
         self._admission_recovery_lock = threading.RLock()
-        self._recovery_thread_cursor: str | None = None
-        # Ephemeral scan progress only; effect phase and native state remain the
-        # durable authorities.  Project cursors prevent bounded operator sweeps
-        # from repeatedly selecting the same foreign/earlier active threads.
-        self._scenario_recovery_cursors: dict[str, str] = {}
         self._pump_thread: threading.Thread | None = None
         self._pump_failure: BaseException | None = None
         self._start_activation = _WritableCoreActivation(
@@ -384,6 +380,10 @@ class LockstepCommandService:
             migrator=RuntimeSchemaMigrator(self.store),
             coordinator=self.coordinator,
             snapshot_resolver=self.snapshot_resolver,
+            exclude_run_drive=lambda run_id: (
+                run_id == self._initial_recovery_exclusion
+            ),
+            drive_recovered_run=self._drive_recovered_run,
         )
 
     def _finish_writable_core_activation(
@@ -426,9 +426,9 @@ class LockstepCommandService:
                 store.close()
         with self._active_effect_lock:
             self._active_effect_runs.clear()
+            self._owned_effect_bindings.clear()
             self._queued_effect_runs.clear()
             self._active_effect_queue.clear()
-        self._recovery_thread_cursor = None
         self._pump_thread = None
         self._pump_failure = None
         self._pump_stop.clear()
@@ -468,80 +468,25 @@ class LockstepCommandService:
     def _recover_engine_effects(self) -> None:
         """Adopt durable protected work without a scheduler or status side effect."""
 
-        self._install_recovered_runtime_execution(
-            after_thread_id=self._recovery_thread_cursor
-        )
+        self._install_recovered_runtime_execution()
         with self._admission_recovery_lock:
             self._recovery_driver._sweep_run_drive_watches(
                 project_identity=None,
                 limit=self._MAX_ACTIVE_EFFECT_RUNS,
             )
-            self._recover_start_admissions()
-            self._recover_effect_batch()
-
-    def _recover_effect_batch(self) -> None:
-        thread_ids = self.effects.list_recovery_threads(
-            limit=self._MAX_ACTIVE_EFFECT_RUNS,
-            after_thread_id=self._recovery_thread_cursor,
-        )
-        if not thread_ids:
-            self._recovery_thread_cursor = None
-            return
-        for thread_id in thread_ids:
-            binding = self.catalog.find_by_thread(thread_id)
-            run_id = binding.public_run_id
-            if not self._reserve_effect_run(run_id):
-                return
-            self.runtime.bind(binding)
-            self._drive_engine_owned(run_id)
-            self._recovery_thread_cursor = thread_id
-            with self._active_effect_lock:
-                active = run_id in self._active_effect_runs
-            if not active:
-                self.runtime.unbind(run_id)
-
-    def _recover_start_admissions(self) -> None:
-        for watch in self.effects.list_dispatch_watches(
-            limit=self._MAX_ACTIVE_EFFECT_RUNS
-        ):
-            binding = self.catalog.get(watch.public_run_id)
-            if not self._reserve_effect_run(binding.public_run_id):
-                return
-            try:
-                if binding.public_run_id == self._initial_recovery_exclusion:
-                    self._deactivate_effect_run(binding.public_run_id)
-                    continue
-                encoded = self.blobs.read(watch.input_blob)
-                values = decode_canonical_start_input(encoded)
-                resolver = getattr(self, "snapshot_resolver", None)
-                if resolver is not None:
-                    resolver.start_ref(binding)
-                self.runtime.bind(binding)
-                snapshot = self.runtime.ensure_started(binding.public_run_id, values)
-                self._drive_engine_owned(
-                    binding.public_run_id, binding=binding, snapshot=snapshot
-                )
-            except (KeyError, TypeError, ValueError) as exc:
-                self._deactivate_effect_run(binding.public_run_id)
-                self.runtime.unbind(binding.public_run_id)
-                raise LockstepError("start admission input integrity failure") from exc
-            except BaseException:
-                self._deactivate_effect_run(binding.public_run_id)
-                self.runtime.unbind(binding.public_run_id)
-                raise
-            with self._active_effect_lock:
-                active = binding.public_run_id in self._active_effect_runs
-            if not active:
-                self.runtime.unbind(binding.public_run_id)
 
     def _reserve_effect_run(self, run_id: str) -> bool:
+        available, _owned = self._reserve_effect_run_owned(run_id)
+        return available
+
+    def _reserve_effect_run_owned(self, run_id: str) -> tuple[bool, bool]:
         with self._active_effect_lock:
             if run_id in self._active_effect_runs:
-                return True
+                return True, False
             if len(self._active_effect_runs) >= self._MAX_ACTIVE_EFFECT_RUNS:
-                return False
+                return False, False
             self._active_effect_runs.add(run_id)
-            return True
+            return True, True
 
     def _activate_effect_run(self, run_id: str) -> None:
         if not self._reserve_effect_run(run_id):
@@ -556,6 +501,30 @@ class LockstepCommandService:
         with self._active_effect_lock:
             self._active_effect_runs.discard(run_id)
             self._queued_effect_runs.discard(run_id)
+
+    def _finish_owned_effect_binding(self, run_id: str, owned: bool) -> None:
+        if not owned:
+            return
+        release = False
+        with self._active_effect_lock:
+            if run_id in self._active_effect_runs:
+                self._owned_effect_bindings.add(run_id)
+            else:
+                release = True
+        if release:
+            self.runtime.unbind(run_id)
+
+    def _release_inactive_effect_binding(self, run_id: str) -> None:
+        release = False
+        with self._active_effect_lock:
+            if (
+                run_id not in self._active_effect_runs
+                and run_id in self._owned_effect_bindings
+            ):
+                self._owned_effect_bindings.discard(run_id)
+                release = True
+        if release:
+            self.runtime.unbind(run_id)
 
     def _take_active_effect_runs(self, limit: int = 128) -> tuple[str, ...]:
         selected = []
@@ -577,10 +546,11 @@ class LockstepCommandService:
             if self._pump_stop.is_set():
                 return
             try:
-                for run_id in self._take_active_effect_runs():
-                    binding = self.catalog.get(run_id)
-                    self.runtime.bind(binding)
-                    self._drive_engine_owned(run_id, binding=binding)
+                with self._admission_recovery_lock:
+                    for run_id in self._take_active_effect_runs():
+                        binding = self.catalog.get(run_id)
+                        self.runtime.bind(binding)
+                        self._drive_engine_owned(run_id, binding=binding)
                 self._recover_engine_effects()
             except Exception as exc:  # noqa: BLE001 - retain cross-provider failure
                 self._pump_failure = exc
@@ -708,6 +678,44 @@ class LockstepCommandService:
         snapshot=None,
     ) -> ScenarioStatus:
         """Advance only coordinator-owned effects through monotonic decisions."""
+        try:
+            return self._engine_drive_service().drive(
+                run_id, binding=binding, snapshot=snapshot
+            )
+        finally:
+            self._release_inactive_effect_binding(run_id)
+
+    def _drive_recovered_run(self, run_id: str) -> bool:
+        """Try one recovered run through the normal authoritative drive owner."""
+
+        binding = self.catalog.get(run_id)
+        owns_binding = self.runtime.bind(binding)
+        owns_reservation = False
+
+        def reserve_effect_run(recovered_run_id: str) -> bool:
+            nonlocal owns_reservation
+            available, owned = self._reserve_effect_run_owned(recovered_run_id)
+            owns_reservation = owns_reservation or owned
+            return available
+
+        try:
+            try:
+                return self._engine_drive_service(
+                    reserve_effect_run=reserve_effect_run
+                ).drive_recovered(run_id)
+            except BaseException:
+                if owns_reservation:
+                    self._deactivate_effect_run(run_id)
+                raise
+        finally:
+            self._release_inactive_effect_binding(run_id)
+            self._finish_owned_effect_binding(run_id, owns_binding)
+
+    def _engine_drive_service(
+        self,
+        *,
+        reserve_effect_run: Callable[[str], bool] | None = None,
+    ) -> EngineDriveService:
         return EngineDriveService(
             runtime=self.runtime,
             catalog=getattr(self, "catalog", None),
@@ -716,51 +724,10 @@ class LockstepCommandService:
             coordinator=self.coordinator,
             max_decisions=self._MAX_ENGINE_PROGRESS_DECISIONS,
             protected_descriptor=self._protected_interrupt_descriptor,
-            reserve_effect_run=self._reserve_effect_run,
+            reserve_effect_run=reserve_effect_run or self._reserve_effect_run,
             activate_effect_run=self._activate_effect_run,
             deactivate_effect_run=self._deactivate_effect_run,
-            acknowledge_start=self._ack_start_if_observable,
-        ).drive(run_id, binding=binding, snapshot=snapshot)
-
-    def _ack_start_if_observable(
-        self,
-        binding: RunBinding,
-        snapshot,
-        protected: tuple[tuple[object, EffectDescriptor | ScopeDescriptor], ...],
-    ) -> None:
-        if not snapshot.pending and not snapshot.next:
-            self.effects.acknowledge_dispatch_watch(binding.public_run_id)
-            return
-        if snapshot.pending and not protected:
-            self.effects.acknowledge_dispatch_watch(binding.public_run_id)
-            return
-        for interrupt, descriptor in protected:
-            effect_id = derive_effect_id(interrupt.coordinate, descriptor.digest)
-            try:
-                record = self.effects.get(effect_id)
-            except KeyError:
-                return
-            if (
-                record.coordinate != interrupt.coordinate
-                or record.descriptor_digest != descriptor.digest
-            ):
-                raise LockstepError("start admission effect binding mismatch")
-            if isinstance(descriptor, EffectDescriptor) and descriptor.kind == "manual":
-                try:
-                    handoff = self.manual.lookup(effect_id)
-                except (KeyError, ValueError, ManualProviderError) as exc:
-                    raise LockstepError(
-                        "start admission manual handoff integrity failure"
-                    ) from exc
-                if (
-                    handoff.coordinate != interrupt.coordinate
-                    or handoff.descriptor_digest != descriptor.digest
-                ):
-                    raise LockstepError(
-                        "start admission manual handoff binding mismatch"
-                    )
-        if protected:
-            self.effects.acknowledge_dispatch_watch(binding.public_run_id)
+        )
 
     def _snapshot_status(
         self, run_id: str, project: str
@@ -790,9 +757,8 @@ class LockstepCommandService:
         self._activate_writable_core()
         recovered: list[str] = []
         with self._activation_lock, self._admission_recovery_lock:
-            cursor = self._scenario_recovery_cursors.get(project_identity)
             self._install_recovered_runtime_execution(
-                after_thread_id=cursor, limit=limit
+                limit=limit
             )
             recovered.extend(
                 self._recovery_driver._sweep_run_drive_watches(
@@ -800,22 +766,6 @@ class LockstepCommandService:
                     limit=limit,
                 )
             )
-            thread_ids = self.effects.list_recovery_threads(
-                limit=limit, after_thread_id=cursor
-            )
-            if not thread_ids:
-                self._scenario_recovery_cursors.pop(project_identity, None)
-            for thread_id in thread_ids:
-                binding = self.catalog.find_by_thread(thread_id)
-                if binding.project_identity != project_identity:
-                    self._scenario_recovery_cursors[project_identity] = thread_id
-                    continue
-                if not self._reserve_effect_run(binding.public_run_id):
-                    break
-                self.runtime.bind(binding)
-                self._drive_engine_owned(binding.public_run_id, binding=binding)
-                recovered.append(binding.public_run_id)
-                self._scenario_recovery_cursors[project_identity] = thread_id
         return {"recovered": recovered, "count": len(recovered), "limit": limit}
 
     def _worker_interrupt(self, run_id: str, step: str | None, project: str):
@@ -858,7 +808,7 @@ class LockstepCommandService:
     @staticmethod
     def _protected_interrupt_descriptor(
         interrupt,
-    ) -> EffectDescriptor | ScopeDescriptor | None:
+    ) -> ProtectedDescriptor | None:
         value = interrupt.value
         if not isinstance(value, dict):
             return None

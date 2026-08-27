@@ -50,15 +50,6 @@ class StaleEffectLease(RuntimeError):
     """The supplied effect lease is not the current live fence."""
 
 
-@dataclass(frozen=True)
-class EffectDispatchWatch:
-    """A process-neutral discovery outbox, never workflow status or authority."""
-
-    public_run_id: str
-    input_blob: BlobRef
-    admitted_at: datetime
-
-
 @dataclass(frozen=True, slots=True)
 class RunDriveWatch:
     """Durable v2 discovery record without workflow or scheduling state."""
@@ -87,9 +78,14 @@ class RunDriveWatch:
                 "input_blob_sha256 must be a lowercase SHA-256 digest"
             )
         if self.input_blob_size is not None and (
-            type(self.input_blob_size) is not int or self.input_blob_size <= 0
+            type(self.input_blob_size) is not int
+            or self.input_blob_size < 0
+            or self.input_blob_size > 64 * 1024 * 1024
         ):
-            raise ValueError("input_blob_size must be a positive integer")
+            raise ValueError(
+                "input_blob_size must be a non-negative integer "
+                "not exceeding 64 MiB"
+            )
         if (
             not isinstance(self.admitted_at, datetime)
             or self.admitted_at.tzinfo is None
@@ -276,6 +272,18 @@ class EffectLedger:
     def _now(self) -> datetime:
         return _utc(self._clock())
 
+    @staticmethod
+    def _run_drive_watch(row) -> RunDriveWatch:
+        admitted_at = _load(row.admitted_at)
+        assert admitted_at is not None
+        return RunDriveWatch(
+            row.admission_seq,
+            row.public_run_id,
+            row.input_blob_sha256,
+            row.input_blob_size,
+            admitted_at,
+        )
+
     def admit_start(
         self,
         catalog: RunCatalog,
@@ -283,7 +291,7 @@ class EffectLedger:
         input_blob: BlobRef,
         *,
         on_admit: Callable[[object, RunBinding], None] | None = None,
-    ) -> tuple[RunBinding, EffectDispatchWatch]:
+    ) -> tuple[RunBinding, RunDriveWatch]:
         """Atomically bind a run and record its immutable initial command."""
 
         if catalog._store is not self._store:
@@ -305,14 +313,11 @@ class EffectLedger:
                 select(table).where(table.c.public_run_id == binding.public_run_id)
             ).first()
             if row is not None:
-                observed_at = _load(row.admitted_at)
-                assert observed_at is not None
-                existing = EffectDispatchWatch(
-                    row.public_run_id,
-                    BlobRef(row.input_blob_sha256, int(row.input_blob_size)),
-                    observed_at,
-                )
-                if existing.input_blob != input_blob:
+                existing = self._run_drive_watch(row)
+                if (
+                    existing.input_blob_sha256 != input_blob.sha256
+                    or existing.input_blob_size != input_blob.size
+                ):
                     raise EffectConflict(
                         "start admission is already bound to another input"
                     )
@@ -325,43 +330,12 @@ class EffectLedger:
                     admitted_at=_dump(admitted_at),
                 )
             )
-        return admitted_binding, EffectDispatchWatch(
-            admitted_binding.public_run_id, input_blob, admitted_at
-        )
-
-    def list_dispatch_watches(self, *, limit: int) -> tuple[EffectDispatchWatch, ...]:
-        if type(limit) is not int or limit <= 0 or limit > 1_000:
-            raise ValueError("dispatch-watch limit must be an integer from 1 to 1000")
-        table = self._store.tables.run_drive_watches
-        with self._store.read_connection() as connection:
-            rows = connection.execute(
-                select(table)
-                .order_by(table.c.admitted_at, table.c.public_run_id)
-                .limit(limit)
-            ).all()
-        result = []
-        for row in rows:
-            admitted_at = _load(row.admitted_at)
-            assert admitted_at is not None
-            result.append(
-                EffectDispatchWatch(
-                    row.public_run_id,
-                    BlobRef(row.input_blob_sha256, int(row.input_blob_size)),
-                    admitted_at,
+            inserted = connection.execute(
+                select(table).where(
+                    table.c.public_run_id == admitted_binding.public_run_id
                 )
-            )
-        return tuple(result)
-
-    def acknowledge_dispatch_watch(self, public_run_id: str) -> bool:
-        """Acknowledge only after the native snapshot is terminal."""
-
-        _nonempty(public_run_id, "dispatch public_run_id")
-        table = self._store.tables.run_drive_watches
-        with self._store._v2_write_transaction() as connection:
-            result = connection.execute(
-                delete(table).where(table.c.public_run_id == public_run_id)
-            )
-        return result.rowcount == 1
+            ).one()
+            return admitted_binding, self._run_drive_watch(inserted)
 
     def max_run_drive_admission_seq(self) -> int | None:
         table = self._store.tables.run_drive_watches
@@ -401,20 +375,29 @@ class EffectLedger:
                 .order_by(table.c.admission_seq)
                 .limit(limit)
             ).all()
-        watches = []
-        for row in rows:
-            admitted_at = _load(row.admitted_at)
-            assert admitted_at is not None
-            watches.append(
-                RunDriveWatch(
-                    row.admission_seq,
-                    row.public_run_id,
-                    row.input_blob_sha256,
-                    row.input_blob_size,
-                    admitted_at,
-                )
+        return tuple(self._run_drive_watch(row) for row in rows)
+
+    def list_run_drive_watches_by_public_run_ids(
+        self, public_run_ids: tuple[str, ...]
+    ) -> tuple[RunDriveWatch, ...]:
+        if (
+            type(public_run_ids) is not tuple
+            or not 1 <= len(public_run_ids) <= 128
+            or any(type(value) is not str or not value for value in public_run_ids)
+            or public_run_ids != tuple(sorted(set(public_run_ids)))
+        ):
+            raise ValueError(
+                "run-drive watch IDs must be a sorted unique tuple of 1 to 128 "
+                "non-empty strings"
             )
-        return tuple(watches)
+        table = self._store.tables.run_drive_watches
+        with self._store.read_connection() as connection:
+            rows = connection.execute(
+                select(table)
+                .where(table.c.public_run_id.in_(public_run_ids))
+                .order_by(table.c.admission_seq)
+            ).all()
+        return tuple(self._run_drive_watch(row) for row in rows)
 
     def acknowledge_run_drive_watch(self, public_run_id: str) -> None:
         if type(public_run_id) is not str or not public_run_id:

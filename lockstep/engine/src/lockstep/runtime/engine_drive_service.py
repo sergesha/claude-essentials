@@ -3,14 +3,46 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from lockstep.runtime.catalog import RunBinding
-from lockstep.runtime.effects.models import EffectDescriptor, ScopeDescriptor
+from lockstep.runtime.effects.models import (
+    AcceptDescriptor,
+    DecisionDescriptor,
+    EffectDescriptor,
+    PublishDescriptor,
+    ScopeDescriptor,
+)
 from lockstep.runtime.errors import LockstepError
 from lockstep.runtime.status import ScenarioStatus, project_status
 
 
-Protected = tuple[tuple[object, EffectDescriptor | ScopeDescriptor], ...]
+ProtectedDescriptor = (
+    EffectDescriptor
+    | ScopeDescriptor
+    | DecisionDescriptor
+    | AcceptDescriptor
+    | PublishDescriptor
+)
+Protected = tuple[tuple[object, ProtectedDescriptor], ...]
+_CONTINUATION_ACTIONS = frozenset(
+    {"prepared", "launch_claimed", "sealed", "delivered", "awaiting_delivery"}
+)
+_ACCEPTED_ATTEMPT_ACTIONS = _CONTINUATION_ACTIONS | frozenset(
+    {
+        "publication_claimed",
+        "publication_progress",
+        "running",
+        "quiescence_pending",
+        "indeterminate",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _DriveReport:
+    status: ScenarioStatus
+    accepted: bool
 
 
 class EngineDriveService:
@@ -25,11 +57,10 @@ class EngineDriveService:
         effects: object,
         coordinator: object,
         max_decisions: int,
-        protected_descriptor: Callable[[object], EffectDescriptor | ScopeDescriptor | None],
+        protected_descriptor: Callable[[object], ProtectedDescriptor | None],
         reserve_effect_run: Callable[[str], bool],
         activate_effect_run: Callable[[str], None],
         deactivate_effect_run: Callable[[str], None],
-        acknowledge_start: Callable[[RunBinding, object, Protected], None],
     ) -> None:
         self._runtime = runtime
         self._catalog = catalog
@@ -41,7 +72,6 @@ class EngineDriveService:
         self._reserve_effect_run = reserve_effect_run
         self._activate_effect_run = activate_effect_run
         self._deactivate_effect_run = deactivate_effect_run
-        self._acknowledge_start = acknowledge_start
 
     def _protected(self, snapshot: object) -> Protected:
         return tuple(
@@ -50,17 +80,17 @@ class EngineDriveService:
             if (descriptor := self._protected_descriptor(interrupt)) is not None
         )
 
+    @staticmethod
+    def _accepted_attempt(actions: set[str]) -> bool:
+        return bool(actions & _ACCEPTED_ATTEMPT_ACTIONS)
+
     def _settle(
         self,
         run_id: str,
-        binding: RunBinding,
-        snapshot: object,
-        protected: Protected,
         status: ScenarioStatus,
         *,
         keep_active: bool,
     ) -> ScenarioStatus:
-        self._acknowledge_start(binding, snapshot, protected)
         if keep_active:
             self._activate_effect_run(run_id)
         else:
@@ -91,63 +121,67 @@ class EngineDriveService:
         run_id: str,
         binding: RunBinding,
         snapshot: object,
-    ) -> tuple[ScenarioStatus | None, object]:
+    ) -> tuple[ScenarioStatus | None, object, bool]:
         status = project_status(binding, snapshot, self._leases, self._effects)
         protected = self._protected(snapshot)
         if not protected:
             cleanup = self._coordinator.reconcile_consumed(run_id)
             if any(report.action == "busy" for report in cleanup):
                 self._activate_effect_run(run_id)
-                return status, snapshot
-            return self._settle(
-                run_id, binding, snapshot, protected, status, keep_active=False
-            ), snapshot
+                return status, snapshot, False
+            return self._settle(run_id, status, keep_active=False), snapshot, False
         if status.status == "awaiting" and status.owner == "worker":
-            return self._settle(
-                run_id, binding, snapshot, protected, status, keep_active=False
-            ), snapshot
+            return self._settle(run_id, status, keep_active=False), snapshot, False
         has_runner = any(
             isinstance(descriptor, EffectDescriptor)
             and descriptor.runner is not None
             for _interrupt, descriptor in protected
         )
         if has_runner and not self._reserve_effect_run(run_id):
-            return status, snapshot
+            return status, snapshot, False
         reports = self._coordinator.reconcile_pending(run_id)
         actions = {report.action for report in reports}
+        accepted = self._accepted_attempt(actions)
         snapshot, delivery_blocked = self._deliver(run_id, protected, actions)
         status = project_status(binding, snapshot, self._leases, self._effects)
         if delivery_blocked:
             self._activate_effect_run(run_id)
-            return status, snapshot
-        current_protected = self._protected(snapshot)
+            return status, snapshot, accepted
         if status.status == "awaiting" and status.owner == "worker":
             return self._settle(
                 run_id,
-                binding,
-                snapshot,
-                current_protected,
                 status,
                 keep_active=False,
-            ), snapshot
-        progressive = {
-            "prepared",
-            "launch_claimed",
-            "sealed",
-            "delivered",
-            "awaiting_delivery",
-        }
-        if not actions <= progressive:
+            ), snapshot, accepted
+        if not actions <= _CONTINUATION_ACTIONS:
             keep_active = bool(actions & {"running", "quiescence_pending", "busy"})
             return self._settle(
                 run_id,
-                binding,
-                snapshot,
-                current_protected,
                 status,
                 keep_active=keep_active,
-            ), snapshot
-        return None, snapshot
+            ), snapshot, accepted
+        return None, snapshot, accepted
+
+    def _drive_report(
+        self,
+        run_id: str,
+        *,
+        binding: RunBinding | None = None,
+        snapshot: object | None = None,
+    ) -> _DriveReport:
+        current_binding = binding or self._catalog.get(run_id)
+        current_snapshot = snapshot or self._runtime.snapshot(
+            run_id, subgraphs=True
+        )
+        accepted = False
+        for _decision in range(self._max_decisions):
+            status, current_snapshot, step_accepted = self._decision(
+                run_id, current_binding, current_snapshot
+            )
+            accepted = accepted or step_accepted
+            if status is not None:
+                return _DriveReport(status, accepted)
+        raise LockstepError("engine-owned progress exceeded its bounded decision budget")
 
     def drive(
         self,
@@ -156,12 +190,9 @@ class EngineDriveService:
         binding: RunBinding | None = None,
         snapshot: object | None = None,
     ) -> ScenarioStatus:
-        current_binding = binding or self._catalog.get(run_id)
-        current_snapshot = snapshot or self._runtime.snapshot(run_id, subgraphs=True)
-        for _decision in range(self._max_decisions):
-            status, current_snapshot = self._decision(
-                run_id, current_binding, current_snapshot
-            )
-            if status is not None:
-                return status
-        raise LockstepError("engine-owned progress exceeded its bounded decision budget")
+        return self._drive_report(
+            run_id, binding=binding, snapshot=snapshot
+        ).status
+
+    def drive_recovered(self, run_id: str) -> bool:
+        return self._drive_report(run_id).accepted

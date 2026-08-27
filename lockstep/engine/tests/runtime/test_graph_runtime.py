@@ -82,6 +82,17 @@ def test_native_ancestry_port_names_both_exact_checkpoint_pairs(method):
     ) * 6
 
 
+def test_bind_reports_new_lifecycle_ownership_atomically(tmp_path):
+    bundles, binding = _binding(tmp_path, FIXTURES / "parent_direct.recipe.yaml")
+    store, runtime = _runtime(tmp_path, bundles)
+    try:
+        assert runtime.bind(binding) is True
+        assert runtime.bind(binding) is False
+    finally:
+        runtime.close()
+        store.close()
+
+
 def test_fresh_start_restart_history_and_live_source_deletion(tmp_path):
     source = tmp_path / "recipes" / "parent.recipe.yaml"
     source.parent.mkdir()

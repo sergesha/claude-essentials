@@ -76,8 +76,6 @@ def _command_drive_state(command) -> tuple[object, ...]:
         tuple(sorted(command._active_effect_runs)),
         tuple(sorted(command._queued_effect_runs)),
         tuple(command._active_effect_queue),
-        command._recovery_thread_cursor,
-        tuple(sorted(command._scenario_recovery_cursors.items())),
         command._pump_thread,
         command._pump_stop.is_set(),
         command._pump_wakeup.is_set(),
@@ -99,6 +97,23 @@ def _contender_can_acquire(lock) -> bool:
     contender.join(timeout=5)
     assert not contender.is_alive()
     return acquired_by_contender[0]
+
+
+def test_temporary_binding_does_not_release_concurrent_same_binding() -> None:
+    from lockstep.runtime.recovery_driver import _bound_runtime
+
+    binding = SimpleNamespace(public_run_id="run-1")
+    unbound = []
+    runtime = SimpleNamespace(
+        binding=lambda _run_id: (_ for _ in ()).throw(KeyError("run-1")),
+        bind=lambda _binding: False,
+        unbind=unbound.append,
+    )
+
+    with _bound_runtime(runtime, binding) as available:
+        assert available is True
+
+    assert unbound == []
 
 
 @contextmanager
@@ -374,22 +389,44 @@ def test_non_decision_watch_delegates_only_public_run_id(
     )
     snapshots = iter((snapshot, terminal)) if accepted else iter((snapshot,))
     events = []
+    bound = {}
+
+    def current_binding(_run_id):
+        if run_id not in bound:
+            raise KeyError(run_id)
+        return bound[run_id]
+
+    def bind_runtime(recovered_binding):
+        created = run_id not in bound
+        bound[run_id] = recovered_binding
+        return created
+
+    def unbind_runtime(_run_id):
+        bound.pop(run_id, None)
+        events.append(("unbind", run_id))
 
     def read_snapshot(_run_id, **_kwargs):
+        assert run_id in bound
         value = next(snapshots)
         if value is terminal:
             events.append(("snapshot", run_id))
         return value
 
+    def drive_recovered(*args, **kwargs):
+        events.append(("drive", args, kwargs, run_id in bound))
+        if accepted:
+            bind_runtime(binding)
+        return accepted
+
     driver = object.__new__(RecoveryDriver)
     driver._catalog = SimpleNamespace(get=lambda _run_id: binding)
     driver._runtime = SimpleNamespace(
-        binding=lambda _run_id: binding,
+        binding=current_binding,
+        bind=bind_runtime,
+        unbind=unbind_runtime,
         snapshot=read_snapshot,
     )
-    driver._drive_recovered_run = lambda *args, **kwargs: (
-        events.append(("drive", args, kwargs)) or accepted
-    )
+    driver._drive_recovered_run = drive_recovered
     driver._coordinator = SimpleNamespace(
         reconcile_consumed=lambda recovered_run_id: (
             events.append(("reconcile", recovered_run_id)) or ()
@@ -418,7 +455,7 @@ def test_non_decision_watch_delegates_only_public_run_id(
     )
 
     assert driver._drive_run_watch(watch) is accepted
-    expected = [("drive", (run_id,), {})]
+    expected = [("unbind", run_id), ("drive", (run_id,), {}, False)]
     if accepted:
         expected.extend(
             (

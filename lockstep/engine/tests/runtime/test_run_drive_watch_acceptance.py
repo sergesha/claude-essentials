@@ -199,6 +199,7 @@ def _read_materialized_artifact(
     """Read and prove the producer, artifact registry, and native acceptance."""
 
     binding = command.catalog.get(run_id)
+    command.runtime.bind(binding)
     pending = command.runtime.snapshot(run_id, subgraphs=True)
     assert len(pending.pending) == 1
     descriptor = command._protected_interrupt_descriptor(  # noqa: SLF001

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import contextmanager
-from typing import Iterator
+from typing import Callable, Iterator
 
 from lockstep.runtime.blobs import (
     BlobRef,
@@ -20,7 +20,13 @@ from lockstep.runtime.effects.coordinator import (
 )
 from lockstep.runtime.effects.descriptors import parse_effect_descriptor
 from lockstep.runtime.effects.ledger import EffectLedger, RunDriveWatch
-from lockstep.runtime.effects.models import DecisionDescriptor
+from lockstep.runtime.effects.models import (
+    AcceptDescriptor,
+    DecisionDescriptor,
+    EffectDescriptor,
+    PublishDescriptor,
+    ScopeDescriptor,
+)
 from lockstep.runtime.graph_runtime import (
     GraphRuntime,
     NativeCoordinateRejected,
@@ -71,11 +77,10 @@ def _bound_runtime(
         current = runtime.binding(binding.public_run_id)
     except KeyError:
         try:
-            runtime.bind(binding)
+            owned = runtime.bind(binding)
         except _BINDING_INTEGRITY_ERRORS:
             yield False
             return
-        owned = True
     else:
         if current != binding:
             yield False
@@ -123,16 +128,16 @@ class _RunDriveBackfill:
             snapshot = self._runtime.snapshot(binding.public_run_id, subgraphs=True)
         return _classify_snapshot(binding.public_run_id, snapshot)
 
-    def apply_next_page(self) -> bool:
+    def apply_next_page(self) -> tuple[str, ...]:
         progress = self._progress
         if progress is not None and progress.completed:
-            return True
+            return ()
         cursor = None if progress is None else progress.after_public_run_id
         candidates = self._catalog.list_after_public_run_id(
             cursor, limit=self.PAGE_SIZE + 1
         )
         if not candidates and progress is None:
-            return False
+            return ()
         page = candidates[: self.PAGE_SIZE]
         classified = tuple(self._classify(binding) for binding in page)
         self._progress = self._migrator.apply_run_drive_watch_page(
@@ -140,7 +145,7 @@ class _RunDriveBackfill:
             classified=classified,
             exhausted=len(candidates) <= self.PAGE_SIZE,
         )
-        return self._progress.completed
+        return self._progress.inserted_public_run_ids
 
 
 class RecoveryDriver:
@@ -156,6 +161,8 @@ class RecoveryDriver:
         migrator: RuntimeSchemaMigrator,
         coordinator: EffectCoordinator,
         snapshot_resolver: RuntimeSnapshotResolver,
+        exclude_run_drive: Callable[[str], bool],
+        drive_recovered_run: Callable[[str], bool],
     ) -> None:
         self._catalog = catalog
         self._runtime = runtime
@@ -163,6 +170,8 @@ class RecoveryDriver:
         self._blobs = blobs
         self._coordinator = coordinator
         self._snapshot_resolver = snapshot_resolver
+        self._exclude_run_drive = exclude_run_drive
+        self._drive_recovered_run = drive_recovered_run
         self._backfill = _RunDriveBackfill(
             catalog=catalog,
             runtime=runtime,
@@ -176,30 +185,60 @@ class RecoveryDriver:
         limit: int,
     ) -> tuple[str, ...]:
         high_water = self._effects.max_run_drive_admission_seq()
-        if not self._backfill.apply_next_page():
-            return ()
+        inserted_public_run_ids = self._backfill.apply_next_page()
         if limit < 1:
             return ()
-        if high_water is None:
-            return ()
-        recovered = []
-        for watches in self._watch_pages(
-            high_water=high_water, page_size=128
-        ):
-            for watch in watches:
-                if self._try_drive_run_watch(watch, project_identity):
-                    recovered.append(watch.public_run_id)
-                    if len(recovered) == limit:
-                        return tuple(recovered)
+        recovered: list[str] = []
+        if high_water is not None:
+            for watches in self._watch_pages(
+                high_water=high_water, page_size=128
+            ):
+                recovered.extend(
+                    self._accepted_from(
+                        watches,
+                        project_identity=project_identity,
+                        limit=limit - len(recovered),
+                    )
+                )
+                if len(recovered) == limit:
+                    return tuple(recovered)
+        if inserted_public_run_ids:
+            watches = self._effects.list_run_drive_watches_by_public_run_ids(
+                inserted_public_run_ids
+            )
+            recovered.extend(
+                self._accepted_from(
+                    watches,
+                    project_identity=project_identity,
+                    limit=limit - len(recovered),
+                )
+            )
         return tuple(recovered)
+
+    def _accepted_from(
+        self,
+        watches: tuple[RunDriveWatch, ...],
+        *,
+        project_identity: str | None,
+        limit: int,
+    ) -> tuple[str, ...]:
+        accepted = []
+        for watch in watches:
+            if self._try_drive_run_watch(watch, project_identity):
+                accepted.append(watch.public_run_id)
+                if len(accepted) == limit:
+                    break
+        return tuple(accepted)
 
     def _try_drive_run_watch(
         self, watch: RunDriveWatch, project_identity: str | None
     ) -> bool:
         try:
-            return self._matches_project(
-                watch, project_identity
-            ) and self._drive_run_watch(watch)
+            return (
+                not self._exclude_run_drive(watch.public_run_id)
+                and self._matches_project(watch, project_identity)
+                and self._drive_run_watch(watch)
+            )
         except _RUN_DRIVE_INTEGRITY_ERRORS as exc:
             _LOG.warning(
                 "run-drive recovery skipped %s after %s",
@@ -237,8 +276,19 @@ class RecoveryDriver:
             return
         self._effects.acknowledge_run_drive_watch(run_id)
 
+    def _settle_after_accepted_drive(self, binding: RunBinding) -> None:
+        with _bound_runtime(self._runtime, binding) as available:
+            if not available:
+                return
+            snapshot = self._runtime.snapshot(
+                binding.public_run_id, subgraphs=True
+            )
+            if not snapshot.pending and not snapshot.next:
+                self._settle_terminal_watch(binding.public_run_id)
+
     def _drive_run_watch(self, watch: RunDriveWatch) -> bool:
         binding = self._catalog.get(watch.public_run_id)
+        delegate = False
         with _bound_runtime(self._runtime, binding) as available:
             if not available:
                 return False
@@ -272,11 +322,30 @@ class RecoveryDriver:
                 descriptor = parse_effect_descriptor(raw)
             except (TypeError, ValueError):
                 return False
-            if not isinstance(descriptor, DecisionDescriptor):
+            if isinstance(descriptor, DecisionDescriptor):
+                report = self._coordinator.reconcile_one(
+                    watch.public_run_id,
+                    interrupt.coordinate,
+                    expected_descriptor_digest=descriptor.digest,
+                )
+                accepted = report.action == "delivered"
+            elif isinstance(
+                descriptor,
+                (
+                    EffectDescriptor,
+                    ScopeDescriptor,
+                    AcceptDescriptor,
+                    PublishDescriptor,
+                ),
+            ):
+                delegate = True
+            else:
                 return False
-            report = self._coordinator.reconcile_one(
-                watch.public_run_id,
-                interrupt.coordinate,
-                expected_descriptor_digest=descriptor.digest,
-            )
-        return report.action == "delivered"
+            if not delegate:
+                if accepted:
+                    self._settle_after_accepted_drive(binding)
+                return accepted
+        accepted = self._drive_recovered_run(watch.public_run_id)
+        if accepted:
+            self._settle_after_accepted_drive(binding)
+        return accepted

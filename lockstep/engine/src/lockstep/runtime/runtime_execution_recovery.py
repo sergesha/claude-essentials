@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -56,13 +57,18 @@ class RuntimeExecutionRecovery:
         raise ValueError("runtime requirement has an unsupported runner selector")
 
     def _durable_runs(
-        self, *, limit: int, after_thread_id: str | None
+        self,
+        *,
+        limit: int,
+        after_thread_id: str | None,
+        watch_filter: Callable[[RunBinding], bool] | None = None,
     ) -> tuple[tuple[RunBinding, bool, tuple[EffectRecord, ...]], ...]:
-        watched = {
-            item.public_run_id
-            for item in self._effects.list_dispatch_watches(limit=limit)
-        }
-        bindings = {run_id: self._catalog.get(run_id) for run_id in watched}
+        watches = self._watched_bindings(
+            limit=limit,
+            watch_filter=watch_filter,
+        )
+        watched = {binding.public_run_id for binding in watches}
+        bindings = {binding.public_run_id: binding for binding in watches}
         records: dict[str, tuple[EffectRecord, ...]] = {}
         for thread_id in self._effects.list_recovery_threads(
             limit=limit, after_thread_id=after_thread_id
@@ -87,14 +93,58 @@ class RuntimeExecutionRecovery:
             for run_id, binding in sorted(bindings.items())
         )
 
+    def _watched_bindings(
+        self,
+        *,
+        limit: int,
+        watch_filter: Callable[[RunBinding], bool] | None,
+    ) -> tuple[RunBinding, ...]:
+        high_water = self._effects.max_run_drive_admission_seq()
+        if high_water is None:
+            return ()
+        page_size = 128 if watch_filter is not None else limit
+        cursor = 0
+        bindings = []
+        while len(bindings) < limit:
+            page = self._effects.list_run_drive_watches(
+                after_admission_seq=cursor,
+                high_water=high_water,
+                limit=page_size,
+            )
+            if not page:
+                break
+            for watch in page:
+                binding = self._catalog.get(watch.public_run_id)
+                if watch_filter is None or watch_filter(binding):
+                    bindings.append(binding)
+                    if len(bindings) == limit:
+                        break
+            cursor = page[-1].admission_seq
+            if len(page) < page_size:
+                break
+        return tuple(bindings)
+
     def _protected_work(
         self, *, limit: int, after_thread_id: str | None
     ) -> tuple[_ProtectedRecoveryWork, ...]:
+        watched_indexes: dict[str, RuntimeRequirementIndex] = {}
+
+        def has_protected_requirements(binding: RunBinding) -> bool:
+            index = self._resolver.index(binding)
+            if not index.requirements:
+                return False
+            watched_indexes[binding.public_run_id] = index
+            return True
+
         work = []
         for binding, watched, records in self._durable_runs(
-            limit=limit, after_thread_id=after_thread_id
+            limit=limit,
+            after_thread_id=after_thread_id,
+            watch_filter=has_protected_requirements,
         ):
-            index = self._resolver.index(binding)
+            index = watched_indexes.get(binding.public_run_id)
+            if index is None:
+                index = self._resolver.index(binding)
             matched = self._match_records(index, records)
             if (watched and index.requirements) or matched:
                 work.append(_ProtectedRecoveryWork(index, matched))

@@ -86,7 +86,9 @@ class GraphRuntime:
         if self._closed or self._closing:
             raise RuntimeError("GraphRuntime is closed")
 
-    def bind(self, run: RunBinding) -> None:
+    def bind(self, run: RunBinding) -> bool:
+        """Bind an app and report whether this call created its lifecycle."""
+
         self._ensure_open()
         with self._lock:
             current = self._bindings.get(run.public_run_id)
@@ -107,7 +109,7 @@ class GraphRuntime:
                     raise RuntimeBindingConflict(
                         f"run {run.public_run_id!r} is already bound differently"
                     )
-                return
+                return False
             ref = RecipeBundleRef(run.recipe_snapshot_ref)
             manifest = self._bundles.read_manifest(ref)
             dag = ValidatedDependencyDAG(
@@ -124,6 +126,7 @@ class GraphRuntime:
             app = self._app_factory(authority, self._checkpoint_path)
             self._bindings[run.public_run_id] = run
             self._apps[run.public_run_id] = app
+            return True
 
     def unbind(self, run_id: str) -> None:
         # Closing/removing a native app is itself a lifecycle mutation.  It
