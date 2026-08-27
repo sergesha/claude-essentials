@@ -270,6 +270,48 @@ def test_list_run_drive_watches_validates_and_returns_bounded_ordered_page(
             )
 
 
+def test_list_run_drive_watches_by_public_run_ids_is_exact_bounded_and_ordered(
+    ledger,
+) -> None:
+    from lockstep.runtime.blobs import BlobRef
+    from lockstep.runtime.catalog import RunBinding, RunCatalog
+
+    effect_ledger, storage = ledger
+    catalog = RunCatalog(storage)
+    admitted = []
+    for index in range(1, 4):
+        _binding, watch = effect_ledger.admit_start(
+            catalog,
+            RunBinding(
+                f"run-{index}",
+                f"thread-{index}",
+                "a" * 64,
+                "bundle:" + "b" * 64,
+                "/project",
+            ),
+            BlobRef("c" * 64, index),
+        )
+        admitted.append(watch)
+
+    assert effect_ledger.list_run_drive_watches_by_public_run_ids(
+        ("missing", "run-1", "run-3")
+    ) == (admitted[0], admitted[2])
+
+    invalid = (
+        (),
+        ["run-1"],
+        ("run-2", "run-1"),
+        ("run-1", "run-1"),
+        ("",),
+        tuple(f"run-{index:03d}" for index in range(129)),
+    )
+    for public_run_ids in invalid:
+        with pytest.raises(ValueError, match="run-drive watch IDs"):
+            effect_ledger.list_run_drive_watches_by_public_run_ids(
+                public_run_ids
+            )
+
+
 def test_acknowledge_run_drive_watch_validates_and_converges_after_post_commit_crash(
     tmp_path,
     monkeypatch,

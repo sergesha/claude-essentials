@@ -9,7 +9,7 @@ from importlib import import_module
 from inspect import Parameter, signature
 from pathlib import Path
 from types import SimpleNamespace
-from typing import get_type_hints
+from typing import Callable, get_type_hints
 
 import pytest
 from sqlalchemy import event
@@ -142,6 +142,24 @@ def test_recovery_driver_has_exact_private_command_composition_surface(
 
     driver_type = getattr(recovery_driver_module, "RecoveryDriver", None)
     assert driver_type is not None
+    constructor = signature(driver_type)
+    assert tuple(constructor.parameters) == (
+        "catalog",
+        "runtime",
+        "effects",
+        "blobs",
+        "migrator",
+        "coordinator",
+        "snapshot_resolver",
+        "exclude_run_drive",
+        "drive_recovered_run",
+    )
+    assert all(
+        parameter.kind is Parameter.KEYWORD_ONLY
+        for parameter in constructor.parameters.values()
+    )
+    constructor_hints = get_type_hints(driver_type.__init__)
+    assert constructor_hints["drive_recovered_run"] == Callable[[str], bool]
     method = getattr(driver_type, "_drive_run_watch", None)
     assert method is not None
     assert tuple(
@@ -225,7 +243,7 @@ def test_sweep_limit_counts_accepted_drives_not_scanned_rows(
 
     def apply_backfill_page():
         sweep_order.append("backfill")
-        return True
+        return ()
 
     driver = object.__new__(RecoveryDriver)
     driver._exclude_run_drive = lambda _run_id: False
@@ -252,6 +270,166 @@ def test_sweep_limit_counts_accepted_drives_not_scanned_rows(
     assert driven == list(range(1, 131))
 
 
+def test_backfill_page_drives_only_exact_inserted_cohort_above_high_water(
+    monkeypatch,
+) -> None:
+    from lockstep.runtime.effects.ledger import RunDriveWatch
+    from lockstep.runtime.recovery_driver import RecoveryDriver
+
+    admitted_at = datetime(2026, 8, 27, tzinfo=UTC)
+    ordinary = RunDriveWatch(2, "ordinary", None, None, admitted_at)
+    migrated = RunDriveWatch(3, "migrated", None, None, admitted_at)
+    concurrent = RunDriveWatch(4, "concurrent", None, None, admitted_at)
+    exact_calls = []
+
+    def exact_watches(public_run_ids):
+        exact_calls.append(public_run_ids)
+        assert concurrent.public_run_id not in public_run_ids
+        return (migrated,)
+
+    driver = object.__new__(RecoveryDriver)
+    driver._backfill = SimpleNamespace(
+        apply_next_page=lambda: (migrated.public_run_id,)
+    )
+    driver._effects = SimpleNamespace(
+        max_run_drive_admission_seq=lambda: ordinary.admission_seq,
+        list_run_drive_watches=lambda **_kwargs: (ordinary,),
+        list_run_drive_watches_by_public_run_ids=exact_watches,
+    )
+    driven = []
+    monkeypatch.setattr(
+        driver,
+        "_try_drive_run_watch",
+        lambda watch, project: driven.append((watch.public_run_id, project))
+        or watch.public_run_id == "migrated",
+    )
+
+    assert driver._sweep_run_drive_watches(
+        project_identity="/project", limit=1
+    ) == ("migrated",)
+    assert exact_calls == [("migrated",)]
+    assert driven == [
+        ("ordinary", "/project"),
+        ("migrated", "/project"),
+    ]
+
+
+def test_ordinary_acceptance_exhausts_shared_budget_before_backfill_cohort(
+    monkeypatch,
+) -> None:
+    from lockstep.runtime.effects.ledger import RunDriveWatch
+    from lockstep.runtime.recovery_driver import RecoveryDriver
+
+    admitted_at = datetime(2026, 8, 27, tzinfo=UTC)
+    ordinary = RunDriveWatch(1, "ordinary", None, None, admitted_at)
+    exact_calls = []
+    driver = object.__new__(RecoveryDriver)
+    driver._backfill = SimpleNamespace(apply_next_page=lambda: ("migrated",))
+    driver._effects = SimpleNamespace(
+        max_run_drive_admission_seq=lambda: ordinary.admission_seq,
+        list_run_drive_watches=lambda **_kwargs: (ordinary,),
+        list_run_drive_watches_by_public_run_ids=lambda ids: exact_calls.append(
+            ids
+        ),
+    )
+    driven = []
+    monkeypatch.setattr(
+        driver,
+        "_try_drive_run_watch",
+        lambda watch, project: driven.append((watch.public_run_id, project))
+        or True,
+    )
+
+    assert driver._sweep_run_drive_watches(
+        project_identity="/project", limit=1
+    ) == ("ordinary",)
+    assert driven == [("ordinary", "/project")]
+    assert exact_calls == []
+
+
+@pytest.mark.parametrize("accepted", (False, True))
+def test_non_decision_watch_delegates_only_public_run_id(
+    accepted: bool,
+) -> None:
+    from lockstep.runtime.effects.descriptors import parse_effect_descriptor
+    from lockstep.runtime.effects.ledger import RunDriveWatch
+    from lockstep.runtime.effects.models import ScopeDescriptor
+    from lockstep.runtime.recovery_driver import RecoveryDriver
+
+    run_id = "run-1"
+    binding = SimpleNamespace(public_run_id=run_id)
+    interrupt = SimpleNamespace(
+        value={"lockstep_effect": {"schema": "lockstep.effect/v1"}},
+        coordinate=SimpleNamespace(),
+    )
+    snapshot = SimpleNamespace(
+        checkpoint_id="checkpoint",
+        pending=(interrupt,),
+        next=(),
+    )
+    terminal = SimpleNamespace(
+        checkpoint_id="terminal",
+        pending=(),
+        next=(),
+    )
+    snapshots = iter((snapshot, terminal)) if accepted else iter((snapshot,))
+    events = []
+
+    def read_snapshot(_run_id, **_kwargs):
+        value = next(snapshots)
+        if value is terminal:
+            events.append(("snapshot", run_id))
+        return value
+
+    driver = object.__new__(RecoveryDriver)
+    driver._catalog = SimpleNamespace(get=lambda _run_id: binding)
+    driver._runtime = SimpleNamespace(
+        binding=lambda _run_id: binding,
+        snapshot=read_snapshot,
+    )
+    driver._drive_recovered_run = lambda *args, **kwargs: (
+        events.append(("drive", args, kwargs)) or accepted
+    )
+    driver._coordinator = SimpleNamespace(
+        reconcile_consumed=lambda recovered_run_id: (
+            events.append(("reconcile", recovered_run_id)) or ()
+        )
+    )
+    driver._effects = SimpleNamespace(
+        acknowledge_run_drive_watch=lambda recovered_run_id: events.append(
+            ("acknowledge", recovered_run_id)
+        )
+    )
+    raw_descriptor = {
+        "schema": "lockstep.effect/v1",
+        "kind": "scope",
+        "logical_id": "parallel-scope",
+        "scope_kind": "parallel",
+        "duration_seconds": 300,
+        "runner_selector": None,
+        "ancestor_deadline_state_keys": [],
+        "result_state_key": "parallel_scope_result",
+        "result_schema": "lockstep.scope-result/v1",
+    }
+    assert isinstance(parse_effect_descriptor(raw_descriptor), ScopeDescriptor)
+    interrupt.value["lockstep_effect"] = raw_descriptor
+    watch = RunDriveWatch(
+        1, run_id, None, None, datetime(2026, 8, 27, tzinfo=UTC)
+    )
+
+    assert driver._drive_run_watch(watch) is accepted
+    expected = [("drive", (run_id,), {})]
+    if accepted:
+        expected.extend(
+            (
+                ("snapshot", run_id),
+                ("reconcile", run_id),
+                ("acknowledge", run_id),
+            )
+        )
+    assert events == expected
+
+
 def test_sweep_excludes_fresh_admission_without_stopping_other_work(
     monkeypatch,
 ) -> None:
@@ -265,7 +443,7 @@ def test_sweep_excludes_fresh_admission_without_stopping_other_work(
     )
     driver = object.__new__(RecoveryDriver)
     driver._exclude_run_drive = lambda run_id: run_id == "fresh"
-    driver._backfill = SimpleNamespace(apply_next_page=lambda: True)
+    driver._backfill = SimpleNamespace(apply_next_page=lambda: ())
     driver._effects = SimpleNamespace(
         max_run_drive_admission_seq=lambda: 2,
         list_run_drive_watches=lambda **_kwargs: watches,
@@ -328,7 +506,7 @@ def test_sweep_isolates_only_known_per_run_integrity_errors(
     )
     driver = object.__new__(RecoveryDriver)
     driver._exclude_run_drive = lambda _run_id: False
-    driver._backfill = SimpleNamespace(apply_next_page=lambda: True)
+    driver._backfill = SimpleNamespace(apply_next_page=lambda: ())
     driver._effects = SimpleNamespace(
         max_run_drive_admission_seq=lambda: 2,
         list_run_drive_watches=lambda **_kwargs: watches,

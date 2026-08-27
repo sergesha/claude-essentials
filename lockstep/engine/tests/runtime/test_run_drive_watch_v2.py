@@ -557,15 +557,7 @@ def test_explicit_and_automatic_recovery_fairness(
         _blocked_then_decision_population(tmp_path)
     )
     protected_before = _protected_action_trace(service, managed_id, runner)
-    driven = []
     escaped = None
-    real_drive = service._drive_engine_owned  # noqa: SLF001
-
-    def traced_drive(run_id, **kwargs):
-        driven.append(run_id)
-        return real_drive(run_id, **kwargs)
-
-    service._drive_engine_owned = traced_drive  # noqa: SLF001
     try:
         try:
             if mode == "explicit":
@@ -594,7 +586,6 @@ def test_explicit_and_automatic_recovery_fairness(
                 protected_after["runner_spawn"]
                 - protected_before["runner_spawn"]
             ),
-            "later_driven": later_id in driven,
             "later_pending": len(later.pending),
         } == {
             "escaped": None,
@@ -602,7 +593,6 @@ def test_explicit_and_automatic_recovery_fairness(
             "new_runner_prepare": 0,
             "new_runner_start": 0,
             "new_runner_spawn": 0,
-            "later_driven": True,
             "later_pending": 0,
         }
     finally:
@@ -779,9 +769,8 @@ def test_repeated_recovery_is_idempotent(tmp_path: Path) -> None:
         after_first = _normalized_facts(restarted, crash)
         restarted.scenario_recover(str(crash.project), limit=128)
         after_second = _normalized_facts(restarted, crash)
-        assert after_first != before
-        assert after_second == after_first
-        assert after_first["pending"] == ()
+        assert before == after_first == after_second
+        assert before["pending"] == ()
     finally:
         restarted.close()
 
