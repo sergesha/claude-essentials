@@ -226,6 +226,7 @@ class LockstepCommandService:
         self._pump_failure: BaseException | None = None
         self._start_activation = _WritableCoreActivation(
             lock=self._activation_lock,
+            admission_lock=self._admission_recovery_lock,
             is_active=lambda: self._writable_core_active,
             is_closed=lambda: self._closed,
             prepare=self._prepare_writable_core,

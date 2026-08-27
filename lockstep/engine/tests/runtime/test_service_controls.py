@@ -78,6 +78,163 @@ def test_writable_core_activation_is_retryable_after_recovery_failure(
         service.close()
 
 
+def test_static_admission_orders_admission_before_snapshot_and_activation() -> None:
+    from lockstep.runtime.start_service import _WritableCoreActivation
+
+    events = []
+
+    class AdmissionLock:
+        held = False
+
+        def acquire(self, blocking=True):
+            assert blocking is True
+            assert not self.held
+            self.held = True
+            events.append("admission-enter")
+            return True
+
+        def release(self):
+            assert self.held
+            self.held = False
+            events.append("admission-exit")
+
+    class ActivationLock:
+        attempts = 0
+
+        def acquire(self, blocking=True):
+            events.append("activation-wait" if blocking else "activation-try")
+            if not blocking:
+                self.attempts += 1
+                return self.attempts > 1
+            return True
+
+        def release(self):
+            events.append("activation-exit")
+
+        def __enter__(self):
+            self.acquire()
+            return self
+
+        def __exit__(self, *_args):
+            self.release()
+
+    admission = AdmissionLock()
+
+    class Current:
+        def __enter__(self):
+            assert admission.held
+            events.append("snapshot-enter")
+
+        def __exit__(self, *_args):
+            events.append("snapshot-exit")
+
+    decision = SimpleNamespace(assert_current=lambda _state_dir: Current())
+    activation = _WritableCoreActivation(
+        lock=ActivationLock(),
+        admission_lock=admission,
+        is_active=lambda: True,
+        is_closed=lambda: False,
+        prepare=lambda: None,
+        finish=lambda: None,
+        rollback=lambda: None,
+        record_degraded=lambda _exc: None,
+    )
+
+    result = activation.admit(
+        Path("/owner"),
+        decision,
+        lambda: (
+            events.append("persist")
+            or {"status": "starting"}
+        ),
+    )
+
+    assert result == {"status": "starting"}
+    assert events == [
+        "admission-enter",
+        "snapshot-enter",
+        "activation-try",
+        "snapshot-exit",
+        "admission-exit",
+        "activation-wait",
+        "activation-exit",
+        "admission-enter",
+        "snapshot-enter",
+        "activation-try",
+        "persist",
+        "snapshot-exit",
+        "admission-exit",
+        "activation-exit",
+    ]
+
+
+def test_static_admission_and_pump_snapshot_lock_cannot_deadlock() -> None:
+    from lockstep.runtime.start_service import _WritableCoreActivation
+
+    admission = threading.RLock()
+    snapshot = threading.Lock()
+    pump_has_admission = threading.Event()
+    current_entered = threading.Event()
+    pump_snapshot_result = []
+    failures = []
+
+    class Current:
+        def __enter__(self):
+            snapshot.acquire()
+            current_entered.set()
+
+        def __exit__(self, *_args):
+            snapshot.release()
+
+    decision = SimpleNamespace(assert_current=lambda _state_dir: Current())
+    activation = _WritableCoreActivation(
+        lock=threading.RLock(),
+        admission_lock=admission,
+        is_active=lambda: True,
+        is_closed=lambda: False,
+        prepare=lambda: None,
+        finish=lambda: None,
+        rollback=lambda: None,
+        record_degraded=lambda _exc: None,
+    )
+
+    def pump() -> None:
+        with admission:
+            pump_has_admission.set()
+            current_entered.wait(0.05)
+            acquired = snapshot.acquire(timeout=0.2)
+            pump_snapshot_result.append(acquired)
+            if acquired:
+                snapshot.release()
+
+    def start() -> None:
+        try:
+            activation.admit(
+                Path("/owner"),
+                decision,
+                lambda: (
+                    admission.acquire()
+                    and admission.release()
+                    or {"status": "starting"}
+                ),
+            )
+        except BaseException as exc:  # pragma: no cover - asserted below
+            failures.append(exc)
+
+    pump_thread = threading.Thread(target=pump)
+    pump_thread.start()
+    assert pump_has_admission.wait(1)
+    start_thread = threading.Thread(target=start)
+    start_thread.start()
+    pump_thread.join(timeout=1)
+    start_thread.join(timeout=1)
+
+    assert not pump_thread.is_alive()
+    assert not start_thread.is_alive()
+    assert pump_snapshot_result == [True]
+    assert failures == []
+
+
 def test_writable_core_activation_is_retryable_after_thread_start_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

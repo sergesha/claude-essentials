@@ -55,6 +55,7 @@ class _WritableCoreActivation:
     """Serialize cold preparation, one start, then unrelated activation work."""
 
     lock: _ExclusiveLock
+    admission_lock: _ExclusiveLock
     is_active: Callable[[], bool]
     is_closed: Callable[[], bool]
     prepare: Callable[[], None]
@@ -103,14 +104,18 @@ class _WritableCoreActivation:
             acquired = False
             persisted = False
             try:
-                with decision.assert_current(state_dir):
-                    acquired = self.lock.acquire(blocking=False)
-                    if acquired:
-                        if configure is not None:
-                            configure()
-                        prepared = self._prepare_locked()
-                        result = persist()
-                        persisted = True
+                self.admission_lock.acquire()
+                try:
+                    with decision.assert_current(state_dir):
+                        acquired = self.lock.acquire(blocking=False)
+                        if acquired:
+                            if configure is not None:
+                                configure()
+                            prepared = self._prepare_locked()
+                            result = persist()
+                            persisted = True
+                finally:
+                    self.admission_lock.release()
                 if not acquired:
                     with self.lock:
                         pass
