@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
@@ -308,6 +309,47 @@ def _define_tables(metadata: MetaData, external_metadata: MetaData) -> RuntimeTa
     )
 
 
+_RUN_DRIVE_WATCH_MIGRATION = "run-drive-watch-v2"
+
+
+def _validate_run_drive_watch_page_envelope(
+    *,
+    expected_after_public_run_id: str | None,
+    classified: tuple[LegacyRunDriveClassification, ...],
+    exhausted: bool,
+) -> tuple[str, ...]:
+    if expected_after_public_run_id is not None and (
+        type(expected_after_public_run_id) is not str
+        or not expected_after_public_run_id
+    ):
+        raise ValueError("expected_after_public_run_id must be a non-empty string")
+    if type(classified) is not tuple:
+        raise TypeError("classified must be a tuple")
+    if any(
+        not isinstance(record, LegacyRunDriveClassification) for record in classified
+    ):
+        raise TypeError(
+            "classified must contain LegacyRunDriveClassification records"
+        )
+    if len(classified) > 128:
+        raise ValueError("classified must contain at most 128 records")
+    public_run_ids = tuple(record.public_run_id for record in classified)
+    if public_run_ids != tuple(sorted(set(public_run_ids))):
+        raise ValueError("classified public_run_ids must be sorted and unique")
+    if (
+        expected_after_public_run_id is not None
+        and public_run_ids
+        and public_run_ids[0] <= expected_after_public_run_id
+    ):
+        raise ValueError(
+            "classified public_run_ids must be strictly after "
+            "expected_after_public_run_id"
+        )
+    if type(exhausted) is not bool:
+        raise TypeError("exhausted must be a boolean")
+    return public_run_ids
+
+
 class RuntimeSchemaMigrator:
     """Private owner-state schema migration boundary."""
 
@@ -321,43 +363,35 @@ class RuntimeSchemaMigrator:
         classified: tuple[LegacyRunDriveClassification, ...],
         exhausted: bool,
     ) -> MigrationProgress:
-        if expected_after_public_run_id is not None and (
-            type(expected_after_public_run_id) is not str
-            or not expected_after_public_run_id
-        ):
-            raise ValueError(
-                "expected_after_public_run_id must be a non-empty string"
-            )
-        if type(classified) is not tuple:
-            raise TypeError("classified must be a tuple")
-        if any(
-            not isinstance(record, LegacyRunDriveClassification)
-            for record in classified
-        ):
-            raise TypeError(
-                "classified must contain LegacyRunDriveClassification records"
-            )
-        if len(classified) > 128:
-            raise ValueError("classified must contain at most 128 records")
-        public_run_ids = tuple(record.public_run_id for record in classified)
-        if public_run_ids != tuple(sorted(set(public_run_ids))):
-            raise ValueError(
-                "classified public_run_ids must be sorted and unique"
-            )
-        if (
-            expected_after_public_run_id is not None
-            and public_run_ids
-            and public_run_ids[0] <= expected_after_public_run_id
-        ):
-            raise ValueError(
-                "classified public_run_ids must be strictly after "
-                "expected_after_public_run_id"
-            )
-        if type(exhausted) is not bool:
-            raise TypeError("exhausted must be a boolean")
-        raise NotImplementedError(
-            "run-drive-watch migration behavior is staged in R2"
+        public_run_ids = _validate_run_drive_watch_page_envelope(
+            expected_after_public_run_id=expected_after_public_run_id,
+            classified=classified,
+            exhausted=exhausted,
         )
+        if expected_after_public_run_id is not None or public_run_ids or exhausted:
+            raise NotImplementedError(
+                "run-drive-watch migration behavior is staged in R2"
+            )
+        table = self._store.tables.runtime_schema_migrations
+        with self._store._v2_write_transaction() as connection:
+            existing = connection.execute(
+                select(table).where(table.c.name == _RUN_DRIVE_WATCH_MIGRATION)
+            ).first()
+            if existing is not None:
+                raise NotImplementedError(
+                    "run-drive-watch migration replay is staged in R2"
+                )
+            timestamp = datetime.now(UTC).isoformat()
+            connection.execute(
+                table.insert().values(
+                    name=_RUN_DRIVE_WATCH_MIGRATION,
+                    schema_version=2,
+                    after_public_run_id=None,
+                    completed_at=None,
+                    updated_at=timestamp,
+                )
+            )
+        return MigrationProgress(None, False, (), ())
 
 
 class SQLiteStore:
