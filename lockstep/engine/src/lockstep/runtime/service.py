@@ -80,6 +80,7 @@ from lockstep.runtime.runtime_execution import (
     capture_runtime_execution_admission,
 )
 from lockstep.runtime.runtime_execution_recovery import RuntimeExecutionRecovery
+from lockstep.runtime.recovery_driver import RecoveryDriver as _RecoveryDriver
 from lockstep.runtime.status import ScenarioStatus, project_status
 from lockstep.runtime.storage import SQLiteStore
 
@@ -221,6 +222,7 @@ class LockstepCommandService:
         self.authority_policy = authority_policy or RecipeAuthorityPolicy()
         self._runtime_execution_context: RuntimeExecutionContext | None = None
         self._runtime_execution_composition = None
+        self._recovery_driver: _RecoveryDriver | None = None
         self._activation_lock = threading.RLock()
         self._writable_core_active = False
         self._closed = False
@@ -388,6 +390,7 @@ class LockstepCommandService:
                 self._reconstruct_runtime_execution_context()
             )
         self._open_effect_coordinator()
+        self._recovery_driver = _RecoveryDriver()
 
     def _finish_writable_core_activation(
         self, deferred_start_run_id: str | None = None
@@ -439,6 +442,7 @@ class LockstepCommandService:
         self._initial_recovery_exclusion = None
         self._runtime_execution_composition = None
         self._runtime_execution_context = None
+        self._recovery_driver = None
         self._writable_core_active = False
 
     def _require_owner_runtime_policy(self, index):
