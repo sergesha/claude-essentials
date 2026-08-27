@@ -816,6 +816,12 @@ class LockstepCommandService:
             self._install_recovered_runtime_execution(
                 after_thread_id=cursor, limit=limit
             )
+            recovered.extend(
+                self._recovery_driver._sweep_run_drive_watches(
+                    project_identity=project_identity,
+                    limit=limit,
+                )
+            )
             thread_ids = self.effects.list_recovery_threads(
                 limit=limit, after_thread_id=cursor
             )
