@@ -174,7 +174,7 @@ def _observe_busy_drive(command, watch):
 def _retry_terminal_watch(command, watch, effect_id: str):
     reconcile_consumed = command.coordinator.reconcile_consumed
     acknowledge = command.effects.acknowledge_run_drive_watch
-    observed = {"reconcile": [], "ack": []}
+    observed = {"reconcile": [], "ack": [], "outcome": None}
 
     def observe_reconcile(run_id: str):
         reports = reconcile_consumed(run_id)
@@ -192,7 +192,7 @@ def _retry_terminal_watch(command, watch, effect_id: str):
     command.coordinator.reconcile_consumed = observe_reconcile
     command.effects.acknowledge_run_drive_watch = observe_delete
     try:
-        command._recovery_driver._drive_run_watch(watch)
+        observed["outcome"] = command._recovery_driver._drive_run_watch(watch)
     finally:
         command.coordinator.reconcile_consumed = reconcile_consumed
         command.effects.acknowledge_run_drive_watch = acknowledge
@@ -439,6 +439,7 @@ def test_terminal_removal_crash_cuts(tmp_path: Path) -> None:
         "watch_retained_at_cut": watches_after_cut == watches_before,
         "retry_reconcile": retry["reconcile"],
         "retry_ack": retry["ack"],
+        "retry_outcome": retry["outcome"],
         "final_effect": final_effect,
         "final_watch_absent": final_watches == (),
         "native_unchanged": persisted_native == terminal,
@@ -457,6 +458,7 @@ def test_terminal_removal_crash_cuts(tmp_path: Path) -> None:
         "watch_retained_at_cut": True,
         "retry_reconcile": [()],
         "retry_ack": [(run_id, "delivered")],
+        "retry_outcome": False,
         "final_effect": "delivered",
         "final_watch_absent": True,
         "native_unchanged": True,

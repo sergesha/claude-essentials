@@ -2,20 +2,38 @@
 
 from __future__ import annotations
 
+import logging
 from contextlib import contextmanager
 from typing import Iterator
 
-from lockstep.runtime.blobs import BlobRef, BlobStore, DigestMismatch
+from lockstep.runtime.blobs import (
+    BlobRef,
+    BlobStorageError,
+    BlobStore,
+    DigestMismatch,
+)
 from lockstep.runtime.catalog import RunBinding, RunCatalog
-from lockstep.runtime.effects.coordinator import EffectCoordinator
+from lockstep.runtime.effects.coordinator import (
+    CoordinatorLineageError,
+    EffectCoordinator,
+    ProviderContractViolation,
+)
 from lockstep.runtime.effects.descriptors import parse_effect_descriptor
 from lockstep.runtime.effects.ledger import EffectLedger, RunDriveWatch
 from lockstep.runtime.effects.models import DecisionDescriptor
-from lockstep.runtime.graph_runtime import GraphRuntime
-from lockstep.runtime.native_models import NativeSnapshot
+from lockstep.runtime.graph_runtime import (
+    GraphRuntime,
+    NativeCoordinateRejected,
+    RuntimeBindingConflict,
+)
+from lockstep.runtime.native_models import NativeHistoryLimitExceeded, NativeSnapshot
 from lockstep.runtime.owner_state import StorageLimitExceeded
+from lockstep.runtime.project_snapshots import SnapshotStorageError
 from lockstep.runtime.recipe_bundles import MaterializationError
-from lockstep.runtime.snapshot_resolver import RuntimeSnapshotResolver
+from lockstep.runtime.snapshot_resolver import (
+    RuntimeSnapshotConflict,
+    RuntimeSnapshotResolver,
+)
 from lockstep.runtime.start_input import decode_canonical_start_input
 from lockstep.runtime.storage import (
     LegacyRunDriveClassification,
@@ -29,6 +47,17 @@ _BINDING_INTEGRITY_ERRORS = (
     MaterializationError,
     StorageLimitExceeded,
 )
+_RUN_DRIVE_INTEGRITY_ERRORS = _BINDING_INTEGRITY_ERRORS + (
+    BlobStorageError,
+    CoordinatorLineageError,
+    NativeCoordinateRejected,
+    NativeHistoryLimitExceeded,
+    ProviderContractViolation,
+    RuntimeBindingConflict,
+    RuntimeSnapshotConflict,
+    SnapshotStorageError,
+)
+_LOG = logging.getLogger(__name__)
 
 
 @contextmanager
@@ -115,7 +144,7 @@ class _RunDriveBackfill:
 
 
 class RecoveryDriver:
-    """Bound one migration page and one watch page to each recovery sweep."""
+    """Bound migration work and one fixed watch population per recovery sweep."""
 
     def __init__(
         self,
@@ -146,24 +175,53 @@ class RecoveryDriver:
         project_identity: str | None,
         limit: int,
     ) -> tuple[str, ...]:
+        high_water = self._effects.max_run_drive_admission_seq()
         if not self._backfill.apply_next_page():
             return ()
         if limit < 1:
             return ()
-        high_water = self._effects.max_run_drive_admission_seq()
         if high_water is None:
             return ()
-        watches = self._effects.list_run_drive_watches(
-            after_admission_seq=0,
-            high_water=high_water,
-            limit=min(limit, 128),
-        )
-        return tuple(
-            watch.public_run_id
-            for watch in watches
-            if self._matches_project(watch, project_identity)
-            and self._drive_run_watch(watch)
-        )
+        recovered = []
+        for watches in self._watch_pages(
+            high_water=high_water, page_size=128
+        ):
+            for watch in watches:
+                if self._try_drive_run_watch(watch, project_identity):
+                    recovered.append(watch.public_run_id)
+                    if len(recovered) == limit:
+                        return tuple(recovered)
+        return tuple(recovered)
+
+    def _try_drive_run_watch(
+        self, watch: RunDriveWatch, project_identity: str | None
+    ) -> bool:
+        try:
+            return self._matches_project(
+                watch, project_identity
+            ) and self._drive_run_watch(watch)
+        except _RUN_DRIVE_INTEGRITY_ERRORS as exc:
+            _LOG.warning(
+                "run-drive recovery skipped %s after %s",
+                watch.public_run_id,
+                type(exc).__name__,
+            )
+            return False
+
+    def _watch_pages(
+        self, *, high_water: int, page_size: int
+    ) -> Iterator[tuple[RunDriveWatch, ...]]:
+        cursor = 0
+        while cursor < high_water:
+            watches = self._effects.list_run_drive_watches(
+                after_admission_seq=cursor,
+                high_water=high_water,
+                limit=page_size,
+            )
+            if not watches:
+                return
+            yield watches
+            cursor = watches[-1].admission_seq
 
     def _matches_project(
         self, watch: RunDriveWatch, project_identity: str | None
@@ -173,12 +231,11 @@ class RecoveryDriver:
         binding = self._catalog.get(watch.public_run_id)
         return binding.project_identity == project_identity
 
-    def _settle_terminal_watch(self, run_id: str) -> bool:
+    def _settle_terminal_watch(self, run_id: str) -> None:
         reports = self._coordinator.reconcile_consumed(run_id)
         if any(report.action != "delivered" for report in reports):
-            return False
+            return
         self._effects.acknowledge_run_drive_watch(run_id)
-        return True
 
     def _drive_run_watch(self, watch: RunDriveWatch) -> bool:
         binding = self._catalog.get(watch.public_run_id)
@@ -201,7 +258,8 @@ class RecoveryDriver:
                     decode_canonical_start_input(encoded),
                 )
             if not snapshot.pending and not snapshot.next:
-                return self._settle_terminal_watch(watch.public_run_id)
+                self._settle_terminal_watch(watch.public_run_id)
+                return False
             if len(snapshot.pending) != 1:
                 return False
             interrupt = snapshot.pending[0]

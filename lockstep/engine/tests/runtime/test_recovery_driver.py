@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import threading
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from importlib import import_module
 from inspect import Parameter, signature
 from pathlib import Path
+from types import SimpleNamespace
 from typing import get_type_hints
 
+import pytest
 from sqlalchemy import event
 
 
@@ -190,6 +193,110 @@ def test_recovery_driver_has_exact_private_sweep_surface() -> None:
         "limit": int,
         "return": tuple[str, ...],
     }
+
+
+def test_sweep_limit_counts_accepted_drives_not_scanned_rows(
+    monkeypatch,
+) -> None:
+    from lockstep.runtime.effects.ledger import RunDriveWatch
+    from lockstep.runtime.recovery_driver import RecoveryDriver
+
+    admitted_at = datetime(2026, 8, 27, tzinfo=UTC)
+    watches = tuple(
+        RunDriveWatch(index, f"run-{index:03d}", None, None, admitted_at)
+        for index in range(1, 132)
+    )
+    list_calls = []
+    max_calls = []
+    sweep_order = []
+
+    def list_watches(*, after_admission_seq, high_water, limit):
+        list_calls.append((after_admission_seq, high_water, limit))
+        return tuple(
+            watch
+            for watch in watches
+            if after_admission_seq < watch.admission_seq <= high_water
+        )[:limit]
+
+    def capture_max():
+        max_calls.append(True)
+        sweep_order.append("high-water")
+        return 131
+
+    def apply_backfill_page():
+        sweep_order.append("backfill")
+        return True
+
+    driver = object.__new__(RecoveryDriver)
+    driver._backfill = SimpleNamespace(apply_next_page=apply_backfill_page)
+    driver._effects = SimpleNamespace(
+        max_run_drive_admission_seq=capture_max,
+        list_run_drive_watches=list_watches,
+    )
+    driven = []
+    monkeypatch.setattr(driver, "_matches_project", lambda *_args: True)
+
+    def drive(watch):
+        driven.append(watch.admission_seq)
+        return watch.admission_seq >= 130
+
+    monkeypatch.setattr(driver, "_drive_run_watch", drive)
+
+    assert driver._sweep_run_drive_watches(
+        project_identity=None, limit=1
+    ) == ("run-130",)
+    assert max_calls == [True]
+    assert sweep_order == ["high-water", "backfill"]
+    assert list_calls == [(0, 131, 128), (128, 131, 128)]
+    assert driven == list(range(1, 131))
+
+
+def test_sweep_isolates_only_known_per_run_integrity_errors(
+    monkeypatch, caplog
+) -> None:
+    import logging
+
+    from lockstep.runtime.effects.ledger import RunDriveWatch
+    from lockstep.runtime.project_snapshots import SnapshotStorageError
+    from lockstep.runtime.recovery_driver import RecoveryDriver
+
+    admitted_at = datetime(2026, 8, 27, tzinfo=UTC)
+    watches = tuple(
+        RunDriveWatch(index, f"run-{index}", None, None, admitted_at)
+        for index in (1, 2)
+    )
+    driver = object.__new__(RecoveryDriver)
+    driver._backfill = SimpleNamespace(apply_next_page=lambda: True)
+    driver._effects = SimpleNamespace(
+        max_run_drive_admission_seq=lambda: 2,
+        list_run_drive_watches=lambda **_kwargs: watches,
+    )
+    monkeypatch.setattr(driver, "_matches_project", lambda *_args: True)
+
+    def drive(watch):
+        if watch.admission_seq == 1:
+            raise SnapshotStorageError("sensitive owner-state detail")
+        return True
+
+    monkeypatch.setattr(driver, "_drive_run_watch", drive)
+
+    with caplog.at_level(logging.WARNING, logger="lockstep.runtime.recovery_driver"):
+        recovered = driver._sweep_run_drive_watches(
+            project_identity=None, limit=1
+        )
+
+    assert recovered == ("run-2",)
+    assert tuple(record.getMessage() for record in caplog.records) == (
+        "run-drive recovery skipped run-1 after SnapshotStorageError",
+    )
+    assert "sensitive owner-state detail" not in caplog.text
+
+    def fail_globally(_watch):
+        raise RuntimeError("global failure")
+
+    monkeypatch.setattr(driver, "_drive_run_watch", fail_globally)
+    with pytest.raises(RuntimeError, match="global failure"):
+        driver._sweep_run_drive_watches(project_identity=None, limit=1)
 
 
 def test_automatic_recovery_reaches_inert_sweep_once(tmp_path: Path) -> None:
