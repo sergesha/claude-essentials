@@ -59,6 +59,17 @@ class EffectDispatchWatch:
     admitted_at: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class RunDriveWatch:
+    """Durable v2 discovery record without workflow or scheduling state."""
+
+    admission_seq: int
+    public_run_id: str
+    input_blob_sha256: str | None
+    input_blob_size: int | None
+    admitted_at: datetime
+
+
 @dataclass(frozen=True)
 class EffectRecord:
     effect_id: str
@@ -255,7 +266,7 @@ class EffectLedger:
         ):
             raise ValueError("start input blob reference is invalid")
         _binding_digest(input_blob.sha256)
-        table = self._store.tables.effect_dispatch_watches
+        table = self._store.tables.run_drive_watches
         admitted_at = self._now()
         with self._store.write_transaction() as connection:
             admitted_binding = catalog.create_in_transaction(connection, binding)
@@ -292,7 +303,7 @@ class EffectLedger:
     def list_dispatch_watches(self, *, limit: int) -> tuple[EffectDispatchWatch, ...]:
         if type(limit) is not int or limit <= 0 or limit > 1_000:
             raise ValueError("dispatch-watch limit must be an integer from 1 to 1000")
-        table = self._store.tables.effect_dispatch_watches
+        table = self._store.tables.run_drive_watches
         with self._store.read_connection() as connection:
             rows = connection.execute(
                 select(table)
@@ -316,12 +327,29 @@ class EffectLedger:
         """Acknowledge only after the native snapshot is terminal."""
 
         _nonempty(public_run_id, "dispatch public_run_id")
-        table = self._store.tables.effect_dispatch_watches
+        table = self._store.tables.run_drive_watches
         with self._store.write_transaction() as connection:
             result = connection.execute(
                 delete(table).where(table.c.public_run_id == public_run_id)
             )
         return result.rowcount == 1
+
+    def max_run_drive_admission_seq(self) -> int | None:
+        raise NotImplementedError("run-drive-watch queries are staged in R2")
+
+    def list_run_drive_watches(
+        self,
+        *,
+        after_admission_seq: int,
+        high_water: int,
+        limit: int,
+    ) -> tuple[RunDriveWatch, ...]:
+        raise NotImplementedError("run-drive-watch queries are staged in R2")
+
+    def acknowledge_run_drive_watch(self, public_run_id: str) -> None:
+        raise NotImplementedError(
+            "run-drive-watch acknowledgement is staged in R2"
+        )
 
     def _result_for(
         self, connection, effect_id: str

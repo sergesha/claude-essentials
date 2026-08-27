@@ -171,7 +171,9 @@ def test_runtime_schema_contains_no_parallel_workflow_authority(system) -> None:
         "leases",
         "effects",
         "effect_observations",
-        "effect_dispatch_watches",
+        "run_drive_watches",
+        "runtime_schema_migrations",
+        "runtime_schema_epoch",
         "consent_epochs",
         "publication_consents",
     }

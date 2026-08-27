@@ -132,7 +132,8 @@ def test_dispatch_watch_is_atomic_idempotent_and_not_status(ledger) -> None:
     assert effect_ledger.list_dispatch_watches(limit=2) == (first,)
     assert effect_ledger.acknowledge_dispatch_watch("run-1") is True
     assert effect_ledger.list_dispatch_watches(limit=2) == ()
-    assert set(storage.tables.effect_dispatch_watches.c.keys()) == {
+    assert set(storage.tables.run_drive_watches.c.keys()) == {
+        "admission_seq",
         "public_run_id",
         "input_blob_sha256",
         "input_blob_size",

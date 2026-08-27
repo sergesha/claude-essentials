@@ -11,8 +11,10 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from sqlalchemy import (
+    CheckConstraint,
     Column,
     ForeignKey,
     Integer,
@@ -21,6 +23,7 @@ from sqlalchemy import (
     Table,
     UniqueConstraint,
     create_engine,
+    inspect as sa_inspect,
 )
 from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.engine.url import make_url
@@ -30,6 +33,20 @@ from lockstep.runtime.owner_state import (
     seal_owner_file,
     verify_owner_file,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class LegacyRunDriveClassification:
+    public_run_id: str
+    disposition: Literal["nonterminal", "terminal", "malformed"]
+
+
+@dataclass(frozen=True, slots=True)
+class MigrationProgress:
+    after_public_run_id: str | None
+    completed: bool
+    inserted_public_run_ids: tuple[str, ...]
+    malformed_public_run_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -42,7 +59,55 @@ class RuntimeTables:
     leases: Table
     effects: Table
     effect_observations: Table
-    effect_dispatch_watches: Table
+    run_drive_watches: Table
+    runtime_schema_migrations: Table
+    runtime_schema_epoch: Table
+
+
+def _define_run_drive_tables(
+    metadata: MetaData,
+) -> tuple[Table, Table, Table]:
+    run_drive_watches = Table(
+        "run_drive_watches",
+        metadata,
+        Column("admission_seq", Integer, primary_key=True, autoincrement=True),
+        Column(
+            "public_run_id",
+            String,
+            ForeignKey("runs.public_run_id"),
+            nullable=False,
+            unique=True,
+        ),
+        Column("input_blob_sha256", String(64), nullable=True),
+        Column("input_blob_size", Integer, nullable=True),
+        Column("admitted_at", String, nullable=False),
+        CheckConstraint(
+            "((input_blob_sha256 IS NULL AND input_blob_size IS NULL) "
+            "OR (input_blob_sha256 IS NOT NULL AND input_blob_size IS NOT NULL))",
+            name="ck_run_drive_watch_input_blob_pair",
+        ),
+        sqlite_autoincrement=True,
+    )
+    runtime_schema_migrations = Table(
+        "runtime_schema_migrations",
+        metadata,
+        Column("name", String, primary_key=True),
+        Column("schema_version", Integer, nullable=False),
+        Column("after_public_run_id", String, nullable=True),
+        Column("completed_at", String, nullable=True),
+        Column("updated_at", String, nullable=False),
+    )
+    runtime_schema_epoch = Table(
+        "runtime_schema_epoch",
+        metadata,
+        Column("singleton", Integer, primary_key=True),
+        Column("epoch", Integer, nullable=False),
+        CheckConstraint(
+            "singleton = 1",
+            name="ck_runtime_schema_epoch_singleton",
+        ),
+    )
+    return run_drive_watches, runtime_schema_migrations, runtime_schema_epoch
 
 
 def _define_tables(metadata: MetaData, external_metadata: MetaData) -> RuntimeTables:
@@ -179,18 +244,12 @@ def _define_tables(metadata: MetaData, external_metadata: MetaData) -> RuntimeTa
         Column("result_json", String, nullable=True),
         Column("observed_at", String, nullable=False),
     )
-    effect_dispatch_watches = Table(
-        "effect_dispatch_watches",
+    (
+        run_drive_watches,
+        runtime_schema_migrations,
+        runtime_schema_epoch,
+    ) = _define_run_drive_tables(
         metadata,
-        Column(
-            "public_run_id",
-            String,
-            ForeignKey("runs.public_run_id"),
-            primary_key=True,
-        ),
-        Column("input_blob_sha256", String(64), nullable=False),
-        Column("input_blob_size", Integer, nullable=False),
-        Column("admitted_at", String, nullable=False),
     )
     return RuntimeTables(
         runs=runs,
@@ -201,8 +260,28 @@ def _define_tables(metadata: MetaData, external_metadata: MetaData) -> RuntimeTa
         leases=leases,
         effects=effects,
         effect_observations=effect_observations,
-        effect_dispatch_watches=effect_dispatch_watches,
+        run_drive_watches=run_drive_watches,
+        runtime_schema_migrations=runtime_schema_migrations,
+        runtime_schema_epoch=runtime_schema_epoch,
     )
+
+
+class RuntimeSchemaMigrator:
+    """Private owner-state schema migration boundary."""
+
+    def __init__(self, store: SQLiteStore) -> None:
+        self._store = store
+
+    def apply_run_drive_watch_page(
+        self,
+        *,
+        expected_after_public_run_id: str | None,
+        classified: tuple[LegacyRunDriveClassification, ...],
+        exhausted: bool,
+    ) -> MigrationProgress:
+        raise NotImplementedError(
+            "run-drive-watch migration behavior is staged in R2"
+        )
 
 
 class SQLiteStore:
@@ -231,6 +310,12 @@ class SQLiteStore:
             url,
             connect_args={"check_same_thread": False, "timeout": 30},
         )
+        existing_tables = set(sa_inspect(self.engine).get_table_names())
+        if existing_tables and "runtime_schema_epoch" not in existing_tables:
+            self.engine.dispose()
+            raise RuntimeError(
+                "runtime schema migration is required before opening this database"
+            )
         self.metadata = MetaData()
         # Runtime-input facts are deliberately not part of the effect/catalog
         # schema metadata.  They share the transaction engine while retaining
@@ -239,6 +324,12 @@ class SQLiteStore:
         self.tables = _define_tables(self.metadata, self.external_fact_metadata)
         self.metadata.create_all(self.engine)
         self.external_fact_metadata.create_all(self.engine)
+        with self.engine.begin() as connection:
+            connection.execute(
+                self.tables.runtime_schema_epoch.insert()
+                .prefix_with("OR IGNORE")
+                .values(singleton=1, epoch=2)
+            )
         self._seal_sqlite_files()
 
     def _sqlite_files(self) -> tuple[Path, ...]:
@@ -293,6 +384,13 @@ class SQLiteStore:
         finally:
             connection.close()
             self._seal_sqlite_files()
+
+    @contextmanager
+    def _v2_write_transaction(self) -> Iterator[Connection]:
+        """Staged surface; exact epoch fencing follows in its own cycle."""
+
+        with self.write_transaction() as connection:
+            yield connection
 
     def close(self) -> None:
         self.engine.dispose()

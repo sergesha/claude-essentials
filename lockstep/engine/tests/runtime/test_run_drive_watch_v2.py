@@ -690,7 +690,7 @@ def test_start_watch_replays_only_before_first_checkpoint_non_null(
     )
     run_id = started["run_id"]
     input_blob = service.blobs.put(b"{}")
-    table = service.store.tables.effect_dispatch_watches
+    table = service.store.tables.run_drive_watches
     with service.store.write_transaction() as connection:
         connection.execute(table.insert().values(
             public_run_id=run_id,
