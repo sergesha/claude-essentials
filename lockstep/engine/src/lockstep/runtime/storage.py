@@ -58,6 +58,10 @@ class MigrationProgress:
     inserted_public_run_ids: tuple[str, ...]
     malformed_public_run_ids: tuple[str, ...]
 
+    def __post_init__(self) -> None:
+        if type(self.completed) is not bool:
+            raise TypeError("completed must be a boolean")
+
 
 @dataclass(frozen=True)
 class RuntimeTables:
