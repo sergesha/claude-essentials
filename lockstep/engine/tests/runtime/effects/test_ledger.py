@@ -141,6 +141,30 @@ def test_dispatch_watch_is_atomic_idempotent_and_not_status(ledger) -> None:
     }
 
 
+def test_max_run_drive_admission_seq_returns_none_then_current_db_max(ledger) -> None:
+    from lockstep.runtime.blobs import BlobRef
+    from lockstep.runtime.catalog import RunBinding, RunCatalog
+
+    effect_ledger, storage = ledger
+    catalog = RunCatalog(storage)
+    assert effect_ledger.max_run_drive_admission_seq() is None
+
+    for index in (1, 2):
+        effect_ledger.admit_start(
+            catalog,
+            RunBinding(
+                f"run-{index}",
+                f"thread-{index}",
+                "a" * 64,
+                "bundle:" + "b" * 64,
+                "/project",
+            ),
+            BlobRef("c" * 64, 2),
+        )
+
+    assert effect_ledger.max_run_drive_admission_seq() == 2
+
+
 def test_dispatch_watch_limit_is_a_batch_not_a_correctness_cap(ledger) -> None:
     from lockstep.runtime.blobs import BlobRef
     from lockstep.runtime.catalog import RunBinding, RunCatalog
