@@ -793,3 +793,74 @@ def test_apply_run_drive_watch_page_rejects_cursor_mismatch_replay_write_free(
         if reopened is not None:
             reopened.close()
         store.close()
+
+
+def test_apply_run_drive_watch_page_durably_completes_empty_exhausted_page_at_prior_cursor(
+    tmp_path: Path,
+) -> None:
+    from lockstep.runtime.storage import (
+        LegacyRunDriveClassification,
+        MigrationProgress,
+        RuntimeSchemaMigrator,
+        SQLiteStore,
+    )
+
+    database_path = tmp_path / "runtime.db"
+    store = SQLiteStore(database_path)
+    reopened = None
+    try:
+        _create_catalog_bindings(store, "run-001")
+        migrator = RuntimeSchemaMigrator(store)
+        migrator.apply_run_drive_watch_page(
+            expected_after_public_run_id=None,
+            classified=(),
+            exhausted=False,
+        )
+        migrator.apply_run_drive_watch_page(
+            expected_after_public_run_id=None,
+            classified=(
+                LegacyRunDriveClassification("run-001", "terminal"),
+            ),
+            exhausted=False,
+        )
+
+        before = datetime.now(UTC)
+        progress = migrator.apply_run_drive_watch_page(
+            expected_after_public_run_id="run-001",
+            classified=(),
+            exhausted=True,
+        )
+        after = datetime.now(UTC)
+        assert progress == MigrationProgress("run-001", True, (), ())
+
+        store.close()
+        reopened = SQLiteStore(database_path)
+        with reopened.read_connection() as connection:
+            migration_rows = connection.execute(
+                reopened.tables.runtime_schema_migrations.select()
+            ).all()
+            watches = connection.execute(
+                reopened.tables.run_drive_watches.select()
+            ).all()
+        assert len(migration_rows) == 1
+        migration_row = migration_rows[0]
+        assert migration_row.name == "run-drive-watch-v2"
+        assert migration_row.schema_version == 2
+        assert migration_row.after_public_run_id == "run-001"
+
+        completed_at = datetime.fromisoformat(migration_row.completed_at)
+        assert completed_at.tzinfo is not None
+        assert completed_at.utcoffset() is not None
+        assert migration_row.completed_at == completed_at.astimezone(UTC).isoformat()
+        assert before <= completed_at <= after
+
+        updated_at = datetime.fromisoformat(migration_row.updated_at)
+        assert updated_at.tzinfo is not None
+        assert updated_at.utcoffset() is not None
+        assert migration_row.updated_at == updated_at.astimezone(UTC).isoformat()
+        assert before <= updated_at <= after
+        assert watches == []
+    finally:
+        if reopened is not None:
+            reopened.close()
+        store.close()
