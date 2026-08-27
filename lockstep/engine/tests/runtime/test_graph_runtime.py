@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime
+import inspect
 from pathlib import Path
 import threading
 
@@ -19,7 +20,7 @@ from lockstep.runtime.graph_runtime import (
 )
 from lockstep.runtime.invocation_lock import InvocationLockStore
 from lockstep.runtime.leases import LeaseStore, LeaseUnavailable
-from lockstep.runtime.native_models import NativeEvent, NativeSnapshot
+from lockstep.runtime.native_models import NativeAppPort, NativeEvent, NativeSnapshot
 from lockstep.runtime.recipe_bundles import RecipeBundleStore
 from lockstep.runtime.storage import SQLiteStore
 
@@ -55,6 +56,29 @@ def _runtime(tmp_path: Path, bundle_store: RecipeBundleStore):
         app_factory=yg.open_native_app,
     )
     return store, runtime
+
+
+@pytest.mark.parametrize(
+    "method",
+    (NativeAppPort.checkpoint_is_ancestor, yg.NativeApp.checkpoint_is_ancestor),
+)
+def test_native_ancestry_port_names_both_exact_checkpoint_pairs(method):
+    parameters = tuple(inspect.signature(method).parameters.values())
+    assert tuple(item.name for item in parameters) == (
+        "self",
+        "thread_id",
+        "ancestor_checkpoint_ns",
+        "ancestor_checkpoint_id",
+        "descendant_checkpoint_ns",
+        "descendant_checkpoint_id",
+        "snapshot_limit",
+    )
+    assert tuple(item.kind for item in parameters[1:]) == (
+        inspect.Parameter.KEYWORD_ONLY,
+    ) * 6
+    assert tuple(item.default for item in parameters[1:]) == (
+        inspect.Parameter.empty,
+    ) * 6
 
 
 def test_fresh_start_restart_history_and_live_source_deletion(tmp_path):
