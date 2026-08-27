@@ -61,6 +61,19 @@ class MigrationProgress:
     def __post_init__(self) -> None:
         if type(self.completed) is not bool:
             raise TypeError("completed must be a boolean")
+        if self.after_public_run_id is not None and (
+            type(self.after_public_run_id) is not str
+            or not self.after_public_run_id
+        ):
+            raise ValueError("after_public_run_id must be a non-empty string")
+        for name, values in (
+            ("inserted_public_run_ids", self.inserted_public_run_ids),
+            ("malformed_public_run_ids", self.malformed_public_run_ids),
+        ):
+            if type(values) is not tuple:
+                raise TypeError(f"{name} must be a tuple")
+            if any(type(value) is not str or not value for value in values):
+                raise ValueError(f"{name} must contain non-empty strings")
 
 
 @dataclass(frozen=True)
