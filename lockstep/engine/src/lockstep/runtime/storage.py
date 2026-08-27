@@ -368,20 +368,44 @@ class RuntimeSchemaMigrator:
             classified=classified,
             exhausted=exhausted,
         )
-        if expected_after_public_run_id is not None or public_run_ids or exhausted:
+        if (
+            expected_after_public_run_id is not None
+            or exhausted
+            or any(record.disposition == "nonterminal" for record in classified)
+        ):
             raise NotImplementedError(
                 "run-drive-watch migration behavior is staged in R2"
             )
-        table = self._store.tables.runtime_schema_migrations
         with self._store._v2_write_transaction() as connection:
-            existing = connection.execute(
-                select(table).where(table.c.name == _RUN_DRIVE_WATCH_MIGRATION)
-            ).first()
-            if existing is not None:
+            progress = self._apply_validated_page_in_transaction(
+                connection,
+                classified=classified,
+                public_run_ids=public_run_ids,
+            )
+        return progress
+
+    def _apply_validated_page_in_transaction(
+        self,
+        connection: Connection,
+        *,
+        classified: tuple[LegacyRunDriveClassification, ...],
+        public_run_ids: tuple[str, ...],
+    ) -> MigrationProgress:
+        table = self._store.tables.runtime_schema_migrations
+        malformed_public_run_ids = tuple(
+            record.public_run_id
+            for record in classified
+            if record.disposition == "malformed"
+        )
+        existing = connection.execute(
+            select(table).where(table.c.name == _RUN_DRIVE_WATCH_MIGRATION)
+        ).first()
+        timestamp = datetime.now(UTC).isoformat()
+        if existing is None:
+            if public_run_ids:
                 raise NotImplementedError(
-                    "run-drive-watch migration replay is staged in R2"
+                    "run-drive-watch migration initialization is staged in R2"
                 )
-            timestamp = datetime.now(UTC).isoformat()
             connection.execute(
                 table.insert().values(
                     name=_RUN_DRIVE_WATCH_MIGRATION,
@@ -391,7 +415,32 @@ class RuntimeSchemaMigrator:
                     updated_at=timestamp,
                 )
             )
-        return MigrationProgress(None, False, (), ())
+            after_public_run_id = None
+        elif (
+            not public_run_ids
+            or existing.schema_version != 2
+            or existing.after_public_run_id is not None
+            or existing.completed_at is not None
+        ):
+            raise NotImplementedError(
+                "run-drive-watch migration replay is staged in R2"
+            )
+        else:
+            after_public_run_id = public_run_ids[-1]
+            connection.execute(
+                table.update()
+                .where(table.c.name == _RUN_DRIVE_WATCH_MIGRATION)
+                .values(
+                    after_public_run_id=after_public_run_id,
+                    updated_at=timestamp,
+                )
+            )
+        return MigrationProgress(
+            after_public_run_id,
+            False,
+            (),
+            malformed_public_run_ids,
+        )
 
 
 class SQLiteStore:
