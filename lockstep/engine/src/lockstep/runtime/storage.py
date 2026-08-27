@@ -356,7 +356,6 @@ def _validate_existing_run_drive_watch_migration(
     stored_after_public_run_id: str | None,
     expected_after_public_run_id: str | None,
     completed_at: str | None,
-    page_is_empty: bool,
 ) -> None:
     if schema_version != 2:
         raise NotImplementedError(
@@ -364,7 +363,7 @@ def _validate_existing_run_drive_watch_migration(
         )
     if stored_after_public_run_id != expected_after_public_run_id:
         raise RuntimeError("run-drive-watch migration cursor mismatch")
-    if completed_at is not None or page_is_empty:
+    if completed_at is not None:
         raise NotImplementedError(
             "run-drive-watch migration replay is staged in R2"
         )
@@ -388,16 +387,13 @@ class RuntimeSchemaMigrator:
             classified=classified,
             exhausted=exhausted,
         )
-        if exhausted:
-            raise NotImplementedError(
-                "run-drive-watch migration behavior is staged in R2"
-            )
         with self._store._v2_write_transaction() as connection:
             progress = self._apply_validated_page_in_transaction(
                 connection,
                 expected_after_public_run_id=expected_after_public_run_id,
                 classified=classified,
                 public_run_ids=public_run_ids,
+                exhausted=exhausted,
             )
         return progress
 
@@ -408,6 +404,7 @@ class RuntimeSchemaMigrator:
         expected_after_public_run_id: str | None,
         classified: tuple[LegacyRunDriveClassification, ...],
         public_run_ids: tuple[str, ...],
+        exhausted: bool,
     ) -> MigrationProgress:
         table = self._store.tables.runtime_schema_migrations
         watch_table = self._store.tables.run_drive_watches
@@ -435,7 +432,7 @@ class RuntimeSchemaMigrator:
                     name=_RUN_DRIVE_WATCH_MIGRATION,
                     schema_version=2,
                     after_public_run_id=None,
-                    completed_at=None,
+                    completed_at=timestamp if exhausted else None,
                     updated_at=timestamp,
                 )
             )
@@ -446,9 +443,12 @@ class RuntimeSchemaMigrator:
                 stored_after_public_run_id=existing.after_public_run_id,
                 expected_after_public_run_id=expected_after_public_run_id,
                 completed_at=existing.completed_at,
-                page_is_empty=not public_run_ids,
             )
-            after_public_run_id = public_run_ids[-1]
+            after_public_run_id = (
+                public_run_ids[-1]
+                if public_run_ids
+                else existing.after_public_run_id
+            )
             if inserted_public_run_ids:
                 connection.execute(
                     watch_table.insert(),
@@ -467,12 +467,13 @@ class RuntimeSchemaMigrator:
                 .where(table.c.name == _RUN_DRIVE_WATCH_MIGRATION)
                 .values(
                     after_public_run_id=after_public_run_id,
+                    completed_at=timestamp if exhausted else None,
                     updated_at=timestamp,
                 )
             )
         return MigrationProgress(
             after_public_run_id,
-            False,
+            exhausted,
             inserted_public_run_ids,
             malformed_public_run_ids,
         )
