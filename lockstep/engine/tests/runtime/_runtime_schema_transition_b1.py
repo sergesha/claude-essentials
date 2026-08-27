@@ -11,7 +11,7 @@ from sqlalchemy import Column, ForeignKey, Integer, MetaData, String, Table, cre
 
 from lockstep.runtime.owner_state import seal_owner_file
 from lockstep.runtime.advisory_lock import AdvisoryLockTimeout, advisory_file_lock
-from lockstep.runtime.storage import _define_tables
+from lockstep.runtime.storage import SQLiteStore, _define_tables
 
 
 _V2_TABLES = {
@@ -68,6 +68,79 @@ def seed_exact_legacy_database(path: Path) -> None:
     finally:
         engine.dispose()
     seal_owner_file(path, writable=True)
+
+
+def seed_empty_database(path: Path) -> None:
+    path.touch(mode=0o600)
+    seal_owner_file(path, writable=True)
+
+
+def seed_exact_v2_database(path: Path) -> None:
+    store = SQLiteStore(path)
+    store.close()
+
+
+def poison_effects_table_ddl(path: Path) -> None:
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute("ALTER TABLE effects ADD COLUMN poison TEXT")
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def poison_mixed_legacy_schema(path: Path) -> None:
+    metadata = MetaData()
+    external = MetaData()
+    tables = _define_tables(metadata, external)
+    engine = create_engine(f"sqlite+pysqlite:///{path}")
+    try:
+        tables.runtime_schema_epoch.create(engine)
+        with engine.begin() as connection:
+            connection.execute(
+                tables.runtime_schema_epoch.insert().values(singleton=1, epoch=2)
+            )
+    finally:
+        engine.dispose()
+
+
+def poison_extra_legacy_schema_object(path: Path) -> None:
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute("CREATE VIEW poison_view AS SELECT 1 AS poison")
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def poison_orphan_legacy_watch(path: Path) -> None:
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute(
+            "INSERT INTO effect_dispatch_watches VALUES (?, ?, ?, ?)",
+            ("orphan", _INPUT_DIGEST, 2, _ADMITTED_AT),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def poison_v2_epoch_one(path: Path) -> None:
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute("UPDATE runtime_schema_epoch SET epoch = 1")
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def poison_v2_missing_epoch(path: Path) -> None:
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute("DELETE FROM runtime_schema_epoch")
+        connection.commit()
+    finally:
+        connection.close()
 
 
 def _legacy_writer(

@@ -1,4 +1,4 @@
-"""B1 staged surface for the private legacy-to-v2 schema transition."""
+"""B1 surface for the private legacy-to-v2 schema transition."""
 
 from __future__ import annotations
 
@@ -6,10 +6,7 @@ from inspect import Parameter, signature
 from pathlib import Path
 from typing import get_type_hints
 
-import pytest
-
-
-def test_transition_surface_is_exact_and_fail_closed_without_io(
+def test_transition_surface_is_exact_and_absent_store_is_noop(
     tmp_path: Path,
 ) -> None:
     from lockstep.runtime.storage import RuntimeSchemaMigrator
@@ -27,10 +24,7 @@ def test_transition_surface_is_exact_and_fail_closed_without_io(
     }
 
     database_path = tmp_path / "absent-runtime.sqlite"
-    with pytest.raises(
-        NotImplementedError,
-        match="runtime schema transition is not implemented",
-    ):
-        transition(database_path)
+    transition(database_path)
 
     assert not database_path.exists()
+    assert tuple(tmp_path.iterdir()) == ()
