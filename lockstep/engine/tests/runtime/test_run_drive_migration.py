@@ -196,6 +196,47 @@ def test_migration_progress_requires_exact_public_id_shapes() -> None:
             progress_type(None, False, (), malformed_public_run_ids)
 
 
+def test_migration_progress_result_ids_are_sorted_unique_disjoint_and_bounded() -> None:
+    progress_type = _migration_type("MigrationProgress")
+    ids = tuple(f"run-{index:03d}" for index in range(128))
+
+    boundary = progress_type("run-127", False, ids[:64], ids[64:])
+    assert boundary.inserted_public_run_ids == ids[:64]
+    assert boundary.malformed_public_run_ids == ids[64:]
+
+    for inserted_public_run_ids in (
+        ("run-002", "run-001"),
+        ("run-001", "run-001"),
+    ):
+        with pytest.raises(
+            ValueError,
+            match="^inserted_public_run_ids must be sorted and unique$",
+        ):
+            progress_type(None, False, inserted_public_run_ids, ())
+    for malformed_public_run_ids in (
+        ("run-002", "run-001"),
+        ("run-001", "run-001"),
+    ):
+        with pytest.raises(
+            ValueError,
+            match="^malformed_public_run_ids must be sorted and unique$",
+        ):
+            progress_type(None, False, (), malformed_public_run_ids)
+
+    with pytest.raises(
+        ValueError,
+        match="^migration progress result IDs must be disjoint$",
+    ):
+        progress_type(None, False, ("run-001",), ("run-001",))
+
+    too_many_ids = tuple(f"run-{index:03d}" for index in range(129))
+    with pytest.raises(
+        ValueError,
+        match="^migration progress result IDs must contain at most 128 entries$",
+    ):
+        progress_type(None, False, too_many_ids[:64], too_many_ids[64:])
+
+
 def test_run_drive_migration_page_api_exact_signature() -> None:
     from lockstep.runtime import storage as storage_module
 
