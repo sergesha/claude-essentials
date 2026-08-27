@@ -78,6 +78,129 @@ def test_durable_recovery_discovers_null_input_v2_watch() -> None:
     ]
 
 
+def test_watch_discovery_pages_past_128_unprotected_runs() -> None:
+    bindings = {
+        f"run-{index:03d}": RunBinding(
+            f"run-{index:03d}",
+            f"thread-{index:03d}",
+            "a" * 64,
+            "bundle:" + "b" * 64,
+            "/project",
+        )
+        for index in range(1, 130)
+    }
+    watches = tuple(
+        SimpleNamespace(admission_seq=index, public_run_id=f"run-{index:03d}")
+        for index in range(1, 130)
+    )
+    requirement = SimpleNamespace(
+        protected_descriptor_digest="d" * 64,
+        runner_selector="codex",
+    )
+    protected_index = SimpleNamespace(
+        project_identity="/project", requirements=(requirement,)
+    )
+    empty_index = SimpleNamespace(project_identity="/project", requirements=())
+    pages = []
+    max_calls = []
+
+    def capture_max():
+        max_calls.append(True)
+        if len(max_calls) > 1:
+            raise AssertionError("watch high-water was captured more than once")
+        return 129
+
+    def list_watches(*, after_admission_seq, high_water, limit):
+        pages.append((after_admission_seq, high_water, limit))
+        return tuple(
+            watch
+            for watch in watches
+            if after_admission_seq < watch.admission_seq <= high_water
+        )[:limit]
+
+    effects = SimpleNamespace(
+        max_run_drive_admission_seq=capture_max,
+        list_run_drive_watches=list_watches,
+        list_recovery_threads=lambda **_kwargs: (),
+    )
+    recovery = _recovery(
+        effects=effects,
+        catalog=SimpleNamespace(get=lambda run_id: bindings[run_id]),
+    )
+    recovery._resolver = SimpleNamespace(
+        index=lambda binding: (
+            protected_index
+            if binding.public_run_id == "run-129"
+            else empty_index
+        )
+    )
+
+    assert recovery._protected_work(
+        limit=128, after_thread_id=None
+    ) == (_ProtectedRecoveryWork(protected_index, ()),)
+    assert max_calls == [True]
+    assert pages == [(0, 129, 128), (128, 129, 128)]
+
+
+def test_watch_discovery_stops_materializing_at_protected_limit() -> None:
+    bindings = {
+        f"run-{index}": RunBinding(
+            f"run-{index}",
+            f"thread-{index}",
+            "a" * 64,
+            "bundle:" + "b" * 64,
+            "/project",
+        )
+        for index in range(1, 4)
+    }
+    watches = tuple(
+        SimpleNamespace(admission_seq=index, public_run_id=f"run-{index}")
+        for index in range(1, 4)
+    )
+    requirement = SimpleNamespace(
+        protected_descriptor_digest="d" * 64,
+        runner_selector="codex",
+    )
+    index = SimpleNamespace(
+        project_identity="/project", requirements=(requirement,)
+    )
+    pages = []
+    materialized = []
+
+    def list_watches(*, after_admission_seq, high_water, limit):
+        pages.append((after_admission_seq, high_water, limit))
+        return watches
+
+    def get_binding(run_id):
+        materialized.append(("catalog", run_id))
+        return bindings[run_id]
+
+    def resolve_index(binding):
+        materialized.append(("resolver", binding.public_run_id))
+        return index
+
+    recovery = _recovery(
+        effects=SimpleNamespace(
+            max_run_drive_admission_seq=lambda: 3,
+            list_run_drive_watches=list_watches,
+            list_recovery_threads=lambda **_kwargs: (),
+        ),
+        catalog=SimpleNamespace(get=get_binding),
+    )
+    recovery._resolver = SimpleNamespace(index=resolve_index)
+
+    work = recovery._protected_work(limit=2, after_thread_id=None)
+
+    assert len(work) == 2
+    assert pages == [(0, 3, 128)]
+    assert materialized == [
+        ("catalog", "run-1"),
+        ("resolver", "run-1"),
+        ("catalog", "run-2"),
+        ("resolver", "run-2"),
+    ]
+
+
 @pytest.mark.parametrize(
     ("record", "message"),
     (

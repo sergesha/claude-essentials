@@ -28,14 +28,7 @@ def _prepare_completed_baseline(population) -> None:
         ).run_drive_watch_migration_state()
         assert progress is not None and progress.completed
         assert progress.after_public_run_id == population.target_id
-        high_water = command.effects.max_run_drive_admission_seq()
-        assert high_water is not None
-        command.effects.acknowledge_run_drive_watch(population.target_id)
-        assert command.effects.list_run_drive_watches(
-            after_admission_seq=0,
-            high_water=high_water,
-            limit=128,
-        ) == ()
+        assert command.effects.max_run_drive_admission_seq() is None
 
 
 def test_completed_backfill_never_rescans_or_rearms_terminal_runs(

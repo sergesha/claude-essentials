@@ -864,6 +864,52 @@ def test_engine_progress_prepares_manual_handoff_before_returning_awaiting() -> 
     assert service.coordinator.calls == 1
 
 
+@pytest.mark.parametrize(
+    ("action", "accepted"),
+    tuple(
+        (action, True)
+        for action in (
+            "prepared",
+            "launch_claimed",
+            "sealed",
+            "delivered",
+            "awaiting_delivery",
+            "publication_claimed",
+            "publication_progress",
+            "running",
+            "quiescence_pending",
+            "indeterminate",
+        )
+    )
+    + tuple(
+        (action, False)
+        for action in (
+            "busy",
+            "unchanged",
+            "no_effect",
+            "manual_pending",
+            "acceptance_pending",
+            "authority_blocked",
+            "deadline_blocked",
+        )
+    ),
+)
+def test_recovered_engine_drive_counts_only_real_attempt_actions(
+    action: str, accepted: bool
+) -> None:
+    from lockstep.runtime.engine_drive_service import EngineDriveService
+
+    assert EngineDriveService._accepted_attempt({action}) is accepted
+
+
+def test_recovered_engine_drive_attempt_accounting_uses_any_real_work() -> None:
+    from lockstep.runtime.engine_drive_service import EngineDriveService
+
+    assert EngineDriveService._accepted_attempt({"running", "busy"}) is True
+    assert EngineDriveService._accepted_attempt({"busy", "unchanged"}) is False
+    assert EngineDriveService._accepted_attempt(set()) is False
+
+
 def test_engine_progress_delivers_scope_result_without_status_mutation() -> None:
     coordinate = NativeCoordinate("thread-1", "cp-1", "", "task-1", "int-1")
     interrupt = NativeInterrupt(

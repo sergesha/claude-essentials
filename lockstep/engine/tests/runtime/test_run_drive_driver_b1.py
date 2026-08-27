@@ -227,7 +227,7 @@ def test_start_watch_replays_only_before_first_checkpoint(tmp_path: Path) -> Non
             "native_unchanged": native_after == native_before,
             "effects_unchanged": effects_after == effects_before,
         } == {
-            "snapshot_calls": [(run_id, True)],
+            "snapshot_calls": [(run_id, True), (run_id, True)],
             "watch_unchanged": True,
             "native_unchanged": True,
             "effects_unchanged": True,
@@ -359,7 +359,7 @@ def test_non_null_watch_replays_input_once_before_first_checkpoint(
     assert starts == [(binding.public_run_id, {})]
     assert persisted[0].checkpoint_id
     assert persisted[0] == persisted[1]
-    assert outcomes == [False, False]
+    assert outcomes == [True, False]
 
 
 def test_terminal_removal_crash_cuts(tmp_path: Path) -> None:

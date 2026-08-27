@@ -157,6 +157,25 @@ def seed_backfill_population(tmp_path: Path) -> BackfillPopulation:
         target = _park_decision(command, compiled, project)
         assert command._runtime_execution_context is None
         assert malformed_ids[-1] < terminal.public_run_id < target.public_run_id
+        # The final v2 writer always admits watches.  Remove the two created
+        # through public starts to model the historical pre-watch population
+        # that this backfill integration fixture is specifically exercising.
+        high_water = command.effects.max_run_drive_admission_seq()
+        assert high_water is not None
+        active_origin_ids = tuple(
+            watch.public_run_id
+            for watch in command.effects.list_run_drive_watches(
+                after_admission_seq=0,
+                high_water=high_water,
+                limit=128,
+            )
+        )
+        assert set(active_origin_ids) == {
+            terminal.public_run_id,
+            target.public_run_id,
+        }
+        command.effects.acknowledge_run_drive_watch(terminal.public_run_id)
+        command.effects.acknowledge_run_drive_watch(target.public_run_id)
         assert command.effects.max_run_drive_admission_seq() is None
         return BackfillPopulation(
             command.state_dir,
