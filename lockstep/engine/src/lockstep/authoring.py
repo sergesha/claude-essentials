@@ -5,12 +5,12 @@ from __future__ import annotations
 import difflib
 import json
 import re
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Mapping
+from typing import Mapping
 
 import yaml
 
+from lockstep.authoring_bundle import AuthoredRecipe
 from lockstep.errors import AuthoringError
 from lockstep.recipe.authority import StrictRecipeIngress, canonical_execution_bytes
 from lockstep.recipe.profile import CompilerProvenance, _create_compiler_provenance
@@ -39,16 +39,6 @@ def validate_logical_name(name: str) -> str:
             "hyphens, beginning with a letter"
         )
     return name
-
-
-@dataclass(frozen=True)
-class AuthoredRecipe:
-    name: str
-    kind: Literal["workflow", "manual"]
-    workflow_path: Path | None
-    recipe_path: Path
-    dependency_path: Path | None
-    source_map_path: Path | None
 
 
 def project_paths(project: Path, name: str) -> AuthoredRecipe:

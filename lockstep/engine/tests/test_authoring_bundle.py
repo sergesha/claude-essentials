@@ -27,7 +27,9 @@ from tests._authoring_gate import (
 
 
 def test_whole_dag_bundle_contracts_are_explicit() -> None:
+    from lockstep.authoring import AuthoredRecipe as PublicAuthoredRecipe
     from lockstep.authoring_bundle import (
+        AuthoredRecipe,
         DestinationImage,
         ProjectCompilationBundle,
         SourceIdentity,
@@ -37,6 +39,7 @@ def test_whole_dag_bundle_contracts_are_explicit() -> None:
         isinstance(contract, type)
         for contract in (SourceIdentity, DestinationImage, ProjectCompilationBundle)
     )
+    assert PublicAuthoredRecipe is AuthoredRecipe
 
 
 def test_authoring_publisher_surface_has_only_the_frozen_operations() -> None:
