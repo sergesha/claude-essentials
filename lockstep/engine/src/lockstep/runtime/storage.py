@@ -40,6 +40,16 @@ class LegacyRunDriveClassification:
     public_run_id: str
     disposition: Literal["nonterminal", "terminal", "malformed"]
 
+    def __post_init__(self) -> None:
+        if type(self.public_run_id) is not str or not self.public_run_id:
+            raise ValueError("public_run_id must be a non-empty string")
+        if type(self.disposition) is not str or self.disposition not in {
+            "nonterminal",
+            "terminal",
+            "malformed",
+        }:
+            raise ValueError("disposition must be nonterminal, terminal, or malformed")
+
 
 @dataclass(frozen=True, slots=True)
 class MigrationProgress:
