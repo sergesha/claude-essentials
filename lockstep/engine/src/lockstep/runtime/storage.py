@@ -364,9 +364,7 @@ def _validate_existing_run_drive_watch_migration(
     if stored_after_public_run_id != expected_after_public_run_id:
         raise RuntimeError("run-drive-watch migration cursor mismatch")
     if completed_at is not None:
-        raise NotImplementedError(
-            "run-drive-watch migration replay is staged in R2"
-        )
+        raise RuntimeError("run-drive-watch migration is already completed")
 
 
 class RuntimeSchemaMigrator:
