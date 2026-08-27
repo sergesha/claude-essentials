@@ -358,9 +358,7 @@ def _validate_existing_run_drive_watch_migration(
     completed_at: str | None,
 ) -> None:
     if schema_version != 2:
-        raise NotImplementedError(
-            "run-drive-watch migration replay is staged in R2"
-        )
+        raise RuntimeError("run-drive-watch migration schema version must be 2")
     if stored_after_public_run_id != expected_after_public_run_id:
         raise RuntimeError("run-drive-watch migration cursor mismatch")
     if completed_at is not None:
