@@ -368,16 +368,14 @@ class RuntimeSchemaMigrator:
             classified=classified,
             exhausted=exhausted,
         )
-        if (
-            expected_after_public_run_id is not None
-            or exhausted
-        ):
+        if exhausted:
             raise NotImplementedError(
                 "run-drive-watch migration behavior is staged in R2"
             )
         with self._store._v2_write_transaction() as connection:
             progress = self._apply_validated_page_in_transaction(
                 connection,
+                expected_after_public_run_id=expected_after_public_run_id,
                 classified=classified,
                 public_run_ids=public_run_ids,
             )
@@ -387,6 +385,7 @@ class RuntimeSchemaMigrator:
         self,
         connection: Connection,
         *,
+        expected_after_public_run_id: str | None,
         classified: tuple[LegacyRunDriveClassification, ...],
         public_run_ids: tuple[str, ...],
     ) -> MigrationProgress:
@@ -407,7 +406,7 @@ class RuntimeSchemaMigrator:
         ).first()
         timestamp = datetime.now(UTC).isoformat()
         if existing is None:
-            if public_run_ids:
+            if expected_after_public_run_id is not None or public_run_ids:
                 raise NotImplementedError(
                     "run-drive-watch migration initialization is staged in R2"
                 )
@@ -424,7 +423,7 @@ class RuntimeSchemaMigrator:
         elif (
             not public_run_ids
             or existing.schema_version != 2
-            or existing.after_public_run_id is not None
+            or existing.after_public_run_id != expected_after_public_run_id
             or existing.completed_at is not None
         ):
             raise NotImplementedError(
