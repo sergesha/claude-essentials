@@ -350,6 +350,26 @@ def _validate_run_drive_watch_page_envelope(
     return public_run_ids
 
 
+def _validate_existing_run_drive_watch_migration(
+    *,
+    schema_version: int,
+    stored_after_public_run_id: str | None,
+    expected_after_public_run_id: str | None,
+    completed_at: str | None,
+    page_is_empty: bool,
+) -> None:
+    if schema_version != 2:
+        raise NotImplementedError(
+            "run-drive-watch migration replay is staged in R2"
+        )
+    if stored_after_public_run_id != expected_after_public_run_id:
+        raise RuntimeError("run-drive-watch migration cursor mismatch")
+    if completed_at is not None or page_is_empty:
+        raise NotImplementedError(
+            "run-drive-watch migration replay is staged in R2"
+        )
+
+
 class RuntimeSchemaMigrator:
     """Private owner-state schema migration boundary."""
 
@@ -420,16 +440,14 @@ class RuntimeSchemaMigrator:
                 )
             )
             after_public_run_id = None
-        elif (
-            not public_run_ids
-            or existing.schema_version != 2
-            or existing.after_public_run_id != expected_after_public_run_id
-            or existing.completed_at is not None
-        ):
-            raise NotImplementedError(
-                "run-drive-watch migration replay is staged in R2"
-            )
         else:
+            _validate_existing_run_drive_watch_migration(
+                schema_version=existing.schema_version,
+                stored_after_public_run_id=existing.after_public_run_id,
+                expected_after_public_run_id=expected_after_public_run_id,
+                completed_at=existing.completed_at,
+                page_is_empty=not public_run_ids,
+            )
             after_public_run_id = public_run_ids[-1]
             if inserted_public_run_ids:
                 connection.execute(
