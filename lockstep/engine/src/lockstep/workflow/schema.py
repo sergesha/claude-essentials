@@ -156,10 +156,13 @@ def _diagnostic_from_yaml(path: Path, exc: Exception) -> DiagnosticError:
     ),))
 
 
-def load_workflow(path: str | Path) -> MarkedDocument:
+def load_workflow_bytes(path: str | Path, source_bytes: bytes) -> MarkedDocument:
+    """Parse one already-captured workflow byte sequence."""
+
     source = Path(path)
+    if not isinstance(source_bytes, bytes):
+        raise TypeError("workflow source bytes must be bytes")
     try:
-        source_bytes = source.read_bytes()
         source_sha256 = hashlib.sha256(source_bytes).hexdigest()
         loader = _MarkedSafeLoader(source_bytes.decode("utf-8"))
         try:
@@ -178,6 +181,11 @@ def load_workflow(path: str | Path) -> MarkedDocument:
         raise DiagnosticError((Diagnostic(exc.code, exc.message, source, mark.line, mark.column, exc.pointer, "remove the unsupported YAML construct"),)) from exc
     except yaml.YAMLError as exc:
         raise _diagnostic_from_yaml(source, exc) from exc
+
+
+def load_workflow(path: str | Path) -> MarkedDocument:
+    source = Path(path)
+    return load_workflow_bytes(source, source.read_bytes())
 
 
 class _Parser:

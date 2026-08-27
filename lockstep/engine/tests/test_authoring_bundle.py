@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -204,6 +206,141 @@ def test_leaf_planner_captures_exact_immutable_bundle_without_writes(
         image.resolved_path for image in bundle.after_images
     } == expected_paths
     _assert_leaf_bundle_is_deeply_immutable(bundle)
+
+
+def test_leaf_planner_captures_existing_real_destination_parent_identity(
+    tmp_path: Path,
+) -> None:
+    from lockstep.authoring_bundle import plan_project_compilation
+
+    project = tmp_path / "project"
+    write_workflow(project, "leaf")
+    recipes = project / ".lockstep" / "recipes"
+    recipes.mkdir()
+
+    bundle = plan_project_compilation(project_paths(project, "leaf"))
+
+    expected = (project.resolve(), (project / ".lockstep").resolve(), recipes.resolve())
+    for image in (*bundle.before_images, *bundle.after_images):
+        _assert_identity_paths(image.ancestors, expected)
+
+
+def test_leaf_planner_rejects_symlinked_destination_parent(tmp_path: Path) -> None:
+    from lockstep.authoring_bundle import plan_project_compilation
+
+    project = tmp_path / "project"
+    write_workflow(project, "leaf")
+    target = tmp_path / "outside-recipes"
+    target.mkdir()
+    (project / ".lockstep" / "recipes").symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(AuthoringError, match="destination ancestor"):
+        plan_project_compilation(project_paths(project, "leaf"))
+
+
+def test_leaf_planner_rejects_destination_parent_swapped_during_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import lockstep.authoring_bundle as bundle_module
+
+    project = tmp_path / "project"
+    write_workflow(project, "leaf")
+    recipes = project / ".lockstep" / "recipes"
+    recipes.mkdir()
+    original_resolve = Path.resolve
+    swapped = False
+
+    def swap_during_resolve(path: Path, *args, **kwargs) -> Path:
+        nonlocal swapped
+        if path == recipes and not swapped:
+            swapped = True
+            recipes.rename(recipes.with_name("recipes-old"))
+            recipes.mkdir()
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", swap_during_resolve)
+
+    with pytest.raises(AuthoringError, match="destination ancestor changed"):
+        bundle_module.plan_project_compilation(project_paths(project, "leaf"))
+
+
+@pytest.mark.parametrize("kind", ("dangling", "loop"))
+def test_leaf_planner_rejects_unresolvable_destination_parent_symlink(
+    tmp_path: Path, kind: str
+) -> None:
+    from lockstep.authoring_bundle import plan_project_compilation
+
+    project = tmp_path / "project"
+    write_workflow(project, "leaf")
+    recipes = project / ".lockstep" / "recipes"
+    target = tmp_path / "missing-recipes" if kind == "dangling" else recipes
+    recipes.symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(AuthoringError, match="destination ancestor"):
+        plan_project_compilation(project_paths(project, "leaf"))
+
+
+def test_leaf_planner_shares_stable_directory_identity_across_components(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import lockstep.authoring_bundle as bundle_module
+
+    project = tmp_path / "project"
+    workflow = write_workflow(project, "leaf")
+    recipe = project_paths(project, "leaf")
+    watched = (project, project / ".lockstep", workflow.parent, recipe.recipe_path.parent)
+    original_capture = bundle_module._directory_identity
+    captures = {path: 0 for path in watched}
+
+    def count_capture(path: Path):
+        if path in captures:
+            captures[path] += 1
+        return original_capture(path)
+
+    monkeypatch.setattr(bundle_module, "_directory_identity", count_capture)
+    bundle = bundle_module.plan_project_compilation(recipe)
+
+    source = bundle.sources[0]
+    destination_ancestors = bundle.before_images[0].ancestors
+    assert bundle.project_identity == source.ancestors[0] == destination_ancestors[0]
+    assert source.ancestors[1] == destination_ancestors[1]
+    assert captures == {
+        project: 1,
+        project / ".lockstep": 1,
+        workflow.parent: 1,
+        recipe.recipe_path.parent: 1,
+    }
+
+
+def test_project_compilation_bundle_rejects_mismatched_paired_ancestors(
+    tmp_path: Path,
+) -> None:
+    from lockstep.authoring_bundle import plan_project_compilation
+
+    project = tmp_path / "project"
+    write_workflow(project, "leaf")
+    bundle = plan_project_compilation(project_paths(project, "leaf"))
+    changed_after = replace(bundle.after_images[0], ancestors=())
+
+    with pytest.raises(ValueError, match="paired destination ancestors"):
+        replace(bundle, after_images=(changed_after, *bundle.after_images[1:]))
+
+
+def test_leaf_only_planner_temporarily_rejects_compiler_generated_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import lockstep.authoring_bundle as bundle_module
+
+    project = tmp_path / "project"
+    write_workflow(project, "leaf")
+    monkeypatch.setattr(
+        bundle_module,
+        "compile_workflow_document",
+        lambda _document, _catalog: (None, SimpleNamespace(generated_files=(object(),))),
+    )
+
+    with pytest.raises(AuthoringError, match="generated files"):
+        bundle_module.plan_project_compilation(project_paths(project, "leaf"))
 
 
 @pytest.mark.parametrize("template", ("reviewed-change", "parallel-review"))

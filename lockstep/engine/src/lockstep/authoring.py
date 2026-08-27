@@ -10,21 +10,22 @@ from typing import Mapping
 
 import yaml
 
-from lockstep.authoring_bundle import AuthoredRecipe
+from lockstep.authoring_bundle import AuthoredRecipe, canonical_recipe_bytes_for_children
 from lockstep.errors import AuthoringError
 from lockstep.recipe.authority import StrictRecipeIngress, canonical_execution_bytes
 from lockstep.recipe.profile import CompilerProvenance, _create_compiler_provenance
-from lockstep.workflow.compiler import CompilationResult, compile_workflow
-from lockstep.workflow.canonical import canonical_yaml
+from lockstep.workflow.compiler import (
+    CompilationResult,
+    compile_workflow_document,
+)
 from lockstep.workflow.estimate import estimate_manual_recipe, estimate_workflow
 from lockstep.workflow.freshness import verify_canonical_match
-from lockstep.workflow.schema import load_workflow, parse_workflow
+from lockstep.workflow.schema import load_workflow
 from lockstep.workflow.semantics import (
     ChildArtifactContract,
     ChildWorkflowContract,
     ResolvedCatalog,
     ResolvedChild,
-    validate_semantics,
 )
 
 _WORKFLOW_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
@@ -95,9 +96,8 @@ def compile_source(
             compiled.as_catalog_bundle(),
         )
     catalog = ResolvedCatalog(children=resolved_children)
-    workflow = parse_workflow(load_workflow(source))
-    validated = validate_semantics(workflow, catalog)
-    return validated, catalog, compile_workflow(validated, catalog)
+    validated, compiled = compile_workflow_document(load_workflow(source), catalog)
+    return validated, catalog, compiled
 
 
 def _call_names(source: Path) -> tuple[str, ...]:
@@ -157,25 +157,13 @@ def compile_project_source(
 def link_recipe_dependencies(recipe_bytes: bytes, children: tuple[str, ...]) -> bytes:
     """Add inert strict-ingress links to separately installed child recipes."""
 
-    if not children:
-        return recipe_bytes
-    document = yaml.safe_load(recipe_bytes)
-    nodes = document.get("nodes") if isinstance(document, dict) else None
-    if not isinstance(nodes, dict):
-        raise AuthoringError("compiled template recipe has no node catalog")
-    for index, child in enumerate(children):
-        nodes[f"template-dependency-{index}"] = {
-            "type": "subgraph",
-            "graph": f"{child}.recipe.yaml",
-            "mode": "invoke",
-        }
-    return canonical_yaml(document)
+    return canonical_recipe_bytes_for_children(recipe_bytes, children)
 
 
 def canonical_recipe_bytes(source: Path, compiled: CompilationResult) -> bytes:
     """Return the one canonical on-disk root, including child ingress links."""
 
-    return link_recipe_dependencies(compiled.recipe_bytes, _call_names(source))
+    return canonical_recipe_bytes_for_children(compiled.recipe_bytes, _call_names(source))
 
 
 def _generated_candidates(recipe: AuthoredRecipe, compiled: CompilationResult) -> dict[str, bytes]:

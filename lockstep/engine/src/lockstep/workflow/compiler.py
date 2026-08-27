@@ -16,6 +16,7 @@ from lockstep.recipe.yamlgraph_adapter import validate_compiler_bundle
 
 from .canonical import canonical_json, canonical_yaml
 from .lowering import lower_workflow
+from .schema import MarkedDocument, parse_workflow
 from .semantics import (
     BundleDependency,
     CanonicalCompiledBundle,
@@ -25,6 +26,7 @@ from .semantics import (
     _canonical_relative_path,
     _exact_sha256,
     _manifest_bundle_sha256,
+    validate_semantics,
 )
 
 
@@ -339,3 +341,13 @@ def compile_workflow(
         bundle_sha256=bundle_sha256,
         compiler_provenance=bundle_proof,
     )
+
+
+def compile_workflow_document(
+    document: MarkedDocument, catalog: WorkflowCatalog
+) -> tuple[ValidatedWorkflow, CompilationResult]:
+    """Validate and compile one already-loaded workflow document."""
+
+    workflow = parse_workflow(document)
+    validated = validate_semantics(workflow, catalog)
+    return validated, compile_workflow(validated, catalog)
