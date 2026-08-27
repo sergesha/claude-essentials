@@ -4,42 +4,25 @@ from __future__ import annotations
 
 import difflib
 import json
-import re
 from pathlib import Path
 from typing import Mapping
 
 import yaml
 
 from lockstep.authoring_bundle import AuthoredRecipe, canonical_recipe_bytes_for_children
+from lockstep.authoring_compilation import (
+    compile_captured_source,
+    validate_logical_name,
+    workflow_call_names,
+)
 from lockstep.errors import AuthoringError
 from lockstep.recipe.authority import StrictRecipeIngress, canonical_execution_bytes
 from lockstep.recipe.profile import CompilerProvenance, _create_compiler_provenance
-from lockstep.workflow.compiler import (
-    CompilationResult,
-    compile_workflow_document,
-)
+from lockstep.workflow.compiler import CompilationResult
 from lockstep.workflow.estimate import estimate_manual_recipe, estimate_workflow
 from lockstep.workflow.freshness import verify_canonical_match
 from lockstep.workflow.schema import load_workflow
-from lockstep.workflow.semantics import (
-    ChildArtifactContract,
-    ChildWorkflowContract,
-    ResolvedCatalog,
-    ResolvedChild,
-)
-
-_WORKFLOW_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
-
-
-def validate_logical_name(name: str) -> str:
-    """Validate a Workflow DSL logical name before it can reach a path."""
-
-    if not isinstance(name, str) or not _WORKFLOW_NAME_RE.fullmatch(name):
-        raise AuthoringError(
-            f"invalid workflow name {name!r}; use lowercase letters, digits, and "
-            "hyphens, beginning with a letter"
-        )
-    return name
+from lockstep.workflow.semantics import ResolvedCatalog, ValidatedWorkflow
 
 
 def project_paths(project: Path, name: str) -> AuthoredRecipe:
@@ -61,70 +44,25 @@ def project_paths(project: Path, name: str) -> AuthoredRecipe:
     raise AuthoringError(f"recipe {name!r} has no workflow source or manual yamlgraph file")
 
 
-def _child_contract(validated) -> ChildWorkflowContract:
-    exports = {}
-    for handle, artifact in validated.artifacts.items():
-        logical = handle.rsplit(".", 1)[-1]
-        exports[logical] = ChildArtifactContract(
-            logical,
-            artifact.source,
-            logical,
-            "application/octet-stream",
-            handle.split(".", 1)[0],
-            handle.replace(".", "_") + "_result",
-        )
-    return ChildWorkflowContract(
-        ("pass", "fail", "error"),
-        exports=exports,
-        non_artifact_writes=validated.flow.effects.writes,
-    )
-
-
 def compile_source(
     source: Path,
     *,
-    children: Mapping[str, tuple[object, CompilationResult]] | None = None,
-) -> tuple[object, object, CompilationResult]:
+    children: Mapping[str, tuple[ValidatedWorkflow, CompilationResult]] | None = None,
+) -> tuple[ValidatedWorkflow, ResolvedCatalog, CompilationResult]:
     """Strictly parse, catalog, validate and compile one source in memory."""
 
-    resolved_children = {}
-    for name, (validated, compiled) in (children or {}).items():
-        resolved_children[name] = ResolvedChild(
-            name,
-            _child_contract(validated),
-            validated.workflow.source_sha256,
-            compiled.as_catalog_bundle(),
-        )
-    catalog = ResolvedCatalog(children=resolved_children)
-    validated, compiled = compile_workflow_document(load_workflow(source), catalog)
-    return validated, catalog, compiled
-
-
-def _call_names(source: Path) -> tuple[str, ...]:
-    document = load_workflow(source).data
-    calls: list[str] = []
-
-    def walk(value: object) -> None:
-        if isinstance(value, dict):
-            raw = value.get("call")
-            if isinstance(raw, dict) and isinstance(raw.get("workflow"), str):
-                calls.append(raw["workflow"])
-            for item in value.values():
-                walk(item)
-        elif isinstance(value, list):
-            for item in value:
-                walk(item)
-
-    walk(document)
-    return tuple(dict.fromkeys(calls))
+    return compile_captured_source(load_workflow(source), children=children)
 
 
 def compile_project_source(
     source: Path,
     *,
-    _cache: dict[Path, tuple[object, object, CompilationResult]] | None = None,
+    _cache: dict[
+        Path, tuple[ValidatedWorkflow, ResolvedCatalog, CompilationResult]
+    ]
+    | None = None,
     _active: set[Path] | None = None,
-) -> tuple[object, object, CompilationResult]:
+) -> tuple[ValidatedWorkflow, ResolvedCatalog, CompilationResult]:
     """Compile the conventional authored child DAG entirely in memory."""
 
     path = Path(source).resolve()
@@ -137,7 +75,7 @@ def compile_project_source(
     active.add(path)
     try:
         children = {}
-        for child in _call_names(path):
+        for child in workflow_call_names(load_workflow(path)):
             child_path = path.parent / f"{child}.workflow.yaml"
             if not child_path.is_file():
                 raise AuthoringError(
@@ -163,7 +101,9 @@ def link_recipe_dependencies(recipe_bytes: bytes, children: tuple[str, ...]) -> 
 def canonical_recipe_bytes(source: Path, compiled: CompilationResult) -> bytes:
     """Return the one canonical on-disk root, including child ingress links."""
 
-    return canonical_recipe_bytes_for_children(compiled.recipe_bytes, _call_names(source))
+    return canonical_recipe_bytes_for_children(
+        compiled.recipe_bytes, workflow_call_names(load_workflow(source))
+    )
 
 
 def _generated_candidates(recipe: AuthoredRecipe, compiled: CompilationResult) -> dict[str, bytes]:
@@ -196,7 +136,7 @@ def canonical_match(recipe: AuthoredRecipe) -> CompilerProvenance:
             "generated recipe is not a byte-for-byte canonical match"
         )
 
-    calls = _call_names(recipe.workflow_path)
+    calls = workflow_call_names(load_workflow(recipe.workflow_path))
     if not calls:
         return verify_canonical_match(
             validated,

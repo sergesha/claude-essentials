@@ -11,11 +11,16 @@ from typing import Literal
 
 import yaml
 
+from lockstep.authoring_compilation import (
+    compile_captured_source,
+    validate_logical_name,
+    workflow_call_names,
+)
 from lockstep.errors import AuthoringError
 from lockstep.workflow.canonical import canonical_yaml
-from lockstep.workflow.compiler import CompilationResult, compile_workflow_document
+from lockstep.workflow.compiler import CompilationResult
 from lockstep.workflow.schema import load_workflow_bytes
-from lockstep.workflow.semantics import ResolvedCatalog
+from lockstep.workflow.semantics import ValidatedWorkflow
 
 __all__ = [
     "DestinationImage",
@@ -33,6 +38,9 @@ class AuthoredRecipe:
     recipe_path: Path
     dependency_path: Path | None
     source_map_path: Path | None
+
+
+_CompiledRole = tuple[AuthoredRecipe, CompilationResult, tuple[str, ...]]
 
 
 def _absolute(path: Path, label: str) -> Path:
@@ -250,23 +258,97 @@ def plan_project_compilation(recipe: AuthoredRecipe) -> ProjectCompilationBundle
     project, source_path = _workflow_project_and_source(recipe)
     directory_identities: dict[Path, _PathIdentity] = {}
     project_identity = _cached_directory_identity(directory_identities, project)
-    source = _capture_source(recipe.name, source_path, project, directory_identities)
-    document = load_workflow_bytes(source.resolved_path, source.content)
-    _validated, compiled = compile_workflow_document(document, ResolvedCatalog())
-    if compiled.generated_files:
-        raise AuthoringError("generated files require direct-child compilation planning")
-    destinations = _leaf_destinations(recipe, compiled)
+    sources, dependency_edges, compiled_roles = _compile_direct_closure(
+        recipe, source_path, project, directory_identities
+    )
+    before_images, after_images = _destination_images(
+        project, compiled_roles, directory_identities
+    )
+    return ProjectCompilationBundle(
+        project,
+        project_identity,
+        sources,
+        dependency_edges,
+        before_images,
+        after_images,
+    )
+
+
+def _compile_direct_closure(
+    recipe: AuthoredRecipe,
+    source_path: Path,
+    project: Path,
+    directory_identities: dict[Path, _PathIdentity],
+) -> tuple[
+    tuple[SourceIdentity, ...],
+    tuple[tuple[str, tuple[str, ...]], ...],
+    tuple[_CompiledRole, ...],
+]:
+    parent_source = _capture_source(
+        recipe.name, source_path, project, directory_identities
+    )
+    parent_document = load_workflow_bytes(
+        parent_source.resolved_path, parent_source.content
+    )
+    child_names = workflow_call_names(parent_document)
+    sources: list[SourceIdentity] = []
+    dependency_edges: list[tuple[str, tuple[str, ...]]] = []
+    compiled_roles: list[_CompiledRole] = []
+    compiled_children: dict[str, tuple[ValidatedWorkflow, CompilationResult]] = {}
+    for child_name in child_names:
+        child_recipe = _workflow_recipe(project, child_name)
+        child_path = child_recipe.workflow_path
+        if child_path is None:
+            raise AuthoringError("workflow source is required")
+        child_source = _capture_source(
+            child_name,
+            child_path,
+            project,
+            directory_identities,
+        )
+        child_document = load_workflow_bytes(
+            child_source.resolved_path, child_source.content
+        )
+        child_validated, _child_catalog, child_compiled = compile_captured_source(
+            child_document
+        )
+        sources.append(child_source)
+        dependency_edges.append((child_name, ()))
+        compiled_roles.append((child_recipe, child_compiled, ()))
+        compiled_children[child_name] = (child_validated, child_compiled)
+    _validated, _catalog, parent_compiled = compile_captured_source(
+        parent_document, children=compiled_children
+    )
+    sources.append(parent_source)
+    dependency_edges.append((recipe.name, child_names))
+    compiled_roles.append((recipe, parent_compiled, child_names))
+    return tuple(sources), tuple(dependency_edges), tuple(compiled_roles)
+
+
+def _destination_images(
+    project: Path,
+    compiled_roles: tuple[_CompiledRole, ...],
+    directory_identities: dict[Path, _PathIdentity],
+) -> tuple[tuple[DestinationImage, ...], tuple[DestinationImage, ...]]:
+    destinations: dict[Path, tuple[str, bytes]] = {}
+    for role_recipe, compiled, children in compiled_roles:
+        for path, content in _workflow_destinations(
+            role_recipe, compiled, children
+        ).items():
+            if path in destinations:
+                raise AuthoringError("compilation destinations must be unique")
+            destinations[path] = (role_recipe.name, content)
     ancestors_by_parent = {
         parent: _destination_ancestors(project, parent, directory_identities)
         for parent in dict.fromkeys(path.parent for path in destinations)
     }
     before_images = tuple(
-        _absent_destination(recipe.name, path, ancestors_by_parent[path.parent])
-        for path in destinations
+        _absent_destination(role, path, ancestors_by_parent[path.parent])
+        for path, (role, _content) in destinations.items()
     )
     after_images = tuple(
         DestinationImage(
-            recipe.name,
+            role,
             path,
             content,
             _digest(content),
@@ -274,15 +356,22 @@ def plan_project_compilation(recipe: AuthoredRecipe) -> ProjectCompilationBundle
             None,
             ancestors_by_parent[path.parent],
         )
-        for path, content in destinations.items()
+        for path, (role, content) in destinations.items()
     )
-    return ProjectCompilationBundle(
-        project,
-        project_identity,
-        (source,),
-        ((recipe.name, ()),),
-        before_images,
-        after_images,
+    return before_images, after_images
+
+
+def _workflow_recipe(project: Path, name: str) -> AuthoredRecipe:
+    validate_logical_name(name)
+    workflow = project / ".lockstep" / "workflows" / f"{name}.workflow.yaml"
+    recipe = project / ".lockstep" / "recipes" / f"{name}.recipe.yaml"
+    return AuthoredRecipe(
+        name,
+        "workflow",
+        workflow,
+        recipe,
+        recipe.with_name(f"{name}.dependencies.json"),
+        recipe.with_name(f"{name}.source-map.json"),
     )
 
 
@@ -333,18 +422,28 @@ def _capture_source(
     )
 
 
-def _leaf_destinations(
-    recipe: AuthoredRecipe, compiled: CompilationResult
+def _workflow_destinations(
+    recipe: AuthoredRecipe,
+    compiled: CompilationResult,
+    children: tuple[str, ...],
 ) -> dict[Path, bytes]:
     dependency_path = recipe.dependency_path
     source_map_path = recipe.source_map_path
     if dependency_path is None or source_map_path is None:
         raise AuthoringError("workflow destinations are incomplete")
-    return {
-        recipe.recipe_path: canonical_recipe_bytes_for_children(compiled.recipe_bytes, ()),
+    destinations = {
+        recipe.recipe_path: canonical_recipe_bytes_for_children(
+            compiled.recipe_bytes, children
+        ),
         dependency_path: compiled.dependency_manifest_bytes,
         source_map_path: compiled.source_map_bytes,
     }
+    for item in compiled.generated_files:
+        path = recipe.recipe_path.parent / item.relative_path
+        if path in destinations:
+            raise AuthoringError("compiled workflow contains a duplicate destination")
+        destinations[path] = item.content
+    return destinations
 
 
 def _absent_destination(
