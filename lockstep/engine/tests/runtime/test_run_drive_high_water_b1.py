@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from lockstep.runtime.catalog import RunBinding, RunCatalog
-from lockstep.runtime.effects.ledger import EffectLedger
+from lockstep.runtime.effects.ledger import EffectLedger, RunDriveWatch
 from lockstep.runtime.read_resources import RuntimeReadResources
 from lockstep.runtime.recovery_driver import RecoveryDriver
 from lockstep.runtime.snapshot_resolver import (
@@ -29,12 +29,13 @@ class _ConcurrentAdmissions:
     facts: RuntimeSnapshotFacts
     input_blob: object
     bindings_and_refs: tuple[tuple[RunBinding, object], ...]
-    admitted_watches: tuple[object, ...] = ()
+    admitted_watches: tuple[RunDriveWatch, ...] = ()
 
     def admit(self) -> None:
-        watches = []
+        before = self.ledger.max_run_drive_admission_seq()
+        assert before is not None
         for binding, ref in self.bindings_and_refs:
-            _binding, watch = self.ledger.admit_start(
+            self.ledger.admit_start(
                 self.catalog,
                 binding,
                 self.input_blob,
@@ -44,8 +45,16 @@ class _ConcurrentAdmissions:
                     )
                 ),
             )
-            watches.append(watch)
-        self.admitted_watches = tuple(watches)
+        high_water = self.ledger.max_run_drive_admission_seq()
+        assert high_water is not None
+        self.admitted_watches = self.ledger.list_run_drive_watches(
+            after_admission_seq=before,
+            high_water=high_water,
+            limit=len(self.bindings_and_refs),
+        )
+        assert tuple(watch.public_run_id for watch in self.admitted_watches) == tuple(
+            binding.public_run_id for binding, _ref in self.bindings_and_refs
+        )
 
 
 def _prepare_concurrent_admissions(population, command) -> _ConcurrentAdmissions:

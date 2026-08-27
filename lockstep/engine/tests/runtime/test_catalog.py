@@ -98,6 +98,34 @@ def test_catalog_canonicalizes_and_validates_created_at(sqlite_store):
         )
 
 
+def test_catalog_pages_legacy_bindings_in_public_run_id_order(sqlite_store) -> None:
+    from lockstep.runtime.catalog import RunCatalog
+
+    catalog = RunCatalog(sqlite_store)
+    for public_run_id, project in (
+        ("run-c", "project-b"),
+        ("run-a", "project-a"),
+        ("run-b", "project-a"),
+    ):
+        requested = _binding(public_run_id, f"thread-{public_run_id}")
+        catalog.create(
+            requested.__class__(
+                **{**requested.__dict__, "project_identity": project}
+            )
+        )
+
+    first = catalog.list_after_public_run_id(None, limit=2)
+    second = catalog.list_after_public_run_id("run-b", limit=2)
+
+    assert {
+        "first": tuple(binding.public_run_id for binding in first),
+        "second": tuple(binding.public_run_id for binding in second),
+    } == {
+        "first": ("run-a", "run-b"),
+        "second": ("run-c",),
+    }
+
+
 def test_sqlite_filesystem_path_starting_with_sqlite_is_not_parsed_as_url(
     tmp_path, monkeypatch
 ):

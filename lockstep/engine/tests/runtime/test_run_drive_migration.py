@@ -130,6 +130,44 @@ def test_runtime_schema_epoch_has_singleton_check_constraint(tmp_path: Path) -> 
         store.close()
 
 
+def test_run_drive_migrator_reads_only_persisted_cursor_and_completion(
+    tmp_path: Path,
+) -> None:
+    from lockstep.runtime.storage import (
+        LegacyRunDriveClassification,
+        MigrationProgress,
+        RuntimeSchemaMigrator,
+        SQLiteStore,
+    )
+
+    store = SQLiteStore(tmp_path / "runtime.db")
+    migrator = RuntimeSchemaMigrator(store)
+    try:
+        absent = migrator.run_drive_watch_migration_state()
+        migrator.apply_run_drive_watch_page(
+            expected_after_public_run_id=None,
+            classified=(
+                LegacyRunDriveClassification("run-001", "malformed"),
+            ),
+            exhausted=False,
+        )
+        incomplete = migrator.run_drive_watch_migration_state()
+        migrator.apply_run_drive_watch_page(
+            expected_after_public_run_id="run-001",
+            classified=(),
+            exhausted=True,
+        )
+        completed = migrator.run_drive_watch_migration_state()
+
+        assert (absent, incomplete, completed) == (
+            None,
+            MigrationProgress("run-001", False, (), ()),
+            MigrationProgress("run-001", True, (), ()),
+        )
+    finally:
+        store.close()
+
+
 def test_v2_write_transaction_rejects_legacy_epoch_before_yield_write_free(
     tmp_path: Path,
 ) -> None:
@@ -981,4 +1019,46 @@ def test_apply_run_drive_watch_page_rejects_wrong_stored_schema_version_write_fr
     finally:
         if reopened is not None:
             reopened.close()
+        store.close()
+
+
+def test_apply_run_drive_watch_page_preserves_existing_v2_admission_watch(
+    tmp_path: Path,
+) -> None:
+    from lockstep.runtime.storage import (
+        LegacyRunDriveClassification,
+        RuntimeSchemaMigrator,
+        SQLiteStore,
+    )
+
+    store = SQLiteStore(tmp_path / "runtime.db")
+    try:
+        _create_catalog_bindings(store, "run-001")
+        watch = store.tables.run_drive_watches
+        with store._v2_write_transaction() as connection:
+            connection.execute(
+                watch.insert().values(
+                    public_run_id="run-001",
+                    input_blob_sha256="c" * 64,
+                    input_blob_size=7,
+                    admitted_at="2026-08-27T00:00:00+00:00",
+                )
+            )
+
+        progress = RuntimeSchemaMigrator(store).apply_run_drive_watch_page(
+            expected_after_public_run_id=None,
+            classified=(
+                LegacyRunDriveClassification("run-001", "nonterminal"),
+            ),
+            exhausted=True,
+        )
+
+        _migrations, watches = _run_drive_migration_state(store)
+        assert progress.after_public_run_id == "run-001"
+        assert progress.completed is True
+        assert progress.inserted_public_run_ids == ()
+        assert len(watches) == 1
+        assert watches[0]["input_blob_sha256"] == "c" * 64
+        assert watches[0]["input_blob_size"] == 7
+    finally:
         store.close()

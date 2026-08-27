@@ -82,7 +82,7 @@ from lockstep.runtime.runtime_execution import (
 from lockstep.runtime.runtime_execution_recovery import RuntimeExecutionRecovery
 from lockstep.runtime.recovery_driver import RecoveryDriver as _RecoveryDriver
 from lockstep.runtime.status import ScenarioStatus, project_status
-from lockstep.runtime.storage import SQLiteStore
+from lockstep.runtime.storage import RuntimeSchemaMigrator, SQLiteStore
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _RESERVED_START_KEYS = frozenset({"namespace"})
@@ -390,7 +390,13 @@ class LockstepCommandService:
                 self._reconstruct_runtime_execution_context()
             )
         self._open_effect_coordinator()
-        self._recovery_driver = _RecoveryDriver()
+        self._recovery_driver = _RecoveryDriver(
+            catalog=self.catalog,
+            runtime=self.runtime,
+            effects=self.effects,
+            migrator=RuntimeSchemaMigrator(self.store),
+            coordinator=self.coordinator,
+        )
 
     def _finish_writable_core_activation(
         self, deferred_start_run_id: str | None = None

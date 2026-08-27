@@ -154,7 +154,7 @@ def _observed_facts(
         )
         for _classified, item in applied
     )
-    snapshot_prefix = tuple(run_id for run_id, _snapshot in snapshot_calls[:130])
+    snapshot_prefix = tuple(run_id for run_id, _snapshot in snapshot_calls[:129])
     reached_watches = tuple(
         (
             watch.public_run_id,
@@ -208,7 +208,7 @@ def _expected_facts(population):
             (population.target_id, True, (population.target_id,), ()),
         ),
         "snapshot_prefix": (
-            *population.malformed_ids,
+            *population.malformed_ids[1:],
             population.terminal_id,
             population.target_id,
         ),

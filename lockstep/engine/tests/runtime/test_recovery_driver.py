@@ -234,7 +234,7 @@ def test_explicit_recovery_reaches_inert_project_sweep_once(tmp_path: Path) -> N
         }
 
 
-def test_recovery_driver_returns_false_without_sql_or_state_change(
+def test_recovery_driver_isolates_invalid_legacy_binding_write_free(
     tmp_path: Path,
 ) -> None:
     from lockstep.runtime.catalog import RunBinding
@@ -294,7 +294,14 @@ def test_recovery_driver_returns_false_without_sql_or_state_change(
                 observe_sql,
             )
 
-        assert statements == []
+        writes = tuple(
+            statement
+            for statement in statements
+            if statement.lstrip().upper().startswith(
+                ("INSERT", "UPDATE", "DELETE", "REPLACE")
+            )
+        )
+        assert writes == ()
         assert _durable_command_state(command) == durable_before
         assert _command_drive_state(command) == drive_before
         assert dict(vars(command._recovery_driver)) == driver_before

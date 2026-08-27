@@ -371,6 +371,25 @@ class RuntimeSchemaMigrator:
     def __init__(self, store: SQLiteStore) -> None:
         self._store = store
 
+    def run_drive_watch_migration_state(self) -> MigrationProgress | None:
+        """Read only the durable schema-upgrade cursor and completion fact."""
+
+        table = self._store.tables.runtime_schema_migrations
+        with self._store.read_connection() as connection:
+            row = connection.execute(
+                select(table).where(table.c.name == _RUN_DRIVE_WATCH_MIGRATION)
+            ).first()
+        if row is None:
+            return None
+        if row.schema_version != 2:
+            raise RuntimeError("run-drive-watch migration schema version must be 2")
+        return MigrationProgress(
+            row.after_public_run_id,
+            row.completed_at is not None,
+            (),
+            (),
+        )
+
     def apply_run_drive_watch_page(
         self,
         *,
@@ -404,7 +423,7 @@ class RuntimeSchemaMigrator:
     ) -> MigrationProgress:
         table = self._store.tables.runtime_schema_migrations
         watch_table = self._store.tables.run_drive_watches
-        inserted_public_run_ids = tuple(
+        requested_public_run_ids = tuple(
             record.public_run_id
             for record in classified
             if record.disposition == "nonterminal"
@@ -443,6 +462,22 @@ class RuntimeSchemaMigrator:
             public_run_ids[-1]
             if public_run_ids
             else stored_after_public_run_id
+        )
+        existing_watch_ids = (
+            frozenset(
+                connection.execute(
+                    select(watch_table.c.public_run_id).where(
+                        watch_table.c.public_run_id.in_(requested_public_run_ids)
+                    )
+                ).scalars()
+            )
+            if requested_public_run_ids
+            else frozenset()
+        )
+        inserted_public_run_ids = tuple(
+            public_run_id
+            for public_run_id in requested_public_run_ids
+            if public_run_id not in existing_watch_ids
         )
         if inserted_public_run_ids:
             connection.execute(

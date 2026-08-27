@@ -91,10 +91,12 @@ def _create_malformed_prefix(
                 public_run_id,
                 f"aaa-malformed-thread-{index:03d}",
                 terminal.recipe_digest,
-                terminal.recipe_snapshot_ref,
+                "f" * 64 if index == 0 else terminal.recipe_snapshot_ref,
                 str(project.resolve()),
             )
         )
+        if index == 0:
+            continue
         command.runtime.bind(binding)
         snapshot = command.runtime.snapshot(public_run_id, subgraphs=True)
         assert snapshot.checkpoint_id == ""

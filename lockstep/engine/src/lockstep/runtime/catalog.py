@@ -143,6 +143,31 @@ class RunCatalog:
             raise KeyError(thread_id)
         return self._from_row(row)
 
+    def list_after_public_run_id(
+        self,
+        after_public_run_id: str | None,
+        *,
+        limit: int,
+    ) -> tuple[RunBinding, ...]:
+        """Page immutable bindings for the one-time v2 schema backfill."""
+
+        if after_public_run_id is not None and (
+            type(after_public_run_id) is not str or not after_public_run_id
+        ):
+            raise ValueError("catalog page cursor must be a non-empty string")
+        if type(limit) is not int or not 1 <= limit <= 129:
+            raise ValueError("catalog migration page limit must be from 1 to 129")
+        table = self._store.tables.runs
+        statement = select(table).order_by(table.c.public_run_id).limit(limit)
+        if after_public_run_id is not None:
+            statement = statement.where(
+                table.c.public_run_id > after_public_run_id
+            )
+        with self._store.read_connection() as connection:
+            return tuple(
+                self._from_row(row) for row in connection.execute(statement)
+            )
+
     def list(
         self, project_identity: str, *, limit: int | None = None
     ) -> list[RunBinding]:
