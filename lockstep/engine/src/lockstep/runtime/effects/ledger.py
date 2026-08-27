@@ -417,9 +417,13 @@ class EffectLedger:
         return tuple(watches)
 
     def acknowledge_run_drive_watch(self, public_run_id: str) -> None:
-        raise NotImplementedError(
-            "run-drive-watch acknowledgement is staged in R2"
-        )
+        if type(public_run_id) is not str or not public_run_id:
+            raise ValueError("public_run_id must be a non-empty string")
+        table = self._store.tables.run_drive_watches
+        with self._store._v2_write_transaction() as connection:
+            connection.execute(
+                delete(table).where(table.c.public_run_id == public_run_id)
+            )
 
     def _result_for(
         self, connection, effect_id: str
