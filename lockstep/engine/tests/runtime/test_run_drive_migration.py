@@ -565,7 +565,7 @@ def test_apply_run_drive_watch_page_advances_terminal_and_malformed_without_watc
         store.close()
 
 
-def test_apply_run_drive_watch_page_inserts_one_durable_nonterminal_null_input_watch(
+def test_apply_run_drive_watch_page_atomically_initializes_from_first_nonempty_page(
     tmp_path: Path,
 ) -> None:
     from lockstep.runtime.effects.ledger import EffectLedger, RunDriveWatch
@@ -582,12 +582,6 @@ def test_apply_run_drive_watch_page_inserts_one_durable_nonterminal_null_input_w
     try:
         _create_catalog_bindings(store, "run-001")
         migrator = RuntimeSchemaMigrator(store)
-        migrator.apply_run_drive_watch_page(
-            expected_after_public_run_id=None,
-            classified=(),
-            exhausted=False,
-        )
-
         before = datetime.now(UTC)
         progress = migrator.apply_run_drive_watch_page(
             expected_after_public_run_id=None,
