@@ -368,6 +368,12 @@ def _validate_existing_run_drive_watch_migration(
 class RuntimeSchemaMigrator:
     """Private owner-state schema migration boundary."""
 
+    @classmethod
+    def transition_legacy_to_v2(cls, path: Path) -> None:
+        """Reserve the fail-closed pre-open transition boundary."""
+
+        raise NotImplementedError("runtime schema transition is not implemented")
+
     def __init__(self, store: SQLiteStore) -> None:
         self._store = store
 
