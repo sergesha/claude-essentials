@@ -377,7 +377,44 @@ class EffectLedger:
         high_water: int,
         limit: int,
     ) -> tuple[RunDriveWatch, ...]:
-        raise NotImplementedError("run-drive-watch queries are staged in R2")
+        if (
+            type(after_admission_seq) is not int
+            or type(high_water) is not int
+            or not 0 <= after_admission_seq <= high_water
+        ):
+            raise ValueError(
+                "run-drive watch bounds must be integers with "
+                "0 <= after_admission_seq <= high_water"
+            )
+        if type(limit) is not int or not 1 <= limit <= 128:
+            raise ValueError(
+                "run-drive watch limit must be an integer from 1 to 128"
+            )
+        table = self._store.tables.run_drive_watches
+        with self._store.read_connection() as connection:
+            rows = connection.execute(
+                select(table)
+                .where(
+                    table.c.admission_seq > after_admission_seq,
+                    table.c.admission_seq <= high_water,
+                )
+                .order_by(table.c.admission_seq)
+                .limit(limit)
+            ).all()
+        watches = []
+        for row in rows:
+            admitted_at = _load(row.admitted_at)
+            assert admitted_at is not None
+            watches.append(
+                RunDriveWatch(
+                    row.admission_seq,
+                    row.public_run_id,
+                    row.input_blob_sha256,
+                    row.input_blob_size,
+                    admitted_at,
+                )
+            )
+        return tuple(watches)
 
     def acknowledge_run_drive_watch(self, public_run_id: str) -> None:
         raise NotImplementedError(
