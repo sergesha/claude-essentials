@@ -565,8 +565,14 @@ def test_apply_run_drive_watch_page_advances_terminal_and_malformed_without_watc
         store.close()
 
 
+@pytest.mark.parametrize(
+    "exhausted",
+    (False, True),
+    ids=("incomplete", "completed"),
+)
 def test_apply_run_drive_watch_page_atomically_initializes_from_first_nonempty_page(
     tmp_path: Path,
+    exhausted: bool,
 ) -> None:
     from lockstep.runtime.effects.ledger import EffectLedger, RunDriveWatch
     from lockstep.runtime.storage import (
@@ -588,12 +594,12 @@ def test_apply_run_drive_watch_page_atomically_initializes_from_first_nonempty_p
             classified=(
                 LegacyRunDriveClassification("run-001", "nonterminal"),
             ),
-            exhausted=False,
+            exhausted=exhausted,
         )
         after = datetime.now(UTC)
         assert progress == MigrationProgress(
             after_public_run_id="run-001",
-            completed=False,
+            completed=exhausted,
             inserted_public_run_ids=("run-001",),
             malformed_public_run_ids=(),
         )
@@ -612,7 +618,17 @@ def test_apply_run_drive_watch_page_atomically_initializes_from_first_nonempty_p
         assert migration_row.name == "run-drive-watch-v2"
         assert migration_row.schema_version == 2
         assert migration_row.after_public_run_id == "run-001"
-        assert migration_row.completed_at is None
+        if exhausted:
+            completed_at = datetime.fromisoformat(migration_row.completed_at)
+            assert completed_at.tzinfo is not None
+            assert completed_at.utcoffset() is not None
+            assert (
+                migration_row.completed_at
+                == completed_at.astimezone(UTC).isoformat()
+            )
+            assert before <= completed_at <= after
+        else:
+            assert migration_row.completed_at is None
         migration_updated_at = datetime.fromisoformat(migration_row.updated_at)
         assert (
             migration_row.updated_at
