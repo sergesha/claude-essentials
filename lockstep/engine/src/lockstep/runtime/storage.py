@@ -371,7 +371,6 @@ class RuntimeSchemaMigrator:
         if (
             expected_after_public_run_id is not None
             or exhausted
-            or any(record.disposition == "nonterminal" for record in classified)
         ):
             raise NotImplementedError(
                 "run-drive-watch migration behavior is staged in R2"
@@ -392,6 +391,12 @@ class RuntimeSchemaMigrator:
         public_run_ids: tuple[str, ...],
     ) -> MigrationProgress:
         table = self._store.tables.runtime_schema_migrations
+        watch_table = self._store.tables.run_drive_watches
+        inserted_public_run_ids = tuple(
+            record.public_run_id
+            for record in classified
+            if record.disposition == "nonterminal"
+        )
         malformed_public_run_ids = tuple(
             record.public_run_id
             for record in classified
@@ -427,6 +432,19 @@ class RuntimeSchemaMigrator:
             )
         else:
             after_public_run_id = public_run_ids[-1]
+            if inserted_public_run_ids:
+                connection.execute(
+                    watch_table.insert(),
+                    [
+                        {
+                            "public_run_id": public_run_id,
+                            "input_blob_sha256": None,
+                            "input_blob_size": None,
+                            "admitted_at": timestamp,
+                        }
+                        for public_run_id in inserted_public_run_ids
+                    ],
+                )
             connection.execute(
                 table.update()
                 .where(table.c.name == _RUN_DRIVE_WATCH_MIGRATION)
@@ -438,7 +456,7 @@ class RuntimeSchemaMigrator:
         return MigrationProgress(
             after_public_run_id,
             False,
-            (),
+            inserted_public_run_ids,
             malformed_public_run_ids,
         )
 
