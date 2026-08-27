@@ -69,6 +69,35 @@ class RunDriveWatch:
     input_blob_size: int | None
     admitted_at: datetime
 
+    def __post_init__(self) -> None:
+        if type(self.admission_seq) is not int or self.admission_seq <= 0:
+            raise ValueError("admission_seq must be a positive integer")
+        if type(self.public_run_id) is not str or not self.public_run_id:
+            raise ValueError("public_run_id must be a non-empty string")
+        if (self.input_blob_sha256 is None) != (self.input_blob_size is None):
+            raise ValueError(
+                "input blob digest and size must both be null or both be non-null"
+            )
+        if self.input_blob_sha256 is not None and (
+            type(self.input_blob_sha256) is not str
+            or len(self.input_blob_sha256) != 64
+            or any(char not in "0123456789abcdef" for char in self.input_blob_sha256)
+        ):
+            raise ValueError(
+                "input_blob_sha256 must be a lowercase SHA-256 digest"
+            )
+        if self.input_blob_size is not None and (
+            type(self.input_blob_size) is not int or self.input_blob_size <= 0
+        ):
+            raise ValueError("input_blob_size must be a positive integer")
+        if (
+            not isinstance(self.admitted_at, datetime)
+            or self.admitted_at.tzinfo is None
+            or self.admitted_at.utcoffset() is None
+        ):
+            raise ValueError("admitted_at must be a timezone-aware datetime")
+        object.__setattr__(self, "admitted_at", self.admitted_at.astimezone(UTC))
+
 
 @dataclass(frozen=True)
 class EffectRecord:
