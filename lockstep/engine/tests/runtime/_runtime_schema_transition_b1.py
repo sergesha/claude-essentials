@@ -143,6 +143,168 @@ def poison_v2_missing_epoch(path: Path) -> None:
         connection.close()
 
 
+def poison_v2_watch_check_quoting(path: Path) -> None:
+    connection = sqlite3.connect(path)
+    try:
+        row = connection.execute(
+            "SELECT sql FROM sqlite_schema "
+            "WHERE type = 'table' AND name = 'run_drive_watches'"
+        ).fetchone()
+        assert row is not None
+        poisoned = row[0].replace(
+            "input_blob_sha256 IS NULL",
+            '"input_blob_sha256 " IS NULL',
+        ).replace(
+            "input_blob_sha256 IS NOT NULL",
+            '"input_blob_sha256 " IS NOT NULL',
+        )
+        assert poisoned != row[0]
+        connection.execute("PRAGMA writable_schema = ON")
+        connection.execute(
+            "UPDATE sqlite_schema SET sql = ? "
+            "WHERE type = 'table' AND name = 'run_drive_watches'",
+            (poisoned,),
+        )
+        version = connection.execute("PRAGMA schema_version").fetchone()[0]
+        connection.execute(f"PRAGMA schema_version = {version + 1}")
+        connection.execute("PRAGMA writable_schema = OFF")
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def poison_v2_watch_conflict_comment(path: Path) -> None:
+    connection = sqlite3.connect(path)
+    try:
+        row = connection.execute(
+            "SELECT sql FROM sqlite_schema "
+            "WHERE type = 'table' AND name = 'run_drive_watches'"
+        ).fetchone()
+        assert row is not None
+        poisoned = row[0].replace(
+            "UNIQUE (public_run_id)",
+            "UNIQUE (public_run_id) ON/**/CONFLICT REPLACE",
+        )
+        assert poisoned != row[0]
+        connection.execute("PRAGMA writable_schema = ON")
+        connection.execute(
+            "UPDATE sqlite_schema SET sql = ? "
+            "WHERE type = 'table' AND name = 'run_drive_watches'",
+            (poisoned,),
+        )
+        version = connection.execute("PRAGMA schema_version").fetchone()[0]
+        connection.execute(f"PRAGMA schema_version = {version + 1}")
+        connection.execute("PRAGMA writable_schema = OFF")
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def poison_v2_watch_generated_column(path: Path) -> None:
+    connection = sqlite3.connect(path)
+    try:
+        row = connection.execute(
+            "SELECT sql FROM sqlite_schema "
+            "WHERE type = 'table' AND name = 'run_drive_watches'"
+        ).fetchone()
+        assert row is not None
+        poisoned = row[0].replace(
+            "admitted_at VARCHAR NOT NULL, ",
+            "admitted_at VARCHAR NOT NULL, poison TEXT AS (input_blob_size), ",
+        )
+        assert poisoned != row[0]
+        connection.execute("PRAGMA writable_schema = ON")
+        connection.execute(
+            "UPDATE sqlite_schema SET sql = ? "
+            "WHERE type = 'table' AND name = 'run_drive_watches'",
+            (poisoned,),
+        )
+        version = connection.execute("PRAGMA schema_version").fetchone()[0]
+        connection.execute(f"PRAGMA schema_version = {version + 1}")
+        connection.execute("PRAGMA writable_schema = OFF")
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def poison_v2_watch_without_autoincrement(path: Path) -> None:
+    connection = sqlite3.connect(path)
+    try:
+        row = connection.execute(
+            "SELECT sql FROM sqlite_schema "
+            "WHERE type = 'table' AND name = 'run_drive_watches'"
+        ).fetchone()
+        assert row is not None
+        poisoned = row[0].replace(" PRIMARY KEY AUTOINCREMENT", " PRIMARY KEY")
+        assert poisoned != row[0]
+        connection.execute("PRAGMA writable_schema = ON")
+        connection.execute(
+            "UPDATE sqlite_schema SET sql = ? "
+            "WHERE type = 'table' AND name = 'run_drive_watches'",
+            (poisoned,),
+        )
+        version = connection.execute("PRAGMA schema_version").fetchone()[0]
+        connection.execute(f"PRAGMA schema_version = {version + 1}")
+        connection.execute("PRAGMA writable_schema = OFF")
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def poison_invalid_legacy_watch_values(path: Path) -> None:
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute(
+            "INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "invalid-watch",
+                "thread-invalid-watch",
+                _RECIPE_DIGEST,
+                "bundle:" + _INPUT_DIGEST,
+                "/project",
+                _ADMITTED_AT,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO effect_dispatch_watches VALUES (?, ?, ?, ?)",
+            ("invalid-watch", "not-a-digest", -1, "not-a-time"),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def poison_oversized_legacy_watch(path: Path) -> None:
+    _poison_legacy_watch_size(path, "oversized-watch", 64 * 1024 * 1024 + 1)
+
+
+def seed_zero_size_legacy_watch(path: Path) -> None:
+    _poison_legacy_watch_size(path, "zero-size-watch", 0)
+
+
+def _poison_legacy_watch_size(path: Path, run_id: str, size: int) -> None:
+    connection = sqlite3.connect(path)
+    try:
+        connection.execute(
+            "INSERT INTO runs VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                run_id,
+                "thread-" + run_id,
+                _RECIPE_DIGEST,
+                "bundle:" + _INPUT_DIGEST,
+                "/project",
+                _ADMITTED_AT,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO effect_dispatch_watches VALUES (?, ?, ?, ?)",
+            (run_id, _INPUT_DIGEST, size, _ADMITTED_AT),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
 def _legacy_writer(
     path,
     opened,

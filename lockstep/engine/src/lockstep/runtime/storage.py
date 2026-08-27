@@ -11,6 +11,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
@@ -310,6 +311,165 @@ def _define_tables(metadata: MetaData, external_metadata: MetaData) -> RuntimeTa
 
 
 _RUN_DRIVE_WATCH_MIGRATION = "run-drive-watch-v2"
+_LEGACY_RUN_DRIVE_WATCH_TABLE = "effect_dispatch_watches"
+_MAX_RUN_INPUT_BLOB_BYTES = 64 * 1024 * 1024
+
+_SchemaManifest = tuple[tuple[str, str, str, str | None], ...]
+
+
+def _define_legacy_run_drive_watch(metadata: MetaData) -> Table:
+    return Table(
+        _LEGACY_RUN_DRIVE_WATCH_TABLE,
+        metadata,
+        Column(
+            "public_run_id",
+            String,
+            ForeignKey("runs.public_run_id"),
+            primary_key=True,
+        ),
+        Column("input_blob_sha256", String(64), nullable=False),
+        Column("input_blob_size", Integer, nullable=False),
+        Column("admitted_at", String, nullable=False),
+    )
+
+
+def _schema_manifest(connection: Connection) -> _SchemaManifest:
+    return tuple(
+        tuple(row)
+        for row in connection.exec_driver_sql(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master "
+            "ORDER BY type, name, tbl_name, sql"
+        )
+    )
+
+
+@lru_cache(maxsize=2)
+def _expected_schema_manifest(*, legacy: bool) -> _SchemaManifest:
+    metadata = MetaData()
+    external_metadata = MetaData()
+    tables = _define_tables(metadata, external_metadata)
+    legacy_table = _define_legacy_run_drive_watch(metadata) if legacy else None
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    try:
+        with engine.begin() as connection:
+            if legacy:
+                excluded = {
+                    tables.run_drive_watches,
+                    tables.runtime_schema_migrations,
+                    tables.runtime_schema_epoch,
+                }
+                metadata.create_all(
+                    connection,
+                    tables=tuple(
+                        table
+                        for table in metadata.sorted_tables
+                        if table not in excluded
+                    ),
+                )
+                assert legacy_table is not None
+            else:
+                metadata.create_all(connection)
+            external_metadata.create_all(connection)
+            return _schema_manifest(connection)
+    finally:
+        engine.dispose()
+
+
+def _validate_database_integrity(connection: Connection) -> None:
+    if tuple(connection.exec_driver_sql("PRAGMA integrity_check")) != (("ok",),):
+        raise RuntimeError("runtime database integrity check failed")
+    if tuple(connection.exec_driver_sql("PRAGMA foreign_key_check")):
+        raise RuntimeError("runtime database foreign-key integrity check failed")
+
+
+def _validate_v2_epoch(connection: Connection) -> None:
+    rows = tuple(
+        connection.exec_driver_sql(
+            "SELECT singleton, epoch FROM runtime_schema_epoch ORDER BY singleton"
+        )
+    )
+    if rows != ((1, 2),):
+        raise RuntimeError("runtime schema epoch is not exact v2")
+
+
+def _validate_watch_values(
+    connection: Connection, *, table_name: str, legacy: bool
+) -> None:
+    sequence = "NULL" if legacy else "admission_seq"
+    rows = connection.exec_driver_sql(
+        f"SELECT {sequence}, public_run_id, input_blob_sha256, "
+        f"input_blob_size, admitted_at FROM {table_name}"
+    )
+    for row in rows:
+        admission_seq, public_run_id, digest, size, admitted_at = tuple(row)
+        if not legacy and (type(admission_seq) is not int or admission_seq <= 0):
+            raise RuntimeError("runtime drive watch contains invalid values")
+        if type(public_run_id) is not str or not public_run_id:
+            raise RuntimeError("runtime drive watch contains invalid values")
+        if digest is None:
+            if legacy or size is not None:
+                raise RuntimeError("runtime drive watch contains invalid values")
+        elif (
+            type(digest) is not str
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+            or type(size) is not int
+            or size < 0
+            or size > _MAX_RUN_INPUT_BLOB_BYTES
+        ):
+            raise RuntimeError("runtime drive watch contains invalid values")
+        if type(admitted_at) is not str:
+            raise RuntimeError("runtime drive watch timestamp is invalid")
+        try:
+            timestamp = datetime.fromisoformat(admitted_at)
+        except ValueError as exc:
+            raise RuntimeError("runtime drive watch timestamp is invalid") from exc
+        if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+            raise RuntimeError("runtime drive watch timestamp is invalid")
+
+
+def _populate_v2_run_drive_schema(
+    connection: Connection, tables: RuntimeTables
+) -> None:
+    connection.exec_driver_sql(
+        "INSERT INTO run_drive_watches "
+        "(public_run_id, input_blob_sha256, input_blob_size, admitted_at) "
+        "SELECT public_run_id, input_blob_sha256, input_blob_size, admitted_at "
+        f"FROM {_LEGACY_RUN_DRIVE_WATCH_TABLE} ORDER BY public_run_id"
+    )
+    connection.execute(
+        tables.runtime_schema_epoch.insert().values(singleton=1, epoch=2)
+    )
+    connection.exec_driver_sql(f"DROP TABLE {_LEGACY_RUN_DRIVE_WATCH_TABLE}")
+
+
+def _sqlite_family(path: Path) -> tuple[Path, ...]:
+    return (
+        path,
+        Path(f"{path}-journal"),
+        Path(f"{path}-wal"),
+        Path(f"{path}-shm"),
+    )
+
+
+def _verify_sqlite_family(path: Path) -> None:
+    for candidate in _sqlite_family(path):
+        if candidate.exists() or candidate.is_symlink():
+            try:
+                verify_owner_file(candidate)
+            except FileNotFoundError:
+                if candidate == path:
+                    raise
+
+
+def _seal_sqlite_family(path: Path) -> None:
+    for candidate in _sqlite_family(path):
+        if candidate.exists():
+            try:
+                seal_owner_file(candidate, writable=True)
+            except FileNotFoundError:
+                if candidate == path:
+                    raise
 
 
 def _validate_run_drive_watch_page_envelope(
@@ -370,9 +530,77 @@ class RuntimeSchemaMigrator:
 
     @classmethod
     def transition_legacy_to_v2(cls, path: Path) -> None:
-        """Reserve the fail-closed pre-open transition boundary."""
+        """Classify an existing store and atomically publish exact epoch 2."""
 
-        raise NotImplementedError("runtime schema transition is not implemented")
+        path = Path(path)
+        if not path.exists() and not path.is_symlink():
+            return
+        verify_owner_file(path)
+        if path.stat().st_size == 0:
+            return
+        metadata = MetaData()
+        external_metadata = MetaData()
+        tables = _define_tables(metadata, external_metadata)
+        engine = create_engine(
+            f"sqlite+pysqlite:///{path}",
+            connect_args={"check_same_thread": False, "timeout": 30},
+        )
+        with advisory_file_lock(path.parent / "runtime-schema.lock"):
+            try:
+                _verify_sqlite_family(path)
+                with engine.connect() as connection:
+                    try:
+                        connection.exec_driver_sql("BEGIN EXCLUSIVE")
+                        manifest = _schema_manifest(connection)
+                        if manifest == _expected_schema_manifest(legacy=False):
+                            _validate_database_integrity(connection)
+                            _validate_v2_epoch(connection)
+                            _validate_watch_values(
+                                connection,
+                                table_name="run_drive_watches",
+                                legacy=False,
+                            )
+                            connection.rollback()
+                            return
+                        if manifest != _expected_schema_manifest(legacy=True):
+                            raise RuntimeError(
+                                "runtime database schema is neither legacy nor v2"
+                            )
+                        _validate_database_integrity(connection)
+                        _validate_watch_values(
+                            connection,
+                            table_name=_LEGACY_RUN_DRIVE_WATCH_TABLE,
+                            legacy=True,
+                        )
+                        metadata.create_all(
+                            connection,
+                            tables=(
+                                tables.run_drive_watches,
+                                tables.runtime_schema_migrations,
+                                tables.runtime_schema_epoch,
+                            ),
+                        )
+                        _populate_v2_run_drive_schema(connection, tables)
+                        if _schema_manifest(connection) != (
+                            _expected_schema_manifest(legacy=False)
+                        ):
+                            raise RuntimeError(
+                                "runtime schema transition produced noncanonical v2"
+                            )
+                        _validate_database_integrity(connection)
+                        _validate_v2_epoch(connection)
+                        _validate_watch_values(
+                            connection,
+                            table_name="run_drive_watches",
+                            legacy=False,
+                        )
+                        connection.commit()
+                    except BaseException:
+                        connection.rollback()
+                        raise
+            finally:
+                engine.dispose()
+                _seal_sqlite_family(path)
 
     def __init__(self, store: SQLiteStore) -> None:
         self._store = store
@@ -564,26 +792,15 @@ class SQLiteStore:
     def _sqlite_files(self) -> tuple[Path, ...]:
         if self.database_path is None:
             return ()
-        path = self.database_path
-        return (path, Path(f"{path}-journal"), Path(f"{path}-wal"), Path(f"{path}-shm"))
+        return _sqlite_family(self.database_path)
 
     def _verify_sqlite_files(self) -> None:
-        for path in self._sqlite_files():
-            if path.exists() or path.is_symlink():
-                try:
-                    verify_owner_file(path)
-                except FileNotFoundError:
-                    if path == self.database_path:
-                        raise
+        if self.database_path is not None:
+            _verify_sqlite_family(self.database_path)
 
     def _seal_sqlite_files(self) -> None:
-        for path in self._sqlite_files():
-            if path.exists():
-                try:
-                    seal_owner_file(path, writable=True)
-                except FileNotFoundError:
-                    if path == self.database_path:
-                        raise
+        if self.database_path is not None:
+            _seal_sqlite_family(self.database_path)
 
     @contextmanager
     def write_transaction(self) -> Iterator[Connection]:
