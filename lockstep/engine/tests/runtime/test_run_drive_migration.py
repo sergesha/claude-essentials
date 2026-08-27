@@ -6,6 +6,7 @@ from inspect import Parameter, signature
 from pathlib import Path
 from typing import get_type_hints
 
+import pytest
 from sqlalchemy import inspect as sa_inspect
 
 
@@ -99,6 +100,24 @@ def test_legacy_run_drive_classification_exact_dto_fields() -> None:
         "public_run_id",
         "disposition",
     )
+
+
+def test_legacy_run_drive_classification_accepts_only_frozen_value_domain() -> None:
+    classification_type = _migration_type("LegacyRunDriveClassification")
+
+    for disposition in ("nonterminal", "terminal", "malformed"):
+        classification = classification_type("run-1", disposition)
+        assert classification.public_run_id == "run-1"
+        assert classification.disposition == disposition
+
+    for public_run_id, disposition in (
+        ("", "nonterminal"),
+        ("run-1", ""),
+        ("run-1", "running"),
+        ("run-1", "NONTERMINAL"),
+    ):
+        with pytest.raises(ValueError):
+            classification_type(public_run_id, disposition)
 
 
 def test_migration_progress_exact_dto_fields() -> None:
