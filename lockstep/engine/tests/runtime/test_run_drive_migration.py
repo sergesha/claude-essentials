@@ -129,6 +129,30 @@ def test_migration_progress_exact_dto_fields() -> None:
         "malformed_public_run_ids",
     )
 
+
+def test_migration_progress_accepts_exact_values_and_requires_strict_boolean() -> None:
+    progress_type = _migration_type("MigrationProgress")
+
+    empty = progress_type(None, False, (), ())
+    assert (
+        empty.after_public_run_id,
+        empty.completed,
+        empty.inserted_public_run_ids,
+        empty.malformed_public_run_ids,
+    ) == (None, False, (), ())
+
+    populated = progress_type("run-2", True, ("run-1",), ("run-2",))
+    assert (
+        populated.after_public_run_id,
+        populated.completed,
+        populated.inserted_public_run_ids,
+        populated.malformed_public_run_ids,
+    ) == ("run-2", True, ("run-1",), ("run-2",))
+
+    with pytest.raises(TypeError, match="completed must be a boolean"):
+        progress_type(None, 1, (), ())
+
+
 def test_run_drive_migration_page_api_exact_signature() -> None:
     from lockstep.runtime import storage as storage_module
 
