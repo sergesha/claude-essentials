@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -163,6 +163,97 @@ def test_max_run_drive_admission_seq_returns_none_then_current_db_max(ledger) ->
         )
 
     assert effect_ledger.max_run_drive_admission_seq() == 2
+
+
+def test_list_run_drive_watches_validates_and_returns_bounded_ordered_page(
+    ledger,
+) -> None:
+    from lockstep.runtime.blobs import BlobRef
+    from lockstep.runtime.catalog import RunBinding, RunCatalog
+    from lockstep.runtime.effects.ledger import EffectLedger, RunDriveWatch
+
+    _effect_ledger, storage = ledger
+    offset_instant = datetime(
+        2026,
+        8,
+        20,
+        12,
+        tzinfo=timezone(timedelta(hours=2)),
+    )
+    effect_ledger = EffectLedger(storage, clock=lambda: offset_instant)
+    catalog = RunCatalog(storage)
+    for index, digest in enumerate(("a" * 64, "b" * 64, "c" * 64), start=1):
+        effect_ledger.admit_start(
+            catalog,
+            RunBinding(
+                f"run-{index}",
+                f"thread-{index}",
+                "d" * 64,
+                "bundle:" + "e" * 64,
+                "/project",
+            ),
+            BlobRef(digest, index),
+        )
+
+    expected_utc = datetime(2026, 8, 20, 10, tzinfo=UTC)
+    all_rows = effect_ledger.list_run_drive_watches(
+        after_admission_seq=0,
+        high_water=3,
+        limit=128,
+    )
+    assert all_rows == (
+        RunDriveWatch(1, "run-1", "a" * 64, 1, expected_utc),
+        RunDriveWatch(2, "run-2", "b" * 64, 2, expected_utc),
+        RunDriveWatch(3, "run-3", "c" * 64, 3, expected_utc),
+    )
+    assert all(row.admitted_at.tzinfo is UTC for row in all_rows)
+    assert effect_ledger.list_run_drive_watches(
+        after_admission_seq=0,
+        high_water=2,
+        limit=128,
+    ) == all_rows[:2]
+    assert effect_ledger.list_run_drive_watches(
+        after_admission_seq=1,
+        high_water=3,
+        limit=1,
+    ) == (all_rows[1],)
+    assert effect_ledger.list_run_drive_watches(
+        after_admission_seq=3,
+        high_water=3,
+        limit=128,
+    ) == ()
+
+    for after_admission_seq, high_water in (
+        (-1, 3),
+        (True, 3),
+        (1.0, 3),
+        (4, 3),
+        (0, -1),
+        (0, True),
+        (0, 1.0),
+    ):
+        with pytest.raises(
+            ValueError,
+            match=(
+                "^run-drive watch bounds must be integers with "
+                "0 <= after_admission_seq <= high_water$"
+            ),
+        ):
+            effect_ledger.list_run_drive_watches(
+                after_admission_seq=after_admission_seq,
+                high_water=high_water,
+                limit=1,
+            )
+    for limit in (0, 129, True, 1.0):
+        with pytest.raises(
+            ValueError,
+            match="^run-drive watch limit must be an integer from 1 to 128$",
+        ):
+            effect_ledger.list_run_drive_watches(
+                after_admission_seq=0,
+                high_water=3,
+                limit=limit,
+            )
 
 
 def test_dispatch_watch_limit_is_a_batch_not_a_correctness_cap(ledger) -> None:
