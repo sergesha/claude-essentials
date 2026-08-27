@@ -27,6 +27,26 @@ def _prepared_command(tmp_path: Path):
         command.close()
 
 
+@contextmanager
+def _active_command(tmp_path: Path):
+    from lockstep.runtime.engine import Engine
+
+    recipes = tmp_path / "recipes"
+    recipes.mkdir()
+    command = Engine.command(tmp_path / "state", recipes)
+    try:
+        command._activate_writable_core()
+        command._pump_stop.set()
+        command._pump_wakeup.set()
+        thread = command._pump_thread
+        if thread is not None:
+            thread.join(timeout=5)
+            assert not thread.is_alive()
+        yield command
+    finally:
+        command.close()
+
+
 def _durable_command_state(command) -> dict[str, tuple[dict[str, object], ...]]:
     table_names = (
         "runs",
@@ -60,6 +80,52 @@ def _command_drive_state(command) -> tuple[object, ...]:
         command._pump_wakeup.is_set(),
         command._pump_failure,
     )
+
+
+def _contender_can_acquire(lock) -> bool:
+    acquired_by_contender: list[bool] = []
+
+    def probe() -> None:
+        acquired = lock.acquire(blocking=False)
+        acquired_by_contender.append(acquired)
+        if acquired:
+            lock.release()
+
+    contender = threading.Thread(target=probe)
+    contender.start()
+    contender.join(timeout=5)
+    assert not contender.is_alive()
+    return acquired_by_contender[0]
+
+
+@contextmanager
+def _observed_sweeps(command):
+    driver = command._recovery_driver
+    driver_before = dict(vars(driver))
+    sweep = driver._sweep_run_drive_watches
+    calls: list[tuple[str | None, int, bool, bool]] = []
+
+    def observe_sweep(
+        *,
+        project_identity: str | None,
+        limit: int,
+    ) -> tuple[str, ...]:
+        calls.append(
+            (
+                project_identity,
+                limit,
+                _contender_can_acquire(command._activation_lock),
+                _contender_can_acquire(command._admission_recovery_lock),
+            )
+        )
+        return sweep(project_identity=project_identity, limit=limit)
+
+    driver._sweep_run_drive_watches = observe_sweep
+    try:
+        yield calls
+    finally:
+        del driver._sweep_run_drive_watches
+    assert dict(vars(driver)) == driver_before
 
 
 def test_recovery_driver_has_exact_private_command_composition_surface(
@@ -130,47 +196,41 @@ def test_automatic_recovery_reaches_inert_sweep_once(tmp_path: Path) -> None:
     with _prepared_command(tmp_path) as command:
         durable_before = _durable_command_state(command)
         drive_before = _command_drive_state(command)
-        driver = command._recovery_driver
-        driver_before = dict(vars(driver))
-        sweep = driver._sweep_run_drive_watches
-        calls: list[tuple[str | None, int, bool]] = []
-
-        def observe_sweep(
-            *,
-            project_identity: str | None,
-            limit: int,
-        ) -> tuple[str, ...]:
-            contender_acquired: list[bool] = []
-
-            def probe_recovery_lock() -> None:
-                acquired = command._admission_recovery_lock.acquire(blocking=False)
-                contender_acquired.append(acquired)
-                if acquired:
-                    command._admission_recovery_lock.release()
-
-            contender = threading.Thread(target=probe_recovery_lock)
-            contender.start()
-            contender.join(timeout=5)
-            assert not contender.is_alive()
-            calls.append((project_identity, limit, contender_acquired[0]))
-            return sweep(project_identity=project_identity, limit=limit)
-
-        driver._sweep_run_drive_watches = observe_sweep
-        try:
+        with _observed_sweeps(command) as calls:
             command._recover_engine_effects()
-        finally:
-            del driver._sweep_run_drive_watches
 
         assert {
             "durable_unchanged": _durable_command_state(command) == durable_before,
             "drive_unchanged": _command_drive_state(command) == drive_before,
-            "driver_unchanged": dict(vars(driver)) == driver_before,
             "sweep_calls": calls,
         } == {
             "durable_unchanged": True,
             "drive_unchanged": True,
-            "driver_unchanged": True,
-            "sweep_calls": [(None, command._MAX_ACTIVE_EFFECT_RUNS, False)],
+            "sweep_calls": [
+                (None, command._MAX_ACTIVE_EFFECT_RUNS, True, False)
+            ],
+        }
+
+
+def test_explicit_recovery_reaches_inert_project_sweep_once(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    with _active_command(tmp_path) as command:
+        durable_before = _durable_command_state(command)
+        drive_before = _command_drive_state(command)
+        with _observed_sweeps(command) as calls:
+            result = command.scenario_recover(str(project), limit=7)
+
+        assert {
+            "result": result,
+            "durable_unchanged": _durable_command_state(command) == durable_before,
+            "drive_unchanged": _command_drive_state(command) == drive_before,
+            "sweep_calls": calls,
+        } == {
+            "result": {"recovered": [], "count": 0, "limit": 7},
+            "durable_unchanged": True,
+            "drive_unchanged": True,
+            "sweep_calls": [(str(project.resolve()), 7, False, False)],
         }
 
 
