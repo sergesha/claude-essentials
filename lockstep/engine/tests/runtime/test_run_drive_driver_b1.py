@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from lockstep.runtime import sessions
+from lockstep.runtime.read_resources import RuntimeReadResources
 from lockstep.runtime.storage import (
     LegacyRunDriveClassification,
     RuntimeSchemaMigrator,
@@ -14,7 +16,16 @@ from lockstep.runtime.storage import (
 from tests.runtime._run_drive_b1_harness import (
     active_native_command,
     active_native_manual_park,
+    prepared_native_reopen,
 )
+
+
+class _NativeCommittedBeforeEffectDelivery(RuntimeError):
+    pass
+
+
+class _PreDeleteCrash(RuntimeError):
+    pass
 
 
 def _replace_with_null_watch(command, run_id: str):
@@ -65,6 +76,127 @@ def _observe_null_watch_drive(command):
         command.runtime.snapshot = snapshot
         command.blobs.read = read_blob
         command.runtime.ensure_started = ensure_started
+
+
+def _terminal_residue(command, run_id: str, project: Path, effect_id: str):
+    session_id = "item12-session"
+    assert sessions.touch(command.state_dir, run_id, session_id, 30) == "bound"
+    mark_delivered = command.effects.mark_delivered
+    mark_calls = []
+
+    def crash_after_native_commit(observed_effect_id, **_kwargs):
+        mark_calls.append(observed_effect_id)
+        raise _NativeCommittedBeforeEffectDelivery
+
+    command.effects.mark_delivered = crash_after_native_commit
+    try:
+        with pytest.raises(_NativeCommittedBeforeEffectDelivery):
+            command.scenario_done(
+                run_id,
+                "answer",
+                {"answer": "yes"},
+                session_id=session_id,
+                project=str(project),
+            )
+    finally:
+        command.effects.mark_delivered = mark_delivered
+
+    terminal = command.runtime.snapshot(run_id, subgraphs=True)
+    assert terminal.checkpoint_id
+    assert terminal.pending == terminal.next == ()
+    assert mark_calls == [effect_id]
+    assert command.effects.get(effect_id).phase == "sealed"
+    return terminal
+
+
+def _drive_to_predelete_cut(command, watch, effect_id: str):
+    reconcile_consumed = command.coordinator.reconcile_consumed
+    acknowledge = command.effects.acknowledge_run_drive_watch
+    observed = {"reconcile": [], "ack": [], "failure": None}
+
+    def observe_reconcile(run_id: str):
+        reports = reconcile_consumed(run_id)
+        observed["reconcile"].append(
+            tuple((item.effect_id, item.action, item.phase) for item in reports)
+        )
+        return reports
+
+    def crash_before_delete(run_id: str):
+        high_water = command.effects.max_run_drive_admission_seq()
+        current = command.effects.list_run_drive_watches(
+            after_admission_seq=0,
+            high_water=high_water,
+            limit=1,
+        )
+        observed["ack"].append(
+            (run_id, command.effects.get(effect_id).phase, current)
+        )
+        raise _PreDeleteCrash("pre-delete")
+
+    command.coordinator.reconcile_consumed = observe_reconcile
+    command.effects.acknowledge_run_drive_watch = crash_before_delete
+    try:
+        try:
+            command._recovery_driver._drive_run_watch(watch)
+        except _PreDeleteCrash as exc:
+            observed["failure"] = str(exc)
+    finally:
+        command.coordinator.reconcile_consumed = reconcile_consumed
+        command.effects.acknowledge_run_drive_watch = acknowledge
+    return observed
+
+
+def _observe_busy_drive(command, watch):
+    reconcile_consumed = command.coordinator.reconcile_consumed
+    acknowledge = command.effects.acknowledge_run_drive_watch
+    observed = {"reconcile": [], "ack": []}
+
+    def observe_reconcile(run_id: str):
+        reports = reconcile_consumed(run_id)
+        observed["reconcile"].append(
+            tuple((item.effect_id, item.action, item.phase) for item in reports)
+        )
+        return reports
+
+    def prevent_delete(run_id: str):
+        observed["ack"].append(run_id)
+
+    command.coordinator.reconcile_consumed = observe_reconcile
+    command.effects.acknowledge_run_drive_watch = prevent_delete
+    try:
+        command._recovery_driver._drive_run_watch(watch)
+    finally:
+        command.coordinator.reconcile_consumed = reconcile_consumed
+        command.effects.acknowledge_run_drive_watch = acknowledge
+    return observed
+
+
+def _retry_terminal_watch(command, watch, effect_id: str):
+    reconcile_consumed = command.coordinator.reconcile_consumed
+    acknowledge = command.effects.acknowledge_run_drive_watch
+    observed = {"reconcile": [], "ack": []}
+
+    def observe_reconcile(run_id: str):
+        reports = reconcile_consumed(run_id)
+        observed["reconcile"].append(
+            tuple((item.effect_id, item.action, item.phase) for item in reports)
+        )
+        return reports
+
+    def observe_delete(run_id: str):
+        observed["ack"].append(
+            (run_id, command.effects.get(effect_id).phase)
+        )
+        return acknowledge(run_id)
+
+    command.coordinator.reconcile_consumed = observe_reconcile
+    command.effects.acknowledge_run_drive_watch = observe_delete
+    try:
+        command._recovery_driver._drive_run_watch(watch)
+    finally:
+        command.coordinator.reconcile_consumed = reconcile_consumed
+        command.effects.acknowledge_run_drive_watch = acknowledge
+    return observed
 
 
 def test_start_watch_replays_only_before_first_checkpoint(tmp_path: Path) -> None:
@@ -147,3 +279,104 @@ def test_null_watch_without_checkpoint_remains_safely_blocked(
         assert native_after == native_before
         assert effects_after == effects_before
         assert snapshot_calls in ([], [(run_id, True)])
+
+
+def test_terminal_removal_crash_cuts(tmp_path: Path) -> None:
+    with active_native_manual_park(tmp_path) as (command, run_id, project):
+        state_dir = command.state_dir
+        recipes_dir = command.recipes_dir
+        runtime_context = command._runtime_execution_context
+        binding = command.catalog.get(run_id)
+        records = command.effects.list_for_thread(binding.thread_id)
+        assert len(records) == 1
+        effect = records[0]
+        assert (effect.effect_kind, effect.phase) == ("manual", "prepared")
+        high_water, watches_before = _replace_with_null_watch(command, run_id)
+        watch = watches_before[0]
+        terminal = _terminal_residue(
+            command, run_id, project, effect.effect_id
+        )
+
+        held = command.leases.acquire(
+            "effect", effect.effect_id, "item12-contender", 30
+        )
+        try:
+            busy = command.coordinator.reconcile_consumed(run_id)
+            busy_drive = _observe_busy_drive(command, watch)
+            busy_effect = command.effects.get(effect.effect_id).phase
+            busy_watches = command.effects.list_run_drive_watches(
+                after_admission_seq=0, high_water=high_water, limit=1
+            )
+            busy_native = command.runtime.snapshot(run_id, subgraphs=True)
+        finally:
+            assert command.leases.release(held)
+        assert [(item.effect_id, item.action, item.phase) for item in busy] == [
+            (effect.effect_id, "busy", "sealed")
+        ]
+        assert command.effects.get(effect.effect_id).phase == "sealed"
+        assert command.effects.list_run_drive_watches(
+            after_admission_seq=0, high_water=high_water, limit=1
+        ) == watches_before
+        assert command.runtime.snapshot(run_id, subgraphs=True) == terminal
+
+        first = _drive_to_predelete_cut(command, watch, effect.effect_id)
+        effect_after_cut = command.effects.get(effect.effect_id).phase
+        watches_after_cut = command.effects.list_run_drive_watches(
+            after_admission_seq=0, high_water=high_water, limit=1
+        )
+
+    with prepared_native_reopen(
+        state_dir, recipes_dir, runtime_context
+    ) as reopened:
+        retained = reopened.effects.list_run_drive_watches(
+            after_admission_seq=0, high_water=high_water, limit=1
+        )
+        assert len(retained) == 1
+        retry = _retry_terminal_watch(reopened, retained[0], effect.effect_id)
+        final_effect = reopened.effects.get(effect.effect_id).phase
+        final_watches = reopened.effects.list_run_drive_watches(
+            after_admission_seq=0, high_water=high_water, limit=1
+        )
+
+    with RuntimeReadResources(state_dir).native_app(binding) as app:
+        persisted_native = app.snapshot(
+            thread_id=binding.thread_id, subgraphs=True
+        )
+
+    assert {
+        "predelete_failure": first["failure"],
+        "busy_drive_reconcile": busy_drive["reconcile"],
+        "busy_drive_ack": busy_drive["ack"],
+        "busy_state_unchanged": (
+            busy_effect == "sealed"
+            and busy_watches == watches_before
+            and busy_native == terminal
+        ),
+        "predelete_reconcile": first["reconcile"],
+        "predelete_ack": first["ack"],
+        "effect_after_cut": effect_after_cut,
+        "watch_retained_at_cut": watches_after_cut == watches_before,
+        "retry_reconcile": retry["reconcile"],
+        "retry_ack": retry["ack"],
+        "final_effect": final_effect,
+        "final_watch_absent": final_watches == (),
+        "native_unchanged": persisted_native == terminal,
+    } == {
+        "predelete_failure": "pre-delete",
+        "busy_drive_reconcile": [
+            ((effect.effect_id, "busy", "sealed"),)
+        ],
+        "busy_drive_ack": [],
+        "busy_state_unchanged": True,
+        "predelete_reconcile": [
+            ((effect.effect_id, "delivered", "delivered"),)
+        ],
+        "predelete_ack": [(run_id, "delivered", watches_before)],
+        "effect_after_cut": "delivered",
+        "watch_retained_at_cut": True,
+        "retry_reconcile": [()],
+        "retry_ack": [(run_id, "delivered")],
+        "final_effect": "delivered",
+        "final_watch_absent": True,
+        "native_unchanged": True,
+    }

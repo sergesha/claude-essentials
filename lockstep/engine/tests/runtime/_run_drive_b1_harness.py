@@ -56,3 +56,21 @@ def active_native_manual_park(tmp_path: Path):
     with active_native_command(tmp_path) as (command, project):
         started = command.start("native-parent-direct", {}, str(project))
         yield command, started["run_id"], project
+
+
+@contextmanager
+def prepared_native_reopen(state_dir: Path, recipes_dir: Path, runtime_context):
+    """Reopen real stores/runtime without coupling to legacy watch recovery."""
+
+    assert runtime_context is None
+    command = Engine.command(state_dir, recipes_dir)
+    reconstruct = command._reconstruct_runtime_execution_context
+    try:
+        command._reconstruct_runtime_execution_context = lambda: None
+        command._prepare_writable_core()
+        command._reconstruct_runtime_execution_context = reconstruct
+        yield command
+    finally:
+        command._reconstruct_runtime_execution_context = reconstruct
+        command._rollback_writable_core_activation()
+        command.close()
