@@ -153,6 +153,49 @@ def test_migration_progress_accepts_exact_values_and_requires_strict_boolean() -
         progress_type(None, 1, (), ())
 
 
+def test_migration_progress_requires_exact_public_id_shapes() -> None:
+    progress_type = _migration_type("MigrationProgress")
+
+    assert progress_type(None, False, (), ()).after_public_run_id is None
+    populated = progress_type("run-2", True, ("run-1",), ("run-2",))
+    assert (
+        populated.after_public_run_id,
+        populated.inserted_public_run_ids,
+        populated.malformed_public_run_ids,
+    ) == ("run-2", ("run-1",), ("run-2",))
+
+    for after_public_run_id in ("", 1):
+        with pytest.raises(
+            ValueError,
+            match="^after_public_run_id must be a non-empty string$",
+        ):
+            progress_type(after_public_run_id, False, (), ())
+
+    with pytest.raises(
+        TypeError,
+        match="^inserted_public_run_ids must be a tuple$",
+    ):
+        progress_type(None, False, ["run-1"], ())
+    with pytest.raises(
+        TypeError,
+        match="^malformed_public_run_ids must be a tuple$",
+    ):
+        progress_type(None, False, (), ["run-1"])
+
+    for inserted_public_run_ids in (("",), (1,)):
+        with pytest.raises(
+            ValueError,
+            match="^inserted_public_run_ids must contain non-empty strings$",
+        ):
+            progress_type(None, False, inserted_public_run_ids, ())
+    for malformed_public_run_ids in (("",), (1,)):
+        with pytest.raises(
+            ValueError,
+            match="^malformed_public_run_ids must contain non-empty strings$",
+        ):
+            progress_type(None, False, (), malformed_public_run_ids)
+
+
 def test_run_drive_migration_page_api_exact_signature() -> None:
     from lockstep.runtime import storage as storage_module
 
