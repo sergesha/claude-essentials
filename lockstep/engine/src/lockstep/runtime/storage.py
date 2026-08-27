@@ -421,20 +421,15 @@ class RuntimeSchemaMigrator:
         ).first()
         timestamp = datetime.now(UTC).isoformat()
         if existing is None:
-            if expected_after_public_run_id is not None or public_run_ids:
+            if expected_after_public_run_id is not None:
                 raise NotImplementedError(
                     "run-drive-watch migration initialization is staged in R2"
                 )
-            connection.execute(
-                table.insert().values(
-                    name=_RUN_DRIVE_WATCH_MIGRATION,
-                    schema_version=2,
-                    after_public_run_id=None,
-                    completed_at=timestamp if exhausted else None,
-                    updated_at=timestamp,
-                )
+            stored_after_public_run_id = None
+            progress_write = table.insert().values(
+                name=_RUN_DRIVE_WATCH_MIGRATION,
+                schema_version=2,
             )
-            after_public_run_id = None
         else:
             _validate_existing_run_drive_watch_migration(
                 schema_version=existing.schema_version,
@@ -442,33 +437,35 @@ class RuntimeSchemaMigrator:
                 expected_after_public_run_id=expected_after_public_run_id,
                 completed_at=existing.completed_at,
             )
-            after_public_run_id = (
-                public_run_ids[-1]
-                if public_run_ids
-                else existing.after_public_run_id
+            stored_after_public_run_id = existing.after_public_run_id
+            progress_write = table.update().where(
+                table.c.name == _RUN_DRIVE_WATCH_MIGRATION
             )
-            if inserted_public_run_ids:
-                connection.execute(
-                    watch_table.insert(),
-                    [
-                        {
-                            "public_run_id": public_run_id,
-                            "input_blob_sha256": None,
-                            "input_blob_size": None,
-                            "admitted_at": timestamp,
-                        }
-                        for public_run_id in inserted_public_run_ids
-                    ],
-                )
+        after_public_run_id = (
+            public_run_ids[-1]
+            if public_run_ids
+            else stored_after_public_run_id
+        )
+        if inserted_public_run_ids:
             connection.execute(
-                table.update()
-                .where(table.c.name == _RUN_DRIVE_WATCH_MIGRATION)
-                .values(
-                    after_public_run_id=after_public_run_id,
-                    completed_at=timestamp if exhausted else None,
-                    updated_at=timestamp,
-                )
+                watch_table.insert(),
+                [
+                    {
+                        "public_run_id": public_run_id,
+                        "input_blob_sha256": None,
+                        "input_blob_size": None,
+                        "admitted_at": timestamp,
+                    }
+                    for public_run_id in inserted_public_run_ids
+                ],
             )
+        connection.execute(
+            progress_write.values(
+                after_public_run_id=after_public_run_id,
+                completed_at=timestamp if exhausted else None,
+                updated_at=timestamp,
+            )
+        )
         return MigrationProgress(
             after_public_run_id,
             exhausted,
