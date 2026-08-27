@@ -12,9 +12,11 @@ from lockstep.runtime.recipe_bundles import RecipeBundleStore
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "native"
 CHILD_INTERRUPT = FIXTURES / "child_interrupt.recipe.yaml"
+CHILD_THEN_PARENT = FIXTURES / "child_then_parent_interrupt.recipe.yaml"
 PARENT_DIRECT = FIXTURES / "parent_direct.recipe.yaml"
 PARENT_INVOKE = FIXTURES / "parent_invoke.recipe.yaml"
 PARALLEL_INTERRUPTS = FIXTURES / "parallel_interrupts.recipe.yaml"
+SEQUENTIAL_INTERRUPTS = FIXTURES / "sequential_interrupts.recipe.yaml"
 WRAPPED_PARENT_DIRECT = FIXTURES / "wrapped_parent_direct.recipe.yaml"
 
 
@@ -37,6 +39,15 @@ def _results(snapshot, value_by_message: dict[str, str]) -> dict[str, str]:
         item.coordinate.interrupt_id: value_by_message[item.value]
         for item in snapshot.pending
     }
+
+
+def _child_then_parent(app, thread_id):
+    child = app.invoke({}, thread_id=thread_id).pending[0]
+    parent = app.resume(
+        thread_id=thread_id,
+        results_by_interrupt_id={child.coordinate.interrupt_id: "yes"},
+    ).pending[0]
+    return child, parent
 
 
 def _authorized(path: Path, state_root: Path):
@@ -113,6 +124,147 @@ def test_parallel_interrupts_support_one_batch_resume_and_native_join(tmp_path):
     assert completed.pending == ()
     assert completed.values["joined"] is True
     assert sorted(completed.values["contributions"]) == ["a", "b"]
+
+
+def test_native_ancestry_rejects_obsolete_checkpoint_fork(tmp_path):
+    app = yg.open_native_app(_authorized(SEQUENTIAL_INTERRUPTS, tmp_path))
+    try:
+        thread_id = "obsolete-fork"
+        first = app.invoke({}, thread_id=thread_id).pending[0]
+        branch_a = app.resume(
+            thread_id=thread_id,
+            results_by_interrupt_id={first.coordinate.interrupt_id: "branch-a"},
+        ).pending[0]
+
+        fork_config = {
+            "configurable": {
+                "thread_id": thread_id,
+                "checkpoint_ns": first.coordinate.checkpoint_ns,
+                "checkpoint_id": first.coordinate.checkpoint_id,
+            }
+        }
+        app._app.invoke(  # noqa: SLF001 - create a real public native checkpoint fork
+            yg.Command(resume={first.coordinate.interrupt_id: "branch-b"}),
+            config=fork_config,
+        )
+        branch_b = app.snapshot(thread_id=thread_id, subgraphs=True).pending[0]
+        occurrences = tuple(
+            app.interrupt_history(
+                thread_id=thread_id,
+                checkpoint_ns=branch_a.coordinate.checkpoint_ns,
+                snapshot_limit=64,
+            )
+        )
+        assert branch_a.coordinate != branch_b.coordinate
+        assert branch_a.value == branch_b.value == "Second?"
+        assert branch_a.coordinate in {item.coordinate for item in occurrences}
+        assert branch_b.coordinate in {item.coordinate for item in occurrences}
+        assert not app.checkpoint_is_ancestor(
+            thread_id=thread_id,
+            ancestor_checkpoint_ns=branch_a.coordinate.checkpoint_ns,
+            ancestor_checkpoint_id=branch_a.coordinate.checkpoint_id,
+            descendant_checkpoint_ns=branch_b.coordinate.checkpoint_ns,
+            descendant_checkpoint_id=branch_b.coordinate.checkpoint_id,
+            snapshot_limit=64,
+        )
+    finally:
+        app.close()
+
+
+def test_cross_namespace_ancestry_traversal_has_one_exact_ceiling(
+    tmp_path, monkeypatch
+):
+    app = yg.open_native_app(_authorized(CHILD_THEN_PARENT, tmp_path))
+    try:
+        thread_id = "bounded-cross-namespace"
+        child, parent = _child_then_parent(app, thread_id)
+        public_reads = []
+        real_get_state = app._app.get_state  # noqa: SLF001 - public-read counter
+
+        def counted_get_state(config, *args, **kwargs):
+            public_reads.append(config)
+            return real_get_state(config, *args, **kwargs)
+
+        monkeypatch.setattr(app._app, "get_state", counted_get_state)  # noqa: SLF001
+        with pytest.raises(yg.NativeHistoryLimitExceeded):
+            app.checkpoint_is_ancestor(
+                thread_id=thread_id,
+                ancestor_checkpoint_ns=child.coordinate.checkpoint_ns,
+                ancestor_checkpoint_id=child.coordinate.checkpoint_id,
+                descendant_checkpoint_ns=parent.coordinate.checkpoint_ns,
+                descendant_checkpoint_id=parent.coordinate.checkpoint_id,
+                snapshot_limit=1,
+            )
+        assert len(public_reads) == 1
+    finally:
+        app.close()
+
+
+def test_cross_namespace_ancestry_rejects_missing_completed_subgraph_bridge(
+    tmp_path, monkeypatch
+):
+    app = yg.open_native_app(_authorized(CHILD_THEN_PARENT, tmp_path))
+    try:
+        thread_id = "missing-completed-bridge"
+        child, parent = _child_then_parent(app, thread_id)
+        exact_occurrences = tuple(
+            item
+            for item in app.interrupt_history(
+                thread_id=thread_id,
+                checkpoint_ns=child.coordinate.checkpoint_ns,
+                snapshot_limit=64,
+            )
+            if item.coordinate == child.coordinate
+        )
+        assert len(exact_occurrences) == 1
+
+        real_get_state = app._app.get_state  # noqa: SLF001 - adversarial topology
+        current_config = {
+            "configurable": {
+                "thread_id": thread_id,
+                "checkpoint_ns": parent.coordinate.checkpoint_ns,
+                "checkpoint_id": parent.coordinate.checkpoint_id,
+            }
+        }
+        completed_bridge_seen = False
+        for _index in range(64):
+            snapshot = real_get_state(current_config, subgraphs=True)
+            if any(
+                task.result is not None and hasattr(task.state, "tasks")
+                for task in snapshot.tasks
+            ):
+                completed_bridge_seen = True
+                break
+            if snapshot.parent_config is None:
+                break
+            current_config = snapshot.parent_config
+        assert completed_bridge_seen
+
+        def without_completed_bridge(config, *args, **kwargs):
+            snapshot = real_get_state(config, *args, **kwargs)
+            return snapshot._replace(
+                tasks=tuple(
+                    task
+                    for task in snapshot.tasks
+                    if not (
+                        task.result is not None and hasattr(task.state, "tasks")
+                    )
+                )
+            )
+
+        monkeypatch.setattr(  # noqa: SLF001 - remove only the causal bridge
+            app._app, "get_state", without_completed_bridge
+        )
+        assert not app.checkpoint_is_ancestor(
+            thread_id=thread_id,
+            ancestor_checkpoint_ns=child.coordinate.checkpoint_ns,
+            ancestor_checkpoint_id=child.coordinate.checkpoint_id,
+            descendant_checkpoint_ns=parent.coordinate.checkpoint_ns,
+            descendant_checkpoint_id=parent.coordinate.checkpoint_id,
+            snapshot_limit=64,
+        )
+    finally:
+        app.close()
 
 
 def test_cycle_honors_yamlgraph_loop_limit(tmp_path):
