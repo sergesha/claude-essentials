@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 from pathlib import Path
 
@@ -57,6 +58,152 @@ def test_authoring_publisher_surface_has_only_the_frozen_operations() -> None:
         "self",
         "project",
     )
+
+
+def _assert_leaf_source_identity(bundle, project: Path, source_path: Path) -> None:
+    project_info = project.lstat()
+    assert bundle.resolved_project == project.resolve()
+    assert (bundle.project_identity.device, bundle.project_identity.inode) == (
+        project_info.st_dev,
+        project_info.st_ino,
+    )
+    assert tuple(source.role for source in bundle.sources) == ("leaf",)
+    source = bundle.sources[0]
+    source_info = source_path.lstat()
+    assert source.resolved_path == source_path.resolve()
+    assert source.content == source_path.read_bytes()
+    assert source.sha256 == hashlib.sha256(source.content).hexdigest()
+    assert (
+        source.leaf.device,
+        source.leaf.inode,
+        source.leaf.mode,
+        source.leaf.size,
+        source.leaf.mtime_ns,
+    ) == (
+        source_info.st_dev,
+        source_info.st_ino,
+        source_info.st_mode,
+        source_info.st_size,
+        source_info.st_mtime_ns,
+    )
+    expected_paths = (
+        project.resolve(),
+        (project / ".lockstep").resolve(),
+        source_path.parent.resolve(),
+    )
+    assert tuple(item.resolved_path for item in source.ancestors) == expected_paths
+    assert tuple(
+        (item.device, item.inode) for item in source.ancestors
+    ) == tuple((path.lstat().st_dev, path.lstat().st_ino) for path in expected_paths)
+    assert bundle.dependency_edges == (("leaf", ()),)
+
+
+def _assert_identity_paths(identities, expected_paths: tuple[Path, ...]) -> None:
+    assert tuple(item.resolved_path for item in identities) == expected_paths
+    assert tuple((item.device, item.inode) for item in identities) == tuple(
+        (path.lstat().st_dev, path.lstat().st_ino) for path in expected_paths
+    )
+
+
+def _assert_leaf_destination_images(
+    bundle, project: Path, expected: dict[Path, bytes]
+) -> None:
+    before_paths = tuple(image.resolved_path for image in bundle.before_images)
+    after_paths = tuple(image.resolved_path for image in bundle.after_images)
+    assert len(before_paths) == len(set(before_paths)) == len(expected)
+    assert len(after_paths) == len(set(after_paths)) == len(expected)
+    assert before_paths == after_paths
+    assert {image.resolved_path: image.content for image in bundle.after_images} == expected
+    assert all(
+        image.content is None
+        and image.sha256 is None
+        and image.mode is None
+        and image.leaf is None
+        for image in bundle.before_images
+    )
+    assert all(
+        image.content is not None
+        and image.sha256 == hashlib.sha256(image.content).hexdigest()
+        and image.mode == 0o644
+        and image.leaf is None
+        for image in bundle.after_images
+    )
+    expected_ancestors = (project.resolve(), (project / ".lockstep").resolve())
+    for before, after in zip(bundle.before_images, bundle.after_images, strict=True):
+        _assert_identity_paths(before.ancestors, expected_ancestors)
+        _assert_identity_paths(after.ancestors, expected_ancestors)
+
+
+def _assert_leaf_bundle_is_deeply_immutable(bundle) -> None:
+    source = bundle.sources[0]
+    original = (
+        bundle.sources,
+        bundle.dependency_edges,
+        bundle.before_images,
+        bundle.after_images,
+        source,
+    )
+    for target, attribute, replacement in (
+        (bundle, "sources", ()),
+        (bundle.project_identity, "inode", bundle.project_identity.inode + 1),
+        (
+            source.ancestors[0],
+            "inode",
+            source.ancestors[0].inode + 1,
+        ),
+        (source, "content", b"changed"),
+        (source.leaf, "inode", source.leaf.inode + 1),
+        (bundle.before_images[0], "content", b"changed"),
+        (bundle.after_images[0], "content", b"changed"),
+    ):
+        with pytest.raises((AttributeError, TypeError)):
+            setattr(target, attribute, replacement)
+    assert original == (
+        bundle.sources,
+        bundle.dependency_edges,
+        bundle.before_images,
+        bundle.after_images,
+        source,
+    )
+
+
+def test_leaf_planner_captures_exact_immutable_bundle_without_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lockstep.authoring_bundle import (
+        ProjectCompilationBundle,
+        plan_project_compilation,
+    )
+
+    project = tmp_path / "project"
+    source_path = write_workflow(project, "leaf")
+    controlled_cwd = tmp_path / "controlled-cwd"
+    controlled_cwd.mkdir()
+    monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(tmp_path / "owner-state"))
+    monkeypatch.chdir(controlled_cwd)
+    before = tree_image(tmp_path)
+
+    bundle = plan_project_compilation(project_paths(project, "leaf"))
+
+    assert isinstance(bundle, ProjectCompilationBundle)
+    assert tree_image(tmp_path) == before
+    assert isinstance(bundle.sources, tuple)
+    assert isinstance(bundle.dependency_edges, tuple)
+    assert isinstance(bundle.before_images, tuple)
+    assert isinstance(bundle.after_images, tuple)
+    _assert_leaf_source_identity(bundle, project, source_path)
+    full_expected = expected_compilation_image(project, ("leaf",))
+    expected_paths = {
+        (project / ".lockstep/recipes/leaf.recipe.yaml").resolve(),
+        (project / ".lockstep/recipes/leaf.dependencies.json").resolve(),
+        (project / ".lockstep/recipes/leaf.source-map.json").resolve(),
+    }
+    assert set(full_expected) == expected_paths
+    _assert_leaf_destination_images(bundle, project, full_expected)
+    assert {
+        image.resolved_path for image in bundle.after_images
+    } == expected_paths
+    _assert_leaf_bundle_is_deeply_immutable(bundle)
 
 
 @pytest.mark.parametrize("template", ("reviewed-change", "parallel-review"))

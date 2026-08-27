@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import stat
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,20 +16,43 @@ from lockstep.mcp import server
 
 @dataclass(frozen=True)
 class TreeEntry:
-    content: bytes
+    kind: str
     mode: int
+    device: int
+    inode: int
+    size: int
+    mtime_ns: int
+    ctime_ns: int
+    content: bytes | None = None
+    symlink_target: str | None = None
+
+
+def _tree_entry(path: Path) -> TreeEntry:
+    info = path.lstat()
+    mode = stat.S_IMODE(info.st_mode)
+    identity = {
+        "device": info.st_dev,
+        "inode": info.st_ino,
+        "size": info.st_size,
+        "mtime_ns": info.st_mtime_ns,
+        "ctime_ns": info.st_ctime_ns,
+    }
+    if stat.S_ISREG(info.st_mode):
+        return TreeEntry("regular", mode, **identity, content=path.read_bytes())
+    if stat.S_ISDIR(info.st_mode):
+        return TreeEntry("directory", mode, **identity)
+    if stat.S_ISLNK(info.st_mode):
+        return TreeEntry("symlink", mode, **identity, symlink_target=os.readlink(path))
+    return TreeEntry("non-regular", mode, **identity)
 
 
 def tree_image(root: Path) -> dict[str, TreeEntry]:
     if not root.exists():
         return {}
-    return {
-        path.relative_to(root).as_posix(): TreeEntry(
-            path.read_bytes(), stat.S_IMODE(path.stat().st_mode)
-        )
+    return {".": _tree_entry(root), **{
+        path.relative_to(root).as_posix(): _tree_entry(path)
         for path in sorted(root.rglob("*"))
-        if path.is_file() and not path.is_symlink()
-    }
+    }}
 
 
 def write_workflow(
