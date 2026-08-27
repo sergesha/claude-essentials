@@ -448,18 +448,21 @@ class NativeApp:
         self,
         *,
         thread_id: str,
-        checkpoint_ns: str,
+        ancestor_checkpoint_ns: str,
         ancestor_checkpoint_id: str,
+        descendant_checkpoint_ns: str,
         descendant_checkpoint_id: str,
         snapshot_limit: int,
     ) -> bool:
         """Use public namespace history anchored at one exact descendant."""
 
         self._ensure_open()
+        if ancestor_checkpoint_ns != descendant_checkpoint_ns:
+            return False
         config = {
             "configurable": {
                 "thread_id": thread_id,
-                "checkpoint_ns": checkpoint_ns,
+                "checkpoint_ns": descendant_checkpoint_ns,
                 "checkpoint_id": descendant_checkpoint_id,
             }
         }
@@ -468,10 +471,13 @@ class NativeApp:
             for _index in range(snapshot_limit):
                 snapshot = self._app.get_state(current_config)
                 current_thread, checkpoint_id, namespace = _snapshot_config(snapshot)
-                if current_thread != thread_id or namespace != checkpoint_ns:
+                if (
+                    current_thread != thread_id
+                    or namespace != descendant_checkpoint_ns
+                ):
                     return False
                 if (
-                    namespace == checkpoint_ns
+                    namespace == ancestor_checkpoint_ns
                     and checkpoint_id == ancestor_checkpoint_id
                 ):
                     return True

@@ -361,8 +361,9 @@ class GraphRuntime:
                 return False
             return app.checkpoint_is_ancestor(
                 thread_id=binding.thread_id,
-                checkpoint_ns=ancestor.checkpoint_ns,
+                ancestor_checkpoint_ns=ancestor.checkpoint_ns,
                 ancestor_checkpoint_id=ancestor.checkpoint_id,
+                descendant_checkpoint_ns=ancestor.checkpoint_ns,
                 descendant_checkpoint_id=descendant_checkpoint_id,
                 snapshot_limit=MAX_HISTORY_SNAPSHOTS,
             )

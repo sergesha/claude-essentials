@@ -97,8 +97,9 @@ class NativeAppPort(Protocol):
         self,
         *,
         thread_id: str,
-        checkpoint_ns: str,
+        ancestor_checkpoint_ns: str,
         ancestor_checkpoint_id: str,
+        descendant_checkpoint_ns: str,
         descendant_checkpoint_id: str,
         snapshot_limit: int,
     ) -> bool: ...
