@@ -281,6 +281,87 @@ def test_null_watch_without_checkpoint_remains_safely_blocked(
         assert snapshot_calls in ([], [(run_id, True)])
 
 
+def test_non_null_watch_replays_input_once_before_first_checkpoint(
+    tmp_path: Path,
+) -> None:
+    with active_native_command(tmp_path) as (command, project):
+        state_dir = command.state_dir
+        recipes_dir = command.recipes_dir
+        runtime_context = command._runtime_execution_context
+        ensure_started = command.runtime.ensure_started
+
+        def crash_before_first_checkpoint(_run_id, _values):
+            raise RuntimeError("crash before first checkpoint")
+
+        command.runtime.ensure_started = crash_before_first_checkpoint
+        try:
+            with pytest.raises(RuntimeError, match="crash before first checkpoint"):
+                command.start("native-parent-direct", {}, str(project))
+        finally:
+            command.runtime.ensure_started = ensure_started
+
+        bindings = command.catalog.list(str(project.resolve()))
+        assert len(bindings) == 1
+        binding = bindings[0]
+
+    reads = []
+    starts = []
+    outcomes = []
+    retained = []
+    persisted = []
+    for _attempt in range(2):
+        with prepared_native_reopen(
+            state_dir, recipes_dir, runtime_context
+        ) as reopened:
+            high_water = reopened.effects.max_run_drive_admission_seq()
+            assert high_water is not None
+            watches = reopened.effects.list_run_drive_watches(
+                after_admission_seq=0,
+                high_water=high_water,
+                limit=1,
+            )
+            assert len(watches) == 1
+            watch = watches[0]
+            retained.append(watch)
+            assert watch.input_blob_sha256 is not None
+            assert watch.input_blob_size is not None
+
+            read_blob = reopened.blobs.read
+            ensure_started = reopened.runtime.ensure_started
+
+            def observe_read(reference):
+                reads.append(reference)
+                return read_blob(reference)
+
+            def observe_start(run_id, values):
+                starts.append((run_id, values))
+                return ensure_started(run_id, values)
+
+            reopened.blobs.read = observe_read
+            reopened.runtime.ensure_started = observe_start
+            try:
+                outcomes.append(
+                    reopened._recovery_driver._drive_run_watch(watch)
+                )
+            finally:
+                reopened.blobs.read = read_blob
+                reopened.runtime.ensure_started = ensure_started
+
+        with RuntimeReadResources(state_dir).native_app(binding) as app:
+            persisted.append(
+                app.snapshot(thread_id=binding.thread_id, subgraphs=True)
+            )
+
+    assert retained[0] == retained[1]
+    assert len(reads) == 1
+    assert reads[0].sha256 == retained[0].input_blob_sha256
+    assert reads[0].size == retained[0].input_blob_size
+    assert starts == [(binding.public_run_id, {})]
+    assert persisted[0].checkpoint_id
+    assert persisted[0] == persisted[1]
+    assert outcomes == [False, False]
+
+
 def test_terminal_removal_crash_cuts(tmp_path: Path) -> None:
     with active_native_manual_park(tmp_path) as (command, run_id, project):
         state_dir = command.state_dir
