@@ -102,6 +102,29 @@ def test_recovery_driver_has_exact_private_command_composition_surface(
         projection.close()
 
 
+def test_recovery_driver_has_exact_private_sweep_surface() -> None:
+    from lockstep.runtime import recovery_driver as recovery_driver_module
+
+    driver_type = getattr(recovery_driver_module, "RecoveryDriver", None)
+    assert driver_type is not None
+    method = getattr(driver_type, "_sweep_run_drive_watches", None)
+    assert method is not None, "R2a.1 must expose the sole private sweep boundary"
+    assert tuple(
+        (parameter.name, parameter.kind)
+        for parameter in signature(method).parameters.values()
+    ) == (
+        ("self", Parameter.POSITIONAL_OR_KEYWORD),
+        ("project_identity", Parameter.KEYWORD_ONLY),
+        ("limit", Parameter.KEYWORD_ONLY),
+    )
+    hints = get_type_hints(method)
+    assert hints == {
+        "project_identity": str | None,
+        "limit": int,
+        "return": tuple[str, ...],
+    }
+
+
 def test_recovery_driver_returns_false_without_sql_or_state_change(
     tmp_path: Path,
 ) -> None:
