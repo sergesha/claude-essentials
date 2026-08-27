@@ -297,7 +297,7 @@ class EffectLedger:
         _binding_digest(input_blob.sha256)
         table = self._store.tables.run_drive_watches
         admitted_at = self._now()
-        with self._store.write_transaction() as connection:
+        with self._store._v2_write_transaction() as connection:
             admitted_binding = catalog.create_in_transaction(connection, binding)
             if on_admit is not None:
                 on_admit(connection, admitted_binding)
@@ -357,7 +357,7 @@ class EffectLedger:
 
         _nonempty(public_run_id, "dispatch public_run_id")
         table = self._store.tables.run_drive_watches
-        with self._store.write_transaction() as connection:
+        with self._store._v2_write_transaction() as connection:
             result = connection.execute(
                 delete(table).where(table.c.public_run_id == public_run_id)
             )
@@ -663,7 +663,7 @@ class EffectLedger:
             table.c.task_id == facts.coordinate.task_id,
             table.c.interrupt_id == facts.coordinate.interrupt_id,
         )
-        with self._store.write_transaction() as connection:
+        with self._store._v2_write_transaction() as connection:
             if lease is not None:
                 self._validate_live_lease(connection, facts.effect_id, lease)
             existing = connection.execute(
@@ -950,7 +950,7 @@ class EffectLedger:
         if type(expected_revision) is not int or expected_revision < 0:
             raise TypeError("expected revision must be a non-negative integer")
         table = self._store.tables.effects
-        with self._store.write_transaction() as connection:
+        with self._store._v2_write_transaction() as connection:
             row = connection.execute(
                 select(table).where(table.c.effect_id == effect_id)
             ).first()

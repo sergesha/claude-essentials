@@ -228,7 +228,7 @@ class OwnerConsentAuthority:
         epochs = self._store.tables.consent_epochs
         consents = self._store.tables.publication_consents
         try:
-            with self._store.write_transaction() as connection:
+            with self._store._v2_write_transaction() as connection:
                 epoch = self._row_epoch(
                     connection, epochs, commitment.project_identity
                 )
@@ -407,7 +407,7 @@ class OwnerConsentAuthority:
         token_sha256 = self._token_hash(token)
         consents = self._store.tables.publication_consents
         epochs = self._store.tables.consent_epochs
-        with self._store.write_transaction() as connection:
+        with self._store._v2_write_transaction() as connection:
             row = connection.execute(
                 select(consents).where(consents.c.token_sha256 == token_sha256)
             ).first()
@@ -457,7 +457,7 @@ class OwnerConsentAuthority:
         project = _text(project_identity, "project_identity")
         epochs = self._store.tables.consent_epochs
         now = self._now().isoformat()
-        with self._store.write_transaction() as connection:
+        with self._store._v2_write_transaction() as connection:
             current = self._row_epoch(connection, epochs, project)
             next_epoch = (1 if current is None else current) + 1
             if current is None:
@@ -601,7 +601,7 @@ class OwnerConsentAuthority:
             launch, PreparedPublication
         ):
             raise EffectAuthorityDenied("invalid or stale publication commitment")
-        with self._store.write_transaction() as connection:
+        with self._store._v2_write_transaction() as connection:
             unbound = replace(
                 request,
                 grant_digest=None,

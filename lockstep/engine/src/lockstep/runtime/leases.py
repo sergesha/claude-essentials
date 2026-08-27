@@ -69,7 +69,7 @@ class LeaseStore:
         now = _utc(self._clock())
         expires_at = now + timedelta(seconds=duration)
         table = self._store.tables.leases
-        with self._store.write_transaction() as connection:
+        with self._store._v2_write_transaction() as connection:
             row = connection.execute(
                 select(table).where(and_(table.c.scope == scope, table.c.lease_key == key))
             ).first()
@@ -128,7 +128,7 @@ class LeaseStore:
 
         now = _utc(self._clock())
         table = self._store.tables.leases
-        with self._store.write_transaction() as connection:
+        with self._store._v2_write_transaction() as connection:
             result = connection.execute(
                 update(table)
                 .where(

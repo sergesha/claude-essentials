@@ -279,7 +279,7 @@ class RuntimeSnapshotFacts:
             effect_id, runtime_key, binding, coordinate, descriptor_digest, ref
         )
         table = self._store.tables.effect_runtime_inputs
-        with self._store.write_transaction() as connection:
+        with self._store._v2_write_transaction() as connection:
             row = connection.execute(
                 select(table).where(
                     and_(table.c.effect_id == effect_id, table.c.runtime_key == runtime_key)
