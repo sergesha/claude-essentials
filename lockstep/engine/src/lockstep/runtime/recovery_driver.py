@@ -5,7 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import Iterator
 
-from lockstep.runtime.blobs import DigestMismatch
+from lockstep.runtime.blobs import BlobRef, BlobStore, DigestMismatch
 from lockstep.runtime.catalog import RunBinding, RunCatalog
 from lockstep.runtime.effects.coordinator import EffectCoordinator
 from lockstep.runtime.effects.descriptors import parse_effect_descriptor
@@ -15,6 +15,8 @@ from lockstep.runtime.graph_runtime import GraphRuntime
 from lockstep.runtime.native_models import NativeSnapshot
 from lockstep.runtime.owner_state import StorageLimitExceeded
 from lockstep.runtime.recipe_bundles import MaterializationError
+from lockstep.runtime.snapshot_resolver import RuntimeSnapshotResolver
+from lockstep.runtime.start_input import decode_canonical_start_input
 from lockstep.runtime.storage import (
     LegacyRunDriveClassification,
     RuntimeSchemaMigrator,
@@ -121,13 +123,17 @@ class RecoveryDriver:
         catalog: RunCatalog,
         runtime: GraphRuntime,
         effects: EffectLedger,
+        blobs: BlobStore,
         migrator: RuntimeSchemaMigrator,
         coordinator: EffectCoordinator,
+        snapshot_resolver: RuntimeSnapshotResolver,
     ) -> None:
         self._catalog = catalog
         self._runtime = runtime
         self._effects = effects
+        self._blobs = blobs
         self._coordinator = coordinator
+        self._snapshot_resolver = snapshot_resolver
         self._backfill = _RunDriveBackfill(
             catalog=catalog,
             runtime=runtime,
@@ -173,7 +179,21 @@ class RecoveryDriver:
             if not available:
                 return False
             snapshot = self._runtime.snapshot(watch.public_run_id, subgraphs=True)
-            if not snapshot.checkpoint_id or len(snapshot.pending) != 1:
+            if not snapshot.checkpoint_id:
+                if (
+                    watch.input_blob_sha256 is None
+                    or watch.input_blob_size is None
+                ):
+                    return False
+                self._snapshot_resolver.start_ref(binding)
+                encoded = self._blobs.read(
+                    BlobRef(watch.input_blob_sha256, watch.input_blob_size)
+                )
+                snapshot = self._runtime.ensure_started(
+                    watch.public_run_id,
+                    decode_canonical_start_input(encoded),
+                )
+            if len(snapshot.pending) != 1:
                 return False
             interrupt = snapshot.pending[0]
             raw = (

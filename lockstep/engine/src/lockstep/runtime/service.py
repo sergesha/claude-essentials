@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 import tempfile
 import threading
@@ -83,9 +82,13 @@ from lockstep.runtime.runtime_execution_recovery import RuntimeExecutionRecovery
 from lockstep.runtime.recovery_driver import RecoveryDriver as _RecoveryDriver
 from lockstep.runtime.status import ScenarioStatus, project_status
 from lockstep.runtime.storage import RuntimeSchemaMigrator, SQLiteStore
+from lockstep.runtime.start_input import (
+    canonical_start_input,
+    decode_canonical_start_input,
+    validate_start_input,
+)
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-_RESERVED_START_KEYS = frozenset({"namespace"})
 
 
 class _UnavailableEffectAuthority:
@@ -98,25 +101,6 @@ class _UnavailableEffectAuthority:
     def commitment(self, _grant, _request, _launch):
         raise EffectAuthorityUnavailable("no process effect authority is configured")
         yield  # pragma: no cover
-
-
-def validate_start_input(input: Mapping[object, object] | None) -> dict[str, Any]:
-    try:
-        values = bounded_json({} if input is None else input, label="scenario input")
-    except PayloadLimitExceeded as exc:
-        raise LockstepError(str(exc)) from exc
-    if not isinstance(values, dict):
-        raise LockstepError("scenario input must be a JSON object")
-    forbidden = sorted(
-        str(key)
-        for key in values
-        if not isinstance(key, str)
-        or key.startswith(("_", "lockstep_"))
-        or key in _RESERVED_START_KEYS
-    )
-    if forbidden:
-        raise LockstepError(f"reserved scenario input keys are forbidden: {forbidden}")
-    return values
 
 
 def validate_evidence_payload(evidence: object) -> dict[str, Any]:
@@ -394,8 +378,10 @@ class LockstepCommandService:
             catalog=self.catalog,
             runtime=self.runtime,
             effects=self.effects,
+            blobs=self.blobs,
             migrator=RuntimeSchemaMigrator(self.store),
             coordinator=self.coordinator,
+            snapshot_resolver=self.snapshot_resolver,
         )
 
     def _finish_writable_core_activation(
@@ -524,9 +510,7 @@ class LockstepCommandService:
                     self._deactivate_effect_run(binding.public_run_id)
                     continue
                 encoded = self.blobs.read(watch.input_blob)
-                values = validate_start_input(json.loads(encoded))
-                if self._canonical_start_input(values) != encoded:
-                    raise LockstepError("start admission input is not canonical")
+                values = decode_canonical_start_input(encoded)
                 resolver = getattr(self, "snapshot_resolver", None)
                 if resolver is not None:
                     resolver.start_ref(binding)
@@ -535,7 +519,7 @@ class LockstepCommandService:
                 self._drive_engine_owned(
                     binding.public_run_id, binding=binding, snapshot=snapshot
                 )
-            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            except (KeyError, TypeError, ValueError) as exc:
                 self._deactivate_effect_run(binding.public_run_id)
                 self.runtime.unbind(binding.public_run_id)
                 raise LockstepError("start admission input integrity failure") from exc
@@ -617,20 +601,6 @@ class LockstepCommandService:
     def recipe_path(self, name: str) -> Path:
         return self._recipe_path(name)
 
-    @staticmethod
-    def _canonical_start_input(values: Mapping[str, Any]) -> bytes:
-        try:
-            admitted = validate_start_input(values)
-            return json.dumps(
-                admitted,
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=False,
-                allow_nan=False,
-            ).encode("utf-8")
-        except (TypeError, ValueError) as exc:
-            raise LockstepError("scenario input is not canonically encodable") from exc
-
     def _bind_existing(self, run_id: str, project: str) -> RunBinding:
         try:
             binding = self.catalog.get(run_id)
@@ -694,7 +664,7 @@ class LockstepCommandService:
                 recipe,
                 plan,
                 values,
-                canonical_input=self._canonical_start_input(values),
+                canonical_input=canonical_start_input(values),
             )
             run_id = result.get("run_id")
             if not isinstance(run_id, str) or not run_id:
