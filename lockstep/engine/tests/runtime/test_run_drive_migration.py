@@ -16,6 +16,22 @@ MIGRATION_COLUMNS = (
 )
 
 
+def _create_catalog_bindings(store, *public_run_ids: str) -> None:
+    from lockstep.runtime.catalog import RunBinding, RunCatalog
+
+    catalog = RunCatalog(store)
+    for public_run_id in public_run_ids:
+        catalog.create(
+            RunBinding(
+                public_run_id,
+                f"thread-{public_run_id}",
+                "a" * 64,
+                "bundle:" + "b" * 64,
+                "/project",
+            )
+        )
+
+
 def test_run_drive_migration_ddl_contract(tmp_path: Path) -> None:
     from lockstep.runtime.storage import SQLiteStore
 
@@ -466,7 +482,6 @@ def test_apply_run_drive_watch_page_durably_initializes_empty_non_exhausted_prog
 def test_apply_run_drive_watch_page_advances_terminal_and_malformed_without_watches(
     tmp_path: Path,
 ) -> None:
-    from lockstep.runtime.catalog import RunBinding, RunCatalog
     from lockstep.runtime.storage import (
         LegacyRunDriveClassification,
         MigrationProgress,
@@ -478,17 +493,7 @@ def test_apply_run_drive_watch_page_advances_terminal_and_malformed_without_watc
     store = SQLiteStore(database_path)
     reopened = None
     try:
-        catalog = RunCatalog(store)
-        for index in (1, 2):
-            catalog.create(
-                RunBinding(
-                    f"run-{index:03d}",
-                    f"thread-{index:03d}",
-                    "a" * 64,
-                    "bundle:" + "b" * 64,
-                    "/project",
-                )
-            )
+        _create_catalog_bindings(store, "run-001", "run-002")
         migrator = RuntimeSchemaMigrator(store)
         migrator.apply_run_drive_watch_page(
             expected_after_public_run_id=None,
@@ -532,6 +537,96 @@ def test_apply_run_drive_watch_page_advances_terminal_and_malformed_without_watc
         assert row.updated_at == updated_at.astimezone(UTC).isoformat()
         assert before <= updated_at <= after
         assert watches == []
+    finally:
+        if reopened is not None:
+            reopened.close()
+        store.close()
+
+
+def test_apply_run_drive_watch_page_inserts_one_durable_nonterminal_null_input_watch(
+    tmp_path: Path,
+) -> None:
+    from lockstep.runtime.effects.ledger import EffectLedger, RunDriveWatch
+    from lockstep.runtime.storage import (
+        LegacyRunDriveClassification,
+        MigrationProgress,
+        RuntimeSchemaMigrator,
+        SQLiteStore,
+    )
+
+    database_path = tmp_path / "runtime.db"
+    store = SQLiteStore(database_path)
+    reopened = None
+    try:
+        _create_catalog_bindings(store, "run-001")
+        migrator = RuntimeSchemaMigrator(store)
+        migrator.apply_run_drive_watch_page(
+            expected_after_public_run_id=None,
+            classified=(),
+            exhausted=False,
+        )
+
+        before = datetime.now(UTC)
+        progress = migrator.apply_run_drive_watch_page(
+            expected_after_public_run_id=None,
+            classified=(
+                LegacyRunDriveClassification("run-001", "nonterminal"),
+            ),
+            exhausted=False,
+        )
+        after = datetime.now(UTC)
+        assert progress == MigrationProgress(
+            after_public_run_id="run-001",
+            completed=False,
+            inserted_public_run_ids=("run-001",),
+            malformed_public_run_ids=(),
+        )
+
+        store.close()
+        reopened = SQLiteStore(database_path)
+        with reopened.read_connection() as connection:
+            migration_rows = connection.execute(
+                reopened.tables.runtime_schema_migrations.select()
+            ).all()
+            watch_rows = connection.execute(
+                reopened.tables.run_drive_watches.select()
+            ).all()
+        assert len(migration_rows) == 1
+        migration_row = migration_rows[0]
+        assert migration_row.name == "run-drive-watch-v2"
+        assert migration_row.schema_version == 2
+        assert migration_row.after_public_run_id == "run-001"
+        assert migration_row.completed_at is None
+        migration_updated_at = datetime.fromisoformat(migration_row.updated_at)
+        assert (
+            migration_row.updated_at
+            == migration_updated_at.astimezone(UTC).isoformat()
+        )
+        assert before <= migration_updated_at <= after
+
+        assert len(watch_rows) == 1
+        watch_row = watch_rows[0]
+        assert watch_row.admission_seq == 1
+        assert watch_row.public_run_id == "run-001"
+        assert watch_row.input_blob_sha256 is None
+        assert watch_row.input_blob_size is None
+        watch_admitted_at = datetime.fromisoformat(watch_row.admitted_at)
+        assert watch_row.admitted_at == watch_admitted_at.astimezone(UTC).isoformat()
+        assert before <= watch_admitted_at <= after
+
+        assert EffectLedger(reopened).list_run_drive_watches(
+            after_admission_seq=0,
+            high_water=1,
+            limit=128,
+        ) == (
+            RunDriveWatch(
+                1,
+                "run-001",
+                None,
+                None,
+                watch_admitted_at,
+            ),
+        )
     finally:
         if reopened is not None:
             reopened.close()
