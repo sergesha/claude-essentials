@@ -32,6 +32,28 @@ def _create_catalog_bindings(store, *public_run_ids: str) -> None:
         )
 
 
+def _run_drive_migration_state(
+    store,
+) -> tuple[
+    tuple[dict[str, object], ...],
+    tuple[dict[str, object], ...],
+]:
+    with store.read_connection() as connection:
+        migrations = tuple(
+            dict(row._mapping)
+            for row in connection.execute(
+                store.tables.runtime_schema_migrations.select()
+            ).all()
+        )
+        watches = tuple(
+            dict(row._mapping)
+            for row in connection.execute(
+                store.tables.run_drive_watches.select()
+            ).all()
+        )
+    return migrations, watches
+
+
 def test_run_drive_migration_ddl_contract(tmp_path: Path) -> None:
     from lockstep.runtime.storage import SQLiteStore
 
@@ -753,17 +775,7 @@ def test_apply_run_drive_watch_page_rejects_cursor_mismatch_replay_write_free(
             exhausted=False,
         )
 
-        migration_table = store.tables.runtime_schema_migrations
-        watch_table = store.tables.run_drive_watches
-        with store.read_connection() as connection:
-            migration_before = tuple(
-                dict(row._mapping)
-                for row in connection.execute(migration_table.select()).all()
-            )
-            watches_before = tuple(
-                dict(row._mapping)
-                for row in connection.execute(watch_table.select()).all()
-            )
+        migration_before, watches_before = _run_drive_migration_state(store)
         assert migration_before[0]["after_public_run_id"] == "run-001"
         assert watches_before[0]["admission_seq"] == 1
 
@@ -776,15 +788,7 @@ def test_apply_run_drive_watch_page_rejects_cursor_mismatch_replay_write_free(
 
         store.close()
         reopened = SQLiteStore(database_path)
-        with reopened.read_connection() as connection:
-            migration_after = tuple(
-                dict(row._mapping)
-                for row in connection.execute(migration_table.select()).all()
-            )
-            watches_after = tuple(
-                dict(row._mapping)
-                for row in connection.execute(watch_table.select()).all()
-            )
+        migration_after, watches_after = _run_drive_migration_state(reopened)
         assert migration_after == migration_before
         assert watches_after == watches_before
         assert type(raised.value) is RuntimeError
@@ -860,6 +864,47 @@ def test_apply_run_drive_watch_page_durably_completes_empty_exhausted_page_at_pr
         assert migration_row.updated_at == updated_at.astimezone(UTC).isoformat()
         assert before <= updated_at <= after
         assert watches == []
+    finally:
+        if reopened is not None:
+            reopened.close()
+        store.close()
+
+
+def test_apply_run_drive_watch_page_rejects_completed_replay_write_free(
+    tmp_path: Path,
+) -> None:
+    from lockstep.runtime.storage import RuntimeSchemaMigrator, SQLiteStore
+
+    database_path = tmp_path / "runtime.db"
+    store = SQLiteStore(database_path)
+    reopened = None
+    try:
+        migrator = RuntimeSchemaMigrator(store)
+        migrator.apply_run_drive_watch_page(
+            expected_after_public_run_id=None,
+            classified=(),
+            exhausted=True,
+        )
+
+        migration_before, watches_before = _run_drive_migration_state(store)
+        assert migration_before[0]["after_public_run_id"] is None
+        assert migration_before[0]["completed_at"] is not None
+        assert watches_before == ()
+
+        with pytest.raises(RuntimeError) as raised:
+            migrator.apply_run_drive_watch_page(
+                expected_after_public_run_id=None,
+                classified=(),
+                exhausted=True,
+            )
+
+        store.close()
+        reopened = SQLiteStore(database_path)
+        migration_after, watches_after = _run_drive_migration_state(reopened)
+        assert migration_after == migration_before
+        assert watches_after == watches_before
+        assert type(raised.value) is RuntimeError
+        assert str(raised.value) == "run-drive-watch migration is already completed"
     finally:
         if reopened is not None:
             reopened.close()
