@@ -8,6 +8,8 @@ from inspect import Parameter, signature
 from pathlib import Path
 from typing import get_type_hints
 
+from sqlalchemy import event
+
 
 @contextmanager
 def _prepared_command(tmp_path: Path):
@@ -22,6 +24,41 @@ def _prepared_command(tmp_path: Path):
     finally:
         command._rollback_writable_core_activation()
         command.close()
+
+
+def _durable_command_state(command) -> dict[str, tuple[dict[str, object], ...]]:
+    table_names = (
+        "runs",
+        "run_start_inputs",
+        "run_drive_watches",
+        "runtime_schema_migrations",
+        "effects",
+        "effect_observations",
+    )
+    with command.store.read_connection() as connection:
+        return {
+            name: tuple(
+                dict(row._mapping)
+                for row in connection.execute(
+                    getattr(command.store.tables, name).select()
+                ).all()
+            )
+            for name in table_names
+        }
+
+
+def _command_drive_state(command) -> tuple[object, ...]:
+    return (
+        tuple(sorted(command._active_effect_runs)),
+        tuple(sorted(command._queued_effect_runs)),
+        tuple(command._active_effect_queue),
+        command._recovery_thread_cursor,
+        tuple(sorted(command._scenario_recovery_cursors.items())),
+        command._pump_thread,
+        command._pump_stop.is_set(),
+        command._pump_wakeup.is_set(),
+        command._pump_failure,
+    )
 
 
 def test_recovery_driver_has_exact_private_command_composition_surface(
@@ -63,3 +100,71 @@ def test_recovery_driver_has_exact_private_command_composition_surface(
         )
     finally:
         projection.close()
+
+
+def test_recovery_driver_returns_false_without_sql_or_state_change(
+    tmp_path: Path,
+) -> None:
+    from lockstep.runtime.catalog import RunBinding
+    from lockstep.runtime.storage import (
+        LegacyRunDriveClassification,
+        RuntimeSchemaMigrator,
+    )
+
+    with _prepared_command(tmp_path) as command:
+        command.catalog.create(
+            RunBinding(
+                "run-001",
+                "thread-run-001",
+                "a" * 64,
+                "bundle:" + "b" * 64,
+                "/project",
+            )
+        )
+        RuntimeSchemaMigrator(command.store).apply_run_drive_watch_page(
+            expected_after_public_run_id=None,
+            classified=(
+                LegacyRunDriveClassification("run-001", "nonterminal"),
+            ),
+            exhausted=False,
+        )
+        watches = command.effects.list_run_drive_watches(
+            after_admission_seq=0,
+            high_water=1,
+            limit=1,
+        )
+        assert len(watches) == 1
+        watch = watches[0]
+        assert watch.input_blob_sha256 is None
+        assert watch.input_blob_size is None
+
+        durable_before = _durable_command_state(command)
+        drive_before = _command_drive_state(command)
+        driver_before = dict(vars(command._recovery_driver))
+        statements: list[str] = []
+
+        def observe_sql(
+            _connection, _cursor, statement, _parameters, _context, _many
+        ) -> None:
+            statements.append(statement)
+
+        event.listen(command.store.engine, "before_cursor_execute", observe_sql)
+        outcome = None
+        failure = None
+        try:
+            outcome = command._recovery_driver._drive_run_watch(watch)
+        except Exception as exc:  # temporary staged surface must remain observable
+            failure = exc
+        finally:
+            event.remove(
+                command.store.engine,
+                "before_cursor_execute",
+                observe_sql,
+            )
+
+        assert statements == []
+        assert _durable_command_state(command) == durable_before
+        assert _command_drive_state(command) == drive_before
+        assert dict(vars(command._recovery_driver)) == driver_before
+        assert failure is None
+        assert outcome is False
