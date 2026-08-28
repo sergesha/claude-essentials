@@ -15,15 +15,18 @@ import pytest
 
 from lockstep.authoring import project_paths, publish_project_compilation
 from lockstep.authoring_bundle import ProjectCompilationBundle, plan_project_compilation
+from lockstep.authoring_journal import AuthoringJournal
 from lockstep.authoring_publisher import AuthoringPublisher
 from lockstep.mcp import server
 from lockstep.recipe.authority import (
     AuthorizedRecipe,
     RecipeCandidate,
+    RecipeAuthorityError,
     StrictRecipeIngress,
 )
 from lockstep.runtime.engine import LockstepError
 from lockstep.runtime.service import LockstepCommandService
+from lockstep.runtime.start_service import AuthorizedStartPlan, AuthorizedStartService
 
 from tests._authoring_crash_gate import NamespaceEntry, namespace_image
 from tests._authoring_gate import mcp_context, replace_marker, write_workflow
@@ -226,6 +229,32 @@ def _prepare_mixed_canonical_scenario(
     )
 
 
+def _prepare_stable_canonical_scenario(
+    tmp_path: Path,
+    *,
+    owner_name: str = "owner-state",
+) -> _MixedCanonicalScenario:
+    project = tmp_path / "project"
+    project.mkdir()
+    owner_state = (tmp_path / owner_name).resolve()
+    source = write_workflow(project, "leaf")
+    publish_project_compilation(project, "leaf", state_dir=owner_state)
+    bundle = plan_project_compilation(project_paths(project, "leaf"))
+    before = {
+        image.resolved_path: (image.content, image.mode)
+        for image in bundle.before_images
+        if image.content is not None and image.mode is not None
+    }
+    return _MixedCanonicalScenario(
+        project,
+        owner_state,
+        source,
+        bundle,
+        before,
+        _owner_lock_identity(namespace_image(owner_state)),
+    )
+
+
 def _tracked_flock(
     observation: _CanonicalObservation,
     original: Callable[[int, int], None],
@@ -318,16 +347,15 @@ def _stop_before_runtime(
     observation: _CanonicalObservation,
 ) -> Callable[..., dict[str, object]]:
     def stop(
-        _service: LockstepCommandService,
+        _service: AuthorizedStartService,
         _recipe: str,
-        authorized,
-        _input,
-        _project: str,
+        plan: AuthorizedStartPlan,
+        _values,
         *,
-        compiler_provenance=None,
+        canonical_input: bytes,
     ) -> dict[str, object]:
-        del compiler_provenance
-        observation.authorized = authorized
+        del canonical_input
+        observation.authorized = plan.authorized
         observation.complete = True
         return {
             "status": "canonical-admission-observed",
@@ -367,8 +395,8 @@ def _install_canonical_observer(
         _observed_authorization(observation, original_authorize),
     )
     monkeypatch.setattr(
-        LockstepCommandService,
-        "start_authorized",
+        AuthorizedStartService,
+        "start",
         _stop_before_runtime(observation),
     )
     return observation
@@ -455,6 +483,8 @@ def test_public_start_recovers_before_locked_canonical_ingress(
     locked_authorizations = tuple(
         item for item in observation.authorizations if item.locked
     )
+    assert len(locked_inspections) == len(observation.inspections)
+    assert len(locked_authorizations) == len(observation.authorizations)
     assert locked_inspections, "no descriptor ingress completed under the authoring lock"
     assert len(locked_authorizations) == 1
     locked_authorization = locked_authorizations[0]
@@ -522,3 +552,167 @@ def test_public_start_denies_python_before_owner_state_import_or_runtime(
     assert module not in sys.modules
     assert not sentinel.exists()
     assert runtime_effects == []
+
+
+@pytest.mark.parametrize("adapter", ("service", "mcp"))
+def test_public_start_uses_ready_boundary_for_one_locked_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    adapter: str,
+) -> None:
+    scenario = _prepare_stable_canonical_scenario(tmp_path)
+    observation = _install_canonical_observer(monkeypatch, scenario)
+
+    result = _invoke_public_start(
+        adapter, scenario.project, scenario.owner_state, monkeypatch
+    )
+
+    assert observation.inspections
+    assert len(observation.authorizations) == 1
+    assert observation.reads
+    assert all(observation.lock_states)
+    assert all(item.locked for item in observation.inspections)
+    assert observation.authorizations[0].locked
+    assert observation.admission_unlocks == 0
+    assert observation.post_lock_admissions == 0
+    assert observation.lock_transitions == ["acquire", "release"]
+    assert observation.authorized is not None
+    assert (
+        replace(observation.authorized, canonical_match_proof=None)
+        == observation.authorizations[0].result
+    )
+    assert result["run_id"] == "canonical-recovery-probe"
+
+
+@pytest.mark.parametrize("adapter", ("service", "mcp"))
+@pytest.mark.parametrize("optimistic_outcome", ("success", "failure"))
+def test_public_start_discards_optimistic_result_when_boundary_appears(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    adapter: str,
+    optimistic_outcome: str,
+) -> None:
+    scenario = _prepare_stable_canonical_scenario(
+        tmp_path, owner_name="publisher-state"
+    )
+    owner_state = (tmp_path / "start-state").resolve()
+    optimistic = replace(scenario, owner_state=owner_state, lock_identity=(-1, -1))
+    observation = _install_canonical_observer(monkeypatch, optimistic)
+    observed_authorize = RecipeCandidate.authorize
+    publication_count = 0
+
+    def publish_after_first_authorization(
+        candidate: RecipeCandidate, policy: object
+    ) -> AuthorizedRecipe:
+        nonlocal publication_count
+        authorized = observed_authorize(candidate, policy)
+        if publication_count == 0:
+            publication_count += 1
+            replace_marker(
+                scenario.source, "initial", "changed-during-start-admission"
+            )
+            changed = plan_project_compilation(
+                project_paths(scenario.project, "leaf")
+            )
+            AuthoringPublisher(owner_state).publish(changed)
+            observation.lock_identity = _owner_lock_identity(
+                namespace_image(owner_state)
+            )
+            if optimistic_outcome == "failure":
+                raise RecipeAuthorityError(
+                    "canonical image changed during optimistic admission"
+                )
+        return authorized
+
+    monkeypatch.setattr(
+        RecipeCandidate, "authorize", publish_after_first_authorization
+    )
+
+    result = _invoke_public_start(adapter, scenario.project, owner_state, monkeypatch)
+
+    assert publication_count == 1
+    assert len(observation.authorizations) == 2
+    optimistic_authorization, locked_authorization = observation.authorizations
+    assert not optimistic_authorization.locked
+    assert locked_authorization.locked
+    assert optimistic_authorization.result != locked_authorization.result
+    locked_inspections = tuple(
+        item for item in observation.inspections if item.locked
+    )
+    assert locked_inspections
+    assert any(
+        locked_authorization.receiver is inspection.result
+        for inspection in locked_inspections
+    )
+    assert any(observation.lock_states)
+    first_locked_read = observation.lock_states.index(True)
+    assert all(observation.lock_states[first_locked_read:])
+    assert observation.admission_unlocks == 0
+    assert observation.post_lock_admissions == 0
+    assert observation.authorized is not None
+    assert (
+        replace(observation.authorized, canonical_match_proof=None)
+        == locked_authorization.result
+    )
+    assert observation.lock_transitions == ["acquire", "release"]
+    assert result["run_id"] == "canonical-recovery-probe"
+
+
+@pytest.mark.parametrize("adapter", ("service", "mcp"))
+def test_public_start_uses_one_optimistic_plan_while_boundary_remains_absent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    adapter: str,
+) -> None:
+    scenario = _prepare_stable_canonical_scenario(
+        tmp_path, owner_name="publisher-state"
+    )
+    owner_state = (tmp_path / "start-state").resolve()
+    optimistic = replace(scenario, owner_state=owner_state, lock_identity=(-1, -1))
+    observation = _install_canonical_observer(monkeypatch, optimistic)
+
+    result = _invoke_public_start(adapter, scenario.project, owner_state, monkeypatch)
+
+    assert observation.inspections
+    assert len(observation.authorizations) == 1
+    assert all(not item.locked for item in observation.inspections)
+    assert not observation.authorizations[0].locked
+    assert observation.authorized is not None
+    assert (
+        replace(observation.authorized, canonical_match_proof=None)
+        == observation.authorizations[0].result
+    )
+    assert not (owner_state / "authoring").exists()
+    assert result["run_id"] == "canonical-recovery-probe"
+
+
+@pytest.mark.parametrize("adapter", ("service", "mcp"))
+def test_public_start_rejects_unready_boundary_without_reader_side_repair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    adapter: str,
+) -> None:
+    scenario = _prepare_stable_canonical_scenario(
+        tmp_path, owner_name="publisher-state"
+    )
+    owner_state = (tmp_path / "start-state").resolve()
+    journal, _identity = AuthoringJournal.create_for_project(
+        owner_state, scenario.project
+    )
+    assert not (journal.directory / "transaction.lock").exists()
+    before = namespace_image(owner_state)
+    unready = replace(scenario, owner_state=owner_state, lock_identity=(-1, -1))
+    observation = _install_canonical_observer(monkeypatch, unready)
+    raised: BaseException | None = None
+
+    try:
+        _invoke_public_start(adapter, scenario.project, owner_state, monkeypatch)
+    except BaseException as exc:
+        raised = exc
+
+    assert isinstance(raised, LockstepError)
+    assert namespace_image(owner_state) == before
+    assert observation.reads == []
+    assert observation.inspections == []
+    assert observation.authorizations == []
+    assert observation.authorized is None
