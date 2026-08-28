@@ -9,7 +9,11 @@ from typing import Mapping
 
 import yaml
 
-from lockstep.authoring_bundle import AuthoredRecipe, canonical_recipe_bytes_for_children
+from lockstep.authoring_bundle import (
+    AuthoredRecipe,
+    _plan_project_compilation,
+    canonical_recipe_bytes_for_children,
+)
 from lockstep.authoring_compilation import (
     compile_captured_source,
     validate_logical_name,
@@ -220,14 +224,19 @@ def classify_generated_recipe(
         ) from exc
 
 
-def write_compilation(recipe: AuthoredRecipe) -> CompilationResult:
+def _require_workflow_compilation(recipe: AuthoredRecipe) -> Path:
     if recipe.kind != "workflow" or recipe.workflow_path is None:
         raise AuthoringError(
             f"manual yamlgraph recipe {recipe.name!r} has no generated output to compile"
         )
-    _validated, _catalog, compiled = compile_project_source(recipe.workflow_path)
+    return recipe.workflow_path
+
+
+def write_compilation(recipe: AuthoredRecipe) -> CompilationResult:
+    workflow_path = _require_workflow_compilation(recipe)
+    _validated, _catalog, compiled = compile_project_source(workflow_path)
     destinations = {
-        recipe.recipe_path: canonical_recipe_bytes(recipe.workflow_path, compiled),
+        recipe.recipe_path: canonical_recipe_bytes(workflow_path, compiled),
         recipe.dependency_path: compiled.dependency_manifest_bytes,
         recipe.source_map_path: compiled.source_map_bytes,
         **{
@@ -240,6 +249,24 @@ def write_compilation(recipe: AuthoredRecipe) -> CompilationResult:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
     return compiled
+
+
+def publish_project_compilation(
+    project: Path, name: str, *, state_dir: Path
+) -> CompilationResult:
+    """Recover, plan once, and atomically publish one authored closure."""
+
+    validate_logical_name(name)
+    root = Path(project).resolve()
+    from lockstep.authoring_publisher import AuthoringPublisher
+
+    publisher = AuthoringPublisher(state_dir)
+    publisher.recover(root)
+    recipe = project_paths(root, name)
+    _require_workflow_compilation(recipe)
+    planned = _plan_project_compilation(recipe)
+    publisher.publish(planned.bundle)
+    return planned.root_result
 
 
 def check_recipe(project: Path, name: str) -> dict[str, object]:

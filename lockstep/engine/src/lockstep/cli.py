@@ -123,9 +123,8 @@ def _cmd_recipe(args: argparse.Namespace) -> int:
         diff_recipe,
         estimate_recipe,
         initialize_minimal,
-        project_paths,
+        publish_project_compilation,
         render_recipe,
-        write_compilation,
     )
 
     project = Path.cwd()
@@ -134,7 +133,9 @@ def _cmd_recipe(args: argparse.Namespace) -> int:
         print(f"initialized {args.name}")
         return 0
     if args.action == "compile":
-        write_compilation(project_paths(project, args.name))
+        publish_project_compilation(
+            project, args.name, state_dir=state_dir().absolute()
+        )
         print(f"compiled {args.name}")
         return 0
     if args.action == "check":

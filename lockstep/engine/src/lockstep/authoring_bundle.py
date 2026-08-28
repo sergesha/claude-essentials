@@ -51,6 +51,12 @@ _CompiledWorkflow = tuple[ValidatedWorkflow, CompilationResult]
 _ProjectedRole = tuple[str, dict[Path, bytes]]
 
 
+@dataclass(frozen=True, slots=True)
+class _PlannedCompilation:
+    bundle: ProjectCompilationBundle
+    root_result: CompilationResult
+
+
 def _absolute(path: Path, label: str) -> Path:
     if not isinstance(path, Path):
         raise TypeError(f"{label} must be a Path")
@@ -275,24 +281,33 @@ class ProjectCompilationBundle:
 def plan_project_compilation(recipe: AuthoredRecipe) -> ProjectCompilationBundle:
     """Plan one immutable authored closure without publishing it."""
 
+    return _plan_project_compilation(recipe).bundle
+
+
+def _plan_project_compilation(recipe: AuthoredRecipe) -> _PlannedCompilation:
+    """Retain the root result from the same pass that produced the bundle."""
+
     if recipe.kind != "workflow" or recipe.workflow_path is None:
         raise AuthoringError("only ordinary workflow sources can be planned")
     project, source_path = _workflow_project_and_source(recipe)
     directory_identities: dict[Path, _PathIdentity] = {}
     project_identity = _cached_directory_identity(directory_identities, project)
-    sources, dependency_edges, compiled_roles = _compile_closure(
+    sources, dependency_edges, compiled_roles, root_result = _compile_closure(
         recipe, source_path, project, directory_identities
     )
     before_images, after_images = _destination_images(
         project, compiled_roles, directory_identities
     )
-    return ProjectCompilationBundle(
-        project,
-        project_identity,
-        sources,
-        dependency_edges,
-        before_images,
-        after_images,
+    return _PlannedCompilation(
+        ProjectCompilationBundle(
+            project,
+            project_identity,
+            sources,
+            dependency_edges,
+            before_images,
+            after_images,
+        ),
+        root_result,
     )
 
 
@@ -305,6 +320,7 @@ def _compile_closure(
     tuple[SourceIdentity, ...],
     tuple[tuple[str, tuple[str, ...]], ...],
     tuple[_ProjectedRole, ...],
+    CompilationResult,
 ]:
     sources: list[SourceIdentity] = []
     dependency_edges: list[tuple[str, tuple[str, ...]]] = []
@@ -357,7 +373,12 @@ def _compile_closure(
             active.remove(role)
 
     visit(recipe, source_path)
-    return tuple(sources), tuple(dependency_edges), tuple(projected_roles)
+    return (
+        tuple(sources),
+        tuple(dependency_edges),
+        tuple(projected_roles),
+        completed[recipe.name][1],
+    )
 
 
 def _destination_images(

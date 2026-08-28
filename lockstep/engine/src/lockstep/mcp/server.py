@@ -44,9 +44,8 @@ from lockstep.authoring import (
     diff_recipe,
     estimate_recipe,
     initialize_minimal,
-    project_paths,
+    publish_project_compilation,
     render_recipe,
-    write_compilation,
 )
 from lockstep.recipe import yamlgraph_adapter as yg
 from lockstep.recipe.authority import (
@@ -419,7 +418,8 @@ def recipe_init(name: str, ctx: Context | None = None) -> dict:
 @app.tool()
 def recipe_compile(name: str, ctx: Context | None = None) -> dict:
     project = _project_for_context(ctx)
-    result = write_compilation(project_paths(project, name))
+    owner_state, _recipes = _configured_paths(project)
+    result = publish_project_compilation(project, name, state_dir=owner_state)
     return {
         "name": name,
         "digest": result.digest,

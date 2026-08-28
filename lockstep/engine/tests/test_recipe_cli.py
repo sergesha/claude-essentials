@@ -26,6 +26,7 @@ def _run_cli(
     project: Path,
     *args: str,
 ) -> _Result:
+    monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(project.parent / "owner-state"))
     monkeypatch.chdir(project)
     try:
         returncode = cli.main(list(args))
