@@ -23,6 +23,10 @@ from lockstep.authoring_recovery_model import (
     AuthoringRecoveryModel,
     parse_recovery_journal,
 )
+from lockstep.authoring_stage_paths import (
+    ReservedStageEvidence,
+    reserved_stage_set,
+)
 from lockstep.errors import AuthoringError
 from lockstep.runtime.advisory_lock import advisory_file_lock
 from lockstep.runtime.owner_state import (
@@ -155,9 +159,13 @@ class AuthoringJournal:
             b"".join(chunks), expected_project=expected_project
         )
 
-    def begin(self, bundle: ProjectCompilationBundle, operation_id: str) -> None:
+    def begin(
+        self,
+        bundle: ProjectCompilationBundle,
+        reservation: ReservedStageEvidence,
+    ) -> None:
         self.require_inactive()
-        self._document = _journal_document(bundle, operation_id)
+        self._document = _journal_document(bundle, reservation)
         self._replace(self._document)
 
     def record_replacement(self, index: int) -> None:
@@ -253,11 +261,17 @@ def _project_stability_facts(info: os.stat_result) -> tuple[int, int, int, int]:
 
 
 def _journal_document(
-    bundle: ProjectCompilationBundle, operation_id: str
+    bundle: ProjectCompilationBundle, reservation: ReservedStageEvidence
 ) -> dict[str, object]:
+    expected_stages = reserved_stage_set(
+        tuple(image.resolved_path for image in bundle.after_images),
+        reservation.operation_id,
+    )
+    if reservation.stages != expected_stages:
+        raise AuthoringError("authoring reserved stage evidence is inconsistent")
     return {
-        "schema": "lockstep.authoring-transaction/v1",
-        "operation_id": operation_id,
+        "schema": "lockstep.authoring-transaction/v2",
+        "operation_id": reservation.operation_id,
         "project": {
             "path": str(bundle.resolved_project),
             "device": bundle.project_identity.device,
@@ -290,6 +304,17 @@ def _journal_document(
                 bundle.before_images, bundle.after_images, strict=True
             )
         ],
+        "reservation": {
+            "kind": "complete-reserved-stage-absence/v1",
+            "stages": [
+                {
+                    "index": stage.index,
+                    "publication": str(stage.publication),
+                    "restoration": str(stage.restoration),
+                }
+                for stage in reservation.stages
+            ],
+        },
         "replacement_progress": [],
     }
 

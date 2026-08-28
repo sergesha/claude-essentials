@@ -12,11 +12,17 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from lockstep.authoring_bundle import LeafIdentity, PathIdentity
+from lockstep.authoring_stage_paths import (
+    ReservedStageEvidence,
+    ReservedStagePaths,
+    reserved_stage_paths,
+)
 from lockstep.errors import AuthoringError
 from lockstep.recipe.authority import RecipeLimits
 
 
-_JOURNAL_SCHEMA = "lockstep.authoring-transaction/v1"
+_JOURNAL_SCHEMA = "lockstep.authoring-transaction/v2"
+_RESERVATION_KIND = "complete-reserved-stage-absence/v1"
 MAX_RECOVERY_JOURNAL_BYTES = 16 * 1024 * 1024
 _MAX_TEXT_BYTES = 4096
 _HEX = frozenset("0123456789abcdef")
@@ -61,14 +67,10 @@ class RecoveryWriteEntry:
     ancestors: tuple[PathIdentity, ...]
 
     def publication_stage(self, operation_id: str) -> Path:
-        return self.path.parent / (
-            f".{self.path.name}.lockstep-{operation_id}-{self.index}.tmp"
-        )
+        return reserved_stage_paths(self.path, operation_id, self.index).publication
 
     def restoration_stage(self, operation_id: str) -> Path:
-        return self.path.parent / (
-            f".{self.path.name}.lockstep-{operation_id}-{self.index}-recovery.tmp"
-        )
+        return reserved_stage_paths(self.path, operation_id, self.index).restoration
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,6 +79,7 @@ class AuthoringRecoveryModel:
     project: PathIdentity
     read_set: tuple[RecoveryReadEntry, ...]
     write_set: tuple[RecoveryWriteEntry, ...]
+    reservation: ReservedStageEvidence
     replacement_progress: tuple[int, ...]
 
 
@@ -120,6 +123,7 @@ class _RecoveryParser:
                 "project",
                 "read_set",
                 "write_set",
+                "reservation",
                 "replacement_progress",
             },
             "journal",
@@ -130,10 +134,50 @@ class _RecoveryParser:
         project = self._project(document["project"])
         read_set = self._read_set(document["read_set"])
         write_set = self._write_set(document["write_set"], read_set)
+        reservation = self._reservation(
+            document["reservation"], operation_id, write_set
+        )
         progress = self._progress(document["replacement_progress"], len(write_set))
         return AuthoringRecoveryModel(
-            operation_id, project, read_set, write_set, progress
+            operation_id, project, read_set, write_set, reservation, progress
         )
+
+    def _reservation(
+        self,
+        value: object,
+        operation_id: str,
+        write_set: tuple[RecoveryWriteEntry, ...],
+    ) -> ReservedStageEvidence:
+        document = self._mapping(value, {"kind", "stages"}, "reservation evidence")
+        if document["kind"] != _RESERVATION_KIND:
+            raise AuthoringError("authoring recovery reservation evidence is invalid")
+        values = self._sequence(document["stages"], "reserved stage set")
+        if len(values) != len(write_set):
+            raise AuthoringError("authoring recovery reserved stage set is incomplete")
+        stages: list[ReservedStagePaths] = []
+        for index, (raw, entry) in enumerate(zip(values, write_set, strict=True)):
+            item = self._mapping(
+                raw,
+                {"index", "publication", "restoration"},
+                "reserved stage entry",
+            )
+            expected = reserved_stage_paths(entry.path, operation_id, index)
+            if (
+                self._counter(item["index"], "reserved stage index") != index
+                or self._project_path(
+                    item["publication"], "publication reserved stage"
+                )
+                != expected.publication
+                or self._project_path(
+                    item["restoration"], "restoration reserved stage"
+                )
+                != expected.restoration
+            ):
+                raise AuthoringError(
+                    "authoring recovery reserved stage derivation is inconsistent"
+                )
+            stages.append(expected)
+        return ReservedStageEvidence(operation_id, tuple(stages))
 
     def _project(self, value: object) -> PathIdentity:
         identity = self._path_identity(value, "project identity")

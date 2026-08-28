@@ -46,6 +46,7 @@ class _DestinationState:
 class _OwnedStage:
     entry: RecoveryWriteEntry
     path: Path
+    state: Literal["absent", "complete", "incomplete"]
     observed: _ObservedFile | None
 
 
@@ -86,12 +87,17 @@ class AuthoringRecovery:
         destinations = tuple(
             self._classify_destination(entry) for entry in self.model.write_set
         )
+        all_destinations_before = all(
+            state.state == "before" for state in destinations
+        )
         publication_stages = tuple(
-            self._inspect_publication_stage(state) for state in destinations
+            self._inspect_publication_stage(
+                state, incomplete_is_reclaimable=all_destinations_before
+            )
+            for state in destinations
         )
         restoration_stages = tuple(
-            self._inspect_restoration_stage(entry)
-            for entry in self.model.write_set
+            self._inspect_restoration_stage(state) for state in destinations
         )
         for state in reversed(destinations):
             if state.state == "after":
@@ -123,10 +129,13 @@ class AuthoringRecovery:
         )
 
     def _inspect_publication_stage(
-        self, destination: _DestinationState
+        self,
+        destination: _DestinationState,
+        *,
+        incomplete_is_reclaimable: bool,
     ) -> _OwnedStage:
         entry = destination.entry
-        path = entry.publication_stage(self.model.operation_id)
+        path = self.model.reservation.stages[entry.index].publication
         parent_descriptor, leaf = self.tree.open_parent(path)
         try:
             observed = _observe_file(parent_descriptor, leaf, path)
@@ -135,29 +144,34 @@ class AuthoringRecovery:
         if observed is None:
             # Exact terminal destination classification makes a missing stage
             # harmless: it was consumed, or recovery can abandon it all-old.
-            return _OwnedStage(entry, path, None)
-        if not _matches_after_file(observed, entry):
-            raise AuthoringError(
-                f"authoring recovery will not remove a foreign stage: {path}"
-            )
-        return _OwnedStage(entry, path, observed)
+            return _OwnedStage(entry, path, "absent", None)
+        if _matches_after_file(observed, entry):
+            return _OwnedStage(entry, path, "complete", observed)
+        if incomplete_is_reclaimable:
+            return _OwnedStage(entry, path, "incomplete", observed)
+        raise AuthoringError(
+            f"authoring recovery will not remove a foreign stage: {path}"
+        )
 
     def _inspect_restoration_stage(
-        self, entry: RecoveryWriteEntry
+        self, destination: _DestinationState
     ) -> _OwnedStage:
-        path = entry.restoration_stage(self.model.operation_id)
+        entry = destination.entry
+        path = self.model.reservation.stages[entry.index].restoration
         parent_descriptor, leaf = self.tree.open_parent(path)
         try:
             observed = _observe_file(parent_descriptor, leaf, path)
         finally:
             os.close(parent_descriptor)
-        if observed is not None and not _matches_desired_before(
-            observed, entry.before
-        ):
-            raise AuthoringError(
-                f"authoring recovery restoration stage is foreign: {path}"
-            )
-        return _OwnedStage(entry, path, observed)
+        if observed is None:
+            return _OwnedStage(entry, path, "absent", None)
+        if _matches_desired_before(observed, entry.before):
+            return _OwnedStage(entry, path, "complete", observed)
+        if destination.state == "after":
+            return _OwnedStage(entry, path, "incomplete", observed)
+        raise AuthoringError(
+            f"authoring recovery restoration stage is foreign: {path}"
+        )
 
     def _restore(
         self, state: _DestinationState, restoration_stage: _OwnedStage
@@ -175,7 +189,7 @@ class AuthoringRecovery:
             _require_same_file(
                 parent_descriptor,
                 stage_leaf,
-                entry.restoration_stage(self.model.operation_id),
+                restoration_stage.path,
                 stage_observed,
             )
             os.replace(
@@ -196,13 +210,21 @@ class AuthoringRecovery:
         before = entry.before
         if before.content is None or before.mode is None:
             raise AuthoringError("authoring recovery before-image is incomplete")
-        path = entry.restoration_stage(self.model.operation_id)
+        path = stage.path
         leaf = path.name
-        if stage.observed is not None:
+        if stage.state == "complete":
+            if stage.observed is None:
+                raise RuntimeError("complete restoration stage has no observation")
             observed = _require_same_file(
                 parent_descriptor, leaf, path, stage.observed
             )
             return leaf, observed
+        if stage.state == "incomplete":
+            if stage.observed is None:
+                raise RuntimeError("incomplete restoration stage has no observation")
+            _require_same_file(parent_descriptor, leaf, path, stage.observed)
+            os.unlink(leaf, dir_fd=parent_descriptor)
+            os.fsync(parent_descriptor)
         flags = (
             os.O_WRONLY
             | os.O_CREAT
@@ -226,14 +248,18 @@ class AuthoringRecovery:
         return leaf, observed
 
     def _remove_publication_stage(self, stage: _OwnedStage) -> None:
-        if stage.observed is None:
+        if stage.state == "absent":
             return
+        if stage.observed is None:
+            raise RuntimeError("observed publication stage has no observation")
         parent_descriptor, leaf = self.tree.open_parent(stage.path)
         try:
             current = _require_same_file(
                 parent_descriptor, leaf, stage.path, stage.observed
             )
-            if not _matches_after_file(current, stage.entry):
+            if stage.state == "complete" and not _matches_after_file(
+                current, stage.entry
+            ):
                 raise AuthoringError(
                     f"authoring recovery stage changed before cleanup: {stage.path}"
                 )
@@ -248,7 +274,11 @@ class AuthoringRecovery:
             observed = _observe_file(parent_descriptor, leaf, stage.path)
             if observed is None:
                 return
-            if stage.observed is None or observed != stage.observed:
+            if (
+                stage.state != "complete"
+                or stage.observed is None
+                or observed != stage.observed
+            ):
                 raise AuthoringError(
                     f"authoring recovery restoration stage changed: {stage.path}"
                 )

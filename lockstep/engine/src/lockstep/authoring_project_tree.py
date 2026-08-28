@@ -10,6 +10,10 @@ from lockstep.authoring_bundle import (
     PathIdentity,
     ProjectCompilationBundle,
 )
+from lockstep.authoring_stage_paths import (
+    ReservedStageEvidence,
+    ReservedStagePaths,
+)
 from lockstep.errors import AuthoringError
 
 
@@ -113,6 +117,18 @@ class AuthoringProjectTree:
         parent = self._contained_parent(destination)
         return self.open_directory(parent), destination.name
 
+    def prove_reserved_stage_absence(
+        self,
+        operation_id: str,
+        stages: tuple[ReservedStagePaths, ...],
+    ) -> ReservedStageEvidence:
+        """Prove a complete planned stage set absent without creating parents."""
+
+        for stage in stages:
+            self._require_reserved_path_absent(stage.publication)
+            self._require_reserved_path_absent(stage.restoration)
+        return ReservedStageEvidence(operation_id, stages)
+
     def open_directory(self, directory: Path) -> int:
         try:
             relative = directory.relative_to(self._project)
@@ -170,6 +186,49 @@ class AuthoringProjectTree:
                 ) from exc
             finally:
                 os.close(parent_descriptor)
+
+    def _require_reserved_path_absent(self, path: Path) -> None:
+        parent = self._contained_parent(path)
+        relative = parent.relative_to(self._project)
+        descriptor = self._open_root()
+        current = self._project
+        try:
+            for part in relative.parts:
+                child = current / part
+                expected = self._expected(child)
+                try:
+                    next_descriptor = os.open(part, _DIRECTORY_FLAGS, dir_fd=descriptor)
+                except FileNotFoundError:
+                    if expected is not None:
+                        raise AuthoringError(
+                            "recorded destination ancestor disappeared"
+                        )
+                    return
+                except OSError as exc:
+                    raise AuthoringError(
+                        "authoring reserved stage parent is unavailable"
+                    ) from exc
+                try:
+                    if expected is None:
+                        raise AuthoringError(
+                            "destination ancestor was created after planning"
+                        )
+                    self._verify_directory_descriptor(
+                        next_descriptor, expected=expected
+                    )
+                except Exception:
+                    os.close(next_descriptor)
+                    raise
+                os.close(descriptor)
+                descriptor = next_descriptor
+                current = child
+            try:
+                os.stat(path.name, dir_fd=descriptor, follow_symlinks=False)
+            except FileNotFoundError:
+                return
+            raise AuthoringError("authoring reserved stage path is occupied")
+        finally:
+            os.close(descriptor)
 
     def _open_root(self) -> int:
         descriptor = os.open(self._project, _DIRECTORY_FLAGS)

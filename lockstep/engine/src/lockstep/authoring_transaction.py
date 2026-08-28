@@ -20,6 +20,7 @@ from lockstep.authoring_identity import (
 )
 from lockstep.authoring_journal import AuthoringJournal
 from lockstep.authoring_project_tree import AuthoringProjectTree
+from lockstep.authoring_stage_paths import ReservedStagePaths, reserved_stage_set
 from lockstep.errors import AuthoringError
 
 
@@ -41,11 +42,11 @@ class _ReplacementOwnership:
     before: DestinationImage
     after: DestinationImage
     identity: PublishedIdentity
-    stage_path: Path
+    reservation: ReservedStagePaths
 
 
 class AuthoringTransaction:
-    __slots__ = ("bundle", "journal", "operation_id", "tree")
+    __slots__ = ("bundle", "journal", "operation_id", "reservations", "tree")
 
     def __init__(
         self, bundle: ProjectCompilationBundle, journal: AuthoringJournal
@@ -53,11 +54,18 @@ class AuthoringTransaction:
         self.bundle = bundle
         self.journal = journal
         self.operation_id = secrets.token_hex(16)
+        self.reservations = reserved_stage_set(
+            tuple(image.resolved_path for image in bundle.after_images),
+            self.operation_id,
+        )
         self.tree = AuthoringProjectTree(bundle)
 
     def publish(self) -> None:
         validate_bundle_preconditions(self.bundle)
-        self.journal.begin(self.bundle, self.operation_id)
+        reservation = self.tree.prove_reserved_stage_absence(
+            self.operation_id, self.reservations
+        )
+        self.journal.begin(self.bundle, reservation)
         staged: dict[Path, _StagedFile] = {}
         owned_stages: dict[Path, _StageOwnership | None] = {}
         consumed_stages: set[Path] = set()
@@ -74,6 +82,7 @@ class AuthoringTransaction:
                     before,
                     after,
                     staged[after.resolved_path],
+                    self.reservations[index],
                     owned_replacements,
                     consumed_stages,
                     stage_consumption_attempts,
@@ -119,9 +128,7 @@ class AuthoringTransaction:
             mode = image.mode
             if content is None or mode is None:
                 raise AuthoringError("authoring after-image is incomplete")
-            path = image.resolved_path.parent / (
-                f".{image.resolved_path.name}.lockstep-{self.operation_id}-{index}.tmp"
-            )
+            path = self.reservations[index].publication
             staged[image.resolved_path] = self._stage_file(
                 image,
                 path,
@@ -182,6 +189,7 @@ class AuthoringTransaction:
         before: DestinationImage,
         after: DestinationImage,
         staged: _StagedFile,
+        reservation: ReservedStagePaths,
         owned_replacements: list[_ReplacementOwnership],
         consumed_stages: set[Path],
         stage_consumption_attempts: set[Path],
@@ -203,7 +211,7 @@ class AuthoringTransaction:
                     before,
                     after,
                     published_identity,
-                    staged.path,
+                    reservation,
                 )
             )
             if before.content is None:
@@ -268,8 +276,8 @@ class AuthoringTransaction:
                     continue
                 if state == "before":
                     continue
-                if replacement.stage_path in stage_consumption_attempts:
-                    consumed_stages.add(replacement.stage_path)
+                if replacement.reservation.publication in stage_consumption_attempts:
+                    consumed_stages.add(replacement.reservation.publication)
                 if replacement.before.content is None:
                     validate_after_identity_at(parent_descriptor, replacement.identity)
                     os.unlink(destination_leaf, dir_fd=parent_descriptor)
@@ -278,13 +286,9 @@ class AuthoringTransaction:
                 before = replacement.before
                 if before.mode is None or before.content is None:
                     raise AuthoringError("authoring before-image is incomplete")
-                restoration_path = before.resolved_path.parent / (
-                    f".{before.resolved_path.name}.lockstep-"
-                    f"{self.operation_id}-rollback.tmp"
-                )
                 restoration = self._stage_file(
                     before,
-                    restoration_path,
+                    replacement.reservation.restoration,
                     before.content,
                     before.mode,
                     owned_stages=owned_stages,
