@@ -15,6 +15,11 @@ from lockstep.authoring_bundle import (
     plan_project_compilation,
 )
 from lockstep.authoring_publisher import AuthoringPublisher
+from lockstep.authoring_recovery_model import (
+    RecoveryAfterImage,
+    RecoveryBeforeImage,
+    RecoveryWriteEntry,
+)
 from lockstep.errors import AuthoringError
 
 from tests._authoring_gate import TreeEntry, replace_marker, tree_image, write_workflow
@@ -68,6 +73,15 @@ class _DestinationReplacementFault:
     injected: bool = False
 
 
+@dataclass(slots=True)
+class _StageReservationProbe:
+    stage_create_syscall_calls: int = 0
+    stage_write_syscall_calls: int = 0
+    destination_replace_calls: int = 0
+    owner_state_replace_calls: int = 0
+    stage_identities: tuple[tuple[int, int], ...] = ()
+
+
 def _namespace_file_image(root: Path) -> dict[str, _NamespaceEntry]:
     return {
         key: _NamespaceEntry(
@@ -84,6 +98,35 @@ def _regular_file_semantics(path: Path) -> tuple[bytes, int]:
     info = path.lstat()
     assert stat.S_ISREG(info.st_mode)
     return path.read_bytes(), stat.S_IMODE(info.st_mode)
+
+
+def _regular_file_identity(path: Path) -> tuple[int, int]:
+    info = path.lstat()
+    assert stat.S_ISREG(info.st_mode)
+    return info.st_dev, info.st_ino
+
+
+def _recovery_write_entry(
+    bundle: ProjectCompilationBundle, index: int
+) -> RecoveryWriteEntry:
+    before = bundle.before_images[index]
+    after = bundle.after_images[index]
+    assert after.content is not None
+    assert after.sha256 is not None
+    assert after.mode is not None
+    return RecoveryWriteEntry(
+        index=index,
+        role=after.role,
+        path=after.resolved_path,
+        before=RecoveryBeforeImage(
+            before.content,
+            before.sha256,
+            before.mode,
+            before.leaf,
+        ),
+        after=RecoveryAfterImage(after.sha256, len(after.content), after.mode),
+        ancestors=before.ancestors,
+    )
 
 
 def _destination_states(
@@ -138,6 +181,40 @@ def _is_exclusive_create(flags: int) -> bool:
     return bool(flags & os.O_CREAT and flags & os.O_EXCL)
 
 
+def _is_owner_state_destination(
+    owner_state: Path, destination: object, directory_fd: int | None
+) -> bool:
+    path = Path(os.fsdecode(destination))
+    if path.is_absolute():
+        try:
+            path.relative_to(owner_state)
+        except ValueError:
+            return False
+        return True
+    if directory_fd is None:
+        return False
+    directory_info = os.fstat(directory_fd)
+    owner_directories = (owner_state,) + tuple(
+        item for item in owner_state.rglob("*") if item.is_dir()
+    )
+    return any(
+        (info.st_dev, info.st_ino)
+        == (directory_info.st_dev, directory_info.st_ino)
+        for info in (item.stat() for item in owner_directories)
+    )
+
+
+def _stage_reservation_probe_counts(
+    probe: _StageReservationProbe,
+) -> tuple[int, int, int, int]:
+    return (
+        probe.stage_create_syscall_calls,
+        probe.stage_write_syscall_calls,
+        probe.destination_replace_calls,
+        probe.owner_state_replace_calls,
+    )
+
+
 def _install_incomplete_stage_fault(
     monkeypatch: pytest.MonkeyPatch,
     destinations: tuple[Path, ...],
@@ -190,6 +267,54 @@ def _install_incomplete_stage_fault(
     monkeypatch.setattr(os, "open", open_then_maybe_crash)
     monkeypatch.setattr(os, "write", write_prefix_then_crash)
     return fault
+
+
+def _install_stage_reservation_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    destinations: tuple[Path, ...],
+    owner_state: Path,
+) -> _StageReservationProbe:
+    original_open = os.open
+    original_write = os.write
+    original_replace = os.replace
+    probe = _StageReservationProbe()
+
+    def observe_open(path, flags, *args, **kwargs):
+        is_stage_create = (
+            _is_exclusive_create(flags)
+            and _is_destination_parent_descriptor(
+                destinations, kwargs.get("dir_fd")
+            )
+        )
+        if is_stage_create:
+            probe.stage_create_syscall_calls += 1
+        descriptor = original_open(path, flags, *args, **kwargs)
+        if is_stage_create:
+            info = os.fstat(descriptor)
+            probe.stage_identities += ((info.st_dev, info.st_ino),)
+        return descriptor
+
+    def observe_write(descriptor, data):
+        info = os.fstat(descriptor)
+        if (info.st_dev, info.st_ino) in probe.stage_identities:
+            probe.stage_write_syscall_calls += 1
+        return original_write(descriptor, data)
+
+    def observe_replace(source_path, destination_path, *args, **kwargs):
+        if _is_destination_namespace_call(
+            destinations, destination_path, kwargs.get("dst_dir_fd")
+        ):
+            probe.destination_replace_calls += 1
+        if _is_owner_state_destination(
+            owner_state, destination_path, kwargs.get("dst_dir_fd")
+        ):
+            probe.owner_state_replace_calls += 1
+        return original_replace(source_path, destination_path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", observe_open)
+    monkeypatch.setattr(os, "write", observe_write)
+    monkeypatch.setattr(os, "replace", observe_replace)
+    return probe
 
 
 def _install_first_destination_replacement_fault(
@@ -375,6 +500,26 @@ def _recover_twice_with_fresh_publishers(
 
     assert _namespace_file_image(scenario.project) == project_before_second_recovery
     assert _namespace_file_image(scenario.owner_state) == owner_before_second_recovery
+
+
+def _assert_two_fresh_recoveries_are_noops(
+    scenario: _ExistingBundleScenario,
+    expected_project: dict[str, _NamespaceEntry],
+    expected_owner: dict[str, _NamespaceEntry],
+    reserved_stage: Path,
+    expected_reserved_semantics: tuple[bytes, int],
+    expected_reserved_identity: tuple[int, int],
+    probe: _StageReservationProbe,
+) -> None:
+    expected_probe_counts = _stage_reservation_probe_counts(probe)
+    for _ in range(2):
+        AuthoringPublisher(scenario.owner_state).recover(scenario.project)
+        assert _stage_reservation_probe_counts(probe) == expected_probe_counts
+        assert _namespace_file_image(scenario.project) == expected_project
+        assert _namespace_file_image(scenario.owner_state) == expected_owner
+        assert _regular_file_semantics(reserved_stage) == expected_reserved_semantics
+        assert _regular_file_identity(reserved_stage) == expected_reserved_identity
+        _assert_existing_bundle_restored(scenario)
 
 
 def test_successful_publish_materializes_only_exact_bundle_destinations(
@@ -645,3 +790,70 @@ def test_recover_cleans_incomplete_restoration_stage_and_restores_existing_bundl
     _assert_durable_crash_cut(scenario, 0, owner_state_before_crash)
 
     _recover_twice_with_fresh_publishers(scenario, project_before_crash)
+
+
+@pytest.mark.parametrize("reservation", ("publication", "restoration"))
+def test_publish_rejects_stage_reservation_collision_before_any_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reservation: str,
+) -> None:
+    import lockstep.authoring_transaction as authoring_transaction
+
+    scenario = _prepare_existing_bundle_scenario(tmp_path)
+    operation_id = "a" * 32
+    entry = _recovery_write_entry(
+        scenario.bundle, len(scenario.bundle.after_images) - 1
+    )
+    reserved_stage = (
+        entry.publication_stage(operation_id)
+        if reservation == "publication"
+        else entry.restoration_stage(operation_id)
+    )
+    assert not reserved_stage.exists()
+    reserved_stage.write_bytes(f"unrelated {reservation} reservation\n".encode())
+    reserved_stage.chmod(0o640)
+    reserved_stage_before = _regular_file_semantics(reserved_stage)
+    reserved_stage_identity = _regular_file_identity(reserved_stage)
+    project_before_publish = _namespace_file_image(scenario.project)
+    owner_before_publish = _namespace_file_image(scenario.owner_state)
+
+    monkeypatch.setattr(
+        authoring_transaction.secrets,
+        "token_hex",
+        lambda _byte_count: operation_id,
+    )
+    probe = _install_stage_reservation_probe(
+        monkeypatch,
+        scenario.destinations,
+        scenario.owner_state,
+    )
+    publication_error: Exception | None = None
+    try:
+        scenario.publisher.publish(scenario.bundle)
+    except (OSError, AuthoringError) as exc:
+        publication_error = exc
+
+    assert (
+        isinstance(publication_error, AuthoringError),
+        None if publication_error is None else str(publication_error),
+        _stage_reservation_probe_counts(probe),
+    ) == (
+        True,
+        "authoring reserved stage path is occupied",
+        (0, 0, 0, 0),
+    )
+    assert _regular_file_semantics(reserved_stage) == reserved_stage_before
+    assert _regular_file_identity(reserved_stage) == reserved_stage_identity
+    assert _namespace_file_image(scenario.project) == project_before_publish
+    assert _namespace_file_image(scenario.owner_state) == owner_before_publish
+    _assert_existing_bundle_restored(scenario)
+    _assert_two_fresh_recoveries_are_noops(
+        scenario,
+        project_before_publish,
+        owner_before_publish,
+        reserved_stage,
+        reserved_stage_before,
+        reserved_stage_identity,
+        probe,
+    )
