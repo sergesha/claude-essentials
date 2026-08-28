@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+import stat
 from dataclasses import replace
+from os import stat_result
 from pathlib import Path
 
 import pytest
@@ -80,6 +82,43 @@ def _assert_identity_paths(identities, expected_paths: tuple[Path, ...]) -> None
     assert tuple((item.device, item.inode) for item in identities) == tuple(
         (path.lstat().st_dev, path.lstat().st_ino) for path in expected_paths
     )
+
+
+def _assert_present_before_images(
+    bundle, project: Path, old_destinations: dict[Path, tuple[bytes, stat_result]]
+) -> None:
+    before_by_path = {
+        image.resolved_path: image for image in bundle.before_images
+    }
+    assert {
+        path: image.content for path, image in before_by_path.items()
+    } == {path: old[0] for path, old in old_destinations.items()}
+    expected_ancestors = (
+        project.resolve(),
+        (project / ".lockstep").resolve(),
+        (project / ".lockstep/recipes").resolve(),
+    )
+    for path, (old_bytes, old_info) in old_destinations.items():
+        image = before_by_path[path]
+        assert image.sha256 == hashlib.sha256(old_bytes).hexdigest()
+        assert image.mode == stat.S_IMODE(old_info.st_mode)
+        assert image.leaf is not None
+        assert (
+            image.leaf.resolved_path,
+            image.leaf.device,
+            image.leaf.inode,
+            image.leaf.mode,
+            image.leaf.size,
+            image.leaf.mtime_ns,
+        ) == (
+            path,
+            old_info.st_dev,
+            old_info.st_ino,
+            old_info.st_mode,
+            old_info.st_size,
+            old_info.st_mtime_ns,
+        )
+        _assert_identity_paths(image.ancestors, expected_ancestors)
 
 
 def _assert_leaf_destination_images(
@@ -198,6 +237,54 @@ def test_leaf_planner_captures_existing_real_destination_parent_identity(
     expected = (project.resolve(), (project / ".lockstep").resolve(), recipes.resolve())
     for image in (*bundle.before_images, *bundle.after_images):
         _assert_identity_paths(image.ancestors, expected)
+
+
+def test_leaf_replanner_captures_present_before_images_and_changed_after_images(
+    tmp_path: Path,
+) -> None:
+    from lockstep.authoring_bundle import plan_project_compilation
+
+    project = tmp_path / "project"
+    source_path = write_workflow(project, "leaf")
+    compile_closure(project, "leaf")
+    recipe = project_paths(project, "leaf")
+    exact_paths = (
+        recipe.recipe_path.resolve(),
+        recipe.dependency_path.resolve(),
+        recipe.source_map_path.resolve(),
+    )
+    old_destinations = {}
+    for path in exact_paths:
+        info = path.lstat()
+        assert stat.S_ISREG(info.st_mode)
+        old_destinations[path] = (path.read_bytes(), info)
+    replace_marker(source_path, "initial", "changed")
+    new_canonical = expected_compilation_image(project, ("leaf",))
+    assert tuple(new_canonical) == exact_paths
+    changed_paths = {
+        path
+        for path in exact_paths
+        if new_canonical[path] != old_destinations[path][0]
+    }
+    assert changed_paths
+    before_tree = tree_image(tmp_path)
+
+    second_plan = plan_project_compilation(project_paths(project, "leaf"))
+
+    assert tree_image(tmp_path) == before_tree
+    _assert_present_before_images(second_plan, project, old_destinations)
+    after_by_path = {
+        image.resolved_path: image.content for image in second_plan.after_images
+    }
+    assert after_by_path == new_canonical
+    assert changed_paths == {
+        path for path in after_by_path if after_by_path[path] != old_destinations[path][0]
+    }
+    write_paths = set(after_by_path)
+    assert write_paths == set(exact_paths)
+    assert write_paths.isdisjoint(
+        source.resolved_path for source in second_plan.sources
+    )
 
 
 def test_leaf_planner_rejects_symlinked_destination_parent(tmp_path: Path) -> None:
