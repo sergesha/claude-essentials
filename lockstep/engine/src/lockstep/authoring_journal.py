@@ -207,6 +207,21 @@ class AuthoringJournal:
         progress.append(index)
         self._replace(self._document)
 
+    def record_committed(self) -> None:
+        if self._document is None:
+            raise RuntimeError("authoring journal has not begun")
+        progress = self._document["replacement_progress"]
+        write_set = self._document["write_set"]
+        committed = self._document["committed"]
+        if not isinstance(progress, list) or not isinstance(write_set, list):
+            raise RuntimeError("authoring journal progress is invalid")
+        if progress != list(range(len(write_set))):
+            raise AuthoringError("authoring journal commit progress is incomplete")
+        if committed is not False:
+            raise RuntimeError("authoring journal commit state is invalid")
+        self._document["committed"] = True
+        self._replace(self._document)
+
     def finish(self) -> None:
         verify_owner_file(self.journal_path)
         self.journal_path.unlink()
@@ -301,7 +316,7 @@ def _journal_document(
     if reservation.stages != expected_stages:
         raise AuthoringError("authoring reserved stage evidence is inconsistent")
     return {
-        "schema": "lockstep.authoring-transaction/v3",
+        "schema": "lockstep.authoring-transaction/v4",
         "operation_id": reservation.operation_id,
         "project": {
             "path": str(bundle.resolved_project),
@@ -348,6 +363,7 @@ def _journal_document(
         },
         "replacement_progress": [],
         "created_directory_progress": [],
+        "committed": False,
     }
 
 

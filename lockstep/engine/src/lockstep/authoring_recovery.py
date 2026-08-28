@@ -2,45 +2,39 @@
 
 from __future__ import annotations
 
-import hashlib
 import os
 import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from lockstep.authoring_committed_recovery import CommittedAuthoringRecovery
 from lockstep.authoring_directory_recovery import DirectoryRecoveryPlan
 from lockstep.authoring_journal import AuthoringJournal
 from lockstep.authoring_project_tree import AuthoringProjectTree
+from lockstep.authoring_recovery_observation import (
+    ObservedRecoveryFile,
+    fsync_recovery_regular,
+    matches_after_file,
+    matches_captured_before,
+    matches_desired_before,
+    matches_planned_after,
+    observe_recovery_file,
+    require_same_recovery_file,
+    same_recovery_file_identity,
+)
 from lockstep.authoring_recovery_model import (
     AuthoringRecoveryModel,
-    RecoveryBeforeImage,
     RecoveryWriteEntry,
 )
 from lockstep.errors import AuthoringError
-from lockstep.recipe.authority import RecipeLimits
-
-
-_MAX_FILE_BYTES = RecipeLimits().max_file_bytes
-
-
-@dataclass(frozen=True, slots=True)
-class _ObservedFile:
-    device: int
-    inode: int
-    mode: int
-    size: int
-    mtime_ns: int
-    ctime_ns: int
-    sha256: str
-    content: bytes
 
 
 @dataclass(frozen=True, slots=True)
 class _DestinationState:
     entry: RecoveryWriteEntry
     state: Literal["before", "after"]
-    observed: _ObservedFile | None
+    observed: ObservedRecoveryFile | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,7 +42,7 @@ class _OwnedStage:
     entry: RecoveryWriteEntry
     path: Path
     state: Literal["absent", "complete", "incomplete"]
-    observed: _ObservedFile | None
+    observed: ObservedRecoveryFile | None
 
 
 def recover_authoring_project(state_dir: Path, project: Path) -> None:
@@ -62,7 +56,10 @@ def recover_authoring_project(state_dir: Path, project: Path) -> None:
             journal.sync_namespace()
             return
         model = journal.read_recovery_model(expected_project=project_identity)
-        AuthoringRecovery(journal, model).recover()
+        if model.committed:
+            CommittedAuthoringRecovery(journal, model).recover()
+        else:
+            AuthoringRecovery(journal, model).recover()
 
 
 class AuthoringRecovery:
@@ -101,7 +98,7 @@ class AuthoringRecovery:
             self._inspect_restoration_stage(state, directories)
             for state in destinations
         )
-        removed_absent_destinations: dict[int, _ObservedFile] = {}
+        removed_absent_destinations: dict[int, ObservedRecoveryFile] = {}
         for state in reversed(destinations):
             if state.state == "after":
                 if state.entry.before.absent:
@@ -118,7 +115,7 @@ class AuthoringRecovery:
             if (
                 removed_destination is not None
                 and stage.observed is not None
-                and _same_file_identity(stage.observed, removed_destination)
+                and same_recovery_file_identity(stage.observed, removed_destination)
             ):
                 self._remove_aliased_publication_stage(
                     stage, removed_destination
@@ -144,14 +141,14 @@ class AuthoringRecovery:
             return _DestinationState(entry, "before", None)
         parent_descriptor, leaf = self.tree.open_parent(entry.path)
         try:
-            observed = _observe_file(parent_descriptor, leaf, entry.path)
+            observed = observe_recovery_file(parent_descriptor, leaf, entry.path)
         finally:
             os.close(parent_descriptor)
-        if _matches_captured_before(
+        if matches_captured_before(
             observed, entry.before
-        ) or _matches_desired_before(observed, entry.before):
+        ) or matches_desired_before(observed, entry.before):
             return _DestinationState(entry, "before", observed)
-        if _matches_planned_after(observed, entry):
+        if matches_planned_after(observed, entry):
             return _DestinationState(entry, "after", observed)
         raise AuthoringError(
             f"authoring recovery destination is foreign: {entry.path}"
@@ -170,14 +167,14 @@ class AuthoringRecovery:
             return _OwnedStage(entry, path, "absent", None)
         parent_descriptor, leaf = self.tree.open_parent(path)
         try:
-            observed = _observe_file(parent_descriptor, leaf, path)
+            observed = observe_recovery_file(parent_descriptor, leaf, path)
         finally:
             os.close(parent_descriptor)
         if observed is None:
             # Exact terminal destination classification makes a missing stage
             # harmless: it was consumed, or recovery can abandon it all-old.
             return _OwnedStage(entry, path, "absent", None)
-        if _matches_after_file(observed, entry):
+        if matches_after_file(observed, entry):
             return _OwnedStage(entry, path, "complete", observed)
         if incomplete_is_reclaimable:
             return _OwnedStage(entry, path, "incomplete", observed)
@@ -196,12 +193,12 @@ class AuthoringRecovery:
             return _OwnedStage(entry, path, "absent", None)
         parent_descriptor, leaf = self.tree.open_parent(path)
         try:
-            observed = _observe_file(parent_descriptor, leaf, path)
+            observed = observe_recovery_file(parent_descriptor, leaf, path)
         finally:
             os.close(parent_descriptor)
         if observed is None:
             return _OwnedStage(entry, path, "absent", None)
-        if _matches_desired_before(observed, entry.before):
+        if matches_desired_before(observed, entry.before):
             return _OwnedStage(entry, path, "complete", observed)
         if destination.state == "after":
             return _OwnedStage(entry, path, "incomplete", observed)
@@ -221,8 +218,8 @@ class AuthoringRecovery:
             stage_leaf, stage_observed = self._prepare_restoration_stage(
                 parent_descriptor, restoration_stage
             )
-            _require_same_file(parent_descriptor, leaf, entry.path, observed)
-            _require_same_file(
+            require_same_recovery_file(parent_descriptor, leaf, entry.path, observed)
+            require_same_recovery_file(
                 parent_descriptor,
                 stage_leaf,
                 restoration_stage.path,
@@ -234,19 +231,19 @@ class AuthoringRecovery:
                 src_dir_fd=parent_descriptor,
                 dst_dir_fd=parent_descriptor,
             )
-            _fsync_regular_at(parent_descriptor, leaf)
+            fsync_recovery_regular(parent_descriptor, leaf)
             os.fsync(parent_descriptor)
         finally:
             os.close(parent_descriptor)
 
     def _remove_absent_destination(
         self, state: _DestinationState
-    ) -> _ObservedFile:
+    ) -> ObservedRecoveryFile:
         if not state.entry.before.absent or state.observed is None:
             raise RuntimeError("absent destination removal has invalid state")
         parent_descriptor, leaf = self.tree.open_parent(state.entry.path)
         try:
-            observed = _require_same_file(
+            observed = require_same_recovery_file(
                 parent_descriptor, leaf, state.entry.path, state.observed
             )
             os.unlink(leaf, dir_fd=parent_descriptor)
@@ -257,7 +254,7 @@ class AuthoringRecovery:
 
     def _prepare_restoration_stage(
         self, parent_descriptor: int, stage: _OwnedStage
-    ) -> tuple[str, _ObservedFile]:
+    ) -> tuple[str, ObservedRecoveryFile]:
         entry = stage.entry
         before = entry.before
         if before.content is None or before.mode is None:
@@ -267,14 +264,14 @@ class AuthoringRecovery:
         if stage.state == "complete":
             if stage.observed is None:
                 raise RuntimeError("complete restoration stage has no observation")
-            observed = _require_same_file(
+            observed = require_same_recovery_file(
                 parent_descriptor, leaf, path, stage.observed
             )
             return leaf, observed
         if stage.state == "incomplete":
             if stage.observed is None:
                 raise RuntimeError("incomplete restoration stage has no observation")
-            _require_same_file(parent_descriptor, leaf, path, stage.observed)
+            require_same_recovery_file(parent_descriptor, leaf, path, stage.observed)
             os.unlink(leaf, dir_fd=parent_descriptor)
             os.fsync(parent_descriptor)
         flags = (
@@ -294,8 +291,8 @@ class AuthoringRecovery:
         finally:
             os.close(descriptor)
         os.fsync(parent_descriptor)
-        observed = _observe_file(parent_descriptor, leaf, path)
-        if observed is None or not _matches_desired_before(observed, before):
+        observed = observe_recovery_file(parent_descriptor, leaf, path)
+        if observed is None or not matches_desired_before(observed, before):
             raise AuthoringError("authoring recovery stage could not be proven")
         return leaf, observed
 
@@ -306,10 +303,10 @@ class AuthoringRecovery:
             raise RuntimeError("observed publication stage has no observation")
         parent_descriptor, leaf = self.tree.open_parent(stage.path)
         try:
-            current = _require_same_file(
+            current = require_same_recovery_file(
                 parent_descriptor, leaf, stage.path, stage.observed
             )
-            if stage.state == "complete" and not _matches_after_file(
+            if stage.state == "complete" and not matches_after_file(
                 current, stage.entry
             ):
                 raise AuthoringError(
@@ -321,19 +318,19 @@ class AuthoringRecovery:
             os.close(parent_descriptor)
 
     def _remove_aliased_publication_stage(
-        self, stage: _OwnedStage, removed_destination: _ObservedFile
+        self, stage: _OwnedStage, removed_destination: ObservedRecoveryFile
     ) -> None:
         if stage.state != "complete" or stage.observed is None:
             raise RuntimeError("aliased publication stage has invalid state")
-        if not _same_file_identity(stage.observed, removed_destination):
+        if not same_recovery_file_identity(stage.observed, removed_destination):
             raise RuntimeError("publication stage is not the destination alias")
         parent_descriptor, leaf = self.tree.open_parent(stage.path)
         try:
-            observed = _observe_file(parent_descriptor, leaf, stage.path)
+            observed = observe_recovery_file(parent_descriptor, leaf, stage.path)
             if (
                 observed is None
-                or not _same_file_identity(observed, stage.observed)
-                or not _matches_after_file(observed, stage.entry)
+                or not same_recovery_file_identity(observed, stage.observed)
+                or not matches_after_file(observed, stage.entry)
             ):
                 raise AuthoringError(
                     f"authoring recovery stage changed before cleanup: {stage.path}"
@@ -348,7 +345,7 @@ class AuthoringRecovery:
             return
         parent_descriptor, leaf = self.tree.open_parent(stage.path)
         try:
-            observed = _observe_file(parent_descriptor, leaf, stage.path)
+            observed = observe_recovery_file(parent_descriptor, leaf, stage.path)
             if observed is None:
                 return
             if (
@@ -359,7 +356,7 @@ class AuthoringRecovery:
                 raise AuthoringError(
                     f"authoring recovery restoration stage changed: {stage.path}"
                 )
-            if not _matches_desired_before(observed, stage.entry.before):
+            if not matches_desired_before(observed, stage.entry.before):
                 raise AuthoringError(
                     f"authoring recovery restoration stage is foreign: {stage.path}"
                 )
@@ -381,10 +378,12 @@ class AuthoringRecovery:
                 continue
             parent_descriptor, leaf = self.tree.open_parent(entry.path)
             try:
-                observed = _observe_file(parent_descriptor, leaf, entry.path)
+                observed = observe_recovery_file(
+                    parent_descriptor, leaf, entry.path
+                )
             finally:
                 os.close(parent_descriptor)
-            if not _matches_desired_before(observed, entry.before):
+            if not matches_desired_before(observed, entry.before):
                 raise AuthoringError(
                     f"authoring recovery did not restore before-image: {entry.path}"
                 )
@@ -402,142 +401,16 @@ class AuthoringRecovery:
                 continue
             parent_descriptor, leaf = self.tree.open_parent(entry.path)
             try:
-                observed = _observe_file(parent_descriptor, leaf, entry.path)
-                if not _matches_desired_before(observed, entry.before):
+                observed = observe_recovery_file(parent_descriptor, leaf, entry.path)
+                if not matches_desired_before(observed, entry.before):
                     raise AuthoringError(
                         f"authoring recovery did not restore before-image: {entry.path}"
                     )
                 if observed is not None:
-                    _fsync_regular_at(parent_descriptor, leaf)
+                    fsync_recovery_regular(parent_descriptor, leaf)
                 os.fsync(parent_descriptor)
             finally:
                 os.close(parent_descriptor)
-
-
-def _observe_file(
-    parent_descriptor: int, leaf: str, path: Path
-) -> _ObservedFile | None:
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_NONBLOCK", 0)
-    )
-    try:
-        descriptor = os.open(leaf, flags, dir_fd=parent_descriptor)
-    except FileNotFoundError:
-        return None
-    except OSError as exc:
-        raise AuthoringError(f"authoring recovery path is unavailable: {path}") from exc
-    try:
-        first = os.fstat(descriptor)
-        if not stat.S_ISREG(first.st_mode):
-            raise AuthoringError(f"authoring recovery path is not regular: {path}")
-        if first.st_size > _MAX_FILE_BYTES:
-            raise AuthoringError(
-                f"authoring recovery path exceeds its byte limit: {path}"
-            )
-        chunks: list[bytes] = []
-        remaining = first.st_size + 1
-        while remaining:
-            chunk = os.read(descriptor, min(1024 * 1024, remaining))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        last = os.fstat(descriptor)
-    finally:
-        os.close(descriptor)
-    if _file_facts(first) != _file_facts(last):
-        raise AuthoringError(f"authoring recovery path changed while reading: {path}")
-    content = b"".join(chunks)
-    if len(content) != first.st_size:
-        raise AuthoringError(f"authoring recovery path changed size: {path}")
-    return _ObservedFile(
-        first.st_dev,
-        first.st_ino,
-        first.st_mode,
-        first.st_size,
-        first.st_mtime_ns,
-        first.st_ctime_ns,
-        hashlib.sha256(content).hexdigest(),
-        content,
-    )
-
-
-def _matches_captured_before(
-    observed: _ObservedFile | None, before: RecoveryBeforeImage
-) -> bool:
-    if before.absent:
-        return observed is None
-    leaf = before.leaf
-    return bool(
-        observed is not None
-        and leaf is not None
-        and before.content is not None
-        and (
-            observed.device,
-            observed.inode,
-            observed.mode,
-            observed.size,
-            observed.mtime_ns,
-            observed.ctime_ns,
-        )
-        == (
-            leaf.device,
-            leaf.inode,
-            leaf.mode,
-            leaf.size,
-            leaf.mtime_ns,
-            leaf.ctime_ns,
-        )
-        and observed.content == before.content
-        and observed.sha256 == before.sha256
-    )
-
-
-def _matches_planned_after(
-    observed: _ObservedFile | None, entry: RecoveryWriteEntry
-) -> bool:
-    return observed is not None and _matches_after_file(observed, entry)
-
-
-def _matches_after_file(observed: _ObservedFile, entry: RecoveryWriteEntry) -> bool:
-    after = entry.after
-    return (
-        observed.size == after.size
-        and observed.sha256 == after.sha256
-        and stat.S_IMODE(observed.mode) == after.mode
-    )
-
-
-def _matches_desired_before(
-    observed: _ObservedFile | None, before: RecoveryBeforeImage
-) -> bool:
-    if before.absent:
-        return observed is None
-    return bool(
-        observed is not None
-        and before.content is not None
-        and observed.content == before.content
-        and observed.sha256 == before.sha256
-        and stat.S_IMODE(observed.mode) == before.mode
-    )
-
-
-def _require_same_file(
-    parent_descriptor: int,
-    leaf: str,
-    path: Path,
-    expected: _ObservedFile,
-) -> _ObservedFile:
-    observed = _observe_file(parent_descriptor, leaf, path)
-    if observed is None or observed != expected:
-        raise AuthoringError(f"authoring recovery path changed before mutation: {path}")
-    return observed
-
-
-def _same_file_identity(left: _ObservedFile, right: _ObservedFile) -> bool:
-    return (left.device, left.inode) == (right.device, right.inode)
 
 
 def _write_all(descriptor: int, content: bytes) -> None:
@@ -547,28 +420,3 @@ def _write_all(descriptor: int, content: bytes) -> None:
         if written <= 0:
             raise OSError("short write while staging authoring recovery")
         remaining = remaining[written:]
-
-
-def _fsync_regular_at(parent_descriptor: int, leaf: str) -> None:
-    descriptor = os.open(
-        leaf,
-        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
-        dir_fd=parent_descriptor,
-    )
-    try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise AuthoringError("authoring recovery destination is not regular")
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
-def _file_facts(info: os.stat_result) -> tuple[int, int, int, int, int, int]:
-    return (
-        info.st_dev,
-        info.st_ino,
-        info.st_mode,
-        info.st_size,
-        info.st_mtime_ns,
-        info.st_ctime_ns,
-    )

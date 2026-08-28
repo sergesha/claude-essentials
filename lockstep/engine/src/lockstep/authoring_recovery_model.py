@@ -23,6 +23,7 @@ from lockstep.recipe.authority import RecipeLimits
 
 _JOURNAL_SCHEMA_V2 = "lockstep.authoring-transaction/v2"
 _JOURNAL_SCHEMA_V3 = "lockstep.authoring-transaction/v3"
+_JOURNAL_SCHEMA_V4 = "lockstep.authoring-transaction/v4"
 _RESERVATION_KIND = "complete-reserved-stage-absence/v1"
 MAX_RECOVERY_JOURNAL_BYTES = 16 * 1024 * 1024
 _MAX_TEXT_BYTES = 4096
@@ -84,6 +85,7 @@ class AuthoringRecoveryModel:
     replacement_progress: tuple[int, ...]
     directory_candidates: tuple[Path, ...]
     created_directories: tuple[PathIdentity, ...]
+    committed: bool
 
 
 def derive_created_directory_candidates(
@@ -169,6 +171,8 @@ class _RecoveryParser:
             keys = base_keys
         elif schema == _JOURNAL_SCHEMA_V3:
             keys = base_keys | {"created_directory_progress"}
+        elif schema == _JOURNAL_SCHEMA_V4:
+            keys = base_keys | {"created_directory_progress", "committed"}
         else:
             raise AuthoringError("authoring recovery journal schema is unsupported")
         document = self._mapping(
@@ -184,6 +188,18 @@ class _RecoveryParser:
             document["reservation"], operation_id, write_set
         )
         progress = self._progress(document["replacement_progress"], len(write_set))
+        committed = False
+        if schema == _JOURNAL_SCHEMA_V4:
+            raw_committed = document["committed"]
+            if type(raw_committed) is not bool:
+                raise AuthoringError(
+                    "authoring recovery committed evidence is invalid"
+                )
+            committed = raw_committed
+            if committed and progress != tuple(range(len(write_set))):
+                raise AuthoringError(
+                    "authoring recovery committed progress is incomplete"
+                )
         candidates = derive_created_directory_candidates(
             tuple((entry.path, entry.ancestors) for entry in write_set)
         )
@@ -203,6 +219,7 @@ class _RecoveryParser:
             progress,
             candidates,
             created_directories,
+            committed,
         )
 
     def _reservation(

@@ -108,6 +108,7 @@ class AuthoringTransaction:
                 ) from rollback_error
             self.journal.finish()
             raise publish_error
+        self.journal.record_committed()
         self.journal.finish()
 
     def _create_destination_directories(self) -> None:
