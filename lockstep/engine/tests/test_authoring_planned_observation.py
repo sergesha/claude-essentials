@@ -325,3 +325,30 @@ def test_manual_check_and_diff_do_not_require_workflow_plan(
         "warnings": [],
     }
     assert diff_recipe(project, "manual") == ""
+
+
+@pytest.mark.parametrize("unsafe_leaf", ("symlink", "oversized", "deep-yaml"))
+def test_preflight_classification_captures_a_bounded_regular_leaf(
+    tmp_path: Path, unsafe_leaf: str
+) -> None:
+    from lockstep.runtime import service
+    from lockstep.runtime.errors import LockstepError
+
+    recipes = tmp_path / "project/.lockstep/recipes"
+    recipes.mkdir(parents=True)
+    recipe = recipes / "leaf.recipe.yaml"
+    if unsafe_leaf == "symlink":
+        target = tmp_path / "outside.recipe.yaml"
+        target.write_text("not: [valid", encoding="utf-8")
+        recipe.symlink_to(target)
+        expected = "regular file"
+    else:
+        if unsafe_leaf == "oversized":
+            recipe.write_bytes(b"x" * (1024 * 1024 + 1))
+            expected = "file admission limit"
+        else:
+            recipe.write_text("[" * 2000 + "0" + "]" * 2000, encoding="utf-8")
+            expected = "YAML depth exceeds"
+
+    with pytest.raises(LockstepError, match=expected):
+        service.preflight_recipe(recipes, "leaf")

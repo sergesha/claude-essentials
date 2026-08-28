@@ -52,7 +52,9 @@ _ProjectedRole = tuple[str, dict[Path, bytes]]
 
 
 @dataclass(frozen=True, slots=True)
-class _PlannedCompilation:
+class PlannedProjectCompilation:
+    """One captured workflow closure and its same-pass root compilation."""
+
     bundle: ProjectCompilationBundle
     root_result: CompilationResult
 
@@ -322,7 +324,7 @@ def _plan_destination_only_bundle(
     )
 
 
-def _plan_project_compilation(recipe: AuthoredRecipe) -> _PlannedCompilation:
+def _plan_project_compilation(recipe: AuthoredRecipe) -> PlannedProjectCompilation:
     """Retain the root result from the same pass that produced the bundle."""
 
     if recipe.kind != "workflow" or recipe.workflow_path is None:
@@ -336,7 +338,7 @@ def _plan_project_compilation(recipe: AuthoredRecipe) -> _PlannedCompilation:
     before_images, after_images = _destination_images(
         project, compiled_roles, directory_identities
     )
-    return _PlannedCompilation(
+    return PlannedProjectCompilation(
         ProjectCompilationBundle(
             project,
             project_identity,

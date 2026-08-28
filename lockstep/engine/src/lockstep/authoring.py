@@ -2,12 +2,9 @@
 
 from __future__ import annotations
 
-import difflib
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Mapping
-
-import yaml
 
 from lockstep.authoring_bundle import (
     AuthoredRecipe,
@@ -20,16 +17,21 @@ from lockstep.authoring_compilation import (
     validate_logical_name,
     workflow_call_names,
 )
+from lockstep.authoring_capture import capture_optional_regular_file
 from lockstep.authoring_installation import (
     CapturedWorkflowSource,
     plan_captured_workflow_installation,
 )
+from lockstep.authoring_results import (
+    CanonicalObservation,
+    canonical_observation,
+    diff_planned_compilation,
+)
 from lockstep.errors import AuthoringError
-from lockstep.recipe.authority import StrictRecipeIngress, canonical_execution_bytes
-from lockstep.recipe.profile import CompilerProvenance, _create_compiler_provenance
+from lockstep.recipe.authority import RecipeLimits, decode_recipe_document
+from lockstep.recipe.profile import CompilerProvenance
 from lockstep.workflow.compiler import CompilationResult
 from lockstep.workflow.estimate import estimate_manual_recipe, estimate_workflow
-from lockstep.workflow.freshness import verify_canonical_match
 from lockstep.workflow.schema import load_workflow
 from lockstep.workflow.semantics import ResolvedCatalog, ValidatedWorkflow
 
@@ -118,73 +120,26 @@ def canonical_recipe_bytes(source: Path, compiled: CompilationResult) -> bytes:
     )
 
 
-def _generated_candidates(recipe: AuthoredRecipe, compiled: CompilationResult) -> dict[str, bytes]:
-    root = recipe.recipe_path.parent
-    candidates = {}
-    for item in compiled.generated_files:
-        path = root / item.relative_path
-        try:
-            candidates[item.relative_path] = path.read_bytes()
-        except OSError as exc:
-            raise AuthoringError(
-                f"generated file {item.relative_path!r} is missing"
-            ) from exc
-    return candidates
-
-
 def canonical_match(recipe: AuthoredRecipe) -> CompilerProvenance:
     if recipe.kind != "workflow" or recipe.workflow_path is None:
         raise AuthoringError(f"manual yamlgraph recipe {recipe.name!r} has no canonical source")
-    validated, catalog, compiled = compile_project_source(recipe.workflow_path)
+    return canonical_observation(_plan_project_compilation(recipe)).proof
+
+
+def classify_generated_recipe_observation(
+    recipes_dir: Path, name: str, recipe_path: Path
+) -> CanonicalObservation | None:
+    """Classify one generated recipe and retain its exact ingress candidate."""
+
+    recipe = _classify_generated_recipe_path(recipes_dir, name, recipe_path)
+    if recipe is None:
+        return None
     try:
-        root = recipe.recipe_path.read_bytes()
-        dependency = recipe.dependency_path.read_bytes() if recipe.dependency_path else None
-    except OSError as exc:
-        raise AuthoringError("generated canonical files are missing") from exc
-    generated = _generated_candidates(recipe, compiled)
-    expected_root = canonical_recipe_bytes(recipe.workflow_path, compiled)
-    if root != expected_root:
+        return canonical_observation(_plan_project_compilation(recipe))
+    except (OSError, ValueError) as exc:
         raise AuthoringError(
-            "generated recipe is not a byte-for-byte canonical match"
-        )
-
-    calls = workflow_call_names(load_workflow(recipe.workflow_path))
-    if not calls:
-        return verify_canonical_match(
-            validated,
-            catalog,
-            root,
-            candidate_generated_files=generated,
-            candidate_dependency_manifest_bytes=dependency,
-        )
-
-    if dependency != compiled.dependency_manifest_bytes:
-        raise AuthoringError(
-            "dependency manifest is not a byte-for-byte canonical match"
-        )
-    for child in calls:
-        canonical_match(project_paths(recipe.recipe_path.parent.parent.parent, child))
-    candidate = StrictRecipeIngress(recipe.recipe_path.parent).inspect(
-        recipe.recipe_path.name
-    )
-    observed = {item.path: item.bytes for item in candidate.files}
-    for path, expected in generated.items():
-        if path not in observed or observed[path] != canonical_execution_bytes(
-            expected, logical_path=path
-        ):
-            raise AuthoringError(
-                f"generated file {path!r} is not a byte-for-byte canonical match"
-            )
-    execution_root = observed.pop(candidate.root)
-    return _create_compiler_provenance(
-        root,
-        context="canonical-match",
-        root_relative_path=candidate.root,
-        generated_files={item.path: item.bytes for item in candidate.files if item.path != candidate.root},
-        execution_recipe_bytes=execution_root,
-        execution_generated_files=observed,
-        source_bundle_sha256=candidate.source_bundle_sha256,
-    )
+            f"generated recipe failed canonical match: {exc}"
+        ) from exc
 
 
 def classify_generated_recipe(
@@ -198,16 +153,23 @@ def classify_generated_recipe(
     yamlgraph inputs.
     """
 
-    try:
-        raw = recipe_path.read_bytes()
-    except OSError as exc:
-        raise AuthoringError(f"recipe {name!r} is missing") from exc
-    if len(raw) > 1024 * 1024:
-        raise AuthoringError("recipe source exceeds the authoring classification limit")
-    try:
-        document = yaml.safe_load(raw)
-    except yaml.YAMLError as exc:
-        raise AuthoringError(f"recipe {name!r} is not valid YAML") from exc
+    observation = classify_generated_recipe_observation(recipes_dir, name, recipe_path)
+    return None if observation is None else observation.proof
+
+
+def _classify_generated_recipe_path(
+    recipes_dir: Path, name: str, recipe_path: Path
+) -> AuthoredRecipe | None:
+    limits = RecipeLimits()
+    captured = capture_optional_regular_file(
+        recipe_path,
+        max_bytes=limits.max_file_bytes,
+        label="recipe source",
+    )
+    if captured is None:
+        raise AuthoringError(f"recipe {name!r} is missing")
+    raw, _identity = captured
+    document = decode_recipe_document(raw, logical=recipe_path.name, limits=limits)
     marker = document.get("x-lockstep-generated") if isinstance(document, dict) else None
     if marker is None:
         return None
@@ -224,12 +186,7 @@ def classify_generated_recipe(
         raise AuthoringError("generated recipe source is missing")
     if recipe.recipe_path.resolve() != recipe_path.resolve():
         raise AuthoringError("generated recipe is outside the canonical project layout")
-    try:
-        return canonical_match(recipe)
-    except (OSError, ValueError) as exc:
-        raise AuthoringError(
-            f"generated recipe failed canonical match: {exc}"
-        ) from exc
+    return recipe
 
 
 def _require_workflow_compilation(recipe: AuthoredRecipe) -> Path:
@@ -327,17 +284,7 @@ def diff_recipe(project: Path, name: str) -> str:
     recipe = project_paths(project, name)
     if recipe.kind == "manual" or recipe.workflow_path is None:
         return ""
-    _validated, _catalog, compiled = compile_project_source(recipe.workflow_path)
-    observed = recipe.recipe_path.read_text() if recipe.recipe_path.exists() else ""
-    expected = canonical_recipe_bytes(recipe.workflow_path, compiled).decode("utf-8")
-    return "".join(
-        difflib.unified_diff(
-            observed.splitlines(keepends=True),
-            expected.splitlines(keepends=True),
-            fromfile=str(recipe.recipe_path),
-            tofile="canonical",
-        )
-    )
+    return diff_planned_compilation(_plan_project_compilation(recipe))
 
 
 def diff_recovered_recipe(project: Path, name: str, *, state_dir: Path) -> str:

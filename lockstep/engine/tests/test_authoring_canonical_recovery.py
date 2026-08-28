@@ -12,6 +12,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import pytest
+import lockstep.authoring as authoring
+import lockstep.authoring_results as authoring_results
 
 from lockstep.authoring import project_paths, publish_project_compilation
 from lockstep.authoring_bundle import ProjectCompilationBundle, plan_project_compilation
@@ -80,6 +82,9 @@ class _CanonicalObservation:
     reader_thread: int = field(default_factory=threading.get_ident)
     lock_held: bool = False
     reads: list[Path] = field(default_factory=list)
+    classification_captures: list[tuple[Path, bool, bool]] = field(
+        default_factory=list
+    )
     images: list[DestinationSemantics] = field(default_factory=list)
     lock_states: list[bool] = field(default_factory=list)
     inspections: list[_ObservedInspection] = field(default_factory=list)
@@ -299,25 +304,84 @@ def _observed_read_bytes(
     return read
 
 
+def _observed_classification_capture(
+    observation: _CanonicalObservation,
+    original: Callable,
+) -> Callable:
+    def capture(path: Path, **kwargs):
+        started_locked = observation.lock_held
+        result = original(path, **kwargs)
+        resolved = path.resolve(strict=False)
+        if not observation.complete and resolved in observation.exact_paths:
+            observation.classification_captures.append(
+                (resolved, started_locked, observation.lock_held)
+            )
+        return result
+
+    return capture
+
+
 def _observed_ingress(
     observation: _CanonicalObservation,
     original: Callable[..., RecipeCandidate],
 ) -> Callable[..., RecipeCandidate]:
     def inspect(ingress: StrictRecipeIngress, root: str) -> RecipeCandidate:
-        started_locked = observation.lock_held
-        if observation.lock_completed:
-            observation.post_lock_admissions += 1
-        observation.admission_depth += 1
-        try:
-            candidate = original(ingress, root)
-            observation.inspections.append(
-                _ObservedInspection(candidate, started_locked, observation.lock_held)
-            )
-            return candidate
-        finally:
-            observation.admission_depth -= 1
+        return _record_inspection(observation, lambda: original(ingress, root))
 
     return inspect
+
+
+def _observed_captured_ingress(
+    observation: _CanonicalObservation,
+    original: Callable[..., RecipeCandidate],
+) -> Callable[..., RecipeCandidate]:
+    def inspect(root: str, sources, **kwargs) -> RecipeCandidate:
+        return _record_inspection(
+            observation, lambda: original(root, sources, **kwargs)
+        )
+
+    return inspect
+
+
+def _observed_plan(
+    observation: _CanonicalObservation,
+    original: Callable,
+) -> Callable:
+    def plan(recipe):
+        result = original(recipe)
+        observation.reads.extend(source.resolved_path for source in result.bundle.sources)
+        observation.reads.extend(
+            image.resolved_path for image in result.bundle.before_images
+        )
+        observation.images.append(
+            {
+                image.resolved_path: (image.content, image.mode)
+                for image in result.bundle.before_images
+                if image.content is not None and image.mode is not None
+            }
+        )
+        observation.lock_states.append(observation.lock_held)
+        return result
+
+    return plan
+
+
+def _record_inspection(
+    observation: _CanonicalObservation,
+    inspect: Callable[[], RecipeCandidate],
+) -> RecipeCandidate:
+    started_locked = observation.lock_held
+    if observation.lock_completed:
+        observation.post_lock_admissions += 1
+    observation.admission_depth += 1
+    try:
+        candidate = inspect()
+        observation.inspections.append(
+            _ObservedInspection(candidate, started_locked, observation.lock_held)
+        )
+        return candidate
+    finally:
+        observation.admission_depth -= 1
 
 
 def _observed_authorization(
@@ -378,16 +442,34 @@ def _install_canonical_observer(
     )
     original_flock = fcntl.flock
     original_read_bytes = Path.read_bytes
+    original_classification_capture = authoring.capture_optional_regular_file
+    original_plan = authoring._plan_project_compilation
     original_inspect = StrictRecipeIngress.inspect
+    original_captured_inspect = authoring_results.inspect_recipe_bytes
     original_authorize = RecipeCandidate.authorize
     monkeypatch.setattr(fcntl, "flock", _tracked_flock(observation, original_flock))
     monkeypatch.setattr(
         Path, "read_bytes", _observed_read_bytes(observation, original_read_bytes)
     )
     monkeypatch.setattr(
+        authoring,
+        "capture_optional_regular_file",
+        _observed_classification_capture(observation, original_classification_capture),
+    )
+    monkeypatch.setattr(
+        authoring,
+        "_plan_project_compilation",
+        _observed_plan(observation, original_plan),
+    )
+    monkeypatch.setattr(
         StrictRecipeIngress,
         "inspect",
         _observed_ingress(observation, original_inspect),
+    )
+    monkeypatch.setattr(
+        authoring_results,
+        "inspect_recipe_bytes",
+        _observed_captured_ingress(observation, original_captured_inspect),
     )
     monkeypatch.setattr(
         RecipeCandidate,
@@ -468,6 +550,11 @@ def test_public_start_recovers_before_locked_canonical_ingress(
         raised = exc
 
     assert observation.reads, "public start never reached canonical project ingress"
+    assert observation.classification_captures
+    assert all(
+        started_locked and completed_locked
+        for _path, started_locked, completed_locked in observation.classification_captures
+    )
     locked_images = tuple(
         image
         for image, locked in zip(
@@ -570,6 +657,11 @@ def test_public_start_uses_ready_boundary_for_one_locked_admission(
     assert observation.inspections
     assert len(observation.authorizations) == 1
     assert observation.reads
+    assert observation.classification_captures
+    assert all(
+        started_locked and completed_locked
+        for _path, started_locked, completed_locked in observation.classification_captures
+    )
     assert all(observation.lock_states)
     assert all(item.locked for item in observation.inspections)
     assert observation.authorizations[0].locked
@@ -631,6 +723,15 @@ def test_public_start_discards_optimistic_result_when_boundary_appears(
     result = _invoke_public_start(adapter, scenario.project, owner_state, monkeypatch)
 
     assert publication_count == 1
+    assert len(observation.classification_captures) == 2
+    _first_path, first_started_locked, first_completed_locked = (
+        observation.classification_captures[0]
+    )
+    _second_path, second_started_locked, second_completed_locked = (
+        observation.classification_captures[1]
+    )
+    assert not first_started_locked and not first_completed_locked
+    assert second_started_locked and second_completed_locked
     assert len(observation.authorizations) == 2
     optimistic_authorization, locked_authorization = observation.authorizations
     assert not optimistic_authorization.locked
@@ -674,6 +775,9 @@ def test_public_start_uses_one_optimistic_plan_while_boundary_remains_absent(
     result = _invoke_public_start(adapter, scenario.project, owner_state, monkeypatch)
 
     assert observation.inspections
+    assert len(observation.classification_captures) == 1
+    _path, started_locked, completed_locked = observation.classification_captures[0]
+    assert not started_locked and not completed_locked
     assert len(observation.authorizations) == 1
     assert all(not item.locked for item in observation.inspections)
     assert not observation.authorizations[0].locked
@@ -713,6 +817,7 @@ def test_public_start_rejects_unready_boundary_without_reader_side_repair(
     assert isinstance(raised, LockstepError)
     assert namespace_image(owner_state) == before
     assert observation.reads == []
+    assert observation.classification_captures == []
     assert observation.inspections == []
     assert observation.authorizations == []
     assert observation.authorized is None

@@ -76,6 +76,12 @@ class RecipeLoader:
         candidate, logical, canonical_path = self._inspect_path(path)
         return self._ref_for_inspection(candidate, logical, canonical_path)
 
+    def _candidate_ref_for_path(
+        self, path: Path
+    ) -> tuple[RecipeCandidate, RecipeRef]:
+        candidate, logical, canonical_path = self._inspect_path(path)
+        return candidate, self._ref_for_inspection(candidate, logical, canonical_path)
+
     def discover(self) -> dict[str, RecipeRef]:
         if not self._root.exists():
             return {}
@@ -104,6 +110,30 @@ class RecipeLoader:
             raise RecipeError(
                 f"recipe not found: {name_or_path!r}; runnable recipes end in {_SUFFIX}"
             ) from exc
+
+    def resolve_candidate(
+        self, name_or_path: str | Path
+    ) -> tuple[RecipeRef, RecipeCandidate]:
+        """Resolve a reference while retaining its same-pass ingress candidate."""
+
+        candidate_path = Path(name_or_path)
+        if candidate_path.is_absolute() or candidate_path.parent != Path("."):
+            candidate, ref = self._candidate_ref_for_path(candidate_path)
+            return ref, candidate
+        if str(name_or_path).endswith(_SUFFIX):
+            candidate, ref = self._candidate_ref_for_path(
+                self._root / candidate_path
+            )
+            return ref, candidate
+        direct = self._root / f"{name_or_path}{_SUFFIX}"
+        if direct.exists() or direct.is_symlink():
+            candidate, ref = self._candidate_ref_for_path(direct)
+            return ref, candidate
+        ref = self.resolve(name_or_path)
+        candidate, verified = self._candidate_ref_for_path(ref.path)
+        if verified != ref:
+            raise RecipeError(f"recipe reference changed while resolving: {ref.path}")
+        return ref, candidate
 
     def load(self, ref: RecipeRef) -> dict[str, Any]:
         candidate, logical, canonical_path = self._inspect_path(ref.path)

@@ -18,11 +18,15 @@ from lockstep.recipe.authority import (
     AuthorizedRecipe,
     RecipeAuthorityError,
     RecipeAuthorityPolicy,
-    StrictRecipeIngress,
+    RecipeCandidate,
 )
 from lockstep.recipe.loader import RecipeError, RecipeLoader
 from lockstep.recipe.yamlgraph_adapter import open_native_app
-from lockstep.authoring import AuthoringError, classify_generated_recipe
+from lockstep.authoring import (
+    AuthoringError,
+    CanonicalObservation,
+    classify_generated_recipe_observation,
+)
 from lockstep.authoring_bundle import PathIdentity
 from lockstep.authoring_journal import AuthoringJournal
 from lockstep.runtime import config, sessions
@@ -134,6 +138,23 @@ def validate_reason_payload(reason: object) -> str:
     return value
 
 
+def _resolve_preflight_recipe(
+    recipes_dir: Path,
+    name: str,
+    compiler_provenance: profile.CompilerProvenance | None,
+) -> tuple[RecipeCandidate, CanonicalObservation | None]:
+    loader = RecipeLoader(recipes_dir)
+    direct = recipes_dir / f"{name}.recipe.yaml"
+    if compiler_provenance is None and (direct.exists() or direct.is_symlink()):
+        observation = classify_generated_recipe_observation(
+            recipes_dir, name, direct
+        )
+        if observation is not None:
+            return observation.candidate, observation
+    _ref, candidate = loader.resolve_candidate(name)
+    return candidate, None
+
+
 def preflight_recipe(
     recipes_dir: Path,
     name: str,
@@ -145,23 +166,17 @@ def preflight_recipe(
     if not _NAME_RE.fullmatch(name or ""):
         raise LockstepError(f"invalid recipe name {name!r}")
     try:
-        source = RecipeLoader(Path(recipes_dir).resolve()).resolve(name).path
+        candidate, canonical_observation = _resolve_preflight_recipe(
+            Path(recipes_dir).resolve(), name, compiler_provenance
+        )
         # A trusted same-process compiler capability already binds the exact
         # executable bundle (used by embedders/tests before files are checked
         # into the conventional project layout).  Public file ingress has no
         # such capability and must mint canonical-match from source instead.
         canonical_proof = (
-            None
-            if compiler_provenance is not None
-            else classify_generated_recipe(Path(recipes_dir).resolve(), name, source)
+            None if canonical_observation is None else canonical_observation.proof
         )
-        if compiler_provenance is not None and canonical_proof is not None:
-            if compiler_provenance.source_bundle_sha256 != canonical_proof.source_bundle_sha256:
-                raise RecipeAuthorityError(
-                    "supplied compiler provenance does not match canonical source"
-                )
         effective_provenance = canonical_proof or compiler_provenance
-        candidate = StrictRecipeIngress(source.parent).inspect(source.name)
         if (
             effective_provenance is not None
             and candidate.source_bundle_sha256
