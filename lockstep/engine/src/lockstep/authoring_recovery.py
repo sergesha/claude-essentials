@@ -80,10 +80,6 @@ class AuthoringRecovery:
         self.tree = AuthoringProjectTree.from_identities(model.project, chains)
 
     def recover(self) -> None:
-        if any(entry.before.absent for entry in self.model.write_set):
-            raise AuthoringError(
-                "authoring recovery supports only existing destination before-images"
-            )
         destinations = tuple(
             self._classify_destination(entry) for entry in self.model.write_set
         )
@@ -99,12 +95,30 @@ class AuthoringRecovery:
         restoration_stages = tuple(
             self._inspect_restoration_stage(state) for state in destinations
         )
+        removed_absent_destinations: dict[int, _ObservedFile] = {}
         for state in reversed(destinations):
             if state.state == "after":
-                self._restore(state, restoration_stages[state.entry.index])
+                if state.entry.before.absent:
+                    removed_absent_destinations[state.entry.index] = (
+                        self._remove_absent_destination(state)
+                    )
+                else:
+                    self._restore(state, restoration_stages[state.entry.index])
         self._require_all_before_images()
         for stage in publication_stages:
-            self._remove_publication_stage(stage)
+            removed_destination = removed_absent_destinations.get(
+                stage.entry.index
+            )
+            if (
+                removed_destination is not None
+                and stage.observed is not None
+                and _same_file_identity(stage.observed, removed_destination)
+            ):
+                self._remove_aliased_publication_stage(
+                    stage, removed_destination
+                )
+            else:
+                self._remove_publication_stage(stage)
         for stage in restoration_stages:
             self._reconcile_restoration_stage(stage)
         self._durably_confirm_all_before_images()
@@ -203,6 +217,22 @@ class AuthoringRecovery:
         finally:
             os.close(parent_descriptor)
 
+    def _remove_absent_destination(
+        self, state: _DestinationState
+    ) -> _ObservedFile:
+        if not state.entry.before.absent or state.observed is None:
+            raise RuntimeError("absent destination removal has invalid state")
+        parent_descriptor, leaf = self.tree.open_parent(state.entry.path)
+        try:
+            observed = _require_same_file(
+                parent_descriptor, leaf, state.entry.path, state.observed
+            )
+            os.unlink(leaf, dir_fd=parent_descriptor)
+            os.fsync(parent_descriptor)
+            return observed
+        finally:
+            os.close(parent_descriptor)
+
     def _prepare_restoration_stage(
         self, parent_descriptor: int, stage: _OwnedStage
     ) -> tuple[str, _ObservedFile]:
@@ -268,6 +298,29 @@ class AuthoringRecovery:
         finally:
             os.close(parent_descriptor)
 
+    def _remove_aliased_publication_stage(
+        self, stage: _OwnedStage, removed_destination: _ObservedFile
+    ) -> None:
+        if stage.state != "complete" or stage.observed is None:
+            raise RuntimeError("aliased publication stage has invalid state")
+        if not _same_file_identity(stage.observed, removed_destination):
+            raise RuntimeError("publication stage is not the destination alias")
+        parent_descriptor, leaf = self.tree.open_parent(stage.path)
+        try:
+            observed = _observe_file(parent_descriptor, leaf, stage.path)
+            if (
+                observed is None
+                or not _same_file_identity(observed, stage.observed)
+                or not _matches_after_file(observed, stage.entry)
+            ):
+                raise AuthoringError(
+                    f"authoring recovery stage changed before cleanup: {stage.path}"
+                )
+            os.unlink(leaf, dir_fd=parent_descriptor)
+            os.fsync(parent_descriptor)
+        finally:
+            os.close(parent_descriptor)
+
     def _reconcile_restoration_stage(self, stage: _OwnedStage) -> None:
         parent_descriptor, leaf = self.tree.open_parent(stage.path)
         try:
@@ -308,13 +361,12 @@ class AuthoringRecovery:
             parent_descriptor, leaf = self.tree.open_parent(entry.path)
             try:
                 observed = _observe_file(parent_descriptor, leaf, entry.path)
-                if observed is None or not _matches_desired_before(
-                    observed, entry.before
-                ):
+                if not _matches_desired_before(observed, entry.before):
                     raise AuthoringError(
                         f"authoring recovery did not restore before-image: {entry.path}"
                     )
-                _fsync_regular_at(parent_descriptor, leaf)
+                if observed is not None:
+                    _fsync_regular_at(parent_descriptor, leaf)
                 os.fsync(parent_descriptor)
             finally:
                 os.close(parent_descriptor)
@@ -440,6 +492,10 @@ def _require_same_file(
     if observed is None or observed != expected:
         raise AuthoringError(f"authoring recovery path changed before mutation: {path}")
     return observed
+
+
+def _same_file_identity(left: _ObservedFile, right: _ObservedFile) -> bool:
+    return (left.device, left.inode) == (right.device, right.inode)
 
 
 def _write_all(descriptor: int, content: bytes) -> None:
