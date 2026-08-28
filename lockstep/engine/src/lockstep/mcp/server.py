@@ -245,11 +245,7 @@ def scenario_start(recipe: str, vars: dict | None = None, ctx: Context | None = 
  — never an argument here."""
     project = _project_for_context(ctx)
     values = validate_start_input(vars)
-    _state_dir, recipes_dir = _configured_paths(project)
-    authorized = preflight_recipe(recipes_dir, recipe)
-    return _mark(
-        _command_for(project).start_authorized(recipe, authorized, values, str(project))
-    )
+    return _mark(_command_for(project).start(recipe, values, str(project)))
 
 
 @app.tool()

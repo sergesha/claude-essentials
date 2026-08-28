@@ -18,7 +18,7 @@ class AdvisoryLockTimeout(TimeoutError):
 
 @contextmanager
 def advisory_file_lock(
-    path: Path, *, timeout: float | None = None
+    path: Path, *, timeout: float | None = None, create: bool = True
 ) -> Iterator[None]:
     """Hold an owner-only file lock until release or process death.
 
@@ -26,11 +26,10 @@ def advisory_file_lock(
     persistent; only the kernel lock conveys ownership, so elapsed wall time can
     never make a live critical section stealable.
     """
-    descriptor = os.open(
-        path,
-        os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
-        0o600,
-    )
+    flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    if create:
+        flags |= os.O_CREAT
+    descriptor = os.open(path, flags, 0o600)
     try:
         info = os.fstat(descriptor)
         if (

@@ -6,11 +6,24 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TypeVar
 
+from lockstep.authoring_bundle import PathIdentity
 from lockstep.authoring_journal import AuthoringJournal
 from lockstep.authoring_recovery import recover_locked_authoring_project
 
 
 Observation = TypeVar("Observation")
+
+
+def observe_existing_authoring_project(
+    journal: AuthoringJournal,
+    project_identity: PathIdentity,
+    operation: Callable[[], Observation],
+) -> Observation:
+    """Recover and observe through a reader-opened persistent boundary."""
+
+    with journal.locked_existing():
+        recover_locked_authoring_project(journal, project_identity)
+        return operation()
 
 
 def observe_authoring_project(

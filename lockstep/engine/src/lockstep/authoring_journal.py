@@ -102,6 +102,23 @@ class AuthoringJournal:
         verify_owner_directory(directory)
         return cls(directory), identity
 
+    @classmethod
+    def locate_ready_for_project(
+        cls, state_dir: Path, project: Path
+    ) -> tuple[AuthoringJournal | None, PathIdentity]:
+        """Locate a persistent reader lock without creating owner state."""
+
+        journal, identity = cls.locate_for_project(state_dir, project)
+        if journal is None:
+            return None, identity
+        lock_path = journal.directory / "transaction.lock"
+        if not lock_path.exists() and not lock_path.is_symlink():
+            raise AuthoringRecoveryRequired(
+                "authoring boundary initialization is incomplete"
+            )
+        verify_owner_file(lock_path)
+        return journal, identity
+
     @contextmanager
     def locked(self) -> Iterator[None]:
         lock_path = self.directory / "transaction.lock"
@@ -110,6 +127,15 @@ class AuthoringJournal:
             verify_owner_file(lock_path)
             if not existed:
                 fsync_owner_directory(self.directory)
+            yield
+
+    @contextmanager
+    def locked_existing(self) -> Iterator[None]:
+        """Hold the verified persistent lock without reader-side creation."""
+
+        lock_path = self.directory / "transaction.lock"
+        with advisory_file_lock(lock_path, create=False):
+            verify_owner_file(lock_path)
             yield
 
     def require_inactive(self) -> None:
