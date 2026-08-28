@@ -22,7 +22,18 @@ from lockstep.authoring_recovery_model import (
 )
 from lockstep.errors import AuthoringError
 
-from tests._authoring_gate import TreeEntry, replace_marker, tree_image, write_workflow
+from tests._authoring_crash_gate import (
+    install_mutation_syscall_probe,
+    namespace_image,
+    opaque_lock_identities,
+)
+from tests._authoring_gate import (
+    TreeEntry,
+    mcp_context,
+    replace_marker,
+    tree_image,
+    write_workflow,
+)
 
 
 DestinationState = tuple[bytes, int] | None
@@ -730,6 +741,198 @@ def test_recover_restores_existing_bundle_after_each_destination_rename_crash(
     fresh_publisher.recover(scenario.project)
     assert tree_image(scenario.project) == project_before_second_recovery
     assert tree_image(scenario.owner_state) == owner_before_second_recovery
+
+
+def _crash_after_first_destination(
+    scenario: _ExistingBundleScenario, monkeypatch: pytest.MonkeyPatch
+) -> dict[str, _NamespaceEntry]:
+    original_replace = os.replace
+    replacement_count = 0
+    owner_namespace_before_crash = _namespace_file_image(scenario.owner_state)
+
+    def replace_then_crash(source_path, destination_path, *args, **kwargs):
+        nonlocal replacement_count
+        result = original_replace(source_path, destination_path, *args, **kwargs)
+        if not _is_destination_namespace_call(
+            scenario.destinations, destination_path, kwargs.get("dst_dir_fd")
+        ):
+            return result
+        replacement_count += 1
+        if replacement_count == 1:
+            raise _SimulatedProcessDeath("mixed authoring transaction")
+        return result
+
+    monkeypatch.setattr(os, "replace", replace_then_crash)
+    owner_state_before_crash = tree_image(scenario.owner_state)
+    with pytest.raises(_SimulatedProcessDeath):
+        scenario.publisher.publish(scenario.bundle)
+    assert replacement_count == 1
+    _assert_durable_crash_cut(scenario, 0, owner_state_before_crash)
+    monkeypatch.setattr(os, "replace", original_replace)
+    return owner_namespace_before_crash
+
+
+def _observe_recovered_recipe_lookup(
+    scenario: _ExistingBundleScenario,
+    owner_namespace_before_crash: dict[str, _NamespaceEntry],
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[str]:
+    import lockstep.authoring as authoring
+
+    original_project_paths = authoring.project_paths
+    observed: list[str] = []
+
+    def project_paths_after_recovery(project: Path, name: str):
+        _assert_existing_bundle_restored(scenario)
+        assert _namespace_file_image(scenario.owner_state) == owner_namespace_before_crash
+        observed.append(name)
+        return original_project_paths(project, name)
+
+    monkeypatch.setattr(authoring, "project_paths", project_paths_after_recovery)
+    return observed
+
+
+def _observe_recovered_recipe_enumeration(
+    scenario: _ExistingBundleScenario,
+    owner_namespace_before_crash: dict[str, _NamespaceEntry],
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[str]:
+    original_glob = Path.glob
+    recipes = scenario.project / ".lockstep" / "recipes"
+    observed: list[str] = []
+
+    def glob_after_recovery(path: Path, pattern: str):
+        if path == recipes:
+            _assert_existing_bundle_restored(scenario)
+            assert _namespace_file_image(scenario.owner_state) == owner_namespace_before_crash
+            observed.append(pattern)
+        return original_glob(path, pattern)
+
+    monkeypatch.setattr(Path, "glob", glob_after_recovery)
+    return observed
+
+
+def _invoke_read_command(
+    scenario: _ExistingBundleScenario,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    adapter: str,
+    action: str,
+) -> None:
+    monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(scenario.owner_state))
+    if adapter == "cli":
+        from lockstep import cli
+
+        monkeypatch.chdir(scenario.project)
+        assert cli.main(["recipe", action, "leaf"]) == (2 if action == "check" else 0)
+        observed = capsys.readouterr()
+        assert (observed.err if action == "check" else observed.out)
+    else:
+        from lockstep.mcp import server
+
+        if action == "check":
+            with pytest.raises(ValueError, match="canonical|byte-for-byte"):
+                server.recipe_check("leaf", ctx=mcp_context(scenario.project))
+        else:
+            assert server.recipe_diff("leaf", ctx=mcp_context(scenario.project))
+
+
+def _assert_recovery_evidence_is_retired(
+    scenario: _ExistingBundleScenario,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _assert_existing_bundle_restored(scenario)
+    project_before = namespace_image(scenario.project)
+    owner_before = namespace_image(scenario.owner_state)
+    allowed = opaque_lock_identities({}, owner_before)
+    assert allowed
+    with monkeypatch.context() as probe:
+        calls = install_mutation_syscall_probe(
+            probe, allowed_write_open_identities=allowed
+        )
+        AuthoringPublisher(scenario.owner_state).recover(scenario.project)
+    assert calls == []
+    assert namespace_image(scenario.project) == project_before
+    assert namespace_image(scenario.owner_state) == owner_before
+
+
+@pytest.mark.parametrize("adapter", ("cli", "mcp"))
+@pytest.mark.parametrize("action", ("check", "diff"))
+def test_read_command_recovers_mixed_authoring_transaction_before_observation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    adapter: str,
+    action: str,
+) -> None:
+    scenario = _prepare_existing_bundle_scenario(tmp_path)
+    owner_namespace_before_crash = _crash_after_first_destination(
+        scenario, monkeypatch
+    )
+    observed = _observe_recovered_recipe_lookup(
+        scenario, owner_namespace_before_crash, monkeypatch
+    )
+
+    _invoke_read_command(scenario, monkeypatch, capsys, adapter, action)
+
+    assert observed
+    _assert_recovery_evidence_is_retired(scenario, monkeypatch)
+
+
+def test_cli_check_all_recovers_before_recipe_enumeration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from lockstep import cli
+
+    scenario = _prepare_existing_bundle_scenario(tmp_path)
+    owner_namespace_before_crash = _crash_after_first_destination(
+        scenario, monkeypatch
+    )
+    observed = _observe_recovered_recipe_enumeration(
+        scenario, owner_namespace_before_crash, monkeypatch
+    )
+    monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(scenario.owner_state))
+    monkeypatch.chdir(scenario.project)
+
+    assert cli.main(["recipe", "check", "--all"]) == 2
+    assert capsys.readouterr().err
+    assert observed == ["*.recipe.yaml"]
+    _assert_recovery_evidence_is_retired(scenario, monkeypatch)
+
+
+@pytest.mark.parametrize("adapter", ("cli", "mcp"))
+@pytest.mark.parametrize("action", ("check", "diff"))
+def test_invalid_read_command_does_not_recover_or_mutate_project(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    adapter: str,
+    action: str,
+) -> None:
+    scenario = _prepare_existing_bundle_scenario(tmp_path)
+    _crash_after_first_destination(scenario, monkeypatch)
+    project_before = namespace_image(scenario.project)
+    owner_before = namespace_image(scenario.owner_state)
+    invalid_name = "../../../escape"
+    monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(scenario.owner_state))
+
+    if adapter == "cli":
+        from lockstep import cli
+
+        monkeypatch.chdir(scenario.project)
+        assert cli.main(["recipe", action, invalid_name]) == 2
+        assert "invalid workflow name" in capsys.readouterr().err
+    else:
+        from lockstep.mcp import server
+
+        command = server.recipe_check if action == "check" else server.recipe_diff
+        with pytest.raises(AuthoringError, match="invalid workflow name"):
+            command(invalid_name, ctx=mcp_context(scenario.project))
+
+    assert namespace_image(scenario.project) == project_before
+    assert namespace_image(scenario.owner_state) == owner_before
 
 
 @pytest.mark.parametrize("cut", ("after_create", "after_prefix"))
