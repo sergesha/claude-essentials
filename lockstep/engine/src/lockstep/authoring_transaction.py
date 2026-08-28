@@ -209,14 +209,13 @@ class AuthoringTransaction:
                 staged.identity.size,
                 staged.identity.sha256,
             )
-            owned_replacements.append(
-                _ReplacementOwnership(
-                    before,
-                    after,
-                    published_identity,
-                    reservation,
-                )
+            replacement = _ReplacementOwnership(
+                before,
+                after,
+                published_identity,
+                reservation,
             )
+            owned_replacements.append(replacement)
             if before.content is None:
                 try:
                     os.link(
@@ -227,6 +226,8 @@ class AuthoringTransaction:
                         follow_symlinks=False,
                     )
                 except FileExistsError as exc:
+                    assert owned_replacements[-1] is replacement
+                    owned_replacements.pop()
                     raise AuthoringError(
                         "authoring destination was created before publication"
                     ) from exc
