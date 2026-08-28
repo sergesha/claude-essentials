@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import os
-import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 import pytest
 
@@ -18,20 +16,18 @@ from lockstep.authoring_bundle import (
 from lockstep.authoring_publisher import AuthoringPublisher
 
 from tests._authoring_gate import write_workflow
+from tests._authoring_crash_gate import (
+    NamespaceEntry as _NamespaceEntry,
+    directory_identity as _directory_identity,
+    install_mutation_syscall_probe as _install_mutation_syscall_probe,
+    namespace_entry as _namespace_entry,
+    namespace_image as _namespace_image,
+    opaque_lock_identities,
+)
 
 
 class _SimulatedProcessDeath(BaseException):
     """Escape the publisher's in-process ``Exception`` rollback boundary."""
-
-
-@dataclass(frozen=True, slots=True)
-class _NamespaceEntry:
-    kind: str
-    mode: int
-    device: int
-    inode: int
-    content: bytes | None = None
-    symlink_target: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,43 +42,6 @@ class _AbsentLeafScenario:
     project_before: dict[str, _NamespaceEntry]
     owner_before: dict[str, _NamespaceEntry]
     sentinels_before: dict[Path, _NamespaceEntry]
-
-
-def _namespace_entry(path: Path) -> _NamespaceEntry:
-    info = path.lstat()
-    mode = stat.S_IMODE(info.st_mode)
-    if stat.S_ISREG(info.st_mode):
-        return _NamespaceEntry(
-            "regular", mode, info.st_dev, info.st_ino, content=path.read_bytes()
-        )
-    if stat.S_ISDIR(info.st_mode):
-        return _NamespaceEntry("directory", mode, info.st_dev, info.st_ino)
-    if stat.S_ISLNK(info.st_mode):
-        return _NamespaceEntry(
-            "symlink",
-            mode,
-            info.st_dev,
-            info.st_ino,
-            symlink_target=os.readlink(path),
-        )
-    return _NamespaceEntry("non-regular", mode, info.st_dev, info.st_ino)
-
-
-def _namespace_image(root: Path) -> dict[str, _NamespaceEntry]:
-    return {
-        ".": _namespace_entry(root),
-        **{
-            path.relative_to(root).as_posix(): _namespace_entry(path)
-            for path in sorted(root.rglob("*"))
-        },
-    }
-
-
-def _directory_identity(path: Path) -> tuple[int, int, int]:
-    info = path.lstat()
-    assert stat.S_ISDIR(info.st_mode)
-    return info.st_dev, info.st_ino, stat.S_IMODE(info.st_mode)
-
 
 def _prepare_absent_leaf_scenario(tmp_path: Path) -> _AbsentLeafScenario:
     project = tmp_path / "project"
@@ -193,130 +152,6 @@ def _assert_destination_parents_unchanged(scenario: _AbsentLeafScenario) -> None
     } == scenario.parent_identities
 
 
-def _open_can_mutate(flags: int) -> bool:
-    access_mode = flags & getattr(os, "O_ACCMODE", os.O_WRONLY | os.O_RDWR)
-    mutation_flags = os.O_CREAT | os.O_EXCL | os.O_TRUNC
-    mutation_flags |= getattr(os, "O_TMPFILE", 0)
-    return access_mode != os.O_RDONLY or bool(flags & mutation_flags)
-
-
-def _opened_path_identity(
-    path: object, directory_fd: int | None
-) -> tuple[int, int] | None:
-    try:
-        info = os.stat(path, dir_fd=directory_fd, follow_symlinks=False)
-    except OSError:
-        return None
-    return info.st_dev, info.st_ino
-
-
-_MUTATION_SYSCALLS = (
-    "chmod",
-    "chown",
-    "fchown",
-    "fchmod",
-    "ftruncate",
-    "link",
-    "lchown",
-    "mkfifo",
-    "mkdir",
-    "mknod",
-    "remove",
-    "rename",
-    "replace",
-    "rmdir",
-    "symlink",
-    "truncate",
-    "unlink",
-    "utime",
-    "write",
-    "writev",
-    "chflags",
-    "fchflags",
-    "pwrite",
-    "pwritev",
-    "removexattr",
-    "setxattr",
-)
-
-
-def _instrument_named_mutation(
-    monkeypatch: pytest.MonkeyPatch, calls: list[str], name: str
-) -> None:
-    original: Callable[..., object] = getattr(os, name)
-
-    def record(*args, **kwargs):
-        calls.append(name)
-        return original(*args, **kwargs)
-
-    monkeypatch.setattr(os, name, record)
-
-
-def _install_named_mutation_probes(
-    monkeypatch: pytest.MonkeyPatch, calls: list[str]
-) -> None:
-    for name in _MUTATION_SYSCALLS:
-        if hasattr(os, name):
-            _instrument_named_mutation(monkeypatch, calls, name)
-
-
-def _write_open_is_allowed(
-    path: object,
-    flags: int,
-    directory_fd: int | None,
-    allowed_identities: frozenset[tuple[int, int]],
-) -> bool:
-    destructive_flags = os.O_EXCL | os.O_TRUNC | getattr(os, "O_TMPFILE", 0)
-    return (
-        not flags & destructive_flags
-        and _opened_path_identity(path, directory_fd) in allowed_identities
-    )
-
-
-def _install_open_mutation_probe(
-    monkeypatch: pytest.MonkeyPatch,
-    calls: list[str],
-    allowed_write_open_identities: frozenset[tuple[int, int]],
-) -> None:
-    original_open = os.open
-
-    def record_open(path, flags, mode=0o777, *, dir_fd=None):
-        if _open_can_mutate(flags) and not _write_open_is_allowed(
-            path, flags, dir_fd, allowed_write_open_identities
-        ):
-            calls.append("open")
-        return original_open(path, flags, mode, dir_fd=dir_fd)
-
-    monkeypatch.setattr(os, "open", record_open)
-
-
-def _install_mutation_syscall_probe(
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    allowed_write_open_identities: frozenset[tuple[int, int]] = frozenset(),
-) -> list[str]:
-    calls: list[str] = []
-    _install_named_mutation_probes(monkeypatch, calls)
-    _install_open_mutation_probe(
-        monkeypatch, calls, allowed_write_open_identities
-    )
-    return calls
-
-
-def _opaque_lock_identities(
-    scenario: _AbsentLeafScenario,
-    owner_after_recovery: dict[str, _NamespaceEntry],
-) -> frozenset[tuple[int, int]]:
-    return frozenset(
-        (entry.device, entry.inode)
-        for path, entry in owner_after_recovery.items()
-        if path not in scenario.owner_before
-        and entry.kind == "regular"
-        and entry.mode == 0o600
-        and entry.content == b""
-    )
-
-
 @pytest.mark.parametrize("ordinal", (0, 1, 2))
 def test_recover_removes_each_crash_prefix_of_planned_absent_leaves(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ordinal: int
@@ -360,8 +195,8 @@ def test_recover_removes_each_crash_prefix_of_planned_absent_leaves(
     _assert_destination_parents_unchanged(scenario)
     project_after_first_recovery = _namespace_image(scenario.project)
     owner_after_first_recovery = _namespace_image(scenario.owner_state)
-    allowed_write_open_identities = _opaque_lock_identities(
-        scenario, owner_after_first_recovery
+    allowed_write_open_identities = opaque_lock_identities(
+        scenario.owner_before, owner_after_first_recovery
     )
     assert allowed_write_open_identities
     mutation_calls = _install_mutation_syscall_probe(
