@@ -149,6 +149,7 @@ def install_mutation_syscall_probe(
     monkeypatch: pytest.MonkeyPatch,
     *,
     allowed_write_open_identities: frozenset[tuple[int, int]] = frozenset(),
+    record_fsync: bool = False,
 ) -> list[str]:
     """Record namespace/write mutations while allowing a known lock reopen."""
 
@@ -166,4 +167,12 @@ def install_mutation_syscall_probe(
         return original_open(path, flags, mode, dir_fd=dir_fd)
 
     monkeypatch.setattr(os, "open", record_open)
+    if record_fsync:
+        original_fsync = os.fsync
+
+        def record_fsync_call(descriptor: int) -> None:
+            calls.append("fsync")
+            original_fsync(descriptor)
+
+        monkeypatch.setattr(os, "fsync", record_fsync_call)
     return calls
