@@ -38,10 +38,52 @@ class _ExistingBundleScenario:
     publisher: AuthoringPublisher
     bundle: ProjectCompilationBundle
     destinations: tuple[Path, ...]
-    source_before: TreeImage
-    project_sentinel_before: TreeImage
+    destination_parent_sentinels: tuple[Path, ...]
+    source_before: tuple[bytes, int]
+    project_sentinel_before: tuple[bytes, int]
     destinations_before: dict[Path, DestinationState]
-    owner_sentinel_before: TreeImage
+    destination_parent_sentinels_before: dict[Path, tuple[bytes, int]]
+    owner_sentinel_before: tuple[bytes, int]
+
+
+@dataclass(frozen=True, slots=True)
+class _NamespaceEntry:
+    kind: str
+    mode: int
+    content: bytes | None
+    symlink_target: str | None
+
+
+@dataclass(slots=True)
+class _IncompleteStageFault:
+    cut: str
+    injected: bool = False
+    created_identity: tuple[int, int] | None = None
+    attempted_bytes: int = 0
+    prefix_bytes: int = 0
+
+
+@dataclass(slots=True)
+class _DestinationReplacementFault:
+    injected: bool = False
+
+
+def _namespace_file_image(root: Path) -> dict[str, _NamespaceEntry]:
+    return {
+        key: _NamespaceEntry(
+            entry.kind,
+            entry.mode,
+            entry.content if entry.kind == "regular" else None,
+            entry.symlink_target if entry.kind == "symlink" else None,
+        )
+        for key, entry in tree_image(root).items()
+    }
+
+
+def _regular_file_semantics(path: Path) -> tuple[bytes, int]:
+    info = path.lstat()
+    assert stat.S_ISREG(info.st_mode)
+    return path.read_bytes(), stat.S_IMODE(info.st_mode)
 
 
 def _destination_states(
@@ -79,6 +121,125 @@ def _is_destination_namespace_call(
     return False
 
 
+def _is_destination_parent_descriptor(
+    destinations: tuple[Path, ...], directory_fd: int | None
+) -> bool:
+    if directory_fd is None:
+        return False
+    directory_info = os.fstat(directory_fd)
+    return any(
+        (parent_info.st_dev, parent_info.st_ino)
+        == (directory_info.st_dev, directory_info.st_ino)
+        for parent_info in (path.parent.stat() for path in destinations)
+    )
+
+
+def _is_exclusive_create(flags: int) -> bool:
+    return bool(flags & os.O_CREAT and flags & os.O_EXCL)
+
+
+def _install_incomplete_stage_fault(
+    monkeypatch: pytest.MonkeyPatch,
+    destinations: tuple[Path, ...],
+    cut: str,
+) -> _IncompleteStageFault:
+    assert cut in {"after_create", "after_prefix"}
+    original_open = os.open
+    original_write = os.write
+    fault = _IncompleteStageFault(cut)
+
+    def open_then_maybe_crash(path, flags, *args, **kwargs):
+        descriptor = original_open(path, flags, *args, **kwargs)
+        directory_fd = kwargs.get("dir_fd")
+        if (
+            fault.created_identity is not None
+            or not _is_exclusive_create(flags)
+            or not _is_destination_parent_descriptor(destinations, directory_fd)
+            or _is_destination_namespace_call(destinations, path, directory_fd)
+        ):
+            return descriptor
+        created = os.fstat(descriptor)
+        assert stat.S_ISREG(created.st_mode)
+        fault.created_identity = (created.st_dev, created.st_ino)
+        if cut == "after_create":
+            os.close(descriptor)
+            fault.injected = True
+            raise _SimulatedProcessDeath(
+                "simulated process death after exclusive stage create"
+            )
+        return descriptor
+
+    def write_prefix_then_crash(descriptor, data):
+        if fault.created_identity is None or fault.injected:
+            return original_write(descriptor, data)
+        current = os.fstat(descriptor)
+        if (current.st_dev, current.st_ino) != fault.created_identity:
+            return original_write(descriptor, data)
+        view = memoryview(data)
+        assert len(view) > 1
+        prefix = view[: max(1, len(view) // 2)]
+        written = original_write(descriptor, prefix)
+        assert 0 < written < len(view)
+        fault.attempted_bytes = len(view)
+        fault.prefix_bytes = written
+        fault.injected = True
+        raise _SimulatedProcessDeath(
+            "simulated process death after strict stage prefix"
+        )
+
+    monkeypatch.setattr(os, "open", open_then_maybe_crash)
+    monkeypatch.setattr(os, "write", write_prefix_then_crash)
+    return fault
+
+
+def _install_first_destination_replacement_fault(
+    monkeypatch: pytest.MonkeyPatch, destinations: tuple[Path, ...]
+) -> _DestinationReplacementFault:
+    original_replace = os.replace
+    fault = _DestinationReplacementFault()
+
+    def replace_then_crash(source_path, destination_path, *args, **kwargs):
+        result = original_replace(source_path, destination_path, *args, **kwargs)
+        if fault.injected or not _is_destination_namespace_call(
+            destinations, destination_path, kwargs.get("dst_dir_fd")
+        ):
+            return result
+        fault.injected = True
+        raise _SimulatedProcessDeath(
+            "simulated process death after destination rename"
+        )
+
+    monkeypatch.setattr(os, "replace", replace_then_crash)
+    return fault
+
+
+def _regular_path_with_identity(
+    project: Path, identity: tuple[int, int]
+) -> Path:
+    matches: list[Path] = []
+    for path in project.rglob("*"):
+        info = path.lstat()
+        if stat.S_ISREG(info.st_mode) and (info.st_dev, info.st_ino) == identity:
+            matches.append(path)
+    assert len(matches) == 1
+    return matches[0]
+
+
+def _assert_incomplete_stage_residue(
+    scenario: _ExistingBundleScenario, fault: _IncompleteStageFault
+) -> None:
+    assert fault.injected
+    assert fault.created_identity is not None
+    residue = _regular_path_with_identity(scenario.project, fault.created_identity)
+    assert residue.parent in {path.parent for path in scenario.destinations}
+    assert residue not in scenario.destinations
+    if fault.cut == "after_create":
+        assert residue.stat().st_size == 0
+    else:
+        assert 0 < fault.prefix_bytes < fault.attempted_bytes
+        assert residue.stat().st_size == fault.prefix_bytes
+
+
 def _prepare_existing_bundle_scenario(tmp_path: Path) -> _ExistingBundleScenario:
     project = tmp_path / "project"
     source = write_workflow(project, "leaf")
@@ -92,13 +253,27 @@ def _prepare_existing_bundle_scenario(tmp_path: Path) -> _ExistingBundleScenario
     owner_sentinel.write_bytes(b"unrelated owner state\n")
     owner_sentinel.chmod(0o600)
     publisher = AuthoringPublisher(owner_state)
-    publisher.publish(plan_project_compilation(project_paths(project, "leaf")))
+    initial_bundle = plan_project_compilation(project_paths(project, "leaf"))
+    publisher.publish(initial_bundle)
+    destination_parent_sentinels = tuple(
+        parent / f"unrelated-sibling-{index}.bin"
+        for index, parent in enumerate(
+            sorted({image.resolved_path.parent for image in initial_bundle.after_images})
+        )
+    )
+    for index, sentinel in enumerate(destination_parent_sentinels):
+        sentinel.write_bytes(f"unrelated destination sibling {index}\n".encode())
+        sentinel.chmod(0o640 if index % 2 == 0 else 0o600)
 
     replace_marker(source, "initial", "edited-before-replan")
     source.write_bytes(b"\n" + source.read_bytes())
     bundle = plan_project_compilation(project_paths(project, "leaf"))
     destinations = tuple(image.resolved_path for image in bundle.after_images)
     assert len(destinations) == 3
+    assert {path.parent for path in destinations} == {
+        path.parent for path in destination_parent_sentinels
+    }
+    assert not set(destination_parent_sentinels) & set(destinations)
     assert all(image.content is not None for image in bundle.before_images)
     assert all(
         before.content != after.content
@@ -115,18 +290,52 @@ def _prepare_existing_bundle_scenario(tmp_path: Path) -> _ExistingBundleScenario
         publisher=publisher,
         bundle=bundle,
         destinations=destinations,
-        source_before=tree_image(source),
-        project_sentinel_before=tree_image(project_sentinel),
+        destination_parent_sentinels=destination_parent_sentinels,
+        source_before=_regular_file_semantics(source),
+        project_sentinel_before=_regular_file_semantics(project_sentinel),
         destinations_before=_destination_states(bundle),
-        owner_sentinel_before=tree_image(owner_sentinel),
+        destination_parent_sentinels_before={
+            path: _regular_file_semantics(path)
+            for path in destination_parent_sentinels
+        },
+        owner_sentinel_before=_regular_file_semantics(owner_sentinel),
     )
 
 
 def _assert_existing_bundle_restored(scenario: _ExistingBundleScenario) -> None:
-    assert tree_image(scenario.source) == scenario.source_before
-    assert tree_image(scenario.project_sentinel) == scenario.project_sentinel_before
+    assert _regular_file_semantics(scenario.source) == scenario.source_before
     assert _destination_states(scenario.bundle) == scenario.destinations_before
-    assert tree_image(scenario.owner_sentinel) == scenario.owner_sentinel_before
+    _assert_unrelated_sentinels_unchanged(scenario)
+
+
+def _assert_unrelated_sentinels_unchanged(
+    scenario: _ExistingBundleScenario,
+) -> None:
+    assert (
+        _regular_file_semantics(scenario.project_sentinel)
+        == scenario.project_sentinel_before
+    )
+    assert {
+        path: _regular_file_semantics(path)
+        for path in scenario.destination_parent_sentinels
+    } == scenario.destination_parent_sentinels_before
+    assert (
+        _regular_file_semantics(scenario.owner_sentinel)
+        == scenario.owner_sentinel_before
+    )
+
+
+def _assert_durable_owner_evidence(
+    scenario: _ExistingBundleScenario, owner_state_before_crash: TreeImage
+) -> None:
+    owner_state_after_crash = tree_image(scenario.owner_state)
+    assert any(
+        key not in owner_state_before_crash
+        and entry.kind == "regular"
+        and entry.mode == 0o600
+        for key, entry in owner_state_after_crash.items()
+    )
+    _assert_unrelated_sentinels_unchanged(scenario)
 
 
 def _assert_durable_crash_cut(
@@ -149,14 +358,23 @@ def _assert_durable_crash_cut(
         else:
             expected = scenario.destinations_before[before.resolved_path]
         assert mixed_destinations[after.resolved_path] == expected
-    owner_state_after_crash = tree_image(scenario.owner_state)
-    assert any(
-        key not in owner_state_before_crash
-        and entry.kind == "regular"
-        and entry.mode == 0o600
-        for key, entry in owner_state_after_crash.items()
-    )
-    assert tree_image(scenario.owner_sentinel) == scenario.owner_sentinel_before
+    _assert_durable_owner_evidence(scenario, owner_state_before_crash)
+
+
+def _recover_twice_with_fresh_publishers(
+    scenario: _ExistingBundleScenario,
+    expected_project: dict[str, _NamespaceEntry],
+) -> None:
+    AuthoringPublisher(scenario.owner_state).recover(scenario.project)
+    assert _namespace_file_image(scenario.project) == expected_project
+    _assert_existing_bundle_restored(scenario)
+    project_before_second_recovery = _namespace_file_image(scenario.project)
+    owner_before_second_recovery = _namespace_file_image(scenario.owner_state)
+
+    AuthoringPublisher(scenario.owner_state).recover(scenario.project)
+
+    assert _namespace_file_image(scenario.project) == project_before_second_recovery
+    assert _namespace_file_image(scenario.owner_state) == owner_before_second_recovery
 
 
 def test_successful_publish_materializes_only_exact_bundle_destinations(
@@ -367,3 +585,63 @@ def test_recover_restores_existing_bundle_after_each_destination_rename_crash(
     fresh_publisher.recover(scenario.project)
     assert tree_image(scenario.project) == project_before_second_recovery
     assert tree_image(scenario.owner_state) == owner_before_second_recovery
+
+
+@pytest.mark.parametrize("cut", ("after_create", "after_prefix"))
+def test_recover_cleans_incomplete_publication_stage_and_restores_existing_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cut: str
+) -> None:
+    scenario = _prepare_existing_bundle_scenario(tmp_path)
+    project_before_crash = _namespace_file_image(scenario.project)
+    owner_state_before_crash = tree_image(scenario.owner_state)
+
+    with monkeypatch.context() as crash_patch:
+        fault = _install_incomplete_stage_fault(
+            crash_patch, scenario.destinations, cut
+        )
+        with pytest.raises(_SimulatedProcessDeath):
+            scenario.publisher.publish(scenario.bundle)
+
+    _assert_incomplete_stage_residue(scenario, fault)
+    _assert_existing_bundle_restored(scenario)
+    _assert_durable_owner_evidence(scenario, owner_state_before_crash)
+
+    _recover_twice_with_fresh_publishers(scenario, project_before_crash)
+
+
+@pytest.mark.parametrize("cut", ("after_create", "after_prefix"))
+def test_recover_cleans_incomplete_restoration_stage_and_restores_existing_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cut: str
+) -> None:
+    scenario = _prepare_existing_bundle_scenario(tmp_path)
+    project_before_crash = _namespace_file_image(scenario.project)
+    owner_state_before_crash = tree_image(scenario.owner_state)
+
+    with monkeypatch.context() as replacement_patch:
+        replacement_fault = _install_first_destination_replacement_fault(
+            replacement_patch, scenario.destinations
+        )
+        with pytest.raises(_SimulatedProcessDeath):
+            scenario.publisher.publish(scenario.bundle)
+
+    assert replacement_fault.injected
+    _assert_durable_crash_cut(scenario, 0, owner_state_before_crash)
+    project_before_stage_crash = _namespace_file_image(scenario.project)
+
+    with monkeypatch.context() as crash_patch:
+        stage_fault = _install_incomplete_stage_fault(
+            crash_patch, scenario.destinations, cut
+        )
+        with pytest.raises(_SimulatedProcessDeath):
+            AuthoringPublisher(scenario.owner_state).recover(scenario.project)
+
+    _assert_incomplete_stage_residue(scenario, stage_fault)
+    assert _regular_file_semantics(scenario.source) == scenario.source_before
+    _assert_unrelated_sentinels_unchanged(scenario)
+    assert (
+        len(_namespace_file_image(scenario.project))
+        == len(project_before_stage_crash) + 1
+    )
+    _assert_durable_crash_cut(scenario, 0, owner_state_before_crash)
+
+    _recover_twice_with_fresh_publishers(scenario, project_before_crash)
