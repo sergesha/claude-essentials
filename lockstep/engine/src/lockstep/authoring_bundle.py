@@ -113,6 +113,12 @@ class _LeafIdentity:
             raise ValueError("leaf identity must describe a regular file")
 
 
+# Narrow typed contracts shared by the authoring planner and publisher.  They
+# remain outside the public ``__all__`` surface.
+PathIdentity = _PathIdentity
+LeafIdentity = _LeafIdentity
+
+
 @dataclass(frozen=True, slots=True)
 class SourceIdentity:
     role: str

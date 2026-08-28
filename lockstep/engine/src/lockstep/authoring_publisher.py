@@ -5,6 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from lockstep.authoring_bundle import ProjectCompilationBundle
+from lockstep.authoring_identity import validate_bundle_preconditions
+from lockstep.authoring_journal import (
+    AuthoringJournal,
+    assert_no_active_journal,
+)
+from lockstep.authoring_transaction import AuthoringTransaction
 
 __all__ = ["AuthoringPublisher"]
 
@@ -26,9 +32,13 @@ class AuthoringPublisher:
         self._state_dir = state_dir
 
     def publish(self, bundle: ProjectCompilationBundle) -> None:
-        del bundle
-        raise NotImplementedError("authoring publication is not implemented")
+        validate_bundle_preconditions(bundle)
+        journal = AuthoringJournal.create_for_bundle(self._state_dir, bundle)
+        with journal.locked():
+            journal.require_inactive()
+            AuthoringTransaction(bundle, journal).publish()
 
     def recover(self, project: Path) -> None:
-        del project
-        raise NotImplementedError("authoring recovery is not implemented")
+        if not isinstance(project, Path):
+            raise TypeError("authoring project must be a Path")
+        assert_no_active_journal(self._state_dir, project)
