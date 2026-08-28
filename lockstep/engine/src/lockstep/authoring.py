@@ -285,6 +285,38 @@ def check_recipe(project: Path, name: str) -> dict[str, object]:
     }
 
 
+def check_recovered_recipe(
+    project: Path, name: str, *, state_dir: Path
+) -> dict[str, object]:
+    validate_logical_name(name)
+    root = Path(project).resolve()
+    from lockstep.authoring_observation import observe_authoring_project
+
+    return observe_authoring_project(state_dir, root, lambda: check_recipe(root, name))
+
+
+def check_all_recovered_recipes(
+    project: Path, *, state_dir: Path
+) -> tuple[tuple[str, dict[str, object]], ...]:
+    root = Path(project).resolve()
+    from lockstep.authoring_observation import observe_authoring_project
+
+    def observe() -> tuple[tuple[str, dict[str, object]], ...]:
+        names = tuple(
+            sorted(
+                path.name.removesuffix(".recipe.yaml")
+                for path in (root / ".lockstep" / "recipes").glob(
+                    "*.recipe.yaml"
+                )
+            )
+        )
+        if not names:
+            raise AuthoringError("no recipes found")
+        return tuple((name, check_recipe(root, name)) for name in names)
+
+    return observe_authoring_project(state_dir, root, observe)
+
+
 def diff_recipe(project: Path, name: str) -> str:
     recipe = project_paths(project, name)
     if recipe.kind == "manual" or recipe.workflow_path is None:
@@ -300,6 +332,14 @@ def diff_recipe(project: Path, name: str) -> str:
             tofile="canonical",
         )
     )
+
+
+def diff_recovered_recipe(project: Path, name: str, *, state_dir: Path) -> str:
+    validate_logical_name(name)
+    root = Path(project).resolve()
+    from lockstep.authoring_observation import observe_authoring_project
+
+    return observe_authoring_project(state_dir, root, lambda: diff_recipe(root, name))
 
 
 def render_recipe(project: Path, name: str, view: str) -> str:

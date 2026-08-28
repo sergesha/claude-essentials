@@ -40,8 +40,8 @@ from mcp.server.mcpserver import MCPServer as FastMCP
 
 from lockstep.recipe import profile
 from lockstep.authoring import (
-    check_recipe,
-    diff_recipe,
+    check_recovered_recipe,
+    diff_recovered_recipe,
     estimate_recipe,
     initialize_minimal,
     publish_project_compilation,
@@ -429,12 +429,16 @@ def recipe_compile(name: str, ctx: Context | None = None) -> dict:
 
 @app.tool()
 def recipe_check(name: str, ctx: Context | None = None) -> dict:
-    return check_recipe(_project_for_context(ctx), name)
+    project = _project_for_context(ctx)
+    owner_state, _recipes = _configured_paths(project)
+    return check_recovered_recipe(project, name, state_dir=owner_state)
 
 
 @app.tool()
 def recipe_diff(name: str, ctx: Context | None = None) -> str:
-    return diff_recipe(_project_for_context(ctx), name)
+    project = _project_for_context(ctx)
+    owner_state, _recipes = _configured_paths(project)
+    return diff_recovered_recipe(project, name, state_dir=owner_state)
 
 
 @app.tool()

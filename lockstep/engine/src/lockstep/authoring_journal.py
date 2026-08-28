@@ -62,11 +62,24 @@ class AuthoringJournal:
     def create_for_bundle(
         cls, state_dir: Path, bundle: ProjectCompilationBundle
     ) -> AuthoringJournal:
-        _validate_owner_state_location(state_dir, bundle.resolved_project)
+        return cls._create_for_identity(state_dir, bundle.project_identity)
+
+    @classmethod
+    def create_for_project(
+        cls, state_dir: Path, project: Path
+    ) -> tuple[AuthoringJournal, PathIdentity]:
+        identity = _current_project_identity(project)
+        return cls._create_for_identity(state_dir, identity), identity
+
+    @classmethod
+    def _create_for_identity(
+        cls, state_dir: Path, identity: PathIdentity
+    ) -> AuthoringJournal:
+        _validate_owner_state_location(state_dir, identity.resolved_path)
         root = initialize_owner_state(state_dir)
         authoring = ensure_owner_directory(root, "authoring")
         directory = ensure_owner_directory(
-            authoring, _project_namespace(bundle)
+            authoring, _project_namespace_for_identity(identity)
         )
         return cls(directory)
 
@@ -271,10 +284,6 @@ def _validate_owner_state_location(state_dir: Path, project: Path) -> None:
         or resolved in project.parents
     ):
         raise ValueError("authoring state directory must be outside the project")
-
-
-def _project_namespace(bundle: ProjectCompilationBundle) -> str:
-    return _project_namespace_for_identity(bundle.project_identity)
 
 
 def _project_namespace_for_identity(identity: PathIdentity) -> str:

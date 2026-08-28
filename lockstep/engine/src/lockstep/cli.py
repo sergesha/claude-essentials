@@ -119,8 +119,9 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
 
 def _cmd_recipe(args: argparse.Namespace) -> int:
     from lockstep.authoring import (
-        check_recipe,
-        diff_recipe,
+        check_all_recovered_recipes,
+        check_recovered_recipe,
+        diff_recovered_recipe,
         estimate_recipe,
         initialize_minimal,
         publish_project_compilation,
@@ -141,20 +142,26 @@ def _cmd_recipe(args: argparse.Namespace) -> int:
     if args.action == "check":
         if args.name is None and not args.all:
             raise CliError("recipe check requires a name or --all")
-        names = [args.name] if args.name else sorted(
-            path.name.removesuffix(".recipe.yaml")
-            for path in (project / ".lockstep" / "recipes").glob("*.recipe.yaml")
-        )
-        if not names:
-            raise CliError("no recipes found")
+        if args.name is not None:
+            result = check_recovered_recipe(
+                project, args.name, state_dir=state_dir().absolute()
+            )
+            results = ((args.name, result),)
+        else:
+            results = check_all_recovered_recipes(
+                project, state_dir=state_dir().absolute()
+            )
         failed = False
-        for name in names:
-            result = check_recipe(project, name)
+        for name, result in results:
             failed = failed or not bool(result["ok"])
             sys.stdout.write(json_text({"name": name, **result}))
         return 1 if failed else 0
     if args.action == "diff":
-        sys.stdout.write(diff_recipe(project, args.name))
+        sys.stdout.write(
+            diff_recovered_recipe(
+                project, args.name, state_dir=state_dir().absolute()
+            )
+        )
         return 0
     if args.action == "render":
         sys.stdout.write(render_recipe(project, args.name, args.view))

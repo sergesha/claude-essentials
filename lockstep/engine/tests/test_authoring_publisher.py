@@ -1015,18 +1015,19 @@ def test_cli_check_all_recovers_before_recipe_enumeration(
 
 @pytest.mark.parametrize("adapter", ("cli", "mcp"))
 @pytest.mark.parametrize("action", ("check", "diff"))
+@pytest.mark.parametrize("invalid_name", ("../../../escape", ""))
 def test_invalid_read_command_does_not_recover_or_mutate_project(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     adapter: str,
     action: str,
+    invalid_name: str,
 ) -> None:
     scenario = _prepare_existing_bundle_scenario(tmp_path)
     _crash_after_first_destination(scenario, monkeypatch)
     project_before = namespace_image(scenario.project)
     owner_before = namespace_image(scenario.owner_state)
-    invalid_name = "../../../escape"
     monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(scenario.owner_state))
 
     if adapter == "cli":

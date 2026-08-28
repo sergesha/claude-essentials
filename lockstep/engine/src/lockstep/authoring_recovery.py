@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from lockstep.authoring_bundle import PathIdentity
 from lockstep.authoring_committed_recovery import CommittedAuthoringRecovery
 from lockstep.authoring_directory_recovery import DirectoryRecoveryPlan
 from lockstep.authoring_journal import AuthoringJournal
@@ -52,14 +53,22 @@ def recover_authoring_project(state_dir: Path, project: Path) -> None:
     if journal is None:
         return
     with journal.locked():
-        if not journal.has_active_transaction():
-            journal.sync_namespace()
-            return
-        model = journal.read_recovery_model(expected_project=project_identity)
-        if model.committed:
-            CommittedAuthoringRecovery(journal, model).recover()
-        else:
-            AuthoringRecovery(journal, model).recover()
+        recover_locked_authoring_project(journal, project_identity)
+
+
+def recover_locked_authoring_project(
+    journal: AuthoringJournal, project_identity: PathIdentity
+) -> None:
+    """Recover one project while its authoring journal lock is already held."""
+
+    if not journal.has_active_transaction():
+        journal.sync_namespace()
+        return
+    model = journal.read_recovery_model(expected_project=project_identity)
+    if model.committed:
+        CommittedAuthoringRecovery(journal, model).recover()
+    else:
+        AuthoringRecovery(journal, model).recover()
 
 
 class AuthoringRecovery:
