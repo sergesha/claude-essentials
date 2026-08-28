@@ -183,3 +183,70 @@ def test_source_change_mid_publish_rolls_outputs_back(
     assert _destination_states(bundle) == destinations_before
     assert tree_image(sentinel) == sentinel_before
     publisher.recover(project)
+
+
+@pytest.mark.parametrize("ordinal", range(3))
+def test_publish_fault_restores_existing_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ordinal: int
+) -> None:
+    project = tmp_path / "project"
+    source = write_workflow(project, "leaf")
+    sentinel = project / "notes" / "owner.txt"
+    sentinel.parent.mkdir()
+    sentinel.write_bytes(b"owner bytes\n")
+    sentinel.chmod(0o640)
+    owner_state = tmp_path / "owner-state"
+    owner_state.mkdir(mode=0o700)
+    owner_sentinel = owner_state / "unrelated.bin"
+    owner_sentinel.write_bytes(b"unrelated owner state\n")
+    owner_sentinel.chmod(0o600)
+    publisher = AuthoringPublisher(owner_state.resolve())
+    first_plan = plan_project_compilation(project_paths(project, "leaf"))
+    publisher.publish(first_plan)
+
+    replace_marker(source, "initial", "edited-before-replan")
+    source.write_bytes(b"\n" + source.read_bytes())
+    bundle = plan_project_compilation(project_paths(project, "leaf"))
+    destinations = tuple(image.resolved_path for image in bundle.after_images)
+    assert len(destinations) == 3
+    assert all(image.content is not None for image in bundle.before_images)
+    assert all(
+        before.content != after.content
+        for before, after in zip(
+            bundle.before_images, bundle.after_images, strict=True
+        )
+    )
+    source_before = tree_image(source)
+    sentinel_before = tree_image(sentinel)
+    destinations_before = _destination_states(bundle)
+    owner_sentinel_before = tree_image(owner_sentinel)
+    original_replace = os.replace
+    replacement_count = 0
+    fault_was_injected = False
+
+    def replace_then_fail(source_path, destination_path, *args, **kwargs):
+        nonlocal fault_was_injected, replacement_count
+        result = original_replace(source_path, destination_path, *args, **kwargs)
+        if fault_was_injected or not _is_destination_namespace_call(
+            destinations, destination_path, kwargs.get("dst_dir_fd")
+        ):
+            return result
+        current_ordinal = replacement_count
+        replacement_count += 1
+        if current_ordinal == ordinal:
+            fault_was_injected = True
+            raise OSError("injected destination replacement fault")
+        return result
+
+    monkeypatch.setattr(os, "replace", replace_then_fail)
+
+    with pytest.raises((OSError, AuthoringError)):
+        publisher.publish(bundle)
+
+    assert fault_was_injected
+    assert replacement_count == ordinal + 1
+    assert tree_image(source) == source_before
+    assert tree_image(sentinel) == sentinel_before
+    assert _destination_states(bundle) == destinations_before
+    assert tree_image(owner_sentinel) == owner_sentinel_before
+    publisher.recover(project)
