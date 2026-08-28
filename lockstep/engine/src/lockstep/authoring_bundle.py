@@ -40,6 +40,7 @@ class AuthoredRecipe:
     source_map_path: Path | None
 
 
+_CompiledWorkflow = tuple[ValidatedWorkflow, CompilationResult]
 _CompiledRole = tuple[AuthoredRecipe, CompilationResult, tuple[str, ...]]
 
 
@@ -258,7 +259,7 @@ def plan_project_compilation(recipe: AuthoredRecipe) -> ProjectCompilationBundle
     project, source_path = _workflow_project_and_source(recipe)
     directory_identities: dict[Path, _PathIdentity] = {}
     project_identity = _cached_directory_identity(directory_identities, project)
-    sources, dependency_edges, compiled_roles = _compile_direct_closure(
+    sources, dependency_edges, compiled_roles = _compile_closure(
         recipe, source_path, project, directory_identities
     )
     before_images, after_images = _destination_images(
@@ -274,7 +275,7 @@ def plan_project_compilation(recipe: AuthoredRecipe) -> ProjectCompilationBundle
     )
 
 
-def _compile_direct_closure(
+def _compile_closure(
     recipe: AuthoredRecipe,
     source_path: Path,
     project: Path,
@@ -284,44 +285,43 @@ def _compile_direct_closure(
     tuple[tuple[str, tuple[str, ...]], ...],
     tuple[_CompiledRole, ...],
 ]:
-    parent_source = _capture_source(
-        recipe.name, source_path, project, directory_identities
-    )
-    parent_document = load_workflow_bytes(
-        parent_source.resolved_path, parent_source.content
-    )
-    child_names = workflow_call_names(parent_document)
     sources: list[SourceIdentity] = []
     dependency_edges: list[tuple[str, tuple[str, ...]]] = []
     compiled_roles: list[_CompiledRole] = []
-    compiled_children: dict[str, tuple[ValidatedWorkflow, CompilationResult]] = {}
-    for child_name in child_names:
-        child_recipe = _workflow_recipe(project, child_name)
-        child_path = child_recipe.workflow_path
-        if child_path is None:
-            raise AuthoringError("workflow source is required")
-        child_source = _capture_source(
-            child_name,
-            child_path,
-            project,
-            directory_identities,
-        )
-        child_document = load_workflow_bytes(
-            child_source.resolved_path, child_source.content
-        )
-        child_validated, _child_catalog, child_compiled = compile_captured_source(
-            child_document
-        )
-        sources.append(child_source)
-        dependency_edges.append((child_name, ()))
-        compiled_roles.append((child_recipe, child_compiled, ()))
-        compiled_children[child_name] = (child_validated, child_compiled)
-    _validated, _catalog, parent_compiled = compile_captured_source(
-        parent_document, children=compiled_children
-    )
-    sources.append(parent_source)
-    dependency_edges.append((recipe.name, child_names))
-    compiled_roles.append((recipe, parent_compiled, child_names))
+    completed: dict[str, _CompiledWorkflow] = {}
+    active: set[str] = set()
+
+    def visit(role_recipe: AuthoredRecipe, role_path: Path) -> None:
+        role = role_recipe.name
+        if role in completed:
+            return
+        if role in active:
+            raise AuthoringError("workflow source dependency graph is recursive")
+        active.add(role)
+        try:
+            source = _capture_source(
+                role, role_path, project, directory_identities
+            )
+            document = load_workflow_bytes(source.resolved_path, source.content)
+            child_names = workflow_call_names(document)
+            for child_name in child_names:
+                child_recipe = _workflow_recipe(project, child_name)
+                child_path = child_recipe.workflow_path
+                if child_path is None:
+                    raise AuthoringError("workflow source is required")
+                visit(child_recipe, child_path)
+            children = {name: completed[name] for name in child_names}
+            validated, _catalog, compiled = compile_captured_source(
+                document, children=children
+            )
+            completed[role] = (validated, compiled)
+            sources.append(source)
+            dependency_edges.append((role, child_names))
+            compiled_roles.append((role_recipe, compiled, child_names))
+        finally:
+            active.remove(role)
+
+    visit(recipe, source_path)
     return tuple(sources), tuple(dependency_edges), tuple(compiled_roles)
 
 
