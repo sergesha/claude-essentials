@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
@@ -209,5 +209,43 @@ def test_recover_removes_each_crash_prefix_of_planned_absent_leaves(
     assert mutation_calls == []
     assert _namespace_image(scenario.project) == project_after_first_recovery
     assert _namespace_image(scenario.owner_state) == owner_after_first_recovery
+    _assert_sentinels_unchanged(scenario)
+    _assert_destination_parents_unchanged(scenario)
+
+
+def test_recover_accepts_real_destination_only_bundle_journal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scenario = _prepare_absent_leaf_scenario(tmp_path)
+    destination_only_bundle = replace(scenario.bundle, sources=())
+    original_link = os.link
+    destination_link_count = 0
+
+    def link_then_crash(source, destination, *args, **kwargs):
+        nonlocal destination_link_count
+        result = original_link(source, destination, *args, **kwargs)
+        if not _is_destination_link(
+            scenario, destination, kwargs.get("dst_dir_fd")
+        ):
+            return result
+        destination_link_count += 1
+        raise _SimulatedProcessDeath(
+            "simulated process death after destination-only publication"
+        )
+
+    monkeypatch.setattr(os, "link", link_then_crash)
+    with pytest.raises(_SimulatedProcessDeath):
+        AuthoringPublisher(scenario.owner_state).publish(destination_only_bundle)
+
+    assert destination_only_bundle.sources == ()
+    assert destination_link_count == 1
+    _assert_crash_namespace(scenario, 0)
+    _assert_opaque_durable_owner_evidence(scenario)
+    monkeypatch.setattr(os, "link", original_link)
+
+    publisher = AuthoringPublisher(scenario.owner_state)
+    publisher.recover(scenario.project)
+
+    assert _namespace_image(scenario.project) == scenario.project_before
     _assert_sentinels_unchanged(scenario)
     _assert_destination_parents_unchanged(scenario)
