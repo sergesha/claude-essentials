@@ -80,6 +80,7 @@ def test_public_recipe_init_routes_one_complete_bundle_through_owner_publisher(
     original_init = AuthoringPublisher.__init__
     original_recover = AuthoringPublisher.recover
     original_publish = AuthoringPublisher.publish
+    original_plan = authoring.plan_captured_workflow_installation
 
     def initialize(publisher: AuthoringPublisher, state: Path) -> None:
         constructed_with.append(state)
@@ -96,9 +97,14 @@ def test_public_recipe_init_routes_one_complete_bundle_through_owner_publisher(
         events.append(("publish", bundle))
         original_publish(publisher, bundle)
 
+    def plan(*args, **kwargs):
+        events.append(("plan", project))
+        return original_plan(*args, **kwargs)
+
     monkeypatch.setattr(AuthoringPublisher, "__init__", initialize)
     monkeypatch.setattr(AuthoringPublisher, "recover", recover)
     monkeypatch.setattr(AuthoringPublisher, "publish", publish)
+    monkeypatch.setattr(authoring, "plan_captured_workflow_installation", plan)
 
     result = _invoke_init(adapter, project, monkeypatch, capsys)
 
@@ -113,9 +119,9 @@ def test_public_recipe_init_routes_one_complete_bundle_through_owner_publisher(
     )
     assert result == expected_result
     assert constructed_with == [owner_state]
-    assert [event[0] for event in events] == ["recover", "publish"]
+    assert [event[0] for event in events] == ["recover", "plan", "publish"]
     assert events[0][1] == project.resolve()
-    bundle = events[1][1]
+    bundle = events[2][1]
     assert isinstance(bundle, ProjectCompilationBundle)
     assert bundle.resolved_project == project.resolve()
     assert bundle.sources == ()
@@ -186,3 +192,48 @@ def test_write_compilation_republishes_the_complete_changed_child_dag(
     assert result == authoring.compile_project_source(
         project / ".lockstep/workflows/release.workflow.yaml"
     )[2]
+
+
+def test_direct_write_compilation_uses_owner_state_and_recovers_before_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    write_workflow(project, "release")
+    recipe = authoring.project_paths(project, "release")
+    owner_state = _owner_state(project)
+    constructed_with: list[Path] = []
+    events: list[str] = []
+    original_init = AuthoringPublisher.__init__
+    original_recover = AuthoringPublisher.recover
+    original_plan = authoring._plan_project_compilation
+    original_publish = AuthoringPublisher.publish
+
+    def initialize(publisher: AuthoringPublisher, state: Path) -> None:
+        constructed_with.append(state)
+        original_init(publisher, state)
+
+    def recover(publisher: AuthoringPublisher, observed_project: Path) -> None:
+        assert observed_project == project.resolve()
+        events.append("recover")
+        original_recover(publisher, observed_project)
+
+    def plan(observed_recipe):
+        events.append("plan")
+        return original_plan(observed_recipe)
+
+    def publish(
+        publisher: AuthoringPublisher, bundle: ProjectCompilationBundle
+    ) -> None:
+        events.append("publish")
+        original_publish(publisher, bundle)
+
+    monkeypatch.setattr(AuthoringPublisher, "__init__", initialize)
+    monkeypatch.setattr(AuthoringPublisher, "recover", recover)
+    monkeypatch.setattr(authoring, "_plan_project_compilation", plan)
+    monkeypatch.setattr(AuthoringPublisher, "publish", publish)
+
+    authoring.write_compilation(recipe, state_dir=owner_state)
+
+    assert constructed_with == [owner_state]
+    assert events == ["recover", "plan", "publish"]
