@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import stat
+from errno import EIO
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -65,6 +66,12 @@ def _scenario(tmp_path: Path, *, absent: bool) -> _Scenario:
         sibling.write_bytes(f"sibling-{index}\n".encode())
         sibling.chmod(0o600 if index % 2 else 0o640)
         parent_sentinels[sibling] = namespace_entry(sibling)
+    if absent:
+        journal = AuthoringJournal.create_for_bundle(owner, bundle)
+        with journal.locked():
+            pass
+        assert not journal.journal_path.exists()
+        assert not journal.journal_path.is_symlink()
     return _Scenario(
         project, owner, bundle, destinations,
         tuple(namespace_entry(path) if path.exists() else None for path in destinations),
@@ -111,6 +118,7 @@ class _RollbackDurabilityProbe:
     scenario: _Scenario
     active: bool = False
     target_index: int | None = None
+    target_is_owned: bool = False
     events: list[str] = field(default_factory=list)
     stage_paths: dict[tuple[tuple[int, int], str], tuple[int, tuple[int, int]]] = field(
         default_factory=dict
@@ -126,6 +134,15 @@ class _RollbackDurabilityProbe:
 
     def activate(self, index: int) -> None:
         self.active, self.target_index = True, index
+
+    def include_target_in_rollback(self) -> None:
+        self.target_is_owned = True
+
+    def owns_destination(self, index: int) -> bool:
+        return self.target_index is not None and (
+            index < self.target_index
+            or self.target_is_owned and index == self.target_index
+        )
 
     def destination_index(self, value: object, directory_fd: int | None) -> int | None:
         if directory_fd is None:
@@ -181,7 +198,7 @@ class _RollbackDurabilityProbe:
     def replace_(self, source, destination, *args, **kwargs):
         result = self.original_replace(source, destination, *args, **kwargs)
         index = self.destination_index(destination, kwargs.get("dst_dir_fd"))
-        if self.active and index is not None and index < self.target_index:
+        if self.active and index is not None and self.owns_destination(index):
             info = self.scenario.destinations[index].stat()
             self.events.append(f"restore-replace[{index}]")
             self.pending_files[index] = info.st_dev, info.st_ino
@@ -211,7 +228,7 @@ class _RollbackDurabilityProbe:
         result = self.original_unlink(path, *args, **kwargs)
         if not self.active:
             return result
-        if index is not None and index < self.target_index:
+        if index is not None and self.owns_destination(index):
             parent = self.scenario.destinations[index].parent.stat()
             self.events.append(f"remove-destination[{index}]")
             self.pending_parents[f"destination-parent-fsync[{index}]"] = (
@@ -259,6 +276,11 @@ def _assert_no_active_evidence(scenario: _Scenario) -> None:
     assert namespace_image(scenario.owner) == scenario.owner_before
 
 
+def _assert_all_old(scenario: _Scenario) -> None:
+    assert namespace_image(scenario.project) == scenario.project_before
+    assert all(not destination.exists() for destination in scenario.destinations)
+
+
 def _assert_untouched_suffix(scenario: _Scenario, index: int) -> None:
     for suffix, expected in zip(
         scenario.destinations[index + 1:], scenario.before[index + 1:], strict=True
@@ -288,10 +310,17 @@ def _assert_edit_rollback_durability(
 
 
 def _assert_create_rollback_durability(
-    probe: _RollbackDurabilityProbe, index: int
+    probe: _RollbackDurabilityProbe, expected_removals: int
 ) -> None:
     journal = probe.events.index("journal-unlink")
-    for ordinal in range(index):
+    removals = tuple(
+        event for event in probe.events if event.startswith("remove-destination[")
+    )
+    assert removals == tuple(
+        f"remove-destination[{ordinal}]"
+        for ordinal in reversed(range(expected_removals))
+    )
+    for ordinal in range(expected_removals):
         removal = f"remove-destination[{ordinal}]"
         parent_fsync = f"destination-parent-fsync[{ordinal}]"
         assert probe.events.count(removal) == 1
@@ -397,3 +426,50 @@ def test_foreign_create_at_real_no_clobber_edge_preserves_leaf_and_restores_pref
     _assert_project_modulo_target(scenario, target)
     _assert_no_active_evidence(scenario)
     _assert_create_rollback_durability(trace, index)
+
+
+@pytest.mark.parametrize("phase", ("before-link", "after-real-link"))
+@pytest.mark.parametrize("index", (0, 1, 2), ids=lambda index: f"create[{index}]")
+def test_ordinary_link_oserror_rolls_back_only_proven_owned_absent_destinations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str, index: int
+) -> None:
+    """Ordinary link errors distinguish no publication from an owned link."""
+
+    scenario = _scenario(tmp_path, absent=True)
+    target = scenario.destinations[index]
+    original = os.link
+    calls: list[tuple[str, int]] = []
+    trace = _install_rollback_durability_trace(monkeypatch, scenario)
+
+    def fail_target_link(source, destination, *args, **kwargs):
+        directory_fd = kwargs.get("dst_dir_fd")
+        if (
+            not calls
+            and directory_fd is not None
+            and os.fsdecode(destination) == target.name
+            and (os.fstat(directory_fd).st_dev, os.fstat(directory_fd).st_ino)
+            == (target.parent.stat().st_dev, target.parent.stat().st_ino)
+        ):
+            calls.append((phase, index))
+            trace.activate(index)
+            if phase == "before-link":
+                raise OSError(EIO, "injected link failure before publication")
+            original(source, destination, *args, **kwargs)
+            trace.include_target_in_rollback()
+            raise OSError(EIO, "injected link failure after publication")
+        return original(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(os, "link", fail_target_link)
+    with pytest.raises(OSError) as failure:
+        AuthoringPublisher(scenario.owner).publish(scenario.bundle)
+
+    assert failure.value.errno == EIO
+    assert calls == [(phase, index)]
+    _assert_all_old(scenario)
+    _assert_no_active_evidence(scenario)
+    _assert_create_rollback_durability(
+        trace, index + (phase == "after-real-link")
+    )
+    snapshot = namespace_image(scenario.project), namespace_image(scenario.owner)
+    AuthoringPublisher(scenario.owner).recover(scenario.project)
+    assert (namespace_image(scenario.project), namespace_image(scenario.owner)) == snapshot
