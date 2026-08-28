@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import os
 import stat
+import sys
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
@@ -21,6 +22,7 @@ from lockstep.recipe.authority import (
     RecipeCandidate,
     StrictRecipeIngress,
 )
+from lockstep.runtime.engine import LockstepError
 from lockstep.runtime.service import LockstepCommandService
 
 from tests._authoring_crash_gate import NamespaceEntry, namespace_image
@@ -44,6 +46,29 @@ class _MixedCanonicalScenario:
     lock_identity: tuple[int, int]
 
 
+@dataclass(frozen=True, slots=True)
+class _ObservedInspection:
+    result: RecipeCandidate
+    started_locked: bool
+    completed_locked: bool
+
+    @property
+    def locked(self) -> bool:
+        return self.started_locked and self.completed_locked
+
+
+@dataclass(frozen=True, slots=True)
+class _ObservedAuthorization:
+    receiver: RecipeCandidate
+    result: AuthorizedRecipe
+    started_locked: bool
+    completed_locked: bool
+
+    @property
+    def locked(self) -> bool:
+        return self.started_locked and self.completed_locked
+
+
 @dataclass(slots=True)
 class _CanonicalObservation:
     expected_before: DestinationSemantics
@@ -54,16 +79,14 @@ class _CanonicalObservation:
     reads: list[Path] = field(default_factory=list)
     images: list[DestinationSemantics] = field(default_factory=list)
     lock_states: list[bool] = field(default_factory=list)
-    ingress_lock_intervals: list[tuple[bool, bool]] = field(default_factory=list)
-    authorization_lock_intervals: list[tuple[bool, bool]] = field(
-        default_factory=list
-    )
+    inspections: list[_ObservedInspection] = field(default_factory=list)
+    authorizations: list[_ObservedAuthorization] = field(default_factory=list)
     lock_transitions: list[str] = field(default_factory=list)
+    lock_started: bool = False
+    lock_completed: bool = False
+    post_lock_admissions: int = 0
     admission_depth: int = 0
     admission_unlocks: int = 0
-    inspection_results: list[RecipeCandidate] = field(default_factory=list)
-    authorization_receivers: list[RecipeCandidate] = field(default_factory=list)
-    authorization_results: list[AuthorizedRecipe] = field(default_factory=list)
     authorized: AuthorizedRecipe | None = None
     complete: bool = False
 
@@ -219,6 +242,11 @@ def _tracked_flock(
                 observation.lock_transitions.append(transition)
             if operation & fcntl.LOCK_UN and observation.admission_depth:
                 observation.admission_unlocks += 1
+            if operation & fcntl.LOCK_UN:
+                if observation.lock_started:
+                    observation.lock_completed = True
+            else:
+                observation.lock_started = True
             observation.lock_held = not bool(operation & fcntl.LOCK_UN)
         return result
 
@@ -248,16 +276,17 @@ def _observed_ingress(
 ) -> Callable[..., RecipeCandidate]:
     def inspect(ingress: StrictRecipeIngress, root: str) -> RecipeCandidate:
         started_locked = observation.lock_held
+        if observation.lock_completed:
+            observation.post_lock_admissions += 1
         observation.admission_depth += 1
         try:
             candidate = original(ingress, root)
-            observation.inspection_results.append(candidate)
+            observation.inspections.append(
+                _ObservedInspection(candidate, started_locked, observation.lock_held)
+            )
             return candidate
         finally:
             observation.admission_depth -= 1
-            observation.ingress_lock_intervals.append(
-                (started_locked, observation.lock_held)
-            )
 
     return inspect
 
@@ -268,17 +297,19 @@ def _observed_authorization(
 ) -> Callable[..., AuthorizedRecipe]:
     def authorize(candidate: RecipeCandidate, policy: object) -> AuthorizedRecipe:
         started_locked = observation.lock_held
+        if observation.lock_completed:
+            observation.post_lock_admissions += 1
         observation.admission_depth += 1
-        observation.authorization_receivers.append(candidate)
         try:
             authorized = original(candidate, policy)
-            observation.authorization_results.append(authorized)
+            observation.authorizations.append(
+                _ObservedAuthorization(
+                    candidate, authorized, started_locked, observation.lock_held
+                )
+            )
             return authorized
         finally:
             observation.admission_depth -= 1
-            observation.authorization_lock_intervals.append(
-                (started_locked, observation.lock_held)
-            )
 
     return authorize
 
@@ -345,26 +376,49 @@ def _install_canonical_observer(
 
 def _invoke_public_start(
     adapter: str,
-    scenario: _MixedCanonicalScenario,
+    project: Path,
+    owner_state: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    name: str = "leaf",
 ) -> dict:
     if adapter == "service":
-        command = LockstepCommandService(
-            scenario.owner_state, scenario.project / ".lockstep" / "recipes"
-        )
+        command = LockstepCommandService(owner_state, project / ".lockstep" / "recipes")
         try:
-            return command.start("leaf", {}, str(scenario.project))
+            return command.start(name, {}, str(project))
         finally:
             command.close()
     if adapter == "mcp":
-        monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(scenario.owner_state))
+        monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(owner_state))
         monkeypatch.delenv("LOCKSTEP_RECIPES", raising=False)
         server._reset_engine()
         try:
-            return server.scenario_start("leaf", {}, ctx=mcp_context(scenario.project))
+            return server.scenario_start(name, {}, ctx=mcp_context(project))
         finally:
             server._reset_engine()
     raise ValueError(f"unknown public start adapter: {adapter}")
+
+
+def _write_denied_python_recipe(project: Path, sentinel: Path) -> str:
+    name = "denied-python"
+    module = "canonical_recovery_attacker"
+    (project / f"{module}.py").write_text(
+        "from pathlib import Path\n"
+        f"Path({str(sentinel)!r}).write_text('imported')\n"
+        "def run(state): return state\n",
+        encoding="utf-8",
+    )
+    recipes = project / ".lockstep" / "recipes"
+    recipes.mkdir(parents=True)
+    (recipes / f"{name}.recipe.yaml").write_text(
+        f"name: {name}\n"
+        "tools:\n"
+        f"  code: {{type: python, module: {module}, function: run}}\n"
+        "nodes: {code: {type: python, tool: code}}\n"
+        "edges: [{from: START, to: code}, {from: code, to: END}]\n",
+        encoding="utf-8",
+    )
+    return name
 
 
 @pytest.mark.parametrize("adapter", ("service", "mcp"))
@@ -379,37 +433,47 @@ def test_public_start_recovers_before_locked_canonical_ingress(
     result: dict | None = None
 
     try:
-        result = _invoke_public_start(adapter, scenario, monkeypatch)
+        result = _invoke_public_start(
+            adapter, scenario.project, scenario.owner_state, monkeypatch
+        )
     except BaseException as exc:
         raised = exc
 
     assert observation.reads, "public start never reached canonical project ingress"
-    assert all(image == scenario.before for image in observation.images), (
-        "public start observed canonical project bytes before authoring recovery"
+    locked_images = tuple(
+        image
+        for image, locked in zip(
+            observation.images, observation.lock_states, strict=True
+        )
+        if locked
     )
-    assert all(observation.lock_states), (
-        "public start observed canonical project bytes without the authoring lock"
+    assert locked_images, "public start never read canonical project bytes under lock"
+    assert all(image == scenario.before for image in locked_images), (
+        "locked canonical ingress observed project bytes before recovery"
     )
-    assert observation.ingress_lock_intervals
-    assert all(
-        started and completed
-        for started, completed in observation.ingress_lock_intervals
-    ), "descriptor-based recipe ingress escaped the authoring lock"
-    assert observation.authorization_lock_intervals
-    assert all(
-        started and completed
-        for started, completed in observation.authorization_lock_intervals
-    ), "AuthorizedRecipe construction escaped the authoring lock"
+    locked_inspections = tuple(item for item in observation.inspections if item.locked)
+    locked_authorizations = tuple(
+        item for item in observation.authorizations if item.locked
+    )
+    assert locked_inspections, "no descriptor ingress completed under the authoring lock"
+    assert len(locked_authorizations) == 1
+    locked_authorization = locked_authorizations[0]
+    assert any(
+        locked_authorization.receiver is inspection.result
+        for inspection in locked_inspections
+    )
     assert observation.admission_unlocks == 0
-    assert len(observation.inspection_results) == 1
-    assert len(observation.authorization_receivers) == 1
-    assert len(observation.authorization_results) == 1
-    assert observation.authorization_receivers[0] is observation.inspection_results[0]
+    assert observation.post_lock_admissions == 0
     assert observation.authorized is not None
     assert observation.authorized.canonical_match_proof is not None
+    assert observation.authorized.root == "leaf.recipe.yaml"
+    assert (
+        observation.authorized.source_bundle_sha256
+        == observation.authorized.canonical_match_proof.source_bundle_sha256
+    )
     assert (
         replace(observation.authorized, canonical_match_proof=None)
-        == observation.authorization_results[0]
+        == locked_authorization.result
     )
     assert observation.lock_transitions in (
         ["acquire"],
@@ -419,3 +483,42 @@ def test_public_start_recovers_before_locked_canonical_ingress(
     assert observation.complete
     assert result is not None
     assert result["run_id"] == "canonical-recovery-probe"
+
+
+@pytest.mark.parametrize("adapter", ("service", "mcp"))
+def test_public_start_denies_python_before_owner_state_import_or_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    adapter: str,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    owner_state = tmp_path / "owner-state"
+    sentinel = project / "ATTACKER-IMPORTED"
+    module = "canonical_recovery_attacker"
+    name = _write_denied_python_recipe(project, sentinel)
+    monkeypatch.syspath_prepend(str(project))
+    sys.modules.pop(module, None)
+    runtime_effects: list[AuthorizedRecipe] = []
+
+    def record_runtime(
+        _service: LockstepCommandService,
+        _recipe: str,
+        authorized: AuthorizedRecipe,
+        *_args,
+        **_kwargs,
+    ) -> dict:
+        runtime_effects.append(authorized)
+        raise AssertionError("denied recipe reached runtime admission")
+
+    monkeypatch.setattr(LockstepCommandService, "start_authorized", record_runtime)
+
+    with pytest.raises(LockstepError, match="executable authority denied"):
+        _invoke_public_start(
+            adapter, project, owner_state, monkeypatch, name=name
+        )
+
+    assert not owner_state.exists()
+    assert module not in sys.modules
+    assert not sentinel.exists()
+    assert runtime_effects == []
