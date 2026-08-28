@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import stat
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -16,10 +17,31 @@ from lockstep.authoring_bundle import (
 from lockstep.authoring_publisher import AuthoringPublisher
 from lockstep.errors import AuthoringError
 
-from tests._authoring_gate import replace_marker, tree_image, write_workflow
+from tests._authoring_gate import TreeEntry, replace_marker, tree_image, write_workflow
 
 
 DestinationState = tuple[bytes, int] | None
+TreeImage = dict[str, TreeEntry]
+
+
+class _SimulatedProcessDeath(BaseException):
+    """Bypass in-process rollback while Python still releases test resources."""
+
+
+@dataclass(frozen=True, slots=True)
+class _ExistingBundleScenario:
+    project: Path
+    source: Path
+    project_sentinel: Path
+    owner_state: Path
+    owner_sentinel: Path
+    publisher: AuthoringPublisher
+    bundle: ProjectCompilationBundle
+    destinations: tuple[Path, ...]
+    source_before: TreeImage
+    project_sentinel_before: TreeImage
+    destinations_before: dict[Path, DestinationState]
+    owner_sentinel_before: TreeImage
 
 
 def _destination_states(
@@ -55,6 +77,86 @@ def _is_destination_namespace_call(
         ):
             return True
     return False
+
+
+def _prepare_existing_bundle_scenario(tmp_path: Path) -> _ExistingBundleScenario:
+    project = tmp_path / "project"
+    source = write_workflow(project, "leaf")
+    project_sentinel = project / "notes" / "owner.txt"
+    project_sentinel.parent.mkdir()
+    project_sentinel.write_bytes(b"owner bytes\n")
+    project_sentinel.chmod(0o640)
+    owner_state = (tmp_path / "owner-state").resolve()
+    owner_state.mkdir(mode=0o700)
+    owner_sentinel = owner_state / "unrelated.bin"
+    owner_sentinel.write_bytes(b"unrelated owner state\n")
+    owner_sentinel.chmod(0o600)
+    publisher = AuthoringPublisher(owner_state)
+    publisher.publish(plan_project_compilation(project_paths(project, "leaf")))
+
+    replace_marker(source, "initial", "edited-before-replan")
+    source.write_bytes(b"\n" + source.read_bytes())
+    bundle = plan_project_compilation(project_paths(project, "leaf"))
+    destinations = tuple(image.resolved_path for image in bundle.after_images)
+    assert len(destinations) == 3
+    assert all(image.content is not None for image in bundle.before_images)
+    assert all(
+        before.content != after.content
+        for before, after in zip(
+            bundle.before_images, bundle.after_images, strict=True
+        )
+    )
+    return _ExistingBundleScenario(
+        project=project,
+        source=source,
+        project_sentinel=project_sentinel,
+        owner_state=owner_state,
+        owner_sentinel=owner_sentinel,
+        publisher=publisher,
+        bundle=bundle,
+        destinations=destinations,
+        source_before=tree_image(source),
+        project_sentinel_before=tree_image(project_sentinel),
+        destinations_before=_destination_states(bundle),
+        owner_sentinel_before=tree_image(owner_sentinel),
+    )
+
+
+def _assert_existing_bundle_restored(scenario: _ExistingBundleScenario) -> None:
+    assert tree_image(scenario.source) == scenario.source_before
+    assert tree_image(scenario.project_sentinel) == scenario.project_sentinel_before
+    assert _destination_states(scenario.bundle) == scenario.destinations_before
+    assert tree_image(scenario.owner_sentinel) == scenario.owner_sentinel_before
+
+
+def _assert_durable_crash_cut(
+    scenario: _ExistingBundleScenario,
+    ordinal: int,
+    owner_state_before_crash: TreeImage,
+) -> None:
+    mixed_destinations = _destination_states(scenario.bundle)
+    for index, (before, after) in enumerate(
+        zip(
+            scenario.bundle.before_images,
+            scenario.bundle.after_images,
+            strict=True,
+        )
+    ):
+        if index <= ordinal:
+            assert after.content is not None
+            assert after.mode is not None
+            expected = (after.content, after.mode)
+        else:
+            expected = scenario.destinations_before[before.resolved_path]
+        assert mixed_destinations[after.resolved_path] == expected
+    owner_state_after_crash = tree_image(scenario.owner_state)
+    assert any(
+        key not in owner_state_before_crash
+        and entry.kind == "regular"
+        and entry.mode == 0o600
+        for key, entry in owner_state_after_crash.items()
+    )
+    assert tree_image(scenario.owner_sentinel) == scenario.owner_sentinel_before
 
 
 def test_successful_publish_materializes_only_exact_bundle_destinations(
@@ -185,41 +287,12 @@ def test_source_change_mid_publish_rolls_outputs_back(
     publisher.recover(project)
 
 
-@pytest.mark.parametrize("ordinal", range(3))
+@pytest.mark.parametrize("ordinal", (0, 1, 2))
 def test_publish_fault_restores_existing_bundle(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ordinal: int
 ) -> None:
-    project = tmp_path / "project"
-    source = write_workflow(project, "leaf")
-    sentinel = project / "notes" / "owner.txt"
-    sentinel.parent.mkdir()
-    sentinel.write_bytes(b"owner bytes\n")
-    sentinel.chmod(0o640)
-    owner_state = tmp_path / "owner-state"
-    owner_state.mkdir(mode=0o700)
-    owner_sentinel = owner_state / "unrelated.bin"
-    owner_sentinel.write_bytes(b"unrelated owner state\n")
-    owner_sentinel.chmod(0o600)
-    publisher = AuthoringPublisher(owner_state.resolve())
-    first_plan = plan_project_compilation(project_paths(project, "leaf"))
-    publisher.publish(first_plan)
-
-    replace_marker(source, "initial", "edited-before-replan")
-    source.write_bytes(b"\n" + source.read_bytes())
-    bundle = plan_project_compilation(project_paths(project, "leaf"))
-    destinations = tuple(image.resolved_path for image in bundle.after_images)
-    assert len(destinations) == 3
-    assert all(image.content is not None for image in bundle.before_images)
-    assert all(
-        before.content != after.content
-        for before, after in zip(
-            bundle.before_images, bundle.after_images, strict=True
-        )
-    )
-    source_before = tree_image(source)
-    sentinel_before = tree_image(sentinel)
-    destinations_before = _destination_states(bundle)
-    owner_sentinel_before = tree_image(owner_sentinel)
+    scenario = _prepare_existing_bundle_scenario(tmp_path)
+    assert len(scenario.destinations) == 3
     original_replace = os.replace
     replacement_count = 0
     fault_was_injected = False
@@ -228,7 +301,7 @@ def test_publish_fault_restores_existing_bundle(
         nonlocal fault_was_injected, replacement_count
         result = original_replace(source_path, destination_path, *args, **kwargs)
         if fault_was_injected or not _is_destination_namespace_call(
-            destinations, destination_path, kwargs.get("dst_dir_fd")
+            scenario.destinations, destination_path, kwargs.get("dst_dir_fd")
         ):
             return result
         current_ordinal = replacement_count
@@ -241,12 +314,56 @@ def test_publish_fault_restores_existing_bundle(
     monkeypatch.setattr(os, "replace", replace_then_fail)
 
     with pytest.raises((OSError, AuthoringError)):
-        publisher.publish(bundle)
+        scenario.publisher.publish(scenario.bundle)
 
     assert fault_was_injected
     assert replacement_count == ordinal + 1
-    assert tree_image(source) == source_before
-    assert tree_image(sentinel) == sentinel_before
-    assert _destination_states(bundle) == destinations_before
-    assert tree_image(owner_sentinel) == owner_sentinel_before
-    publisher.recover(project)
+    _assert_existing_bundle_restored(scenario)
+    scenario.publisher.recover(scenario.project)
+
+
+@pytest.mark.parametrize("ordinal", (0, 1, 2))
+def test_recover_restores_existing_bundle_after_each_destination_rename_crash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ordinal: int
+) -> None:
+    scenario = _prepare_existing_bundle_scenario(tmp_path)
+    assert len(scenario.destinations) == 3
+    original_replace = os.replace
+    replacement_count = 0
+    crash_was_injected = False
+
+    def replace_then_crash(source_path, destination_path, *args, **kwargs):
+        nonlocal crash_was_injected, replacement_count
+        result = original_replace(source_path, destination_path, *args, **kwargs)
+        if crash_was_injected or not _is_destination_namespace_call(
+            scenario.destinations, destination_path, kwargs.get("dst_dir_fd")
+        ):
+            return result
+        current_ordinal = replacement_count
+        replacement_count += 1
+        if current_ordinal == ordinal:
+            crash_was_injected = True
+            raise _SimulatedProcessDeath(
+                "simulated process death after destination rename"
+            )
+        return result
+
+    monkeypatch.setattr(os, "replace", replace_then_crash)
+    owner_state_before_crash = tree_image(scenario.owner_state)
+    with pytest.raises(_SimulatedProcessDeath):
+        scenario.publisher.publish(scenario.bundle)
+
+    assert crash_was_injected
+    assert replacement_count == ordinal + 1
+    _assert_durable_crash_cut(scenario, ordinal, owner_state_before_crash)
+    monkeypatch.setattr(os, "replace", original_replace)
+
+    fresh_publisher = AuthoringPublisher(scenario.owner_state)
+    fresh_publisher.recover(scenario.project)
+
+    _assert_existing_bundle_restored(scenario)
+    project_before_second_recovery = tree_image(scenario.project)
+    owner_before_second_recovery = tree_image(scenario.owner_state)
+    fresh_publisher.recover(scenario.project)
+    assert tree_image(scenario.project) == project_before_second_recovery
+    assert tree_image(scenario.owner_state) == owner_before_second_recovery
