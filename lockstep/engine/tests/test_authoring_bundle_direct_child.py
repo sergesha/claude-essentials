@@ -17,25 +17,43 @@ from tests._authoring_gate import (
 )
 
 
-def _direct_child_images(project: Path) -> dict[str, dict[Path, bytes]]:
+def _role_images(
+    project: Path, roles: tuple[str, ...]
+) -> dict[str, dict[Path, bytes]]:
     return {
         role: expected_compilation_image(project, (role,))
-        for role in ("child", "parent")
+        for role in roles
     }
 
 
-def _assert_direct_child_sources(bundle, project: Path, paths: dict[str, Path]) -> None:
-    assert tuple(source.role for source in bundle.sources) == ("child", "parent")
+def _assert_closure_sources(
+    bundle,
+    project: Path,
+    paths: dict[str, Path],
+    roles: tuple[str, ...],
+    edges: tuple[tuple[str, tuple[str, ...]], ...],
+) -> None:
+    assert tuple(source.role for source in bundle.sources) == roles
     assert len({source.role for source in bundle.sources}) == len(bundle.sources)
     for source in bundle.sources:
         assert_source_identity(source, project, paths[source.role])
-    assert bundle.dependency_edges == (("child", ()), ("parent", ("child",)))
+    assert bundle.dependency_edges == edges
     assert bundle.project_identity == bundle.sources[0].ancestors[0]
-    assert bundle.sources[0].ancestors[:2] == bundle.sources[1].ancestors[:2]
+    assert all(
+        source.ancestors == bundle.sources[0].ancestors for source in bundle.sources
+    )
 
 
-def _assert_direct_child_destinations(bundle, project: Path, expected_by_role) -> None:
+def _assert_closure_destinations(
+    bundle,
+    project: Path,
+    expected_by_role: dict[str, dict[Path, bytes]],
+    roles: tuple[str, ...],
+) -> None:
     expected_paths = {role: set(images) for role, images in expected_by_role.items()}
+    assert sum(len(paths) for paths in expected_paths.values()) == len(
+        set().union(*expected_paths.values())
+    )
     expected_ancestors = (project.resolve(), (project / ".lockstep").resolve())
     for before_image, after_image in zip(
         bundle.before_images, bundle.after_images, strict=True
@@ -65,21 +83,25 @@ def _assert_direct_child_destinations(bundle, project: Path, expected_by_role) -
     for images in (bundle.before_images, bundle.after_images):
         assert {
             role: {image.resolved_path for image in images if image.role == role}
-            for role in ("child", "parent")
+            for role in roles
         } == expected_paths
 
 
-def _parent_generated_images(project: Path, expected_by_role) -> dict[Path, bytes]:
-    parent = project_paths(project, "parent")
-    parent_root_paths = {
-        parent.recipe_path,
-        parent.dependency_path,
-        parent.source_map_path,
-    }
+def _role_generated_images(
+    project: Path, expected_by_role: dict[str, dict[Path, bytes]]
+) -> dict[str, dict[Path, bytes]]:
     return {
-        path: content
-        for path, content in expected_by_role["parent"].items()
-        if path not in parent_root_paths
+        role: {
+            path: content
+            for path, content in images.items()
+            if path
+            not in {
+                project_paths(project, role).recipe_path,
+                project_paths(project, role).dependency_path,
+                project_paths(project, role).source_map_path,
+            }
+        }
+        for role, images in expected_by_role.items()
     }
 
 
@@ -101,8 +123,9 @@ def test_direct_child_planner_captures_complete_generated_bundle_without_writes(
         "child": write_workflow(project, "child"),
         "parent": write_workflow(project, "parent", children=("child",)),
     }
-    expected_by_role = _direct_child_images(project)
-    expected_generated = _parent_generated_images(project, expected_by_role)
+    roles = ("child", "parent")
+    expected_by_role = _role_images(project, roles)
+    expected_generated = _role_generated_images(project, expected_by_role)["parent"]
     assert expected_generated
     controlled_cwd = tmp_path / "controlled-cwd"
     controlled_cwd.mkdir()
@@ -118,6 +141,60 @@ def test_direct_child_planner_captures_complete_generated_bundle_without_writes(
 
     assert isinstance(bundle, ProjectCompilationBundle)
     assert tree_image(tmp_path) == before
-    _assert_direct_child_sources(bundle, project, paths)
-    _assert_direct_child_destinations(bundle, project, expected_by_role)
+    _assert_closure_sources(
+        bundle,
+        project,
+        paths,
+        roles,
+        (("child", ()), ("parent", ("child",))),
+    )
+    _assert_closure_destinations(bundle, project, expected_by_role, roles)
     _assert_parent_generated_images(bundle, expected_generated)
+
+
+def test_transitive_planner_captures_complete_three_role_bundle_without_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from lockstep.authoring_bundle import ProjectCompilationBundle, plan_project_compilation
+
+    project = tmp_path / "project"
+    roles = ("grandchild", "child", "parent")
+    paths = {
+        "grandchild": write_workflow(project, "grandchild"),
+        "child": write_workflow(project, "child", children=("grandchild",)),
+        "parent": write_workflow(project, "parent", children=("child",)),
+    }
+    expected_by_role = _role_images(project, roles)
+    generated_by_role = _role_generated_images(project, expected_by_role)
+    assert all(expected_by_role.values())
+    assert generated_by_role["child"]
+    assert generated_by_role["parent"]
+    assert sum(len(images) for images in expected_by_role.values()) == len(
+        set().union(*(set(images) for images in expected_by_role.values()))
+    )
+    controlled_cwd = tmp_path / "controlled-cwd"
+    controlled_cwd.mkdir()
+    monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(tmp_path / "owner-state"))
+    monkeypatch.chdir(controlled_cwd)
+    before = tree_image(tmp_path)
+
+    try:
+        bundle = plan_project_compilation(project_paths(project, "parent"))
+    except Exception:
+        assert tree_image(tmp_path) == before
+        raise
+
+    assert isinstance(bundle, ProjectCompilationBundle)
+    assert tree_image(tmp_path) == before
+    _assert_closure_sources(
+        bundle,
+        project,
+        paths,
+        roles,
+        (
+            ("grandchild", ()),
+            ("child", ("grandchild",)),
+            ("parent", ("child",)),
+        ),
+    )
+    _assert_closure_destinations(bundle, project, expected_by_role, roles)
