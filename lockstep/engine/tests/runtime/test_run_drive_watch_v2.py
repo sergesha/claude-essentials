@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
 from inspect import Parameter, signature
 from pathlib import Path
+import resource
 from types import NoneType
 from typing import get_type_hints
 
@@ -714,28 +715,42 @@ def test_fresh_driver_reaches_decision_after_128_worker_parks(
     state = tmp_path / "state"
     service = _legacy_service(state, recipes)
     _stop_pump(service)
-    for _index in range(128):
-        parked = service.start(
-            "worker-park", {}, str(project),
-            compiler_provenance=parked_compiled.compiler_provenance,
+    original_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+    reduced_soft_limit = (
+        64
+        if original_limit[0] == resource.RLIM_INFINITY
+        else min(original_limit[0], 64)
+    )
+    reduced_limit = (reduced_soft_limit, original_limit[1])
+    try:
+        resource.setrlimit(resource.RLIMIT_NOFILE, reduced_limit)
+        for _index in range(128):
+            parked = service.start(
+                "worker-park", {}, str(project),
+                compiler_provenance=parked_compiled.compiler_provenance,
+            )
+            parked_id = parked["run_id"]
+            with pytest.raises(KeyError):
+                service.runtime.binding(parked_id)
+        late = service.start(
+            "late-decision", {}, str(project),
+            compiler_provenance=decision_compiled.compiler_provenance,
         )
-        assert service.runtime.snapshot(
-            parked["run_id"], subgraphs=True
-        ).pending
-    late = service.start(
-        "late-decision", {}, str(project),
-        compiler_provenance=decision_compiled.compiler_provenance,
-    )
-    late_id = late["run_id"]
-    late_binding = service.catalog.get(late_id)
-    manual = service.runtime.snapshot(late_id, subgraphs=True)
-    service.coordinator.submit_manual(
-        late_id,
-        manual.pending[0].coordinate,
-        ManualSubmission.build("PASS", evidence={}),
-    )
-    assert service.runtime.snapshot(late_id, subgraphs=True).pending
-    service.close()
+        late_id = late["run_id"]
+        late_binding = service.catalog.get(late_id)
+        with pytest.raises(KeyError):
+            service.runtime.binding(late_id)
+        assert service.runtime.bind(late_binding) is True
+        manual = service.runtime.snapshot(late_id, subgraphs=True)
+        service.coordinator.submit_manual(
+            late_id,
+            manual.pending[0].coordinate,
+            ManualSubmission.build("PASS", evidence={}),
+        )
+        assert service.runtime.snapshot(late_id, subgraphs=True).pending
+    finally:
+        resource.setrlimit(resource.RLIMIT_NOFILE, original_limit)
+        service.close()
 
     fresh = _legacy_service(state, recipes)
     try:
