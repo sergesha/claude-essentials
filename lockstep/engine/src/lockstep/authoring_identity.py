@@ -7,6 +7,7 @@ import os
 import stat
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from lockstep.authoring_bundle import (
     DestinationImage,
@@ -180,6 +181,78 @@ def validate_after_identity_at(
         or _sha256(content) != identity.sha256
     ):
         raise AuthoringError("transaction-written destination changed unexpectedly")
+
+
+def classify_destination_ownership_at(
+    directory_descriptor: int,
+    before: DestinationImage,
+    after: PublishedIdentity,
+) -> Literal["before", "after"]:
+    """Classify one reserved mutation from a single verified-parent observation."""
+
+    leaf = before.resolved_path.name
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    try:
+        descriptor = os.open(leaf, flags, dir_fd=directory_descriptor)
+    except FileNotFoundError:
+        before_matches = before.content is None
+        after_matches = False
+    except OSError as exc:
+        raise AuthoringError(
+            f"authoring destination is unavailable: {before.resolved_path}"
+        ) from exc
+    else:
+        try:
+            initial = os.fstat(descriptor)
+            expected_sizes = {after.size}
+            if before.content is not None:
+                expected_sizes.add(len(before.content))
+            if (
+                not stat.S_ISREG(initial.st_mode)
+                or initial.st_size not in expected_sizes
+            ):
+                raise AuthoringError(
+                    "reserved authoring destination matches neither transaction image"
+                )
+        except Exception:
+            os.close(descriptor)
+            raise
+        content, info = _read_descriptor(
+            descriptor,
+            before.resolved_path,
+            expected_size=initial.st_size,
+        )
+        expected_before = before.leaf
+        before_matches = (
+            before.content is not None
+            and expected_before is not None
+            and _leaf_facts(info)
+            == (
+                expected_before.device,
+                expected_before.inode,
+                expected_before.mode,
+                expected_before.size,
+                expected_before.mtime_ns,
+            )
+            and content == before.content
+            and _sha256(content) == before.sha256
+        )
+        after_matches = (
+            info.st_dev == after.device
+            and info.st_ino == after.inode
+            and info.st_mode == after.mode
+            and info.st_size == after.size
+            and _sha256(content) == after.sha256
+        )
+    if before_matches == after_matches:
+        raise AuthoringError(
+            "reserved authoring destination ownership is ambiguous"
+        )
+    return "before" if before_matches else "after"
 
 
 def _validate_destination_shape(

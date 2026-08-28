@@ -12,6 +12,7 @@ from lockstep.authoring_bundle import DestinationImage, ProjectCompilationBundle
 from lockstep.authoring_identity import (
     PublishedIdentity,
     capture_after_identity_at,
+    classify_destination_ownership_at,
     validate_after_identity_at,
     validate_bundle_preconditions,
     validate_destination_before_at,
@@ -36,10 +37,11 @@ class _StagedFile:
 
 
 @dataclass(frozen=True, slots=True)
-class _AppliedReplacement:
+class _ReplacementOwnership:
     before: DestinationImage
     after: DestinationImage
     identity: PublishedIdentity
+    stage_path: Path
 
 
 class AuthoringTransaction:
@@ -59,7 +61,8 @@ class AuthoringTransaction:
         staged: dict[Path, _StagedFile] = {}
         owned_stages: dict[Path, _StageOwnership | None] = {}
         consumed_stages: set[Path] = set()
-        applied: list[_AppliedReplacement] = []
+        stage_consumption_attempts: set[Path] = set()
+        owned_replacements: list[_ReplacementOwnership] = []
         try:
             self._create_destination_directories()
             self._stage_after_images(staged, owned_stages)
@@ -71,8 +74,9 @@ class AuthoringTransaction:
                     before,
                     after,
                     staged[after.resolved_path],
-                    applied,
+                    owned_replacements,
                     consumed_stages,
+                    stage_consumption_attempts,
                 )
                 self.journal.record_replacement(index)
                 validate_sources(self.bundle.sources)
@@ -82,9 +86,10 @@ class AuthoringTransaction:
         except Exception as publish_error:
             try:
                 self._rollback(
-                    applied,
+                    owned_replacements,
                     owned_stages=owned_stages,
                     consumed_stages=consumed_stages,
+                    stage_consumption_attempts=stage_consumption_attempts,
                 )
                 self._cleanup_stages(owned_stages, consumed_stages)
                 self.tree.remove_created_directories()
@@ -177,13 +182,30 @@ class AuthoringTransaction:
         before: DestinationImage,
         after: DestinationImage,
         staged: _StagedFile,
-        applied: list[_AppliedReplacement],
+        owned_replacements: list[_ReplacementOwnership],
         consumed_stages: set[Path],
+        stage_consumption_attempts: set[Path],
     ) -> None:
         destination = after.resolved_path
         parent_descriptor, destination_leaf = self.tree.open_parent(destination)
         try:
             validate_destination_before_at(parent_descriptor, before)
+            published_identity = PublishedIdentity(
+                destination,
+                staged.identity.device,
+                staged.identity.inode,
+                staged.identity.mode,
+                staged.identity.size,
+                staged.identity.sha256,
+            )
+            owned_replacements.append(
+                _ReplacementOwnership(
+                    before,
+                    after,
+                    published_identity,
+                    staged.path,
+                )
+            )
             if before.content is None:
                 try:
                     os.link(
@@ -198,6 +220,7 @@ class AuthoringTransaction:
                         "authoring destination was created before publication"
                     ) from exc
             else:
+                stage_consumption_attempts.add(staged.path)
                 os.replace(
                     staged.path.name,
                     destination_leaf,
@@ -205,16 +228,8 @@ class AuthoringTransaction:
                     dst_dir_fd=parent_descriptor,
                 )
                 consumed_stages.add(staged.path)
-            published_identity = PublishedIdentity(
-                destination,
-                staged.identity.device,
-                staged.identity.inode,
-                staged.identity.mode,
-                staged.identity.size,
-                staged.identity.sha256,
-            )
-            applied.append(_AppliedReplacement(before, after, published_identity))
             if before.content is None:
+                stage_consumption_attempts.add(staged.path)
                 os.unlink(staged.path.name, dir_fd=parent_descriptor)
                 consumed_stages.add(staged.path)
             _fsync_regular_at(parent_descriptor, destination_leaf)
@@ -230,17 +245,33 @@ class AuthoringTransaction:
 
     def _rollback(
         self,
-        applied: list[_AppliedReplacement],
+        owned_replacements: list[_ReplacementOwnership],
         *,
         owned_stages: dict[Path, _StageOwnership | None],
         consumed_stages: set[Path],
+        stage_consumption_attempts: set[Path],
     ) -> None:
-        for replacement in reversed(applied):
+        ownership_error: AuthoringError | None = None
+        for replacement in reversed(owned_replacements):
             destination = replacement.after.resolved_path
             parent_descriptor, destination_leaf = self.tree.open_parent(destination)
             try:
-                validate_after_identity_at(parent_descriptor, replacement.identity)
+                try:
+                    state = classify_destination_ownership_at(
+                        parent_descriptor,
+                        replacement.before,
+                        replacement.identity,
+                    )
+                except AuthoringError as exc:
+                    if ownership_error is None:
+                        ownership_error = exc
+                    continue
+                if state == "before":
+                    continue
+                if replacement.stage_path in stage_consumption_attempts:
+                    consumed_stages.add(replacement.stage_path)
                 if replacement.before.content is None:
+                    validate_after_identity_at(parent_descriptor, replacement.identity)
                     os.unlink(destination_leaf, dir_fd=parent_descriptor)
                     os.fsync(parent_descriptor)
                     continue
@@ -270,6 +301,10 @@ class AuthoringTransaction:
                 os.fsync(parent_descriptor)
             finally:
                 os.close(parent_descriptor)
+        if ownership_error is not None:
+            raise AuthoringError(
+                "authoring rollback found an ambiguous destination"
+            ) from ownership_error
 
     def _cleanup_stages(
         self,
