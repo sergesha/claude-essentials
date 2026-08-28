@@ -182,7 +182,9 @@ class _RecoveryParser:
         )
         operation_id = self._operation_id(document["operation_id"])
         project = self._project(document["project"])
-        read_set = self._read_set(document["read_set"])
+        read_set = self._read_set(
+            document["read_set"], allow_empty=schema == _JOURNAL_SCHEMA_V4
+        )
         write_set = self._write_set(document["write_set"], read_set)
         reservation = self._reservation(
             document["reservation"], operation_id, write_set
@@ -265,9 +267,11 @@ class _RecoveryParser:
             raise AuthoringError("authoring recovery journal names another project")
         return identity
 
-    def _read_set(self, value: object) -> tuple[RecoveryReadEntry, ...]:
+    def _read_set(
+        self, value: object, *, allow_empty: bool
+    ) -> tuple[RecoveryReadEntry, ...]:
         values = self._sequence(value, "read set")
-        if not values or len(values) > self.limits.max_files:
+        if (not allow_empty and not values) or len(values) > self.limits.max_files:
             raise AuthoringError("authoring recovery read set is outside its bounds")
         entries: list[RecoveryReadEntry] = []
         roles: set[str] = set()
@@ -324,7 +328,7 @@ class _RecoveryParser:
             )
             role = self._text(item["role"], "write role")
             path = self._project_path(item["path"], "write path")
-            if role not in roles or path in paths:
+            if (roles and role not in roles) or path in paths:
                 raise AuthoringError("authoring recovery write set is inconsistent")
             paths.add(path)
             before = self._before(item["before"], path)
