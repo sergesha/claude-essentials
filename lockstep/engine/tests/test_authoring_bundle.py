@@ -222,6 +222,62 @@ def test_leaf_planner_captures_exact_immutable_bundle_without_writes(
     _assert_leaf_bundle_is_deeply_immutable(bundle)
 
 
+def _two_role_bundle(project: Path):
+    from lockstep.authoring_bundle import plan_project_compilation
+
+    write_workflow(project, "child")
+    write_workflow(project, "parent", children=("child",))
+    return plan_project_compilation(project_paths(project, "parent"))
+
+
+def test_destination_only_bundle_roles_are_owned_by_dependency_topology(
+    tmp_path: Path,
+) -> None:
+    ordinary = _two_role_bundle(tmp_path / "project")
+
+    template = replace(ordinary, sources=())
+
+    assert template.sources == ()
+    assert tuple(role for role, _children in template.dependency_edges) == (
+        "child",
+        "parent",
+    )
+    assert {image.role for image in template.after_images} == {
+        "child",
+        "parent",
+    }
+
+
+def test_bundle_rejects_a_partial_source_role_inventory(tmp_path: Path) -> None:
+    ordinary = _two_role_bundle(tmp_path / "project")
+
+    with pytest.raises(ValueError):
+        replace(ordinary, sources=ordinary.sources[:1])
+
+
+def test_destination_only_bundle_requires_nonempty_topology(tmp_path: Path) -> None:
+    ordinary = _two_role_bundle(tmp_path / "project")
+
+    with pytest.raises(ValueError):
+        replace(ordinary, sources=(), dependency_edges=())
+
+
+def test_destination_only_bundle_rejects_an_unowned_write_role(
+    tmp_path: Path,
+) -> None:
+    ordinary = _two_role_bundle(tmp_path / "project")
+    changed_before = replace(ordinary.before_images[0], role="foreign")
+    changed_after = replace(ordinary.after_images[0], role="foreign")
+
+    with pytest.raises(ValueError):
+        replace(
+            ordinary,
+            sources=(),
+            before_images=(changed_before, *ordinary.before_images[1:]),
+            after_images=(changed_after, *ordinary.after_images[1:]),
+        )
+
+
 def test_leaf_planner_captures_existing_real_destination_parent_identity(
     tmp_path: Path,
 ) -> None:
