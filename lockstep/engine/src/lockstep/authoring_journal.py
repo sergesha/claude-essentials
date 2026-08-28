@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 import os
+import stat
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -16,6 +17,11 @@ from lockstep.authoring_bundle import (
     LeafIdentity,
     PathIdentity,
     ProjectCompilationBundle,
+)
+from lockstep.authoring_recovery_model import (
+    MAX_RECOVERY_JOURNAL_BYTES,
+    AuthoringRecoveryModel,
+    parse_recovery_journal,
 )
 from lockstep.errors import AuthoringError
 from lockstep.runtime.advisory_lock import advisory_file_lock
@@ -53,6 +59,25 @@ class AuthoringJournal:
         )
         return cls(directory)
 
+    @classmethod
+    def locate_for_project(
+        cls, state_dir: Path, project: Path
+    ) -> tuple[AuthoringJournal | None, PathIdentity]:
+        identity = _current_project_identity(project)
+        _validate_owner_state_location(state_dir, identity.resolved_path)
+        if not state_dir.exists() and not state_dir.is_symlink():
+            return None, identity
+        verify_owner_directory(state_dir)
+        authoring = state_dir / "authoring"
+        if not authoring.exists() and not authoring.is_symlink():
+            return None, identity
+        verify_owner_directory(authoring)
+        directory = authoring / _project_namespace_for_identity(identity)
+        if not directory.exists() and not directory.is_symlink():
+            return None, identity
+        verify_owner_directory(directory)
+        return cls(directory), identity
+
     @contextmanager
     def locked(self) -> Iterator[None]:
         lock_path = self.directory / "transaction.lock"
@@ -64,11 +89,71 @@ class AuthoringJournal:
             yield
 
     def require_inactive(self) -> None:
-        if self.journal_path.exists() or self.journal_path.is_symlink():
-            verify_owner_file(self.journal_path)
+        if self.has_active_transaction():
             raise AuthoringRecoveryRequired(
                 "active authoring transaction requires recovery"
             )
+
+    def has_active_transaction(self) -> bool:
+        if not self.journal_path.exists() and not self.journal_path.is_symlink():
+            return False
+        verify_owner_file(self.journal_path)
+        return True
+
+    def sync_namespace(self) -> None:
+        """Complete durability after a prior journal unlink cut."""
+
+        fsync_owner_directory(self.directory)
+
+    def read_recovery_model(
+        self, *, expected_project: PathIdentity
+    ) -> AuthoringRecoveryModel:
+        if not self.has_active_transaction():
+            raise AuthoringRecoveryRequired("authoring recovery journal disappeared")
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(self.journal_path, flags)
+        try:
+            first = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(first.st_mode)
+                or first.st_uid != os.getuid()
+                or first.st_mode & 0o077
+                or first.st_size > MAX_RECOVERY_JOURNAL_BYTES
+            ):
+                raise AuthoringError("authoring recovery journal is insecure")
+            chunks: list[bytes] = []
+            remaining = MAX_RECOVERY_JOURNAL_BYTES + 1
+            while remaining:
+                chunk = os.read(descriptor, min(1024 * 1024, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            last = os.fstat(descriptor)
+        finally:
+            os.close(descriptor)
+        if (
+            (
+                first.st_dev,
+                first.st_ino,
+                first.st_mode,
+                first.st_size,
+                first.st_mtime_ns,
+                first.st_ctime_ns,
+            )
+            != (
+                last.st_dev,
+                last.st_ino,
+                last.st_mode,
+                last.st_size,
+                last.st_mtime_ns,
+                last.st_ctime_ns,
+            )
+        ):
+            raise AuthoringError("authoring recovery journal changed while reading")
+        return parse_recovery_journal(
+            b"".join(chunks), expected_project=expected_project
+        )
 
     def begin(self, bundle: ProjectCompilationBundle, operation_id: str) -> None:
         self.require_inactive()
@@ -85,6 +170,7 @@ class AuthoringJournal:
         self._replace(self._document)
 
     def finish(self) -> None:
+        verify_owner_file(self.journal_path)
         self.journal_path.unlink()
         fsync_owner_directory(self.directory)
         self._document = None
@@ -117,28 +203,6 @@ class AuthoringJournal:
                 pass
 
 
-def assert_no_active_journal(state_dir: Path, project: Path) -> None:
-    project = project.resolve(strict=True)
-    _validate_owner_state_location(state_dir, project)
-    if not state_dir.exists() and not state_dir.is_symlink():
-        return
-    verify_owner_directory(state_dir)
-    authoring = state_dir / "authoring"
-    if not authoring.exists() and not authoring.is_symlink():
-        return
-    verify_owner_directory(authoring)
-    info = project.lstat()
-    identity = {"path": str(project), "device": info.st_dev, "inode": info.st_ino}
-    digest = hashlib.sha256(_canonical(identity)).hexdigest()
-    directory = authoring / digest
-    if not directory.exists() and not directory.is_symlink():
-        return
-    verify_owner_directory(directory)
-    journal = AuthoringJournal(directory)
-    with journal.locked():
-        journal.require_inactive()
-
-
 def _validate_owner_state_location(state_dir: Path, project: Path) -> None:
     if not state_dir.is_absolute() or any(part in {".", ".."} for part in state_dir.parts):
         raise ValueError("authoring state directory must be absolute and canonical")
@@ -156,12 +220,36 @@ def _validate_owner_state_location(state_dir: Path, project: Path) -> None:
 
 
 def _project_namespace(bundle: ProjectCompilationBundle) -> str:
-    identity = {
-        "path": str(bundle.resolved_project),
-        "device": bundle.project_identity.device,
-        "inode": bundle.project_identity.inode,
+    return _project_namespace_for_identity(bundle.project_identity)
+
+
+def _project_namespace_for_identity(identity: PathIdentity) -> str:
+    document = {
+        "path": str(identity.resolved_path),
+        "device": identity.device,
+        "inode": identity.inode,
     }
-    return hashlib.sha256(_canonical(identity)).hexdigest()
+    return hashlib.sha256(_canonical(document)).hexdigest()
+
+
+def _current_project_identity(project: Path) -> PathIdentity:
+    try:
+        supplied = project.lstat()
+        if stat.S_ISLNK(supplied.st_mode) or not stat.S_ISDIR(supplied.st_mode):
+            raise AuthoringError("authoring recovery project must be a real directory")
+        resolved = project.resolve(strict=True)
+        info = resolved.lstat()
+    except (OSError, RuntimeError) as exc:
+        raise AuthoringError("authoring recovery project is unavailable") from exc
+    if not stat.S_ISDIR(info.st_mode) or _project_stability_facts(
+        supplied
+    ) != _project_stability_facts(info):
+        raise AuthoringError("authoring recovery project identity changed")
+    return PathIdentity(resolved, info.st_dev, info.st_ino)
+
+
+def _project_stability_facts(info: os.stat_result) -> tuple[int, int, int, int]:
+    return info.st_dev, info.st_ino, info.st_mode, info.st_ctime_ns
 
 
 def _journal_document(
@@ -234,6 +322,7 @@ def _leaf_document(identity: LeafIdentity | None) -> dict[str, object] | None:
         "mode": identity.mode,
         "size": identity.size,
         "mtime_ns": identity.mtime_ns,
+        "ctime_ns": identity.ctime_ns,
     }
 
 

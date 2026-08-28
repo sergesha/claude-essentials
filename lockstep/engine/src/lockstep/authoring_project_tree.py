@@ -21,10 +21,16 @@ _DIRECTORY_FLAGS = (
 class AuthoringProjectTree:
     """Open and mutate only identity-bound directories below one project root."""
 
-    __slots__ = ("bundle", "created_directories", "_recorded")
+    __slots__ = (
+        "created_directories",
+        "_project",
+        "_project_identity",
+        "_recorded",
+    )
 
     def __init__(self, bundle: ProjectCompilationBundle) -> None:
-        self.bundle = bundle
+        self._project = bundle.resolved_project
+        self._project_identity = bundle.project_identity
         self.created_directories: dict[Path, PathIdentity | None] = {}
         recorded = {bundle.resolved_project: bundle.project_identity}
         for source in bundle.sources:
@@ -35,13 +41,30 @@ class AuthoringProjectTree:
                 self._record_identity(recorded, identity)
         self._recorded = recorded
 
+    @classmethod
+    def from_identities(
+        cls,
+        project_identity: PathIdentity,
+        ancestor_chains: tuple[tuple[PathIdentity, ...], ...],
+    ) -> AuthoringProjectTree:
+        tree = cls.__new__(cls)
+        tree._project = project_identity.resolved_path
+        tree._project_identity = project_identity
+        tree.created_directories = {}
+        recorded = {tree._project: project_identity}
+        for ancestors in ancestor_chains:
+            for identity in ancestors:
+                tree._record_identity(recorded, identity)
+        tree._recorded = recorded
+        return tree
+
     def ensure_directory(self, directory: Path) -> None:
         try:
-            relative = directory.relative_to(self.bundle.resolved_project)
+            relative = directory.relative_to(self._project)
         except ValueError as exc:
             raise AuthoringError("authoring directory is outside the project") from exc
         descriptor = self._open_root()
-        current = self.bundle.resolved_project
+        current = self._project
         try:
             for part in relative.parts:
                 child = current / part
@@ -92,11 +115,11 @@ class AuthoringProjectTree:
 
     def open_directory(self, directory: Path) -> int:
         try:
-            relative = directory.relative_to(self.bundle.resolved_project)
+            relative = directory.relative_to(self._project)
         except ValueError as exc:
             raise AuthoringError("authoring directory is outside the project") from exc
         descriptor = self._open_root()
-        current = self.bundle.resolved_project
+        current = self._project
         try:
             for part in relative.parts:
                 child = current / part
@@ -149,10 +172,10 @@ class AuthoringProjectTree:
                 os.close(parent_descriptor)
 
     def _open_root(self) -> int:
-        descriptor = os.open(self.bundle.resolved_project, _DIRECTORY_FLAGS)
+        descriptor = os.open(self._project, _DIRECTORY_FLAGS)
         try:
             self._verify_directory_descriptor(
-                descriptor, expected=self.bundle.project_identity
+                descriptor, expected=self._project_identity
             )
             return descriptor
         except Exception:
@@ -166,10 +189,10 @@ class AuthoringProjectTree:
 
     def _contained_parent(self, destination: Path) -> Path:
         try:
-            destination.relative_to(self.bundle.resolved_project)
+            destination.relative_to(self._project)
         except ValueError as exc:
             raise AuthoringError("authoring destination is outside the project") from exc
-        if destination == self.bundle.resolved_project or not destination.name:
+        if destination == self._project or not destination.name:
             raise AuthoringError("authoring destination is invalid")
         return destination.parent
 

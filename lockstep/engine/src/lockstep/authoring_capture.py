@@ -128,9 +128,16 @@ def validate_directory(
         raise AuthoringError(f"{label} changed while it was captured")
 
 
-def _leaf_facts(info: os.stat_result) -> tuple[int, int, int, int, int]:
-    return info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns
+def _leaf_facts(info: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
 
 
-def _directory_facts(info: os.stat_result) -> tuple[int, int, int]:
-    return info.st_dev, info.st_ino, info.st_mode
+def _directory_facts(info: os.stat_result) -> tuple[int, int, int, int]:
+    return info.st_dev, info.st_ino, info.st_mode, info.st_ctime_ns

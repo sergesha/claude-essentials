@@ -106,12 +106,20 @@ class _LeafIdentity:
     mode: int
     size: int
     mtime_ns: int
+    ctime_ns: int
 
     def __post_init__(self) -> None:
         _absolute(self.resolved_path, "leaf identity path")
         if any(
             type(value) is not int
-            for value in (self.device, self.inode, self.mode, self.size, self.mtime_ns)
+            for value in (
+                self.device,
+                self.inode,
+                self.mode,
+                self.size,
+                self.mtime_ns,
+                self.ctime_ns,
+            )
         ):
             raise TypeError("leaf identity values must be integers")
         if min(self.device, self.inode, self.mode, self.size) < 0:
@@ -561,4 +569,5 @@ def _leaf_identity(path: Path, info: stat_result) -> _LeafIdentity:
         info.st_mode,
         info.st_size,
         info.st_mtime_ns,
+        info.st_ctime_ns,
     )

@@ -6,10 +6,8 @@ from pathlib import Path
 
 from lockstep.authoring_bundle import ProjectCompilationBundle
 from lockstep.authoring_identity import validate_bundle_preconditions
-from lockstep.authoring_journal import (
-    AuthoringJournal,
-    assert_no_active_journal,
-)
+from lockstep.authoring_journal import AuthoringJournal
+from lockstep.authoring_recovery import recover_authoring_project
 from lockstep.authoring_transaction import AuthoringTransaction
 
 __all__ = ["AuthoringPublisher"]
@@ -41,4 +39,4 @@ class AuthoringPublisher:
     def recover(self, project: Path) -> None:
         if not isinstance(project, Path):
             raise TypeError("authoring project must be a Path")
-        assert_no_active_journal(self._state_dir, project)
+        recover_authoring_project(self._state_dir, project)

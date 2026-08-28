@@ -68,6 +68,7 @@ def validate_source(source: SourceIdentity) -> None:
         expected.mode,
         expected.size,
         expected.mtime_ns,
+        expected.ctime_ns,
     ):
         raise AuthoringError("workflow source identity changed after planning")
     if content != source.content or _sha256(content) != source.sha256:
@@ -99,6 +100,7 @@ def validate_destination_before(
         leaf.mode,
         leaf.size,
         leaf.mtime_ns,
+        leaf.ctime_ns,
     ):
         raise AuthoringError("authoring destination identity changed after planning")
     if content != image.content or _sha256(content) != image.sha256:
@@ -132,6 +134,7 @@ def validate_destination_before_at(
         expected.mode,
         expected.size,
         expected.mtime_ns,
+        expected.ctime_ns,
     ):
         raise AuthoringError("authoring destination identity changed after planning")
     if content != image.content or _sha256(content) != image.sha256:
@@ -237,6 +240,7 @@ def classify_destination_ownership_at(
                 expected_before.mode,
                 expected_before.size,
                 expected_before.mtime_ns,
+                expected_before.ctime_ns,
             )
             and content == before.content
             and _sha256(content) == before.sha256
@@ -402,8 +406,15 @@ def _read_descriptor(
     return content, first
 
 
-def _leaf_facts(info: os.stat_result) -> tuple[int, int, int, int, int]:
-    return info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns
+def _leaf_facts(info: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_mode,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+    )
 
 
 def _sha256(content: bytes) -> str:
