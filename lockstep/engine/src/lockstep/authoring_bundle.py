@@ -3,19 +3,26 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import stat
 from dataclasses import dataclass
+from os import stat_result
 from pathlib import Path
 from typing import Literal
 
 import yaml
 
+from lockstep.authoring_capture import (
+    capture_directory,
+    capture_optional_regular_file,
+    capture_regular_file,
+    validate_directory,
+)
 from lockstep.authoring_compilation import (
     compile_captured_source,
     validate_logical_name,
     workflow_call_names,
 )
+from lockstep.authoring_limits import AuthoringBudget
 from lockstep.errors import AuthoringError
 from lockstep.workflow.canonical import canonical_yaml
 from lockstep.workflow.compiler import CompilationResult
@@ -41,7 +48,7 @@ class AuthoredRecipe:
 
 
 _CompiledWorkflow = tuple[ValidatedWorkflow, CompilationResult]
-_CompiledRole = tuple[AuthoredRecipe, CompilationResult, tuple[str, ...]]
+_ProjectedRole = tuple[str, dict[Path, bytes]]
 
 
 def _absolute(path: Path, label: str) -> Path:
@@ -289,13 +296,16 @@ def _compile_closure(
 ) -> tuple[
     tuple[SourceIdentity, ...],
     tuple[tuple[str, tuple[str, ...]], ...],
-    tuple[_CompiledRole, ...],
+    tuple[_ProjectedRole, ...],
 ]:
     sources: list[SourceIdentity] = []
     dependency_edges: list[tuple[str, tuple[str, ...]]] = []
-    compiled_roles: list[_CompiledRole] = []
+    projected_roles: list[_ProjectedRole] = []
     completed: dict[str, _CompiledWorkflow] = {}
     active: set[str] = set()
+    source_budget = AuthoringBudget("authoring read set")
+    destination_budget = AuthoringBudget("authoring after images")
+    destination_paths: set[Path] = set()
 
     def visit(role_recipe: AuthoredRecipe, role_path: Path) -> None:
         role = role_recipe.name
@@ -306,8 +316,13 @@ def _compile_closure(
         active.add(role)
         try:
             source = _capture_source(
-                role, role_path, project, directory_identities
+                role,
+                role_path,
+                project,
+                directory_identities,
+                max_bytes=source_budget.max_bytes_for_next,
             )
+            source_budget.retain(source.content)
             document = load_workflow_bytes(source.resolved_path, source.content)
             child_names = workflow_call_names(document)
             for child_name in child_names:
@@ -320,38 +335,49 @@ def _compile_closure(
             validated, _catalog, compiled = compile_captured_source(
                 document, children=children
             )
+            projected = _workflow_destinations(role_recipe, compiled, child_names)
+            if any(path in destination_paths for path in projected):
+                raise AuthoringError("compilation destinations must be unique")
+            for content in projected.values():
+                destination_budget.retain(content)
+            destination_paths.update(projected)
             completed[role] = (validated, compiled)
             sources.append(source)
             dependency_edges.append((role, child_names))
-            compiled_roles.append((role_recipe, compiled, child_names))
+            projected_roles.append((role, projected))
         finally:
             active.remove(role)
 
     visit(recipe, source_path)
-    return tuple(sources), tuple(dependency_edges), tuple(compiled_roles)
+    return tuple(sources), tuple(dependency_edges), tuple(projected_roles)
 
 
 def _destination_images(
     project: Path,
-    compiled_roles: tuple[_CompiledRole, ...],
+    projected_roles: tuple[_ProjectedRole, ...],
     directory_identities: dict[Path, _PathIdentity],
 ) -> tuple[tuple[DestinationImage, ...], tuple[DestinationImage, ...]]:
     destinations: dict[Path, tuple[str, bytes]] = {}
-    for role_recipe, compiled, children in compiled_roles:
-        for path, content in _workflow_destinations(
-            role_recipe, compiled, children
-        ).items():
-            if path in destinations:
-                raise AuthoringError("compilation destinations must be unique")
-            destinations[path] = (role_recipe.name, content)
+    for role, projected in projected_roles:
+        destinations.update(
+            (path, (role, content)) for path, content in projected.items()
+        )
     ancestors_by_parent = {
         parent: _destination_ancestors(project, parent, directory_identities)
         for parent in dict.fromkeys(path.parent for path in destinations)
     }
-    before_images = tuple(
-        _absent_destination(role, path, ancestors_by_parent[path.parent])
-        for path, (role, _content) in destinations.items()
-    )
+    before_images_list: list[DestinationImage] = []
+    before_budget = AuthoringBudget("authoring before images")
+    for path, (role, _content) in destinations.items():
+        image = _capture_destination(
+            role,
+            path,
+            ancestors_by_parent[path.parent],
+            max_bytes=before_budget.max_bytes_for_next,
+        )
+        before_images_list.append(image)
+        before_budget.retain(image.content)
+    before_images = tuple(before_images_list)
     after_images = tuple(
         DestinationImage(
             role,
@@ -405,26 +431,25 @@ def _capture_source(
     path: Path,
     project: Path,
     directory_identities: dict[Path, _PathIdentity],
+    *,
+    max_bytes: int,
 ) -> SourceIdentity:
-    first = path.lstat()
-    if not stat.S_ISREG(first.st_mode):
-        raise AuthoringError("workflow source must be a regular file")
-    content = path.read_bytes()
-    last = path.lstat()
-    observed = (last.st_dev, last.st_ino, last.st_mode, last.st_size, last.st_mtime_ns)
-    expected = (first.st_dev, first.st_ino, first.st_mode, first.st_size, first.st_mtime_ns)
-    if observed != expected or last.st_size != len(content):
-        raise AuthoringError("workflow source changed while it was captured")
+    ancestors = tuple(
+        _cached_directory_identity(directory_identities, ancestor)
+        for ancestor in (project, project / ".lockstep", path.parent)
+    )
+    _validate_ancestor_identities(ancestors)
+    content, info = capture_regular_file(
+        path, max_bytes=max_bytes, label="workflow source"
+    )
+    _validate_ancestor_identities(ancestors)
     return SourceIdentity(
         role,
         path,
         content,
         _digest(content),
-        _leaf_identity(path, last),
-        tuple(
-            _cached_directory_identity(directory_identities, ancestor)
-            for ancestor in (project, project / ".lockstep", path.parent)
-        ),
+        _leaf_identity(path, info),
+        ancestors,
     )
 
 
@@ -452,14 +477,34 @@ def _workflow_destinations(
     return destinations
 
 
-def _absent_destination(
-    role: str, path: Path, ancestors: tuple[_PathIdentity, ...]
+def _capture_destination(
+    role: str,
+    path: Path,
+    ancestors: tuple[_PathIdentity, ...],
+    *,
+    max_bytes: int,
 ) -> DestinationImage:
-    try:
-        path.lstat()
-    except FileNotFoundError:
-        return DestinationImage(role, path, None, None, None, None, ancestors)
-    raise AuthoringError("existing compilation destinations are not yet supported")
+    _validate_ancestor_identities(ancestors)
+    captured = capture_optional_regular_file(
+        path,
+        max_bytes=max_bytes,
+        label="compilation destination",
+    )
+    if captured is None:
+        image = DestinationImage(role, path, None, None, None, None, ancestors)
+    else:
+        content, info = captured
+        image = DestinationImage(
+            role,
+            path,
+            content,
+            _digest(content),
+            stat.S_IMODE(info.st_mode),
+            _leaf_identity(path, info),
+            ancestors,
+        )
+    _validate_ancestor_identities(ancestors)
+    return image
 
 
 def _destination_ancestors(
@@ -483,28 +528,8 @@ def _destination_ancestors(
 
 
 def _directory_identity(path: Path) -> _PathIdentity:
-    try:
-        first = path.lstat()
-    except FileNotFoundError:
-        raise
-    except OSError as exc:
-        raise AuthoringError("destination ancestor cannot be captured") from exc
-    if not stat.S_ISDIR(first.st_mode):
-        raise AuthoringError("destination ancestor must be a canonical real directory")
-    try:
-        resolved = path.resolve(strict=True)
-        last = path.lstat()
-    except (OSError, RuntimeError) as exc:
-        raise AuthoringError("destination ancestor cannot be captured") from exc
-    if (first.st_dev, first.st_ino, first.st_mode) != (
-        last.st_dev,
-        last.st_ino,
-        last.st_mode,
-    ):
-        raise AuthoringError("destination ancestor changed while it was captured")
-    if resolved != path:
-        raise AuthoringError("destination ancestor must be a canonical real directory")
-    return _PathIdentity(path, first.st_dev, first.st_ino)
+    info = capture_directory(path, label="destination ancestor")
+    return _PathIdentity(path, info.st_dev, info.st_ino)
 
 
 def _cached_directory_identity(
@@ -518,7 +543,17 @@ def _cached_directory_identity(
     return identity
 
 
-def _leaf_identity(path: Path, info: os.stat_result) -> _LeafIdentity:
+def _validate_ancestor_identities(ancestors: tuple[_PathIdentity, ...]) -> None:
+    for expected in ancestors:
+        validate_directory(
+            expected.resolved_path,
+            device=expected.device,
+            inode=expected.inode,
+            label="destination ancestor",
+        )
+
+
+def _leaf_identity(path: Path, info: stat_result) -> _LeafIdentity:
     return _LeafIdentity(
         path,
         info.st_dev,

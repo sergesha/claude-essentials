@@ -14,9 +14,8 @@ from lockstep.authoring_bundle import (
     ProjectCompilationBundle,
     SourceIdentity,
 )
+from lockstep.authoring_limits import validate_authoring_contents
 from lockstep.errors import AuthoringError
-from lockstep.recipe.authority import RecipeLimits
-from lockstep.runtime.owner_state import StorageLimitExceeded
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,41 +208,28 @@ def _validate_destination_shape(
 
 
 def _validate_bundle_limits(bundle: ProjectCompilationBundle) -> None:
-    limits = RecipeLimits()
     groups = (
         (
-            "read set",
-            len(bundle.sources),
-            tuple(item.content for item in bundle.sources),
+            "authoring read set",
+            (item.content for item in bundle.sources),
         ),
         (
-            "before images",
-            len(bundle.before_images),
-            tuple(
+            "authoring before images",
+            (
                 item.content
                 for item in bundle.before_images
-                if item.content is not None
             ),
         ),
         (
-            "after images",
-            len(bundle.after_images),
-            tuple(
+            "authoring after images",
+            (
                 item.content
                 for item in bundle.after_images
-                if item.content is not None
             ),
         ),
     )
-    for label, record_count, contents in groups:
-        if record_count > limits.max_files:
-            raise StorageLimitExceeded(
-                f"authoring {label} exceed {limits.max_files} admission limit"
-            )
-        if sum(map(len, contents)) > limits.max_source_bytes:
-            raise StorageLimitExceeded(
-                f"authoring {label} exceed the aggregate byte admission limit"
-            )
+    for label, contents in groups:
+        validate_authoring_contents(label, contents)
 
 
 def _validate_ancestor_chain(
