@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from importlib import import_module, resources
 from pathlib import Path
 
@@ -47,6 +48,15 @@ EXPECTED_BUNDLES = {
 
 def _templates():
     return import_module("lockstep.templates")
+
+
+def _install_template(template: str, name: str, project: Path):
+    return _templates().install_template(
+        template,
+        name,
+        project,
+        state_dir=(project.parent / f"{project.name}-owner-state").resolve(),
+    )
 
 
 def test_catalog_is_discovered_from_exact_package_resource_bundles(
@@ -136,7 +146,7 @@ def test_every_destination_is_preflighted_before_any_bundle_write(
     }
 
     with pytest.raises(_templates().TemplateCollision, match=collision):
-        _templates().install_template("reviewed-change", "release", tmp_path)
+        _install_template("reviewed-change", "release", tmp_path)
 
     after = {
         path.relative_to(tmp_path): path.read_bytes()
@@ -149,9 +159,7 @@ def test_every_destination_is_preflighted_before_any_bundle_write(
 def test_atomic_install_publishes_the_complete_self_contained_child_dag(
     tmp_path: Path,
 ) -> None:
-    installed = _templates().install_template(
-        "parallel-review", "release", tmp_path
-    )
+    installed = _install_template("parallel-review", "release", tmp_path)
 
     expected_sources = {
         tmp_path / ".lockstep/workflows/release.workflow.yaml",
@@ -187,7 +195,7 @@ def test_atomic_install_publishes_the_complete_self_contained_child_dag(
 def test_template_install_compile_round_trip_preserves_canonical_child_dag(
     tmp_path: Path, bundle_name: str
 ) -> None:
-    installed = _templates().install_template(bundle_name, "release", tmp_path)
+    installed = _install_template(bundle_name, "release", tmp_path)
     expected_recipes = {
         f"{output.replace('{name}', 'release')}.recipe.yaml"
         for output in EXPECTED_BUNDLES[bundle_name]["outputs"].values()
@@ -216,7 +224,7 @@ def test_template_install_compile_round_trip_preserves_canonical_child_dag(
 def test_unlinked_template_parent_recipe_is_not_canonical(
     tmp_path: Path, bundle_name: str
 ) -> None:
-    _templates().install_template(bundle_name, "release", tmp_path)
+    _install_template(bundle_name, "release", tmp_path)
     recipe = project_paths(tmp_path, "release")
     _validated, _catalog, compiled = compile_project_source(recipe.workflow_path)
     recipe.recipe_path.write_bytes(compiled.recipe_bytes)
@@ -230,21 +238,21 @@ def test_custom_template_path_is_rejected_as_a_v2_feature(tmp_path: Path) -> Non
     custom.mkdir()
 
     with pytest.raises(ValueError, match="custom template paths are a v2 feature"):
-        _templates().install_template(str(custom), "release", tmp_path)
+        _install_template(str(custom), "release", tmp_path)
 
 
 def test_compile_failure_before_publish_leaves_no_bundle_destinations(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    templates = _templates()
+    installation = import_module("lockstep.template_installation")
     monkeypatch.setattr(
-        templates,
-        "_compile_role",
+        installation,
+        "compile_captured_source",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("compile fault")),
     )
 
     with pytest.raises(RuntimeError, match="compile fault"):
-        templates.install_template("reviewed-change", "release", tmp_path)
+        _install_template("reviewed-change", "release", tmp_path)
 
     assert not (tmp_path / ".lockstep/workflows").exists()
     assert not (tmp_path / ".lockstep/recipes").exists()
@@ -253,22 +261,22 @@ def test_compile_failure_before_publish_leaves_no_bundle_destinations(
 def test_publish_fault_rolls_back_every_destination_and_next_init_recovers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    templates = _templates()
-    real_replace = templates._replace_destination
+    original_link = os.link
     calls = 0
 
-    def fail_second(source, destination):
+    def fail_second(source, destination, *args, **kwargs):
         nonlocal calls
         calls += 1
+        result = original_link(source, destination, *args, **kwargs)
         if calls == 2:
             raise OSError("publish fault")
-        return real_replace(source, destination)
+        return result
 
-    monkeypatch.setattr(templates, "_replace_destination", fail_second)
+    monkeypatch.setattr(os, "link", fail_second)
     with pytest.raises(OSError, match="publish fault"):
-        templates.install_template("reviewed-change", "release", tmp_path)
+        _install_template("reviewed-change", "release", tmp_path)
     assert not any(path.is_file() for path in tmp_path.rglob("*"))
 
-    monkeypatch.setattr(templates, "_replace_destination", real_replace)
-    installed = templates.install_template("reviewed-change", "release", tmp_path)
+    monkeypatch.setattr(os, "link", original_link)
+    installed = _install_template("reviewed-change", "release", tmp_path)
     assert all(path.is_file() for path in (*installed.sources, *installed.recipes))

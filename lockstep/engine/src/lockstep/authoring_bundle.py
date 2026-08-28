@@ -289,6 +289,39 @@ def plan_project_compilation(recipe: AuthoredRecipe) -> ProjectCompilationBundle
     return _plan_project_compilation(recipe).bundle
 
 
+def _plan_destination_only_bundle(
+    project: Path,
+    dependency_edges: tuple[tuple[str, tuple[str, ...]], ...],
+    projected_roles: tuple[_ProjectedRole, ...],
+) -> ProjectCompilationBundle:
+    root = Path(project).resolve()
+    if tuple(role for role, _projected in projected_roles) != tuple(
+        role for role, _children in dependency_edges
+    ):
+        raise AuthoringError("destination-only projections must match dependency roles")
+    destination_budget = AuthoringBudget("authoring after images")
+    destination_paths: set[Path] = set()
+    for _role, projected in projected_roles:
+        if any(path in destination_paths for path in projected):
+            raise AuthoringError("compilation destinations must be unique")
+        for content in projected.values():
+            destination_budget.retain(content)
+        destination_paths.update(projected)
+    directory_identities: dict[Path, _PathIdentity] = {}
+    project_identity = _cached_directory_identity(directory_identities, root)
+    before_images, after_images = _destination_images(
+        root, projected_roles, directory_identities
+    )
+    return ProjectCompilationBundle(
+        root,
+        project_identity,
+        (),
+        dependency_edges,
+        before_images,
+        after_images,
+    )
+
+
 def _plan_project_compilation(recipe: AuthoredRecipe) -> _PlannedCompilation:
     """Retain the root result from the same pass that produced the bundle."""
 

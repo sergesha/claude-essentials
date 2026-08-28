@@ -456,7 +456,13 @@ def test_parent_compile_rebuilds_changed_direct_child(
     from lockstep.templates import install_template, show_template
 
     project = tmp_path / "project"
-    install_template(template, "release", project)
+    project.mkdir()
+    install_template(
+        template,
+        "release",
+        project,
+        state_dir=(tmp_path / "template-owner-state").resolve(),
+    )
     shown = show_template(template, "release")
     changed_child = next(name for name in shown.compile_order if name != "release")
     child = project / ".lockstep/workflows" / f"{changed_child}.workflow.yaml"

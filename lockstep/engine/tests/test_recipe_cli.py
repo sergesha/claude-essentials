@@ -137,7 +137,12 @@ def test_direct_authoring_boundaries_reject_invalid_logical_names_without_writes
         elif boundary == "show_template":
             templates.show_template("reviewed-change", name)
         else:
-            templates.install_template("reviewed-change", name, project)
+            templates.install_template(
+                "reviewed-change",
+                name,
+                project,
+                state_dir=(probe / "owner-state").resolve(),
+            )
 
     assert _tree_snapshot(probe) == before
 
@@ -154,7 +159,12 @@ def test_invalid_template_name_is_rejected_before_recovery_mutates_project(
     before = _tree_snapshot(probe)
 
     with pytest.raises(authoring.AuthoringError, match="invalid workflow name"):
-        templates.install_template("reviewed-change", "../../../escape", project)
+        templates.install_template(
+            "reviewed-change",
+            "../../../escape",
+            project,
+            state_dir=(probe / "owner-state").resolve(),
+        )
 
     assert _tree_snapshot(probe) == before
 

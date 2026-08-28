@@ -186,7 +186,12 @@ def _cmd_template(args: argparse.Namespace) -> int:
         sys.stdout.write(json_text(show_template(args.template, args.name).to_dict()))
         return 0
     if args.action == "init":
-        install_template(args.template, args.name, Path.cwd())
+        install_template(
+            args.template,
+            args.name,
+            Path.cwd(),
+            state_dir=state_dir().absolute(),
+        )
         print(f"initialized {args.name}")
         return 0
     raise CliError("unknown template action")

@@ -114,7 +114,12 @@ def test_packaged_template_scope_only_public_start_has_no_runtime_authority(
 
     project = tmp_path / "project"
     project.mkdir()
-    install_template(template, "release", project)
+    install_template(
+        template,
+        "release",
+        project,
+        state_dir=(tmp_path / "template-owner-state").resolve(),
+    )
     recipes = project / ".lockstep" / "recipes"
     authorized = StrictRecipeIngress(recipes).inspect(
         "release.recipe.yaml"
