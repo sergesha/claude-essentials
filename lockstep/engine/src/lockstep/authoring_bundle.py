@@ -233,9 +233,7 @@ class ProjectCompilationBundle:
                 raise TypeError(f"bundle {label} must be a tuple")
         if any(not isinstance(item, SourceIdentity) for item in self.sources):
             raise TypeError("bundle source identity is invalid")
-        roles = tuple(item.role for item in self.sources)
-        if not roles or len(roles) != len(set(roles)):
-            raise ValueError("bundle source roles must be non-empty and unique")
+        source_roles = tuple(item.role for item in self.sources)
         source_paths = tuple(item.resolved_path for item in self.sources)
         if len(source_paths) != len(set(source_paths)):
             raise ValueError("bundle source paths must be unique")
@@ -244,8 +242,15 @@ class ProjectCompilationBundle:
             for edge in self.dependency_edges
         ):
             raise TypeError("bundle dependency edge is invalid")
-        if tuple(role for role, _children in self.dependency_edges) != roles:
-            raise ValueError("bundle dependency edges must match child-first source roles")
+        roles = tuple(role for role, _children in self.dependency_edges)
+        if (
+            not roles
+            or any(not isinstance(role, str) or not role for role in roles)
+            or len(roles) != len(set(roles))
+        ):
+            raise ValueError("bundle dependency roles must be non-empty and unique")
+        if source_roles not in ((), roles):
+            raise ValueError("bundle source roles must be complete or empty")
         seen: set[str] = set()
         for role, children in self.dependency_edges:
             if (
@@ -269,7 +274,7 @@ class ProjectCompilationBundle:
             raise ValueError("bundle after-images must contain exact destination bytes")
         for before, after in zip(self.before_images, self.after_images, strict=True):
             if before.role != after.role or before.role not in roles:
-                raise ValueError("bundle destination roles must match source roles")
+                raise ValueError("bundle destination roles must match dependency roles")
             if before.ancestors != after.ancestors:
                 raise ValueError("paired destination ancestors must match")
             if before.content is not None and before.leaf is None:
