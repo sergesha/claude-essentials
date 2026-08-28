@@ -21,6 +21,7 @@ from lockstep.authoring_bundle import (
 from lockstep.authoring_recovery_model import (
     MAX_RECOVERY_JOURNAL_BYTES,
     AuthoringRecoveryModel,
+    derive_created_directory_candidates,
     parse_recovery_journal,
 )
 from lockstep.authoring_stage_paths import (
@@ -44,11 +45,17 @@ class AuthoringRecoveryRequired(AuthoringError):
 
 
 class AuthoringJournal:
-    __slots__ = ("directory", "journal_path", "_document")
+    __slots__ = (
+        "directory",
+        "journal_path",
+        "_created_directory_candidates",
+        "_document",
+    )
 
     def __init__(self, directory: Path) -> None:
         self.directory = directory
         self.journal_path = directory / "transaction.json"
+        self._created_directory_candidates: tuple[Path, ...] = ()
         self._document: dict[str, object] | None = None
 
     @classmethod
@@ -165,7 +172,30 @@ class AuthoringJournal:
         reservation: ReservedStageEvidence,
     ) -> None:
         self.require_inactive()
+        self._created_directory_candidates = derive_created_directory_candidates(
+            tuple(
+                (image.resolved_path, image.ancestors)
+                for image in bundle.before_images
+            )
+        )
         self._document = _journal_document(bundle, reservation)
+        self._replace(self._document)
+
+    def record_created_directory(self, identity: PathIdentity) -> None:
+        if self._document is None:
+            raise RuntimeError("authoring journal has not begun")
+        progress = self._document["created_directory_progress"]
+        if not isinstance(progress, list):
+            raise RuntimeError("authoring journal directory progress is invalid")
+        index = len(progress)
+        if (
+            index >= len(self._created_directory_candidates)
+            or identity.resolved_path != self._created_directory_candidates[index]
+        ):
+            raise AuthoringError(
+                "authoring created directory progress is inconsistent"
+            )
+        progress.append(_identity_document(identity))
         self._replace(self._document)
 
     def record_replacement(self, index: int) -> None:
@@ -181,6 +211,7 @@ class AuthoringJournal:
         verify_owner_file(self.journal_path)
         self.journal_path.unlink()
         fsync_owner_directory(self.directory)
+        self._created_directory_candidates = ()
         self._document = None
 
     def _replace(self, document: dict[str, object]) -> None:
@@ -270,7 +301,7 @@ def _journal_document(
     if reservation.stages != expected_stages:
         raise AuthoringError("authoring reserved stage evidence is inconsistent")
     return {
-        "schema": "lockstep.authoring-transaction/v2",
+        "schema": "lockstep.authoring-transaction/v3",
         "operation_id": reservation.operation_id,
         "project": {
             "path": str(bundle.resolved_project),
@@ -316,6 +347,7 @@ def _journal_document(
             ],
         },
         "replacement_progress": [],
+        "created_directory_progress": [],
     }
 
 

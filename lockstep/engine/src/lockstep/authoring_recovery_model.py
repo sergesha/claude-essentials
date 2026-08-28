@@ -21,7 +21,8 @@ from lockstep.errors import AuthoringError
 from lockstep.recipe.authority import RecipeLimits
 
 
-_JOURNAL_SCHEMA = "lockstep.authoring-transaction/v2"
+_JOURNAL_SCHEMA_V2 = "lockstep.authoring-transaction/v2"
+_JOURNAL_SCHEMA_V3 = "lockstep.authoring-transaction/v3"
 _RESERVATION_KIND = "complete-reserved-stage-absence/v1"
 MAX_RECOVERY_JOURNAL_BYTES = 16 * 1024 * 1024
 _MAX_TEXT_BYTES = 4096
@@ -81,6 +82,43 @@ class AuthoringRecoveryModel:
     write_set: tuple[RecoveryWriteEntry, ...]
     reservation: ReservedStageEvidence
     replacement_progress: tuple[int, ...]
+    directory_candidates: tuple[Path, ...]
+    created_directories: tuple[PathIdentity, ...]
+
+
+def derive_created_directory_candidates(
+    paths_and_ancestors: tuple[tuple[Path, tuple[PathIdentity, ...]], ...],
+) -> tuple[Path, ...]:
+    """Derive mkdir order without allowing journal progress to mint paths."""
+
+    parents: dict[Path, tuple[PathIdentity, ...]] = {}
+    for path, ancestors in paths_and_ancestors:
+        if not ancestors:
+            raise AuthoringError("authoring directory candidate has no ancestor proof")
+        parent = path.parent
+        recorded = parents.setdefault(parent, ancestors)
+        if recorded != ancestors:
+            raise AuthoringError(
+                "authoring directory candidate has conflicting ancestor proofs"
+            )
+    candidates: list[Path] = []
+    seen: set[Path] = set()
+    for parent, ancestors in sorted(
+        parents.items(), key=lambda item: (len(item[0].parts), str(item[0]))
+    ):
+        current = ancestors[-1].resolved_path
+        try:
+            missing_parts = parent.relative_to(current).parts
+        except ValueError as exc:
+            raise AuthoringError(
+                "authoring directory candidate escapes its ancestor proof"
+            ) from exc
+        for part in missing_parts:
+            current = current / part
+            if current not in seen:
+                seen.add(current)
+                candidates.append(current)
+    return tuple(candidates)
 
 
 def parse_recovery_journal(
@@ -115,21 +153,29 @@ class _RecoveryParser:
         self.limits = RecipeLimits()
 
     def parse(self, value: object) -> AuthoringRecoveryModel:
+        if not isinstance(value, dict):
+            raise AuthoringError("authoring recovery journal has an open shape")
+        schema = value.get("schema")
+        base_keys = {
+            "schema",
+            "operation_id",
+            "project",
+            "read_set",
+            "write_set",
+            "reservation",
+            "replacement_progress",
+        }
+        if schema == _JOURNAL_SCHEMA_V2:
+            keys = base_keys
+        elif schema == _JOURNAL_SCHEMA_V3:
+            keys = base_keys | {"created_directory_progress"}
+        else:
+            raise AuthoringError("authoring recovery journal schema is unsupported")
         document = self._mapping(
             value,
-            {
-                "schema",
-                "operation_id",
-                "project",
-                "read_set",
-                "write_set",
-                "reservation",
-                "replacement_progress",
-            },
+            keys,
             "journal",
         )
-        if document["schema"] != _JOURNAL_SCHEMA:
-            raise AuthoringError("authoring recovery journal schema is unsupported")
         operation_id = self._operation_id(document["operation_id"])
         project = self._project(document["project"])
         read_set = self._read_set(document["read_set"])
@@ -138,8 +184,25 @@ class _RecoveryParser:
             document["reservation"], operation_id, write_set
         )
         progress = self._progress(document["replacement_progress"], len(write_set))
+        candidates = derive_created_directory_candidates(
+            tuple((entry.path, entry.ancestors) for entry in write_set)
+        )
+        created_directories = (
+            ()
+            if schema == _JOURNAL_SCHEMA_V2
+            else self._created_directory_progress(
+                document["created_directory_progress"], candidates
+            )
+        )
         return AuthoringRecoveryModel(
-            operation_id, project, read_set, write_set, reservation, progress
+            operation_id,
+            project,
+            read_set,
+            write_set,
+            reservation,
+            progress,
+            candidates,
+            created_directories,
         )
 
     def _reservation(
@@ -339,6 +402,28 @@ class _RecoveryParser:
                 "authoring recovery replacement progress is not monotonic"
             )
         return progress
+
+    def _created_directory_progress(
+        self, value: object, candidates: tuple[Path, ...]
+    ) -> tuple[PathIdentity, ...]:
+        values = self._sequence(value, "created directory progress")
+        if len(values) > len(candidates):
+            raise AuthoringError(
+                "authoring recovery created directory progress is invalid"
+            )
+        identities = tuple(
+            self._path_identity(item, "created directory identity")
+            for item in values
+        )
+        if tuple(identity.resolved_path for identity in identities) != candidates[
+            : len(identities)
+        ] or len({(identity.device, identity.inode) for identity in identities}) != len(
+            identities
+        ):
+            raise AuthoringError(
+                "authoring recovery created directory progress is not monotonic"
+            )
+        return identities
 
     def _path_identity(self, value: object, label: str) -> PathIdentity:
         item = self._mapping(value, {"path", "device", "inode"}, label)

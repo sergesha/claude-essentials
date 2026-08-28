@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import stat
 from pathlib import Path
+from typing import Callable
 
 from lockstep.authoring_bundle import (
     PathIdentity,
@@ -62,7 +63,11 @@ class AuthoringProjectTree:
         tree._recorded = recorded
         return tree
 
-    def ensure_directory(self, directory: Path) -> None:
+    def ensure_directory(
+        self,
+        directory: Path,
+        persist_created_directory_identity: Callable[[PathIdentity], None],
+    ) -> None:
         try:
             relative = directory.relative_to(self._project)
         except ValueError as exc:
@@ -87,11 +92,13 @@ class AuthoringProjectTree:
                         info = self._verify_directory_descriptor(
                             next_descriptor, expected=None
                         )
-                        self.created_directories[child] = PathIdentity(
+                        identity = PathIdentity(
                             child, info.st_dev, info.st_ino
                         )
+                        self.created_directories[child] = identity
+                        persist_created_directory_identity(identity)
                         os.fsync(descriptor)
-                    except Exception:
+                    except BaseException:
                         os.close(next_descriptor)
                         raise
                 else:
@@ -104,7 +111,7 @@ class AuthoringProjectTree:
                         self._verify_directory_descriptor(
                             next_descriptor, expected=expected
                         )
-                    except Exception:
+                    except BaseException:
                         os.close(next_descriptor)
                         raise
                 os.close(descriptor)
@@ -147,16 +154,67 @@ class AuthoringProjectTree:
                     self._verify_directory_descriptor(
                         next_descriptor, expected=expected
                     )
-                except Exception:
+                except BaseException:
                     os.close(next_descriptor)
                     raise
                 os.close(descriptor)
                 descriptor = next_descriptor
                 current = child
             return descriptor
-        except Exception:
+        except BaseException:
             os.close(descriptor)
             raise
+
+    def inspect_created_directory(
+        self, directory: Path, expected: PathIdentity | None
+    ) -> frozenset[str] | None:
+        """Inspect one candidate and enroll only an exact journal-owned inode."""
+
+        if expected is not None and expected.resolved_path != directory:
+            raise AuthoringError("created directory identity names another path")
+        parent_descriptor = self.open_directory(directory.parent)
+        try:
+            try:
+                child_descriptor = os.open(
+                    directory.name, _DIRECTORY_FLAGS, dir_fd=parent_descriptor
+                )
+            except FileNotFoundError:
+                return None
+            except OSError as exc:
+                raise AuthoringError(
+                    "transaction-created directory is foreign"
+                ) from exc
+            try:
+                if expected is None:
+                    raise AuthoringError(
+                        "transaction-created directory ownership is ambiguous"
+                    )
+                self._verify_directory_descriptor(
+                    child_descriptor, expected=expected
+                )
+                children = frozenset(os.listdir(child_descriptor))
+            finally:
+                os.close(child_descriptor)
+        finally:
+            os.close(parent_descriptor)
+        self.created_directories[directory] = expected
+        return children
+
+    def durably_confirm_created_directory_absent(self, directory: Path) -> None:
+        parent_descriptor = self.open_directory(directory.parent)
+        try:
+            try:
+                os.stat(
+                    directory.name,
+                    dir_fd=parent_descriptor,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                os.fsync(parent_descriptor)
+                return
+            raise AuthoringError("transaction-created directory is not absent")
+        finally:
+            os.close(parent_descriptor)
 
     def remove_created_directories(self) -> None:
         for directory in sorted(

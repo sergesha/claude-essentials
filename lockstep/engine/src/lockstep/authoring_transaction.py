@@ -116,7 +116,9 @@ class AuthoringTransaction:
             key=lambda path: (len(path.parts), str(path)),
         )
         for parent in parents:
-            self.tree.ensure_directory(parent)
+            self.tree.ensure_directory(
+                parent, self.journal.record_created_directory
+            )
 
     def _stage_after_images(
         self,

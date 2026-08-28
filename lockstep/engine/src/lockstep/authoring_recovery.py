@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from lockstep.authoring_directory_recovery import DirectoryRecoveryPlan
 from lockstep.authoring_journal import AuthoringJournal
 from lockstep.authoring_project_tree import AuthoringProjectTree
 from lockstep.authoring_recovery_model import (
@@ -80,20 +81,25 @@ class AuthoringRecovery:
         self.tree = AuthoringProjectTree.from_identities(model.project, chains)
 
     def recover(self) -> None:
+        directories = DirectoryRecoveryPlan.preflight(self.tree, self.model)
         destinations = tuple(
-            self._classify_destination(entry) for entry in self.model.write_set
+            self._classify_destination(entry, directories)
+            for entry in self.model.write_set
         )
         all_destinations_before = all(
             state.state == "before" for state in destinations
         )
         publication_stages = tuple(
             self._inspect_publication_stage(
-                state, incomplete_is_reclaimable=all_destinations_before
+                state,
+                directories,
+                incomplete_is_reclaimable=all_destinations_before,
             )
             for state in destinations
         )
         restoration_stages = tuple(
-            self._inspect_restoration_stage(state) for state in destinations
+            self._inspect_restoration_stage(state, directories)
+            for state in destinations
         )
         removed_absent_destinations: dict[int, _ObservedFile] = {}
         for state in reversed(destinations):
@@ -104,7 +110,7 @@ class AuthoringRecovery:
                     )
                 else:
                     self._restore(state, restoration_stages[state.entry.index])
-        self._require_all_before_images()
+        self._require_all_before_images(directories)
         for stage in publication_stages:
             removed_destination = removed_absent_destinations.get(
                 stage.entry.index
@@ -121,12 +127,21 @@ class AuthoringRecovery:
                 self._remove_publication_stage(stage)
         for stage in restoration_stages:
             self._reconcile_restoration_stage(stage)
-        self._durably_confirm_all_before_images()
+        self._durably_confirm_all_before_images(directories)
+        directories.remove_directories()
         self.journal.finish()
 
     def _classify_destination(
-        self, entry: RecoveryWriteEntry
+        self,
+        entry: RecoveryWriteEntry,
+        directories: DirectoryRecoveryPlan,
     ) -> _DestinationState:
+        if directories.parent_is_missing(entry.path):
+            if not entry.before.absent:
+                raise AuthoringError(
+                    f"authoring recovery lost a present before-image: {entry.path}"
+                )
+            return _DestinationState(entry, "before", None)
         parent_descriptor, leaf = self.tree.open_parent(entry.path)
         try:
             observed = _observe_file(parent_descriptor, leaf, entry.path)
@@ -145,11 +160,14 @@ class AuthoringRecovery:
     def _inspect_publication_stage(
         self,
         destination: _DestinationState,
+        directories: DirectoryRecoveryPlan,
         *,
         incomplete_is_reclaimable: bool,
     ) -> _OwnedStage:
         entry = destination.entry
         path = self.model.reservation.stages[entry.index].publication
+        if directories.parent_is_missing(path):
+            return _OwnedStage(entry, path, "absent", None)
         parent_descriptor, leaf = self.tree.open_parent(path)
         try:
             observed = _observe_file(parent_descriptor, leaf, path)
@@ -168,10 +186,14 @@ class AuthoringRecovery:
         )
 
     def _inspect_restoration_stage(
-        self, destination: _DestinationState
+        self,
+        destination: _DestinationState,
+        directories: DirectoryRecoveryPlan,
     ) -> _OwnedStage:
         entry = destination.entry
         path = self.model.reservation.stages[entry.index].restoration
+        if directories.parent_is_missing(path):
+            return _OwnedStage(entry, path, "absent", None)
         parent_descriptor, leaf = self.tree.open_parent(path)
         try:
             observed = _observe_file(parent_descriptor, leaf, path)
@@ -322,6 +344,8 @@ class AuthoringRecovery:
             os.close(parent_descriptor)
 
     def _reconcile_restoration_stage(self, stage: _OwnedStage) -> None:
+        if stage.state == "absent":
+            return
         parent_descriptor, leaf = self.tree.open_parent(stage.path)
         try:
             observed = _observe_file(parent_descriptor, leaf, stage.path)
@@ -344,8 +368,17 @@ class AuthoringRecovery:
         finally:
             os.close(parent_descriptor)
 
-    def _require_all_before_images(self) -> None:
+    def _require_all_before_images(
+        self, directories: DirectoryRecoveryPlan
+    ) -> None:
         for entry in self.model.write_set:
+            if directories.parent_is_missing(entry.path):
+                if not entry.before.absent:
+                    raise AuthoringError(
+                        "authoring recovery lost a present before-image: "
+                        f"{entry.path}"
+                    )
+                continue
             parent_descriptor, leaf = self.tree.open_parent(entry.path)
             try:
                 observed = _observe_file(parent_descriptor, leaf, entry.path)
@@ -356,8 +389,17 @@ class AuthoringRecovery:
                     f"authoring recovery did not restore before-image: {entry.path}"
                 )
 
-    def _durably_confirm_all_before_images(self) -> None:
+    def _durably_confirm_all_before_images(
+        self, directories: DirectoryRecoveryPlan
+    ) -> None:
         for entry in self.model.write_set:
+            if directories.parent_is_missing(entry.path):
+                if not entry.before.absent:
+                    raise AuthoringError(
+                        "authoring recovery lost a present before-image: "
+                        f"{entry.path}"
+                    )
+                continue
             parent_descriptor, leaf = self.tree.open_parent(entry.path)
             try:
                 observed = _observe_file(parent_descriptor, leaf, entry.path)
