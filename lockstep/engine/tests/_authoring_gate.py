@@ -147,8 +147,9 @@ def replace_marker(path: Path, old: str, new: str) -> None:
 def compile_closure(project: Path, *names: str) -> None:
     from lockstep.authoring import project_paths, write_compilation
 
+    owner_state = (project.parent / f"{project.name}-owner-state").resolve()
     for name in names:
-        write_compilation(project_paths(project, name))
+        write_compilation(project_paths(project, name), state_dir=owner_state)
 
 
 def expected_compilation_image(

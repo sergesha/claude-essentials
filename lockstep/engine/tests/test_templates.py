@@ -209,7 +209,10 @@ def test_template_install_compile_round_trip_preserves_canonical_child_dag(
     )
     assert {item.path for item in before.files} >= expected_recipes
 
-    write_compilation(project_paths(tmp_path, "release"))
+    write_compilation(
+        project_paths(tmp_path, "release"),
+        state_dir=(tmp_path.parent / "template-owner-state").resolve(),
+    )
 
     for output in installed.compile_order:
         assert diff_recipe(tmp_path, output) == ""

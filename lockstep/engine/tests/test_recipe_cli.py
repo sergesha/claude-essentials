@@ -133,7 +133,11 @@ def test_direct_authoring_boundaries_reject_invalid_logical_names_without_writes
         if boundary == "project_paths":
             authoring.project_paths(project, name)
         elif boundary == "initialize_minimal":
-            authoring.initialize_minimal(project, name)
+            authoring.initialize_minimal(
+                project,
+                name,
+                state_dir=(probe / "owner-state").resolve(),
+            )
         elif boundary == "show_template":
             templates.show_template("reviewed-change", name)
         else:
