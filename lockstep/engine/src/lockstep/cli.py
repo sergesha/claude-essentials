@@ -130,7 +130,9 @@ def _cmd_recipe(args: argparse.Namespace) -> int:
 
     project = Path.cwd()
     if args.action == "init":
-        initialize_minimal(project, args.name)
+        initialize_minimal(
+            project, args.name, state_dir=state_dir().absolute()
+        )
         print(f"initialized {args.name}")
         return 0
     if args.action == "compile":

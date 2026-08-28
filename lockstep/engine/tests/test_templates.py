@@ -247,7 +247,7 @@ def test_custom_template_path_is_rejected_as_a_v2_feature(tmp_path: Path) -> Non
 def test_compile_failure_before_publish_leaves_no_bundle_destinations(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    installation = import_module("lockstep.template_installation")
+    installation = import_module("lockstep.authoring_installation")
     monkeypatch.setattr(
         installation,
         "compile_captured_source",

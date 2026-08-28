@@ -403,7 +403,8 @@ def scenario_dryrun(
 @app.tool()
 def recipe_init(name: str, ctx: Context | None = None) -> dict:
     project = _project_for_context(ctx)
-    recipe = initialize_minimal(project, name)
+    owner_state, _recipes = _configured_paths(project)
+    recipe = initialize_minimal(project, name, state_dir=owner_state)
     return {
         "name": name,
         "workflow": str(recipe.workflow_path.relative_to(project)),

@@ -5,19 +5,24 @@ from __future__ import annotations
 import difflib
 import json
 from pathlib import Path
-from typing import Mapping
+from typing import TYPE_CHECKING, Mapping
 
 import yaml
 
 from lockstep.authoring_bundle import (
     AuthoredRecipe,
     _plan_project_compilation,
+    _workflow_project_and_source,
     canonical_recipe_bytes_for_children,
 )
 from lockstep.authoring_compilation import (
     compile_captured_source,
     validate_logical_name,
     workflow_call_names,
+)
+from lockstep.authoring_installation import (
+    CapturedWorkflowSource,
+    plan_captured_workflow_installation,
 )
 from lockstep.errors import AuthoringError
 from lockstep.recipe.authority import StrictRecipeIngress, canonical_execution_bytes
@@ -27,6 +32,9 @@ from lockstep.workflow.estimate import estimate_manual_recipe, estimate_workflow
 from lockstep.workflow.freshness import verify_canonical_match
 from lockstep.workflow.schema import load_workflow
 from lockstep.workflow.semantics import ResolvedCatalog, ValidatedWorkflow
+
+if TYPE_CHECKING:
+    from lockstep.authoring_publisher import AuthoringPublisher
 
 
 def project_paths(project: Path, name: str) -> AuthoredRecipe:
@@ -232,23 +240,23 @@ def _require_workflow_compilation(recipe: AuthoredRecipe) -> Path:
     return recipe.workflow_path
 
 
-def write_compilation(recipe: AuthoredRecipe) -> CompilationResult:
-    workflow_path = _require_workflow_compilation(recipe)
-    _validated, _catalog, compiled = compile_project_source(workflow_path)
-    destinations = {
-        recipe.recipe_path: canonical_recipe_bytes(workflow_path, compiled),
-        recipe.dependency_path: compiled.dependency_manifest_bytes,
-        recipe.source_map_path: compiled.source_map_bytes,
-        **{
-            recipe.recipe_path.parent / item.relative_path: item.content
-            for item in compiled.generated_files
-        },
-    }
-    for path, content in destinations.items():
-        assert path is not None
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(content)
-    return compiled
+def _publish_planned_compilation(
+    publisher: AuthoringPublisher, recipe: AuthoredRecipe
+) -> CompilationResult:
+    planned = _plan_project_compilation(recipe)
+    publisher.publish(planned.bundle)
+    return planned.root_result
+
+
+def write_compilation(
+    recipe: AuthoredRecipe, *, state_dir: Path
+) -> CompilationResult:
+    project, _source = _workflow_project_and_source(recipe)
+    from lockstep.authoring_publisher import AuthoringPublisher
+
+    publisher = AuthoringPublisher(state_dir)
+    publisher.recover(project)
+    return _publish_planned_compilation(publisher, recipe)
 
 
 def publish_project_compilation(
@@ -264,9 +272,7 @@ def publish_project_compilation(
     publisher.recover(root)
     recipe = project_paths(root, name)
     _require_workflow_compilation(recipe)
-    planned = _plan_project_compilation(recipe)
-    publisher.publish(planned.bundle)
-    return planned.root_result
+    return _publish_planned_compilation(publisher, recipe)
 
 
 def check_recipe(project: Path, name: str) -> dict[str, object]:
@@ -364,26 +370,40 @@ def estimate_recipe(project: Path, name: str) -> dict[str, object]:
     return estimate_workflow(validated.workflow, catalog).to_dict()
 
 
-def initialize_minimal(project: Path, name: str) -> AuthoredRecipe:
-    validate_logical_name(name)
-    root = Path(project).resolve()
-    workflow = root / ".lockstep" / "workflows" / f"{name}.workflow.yaml"
-    recipe_path = root / ".lockstep" / "recipes" / f"{name}.recipe.yaml"
-    for destination in (workflow, recipe_path):
-        if destination.exists() or destination.is_symlink():
-            raise AuthoringError(f"destination already exists: {destination.relative_to(root)}")
-    workflow.parent.mkdir(parents=True, exist_ok=True)
-    workflow.write_text(
+def _minimal_workflow_source(name: str) -> bytes:
+    return (
         "workflow_version: '1'\n"
         f"name: {name}\n"
         "description: Native durable workflow\n"
         "protect: ['**']\n"
         "flow:\n"
         "  - escalate: {}\n"
+    ).encode()
+
+
+def initialize_minimal(
+    project: Path, name: str, *, state_dir: Path
+) -> AuthoredRecipe:
+    validate_logical_name(name)
+    root = Path(project).resolve()
+    from lockstep.authoring_publisher import AuthoringPublisher
+
+    publisher = AuthoringPublisher(state_dir)
+    publisher.recover(root)
+    planned = plan_captured_workflow_installation(
+        root,
+        (CapturedWorkflowSource(name, _minimal_workflow_source(name)),),
+        root_role=name,
     )
-    recipe = project_paths(root, name)
-    write_compilation(recipe)
-    return recipe
+    occupied = next(
+        (image for image in planned.bundle.before_images if image.content is not None),
+        None,
+    )
+    if occupied is not None:
+        relative = occupied.resolved_path.relative_to(root)
+        raise AuthoringError(f"destination already exists: {relative}")
+    publisher.publish(planned.bundle)
+    return project_paths(root, name)
 
 
 def json_text(value: object) -> str:
