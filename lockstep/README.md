@@ -516,6 +516,17 @@ response marker — gated `Write` allowed, doctor green.
 
 ## Known issues (v1)
 
+### Generated workflow output reliability
+
+Workflow compilation and packaged-template installation serialize cooperating
+Lockstep writers. Each generated file replacement is atomic and durable, but
+the generated set is **not** a multi-file transaction: a crash can leave old,
+new, or mixed generated files. Lockstep starts generated output only after a
+fresh observation confirms the complete canonical closure and exact DAG. Run
+the explicit generation command again to repair incomplete output; do not
+manually remove a legacy v4 owner-state marker, because it requires a
+pre-simplification recovery build.
+
 - **Glob semantics for `**`-prefixed patterns**: `unchanged`/`fresh` filter the
   stored manifest with `fnmatch` (where `**/` requires a literal `/`) while the
   current tree is scanned with `glob` (where `**` matches zero segments). A bare

@@ -403,8 +403,15 @@ status signal", not "process compliance".
   admission. Marker-free yamlgraph recipes remain manual inputs.
 - The package template catalog is closed to `parallel-review` and
   `reviewed-change`. Installation rejects custom paths, preflights the whole
-  destination set, compiles children before their parent, and publishes via a
-  recoverable atomic journal.
+  destination set, compiles children before their parent, and serializes
+  cooperating writers. Each generated destination is replaced atomically and
+  durably after descriptor-relative identity/currentness checks; this is not a
+  multi-file atomic transaction and has no authoring journal or automatic
+  rollback/recovery. A crash may therefore leave old, new, or mixed generated
+  files. Runtime start accepts generated output only after fresh observation
+  confirms a complete canonical closure and exact DAG; explicit regeneration
+  repairs incomplete output. A legacy v4 owner-state marker requires a
+  pre-simplification recovery build and must not be manually deleted.
 
 - Unit: MemorySaver runs of fixture recipes; profile_check on a corpus of
   good/broken recipes; evidence schema accept/reject; example recipes pass

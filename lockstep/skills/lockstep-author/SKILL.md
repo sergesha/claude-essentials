@@ -381,6 +381,16 @@ a human review gate when you do.
 
 ## Starting point
 
+## Generated workflow output reliability
+
+When your workflow source is compiled or a packaged template is installed,
+cooperating Lockstep writers serialize and each generated file replacement is
+atomic and durable. The set is not a multi-file transaction: after a crash it
+may contain old, new, or mixed generated files. Runtime start admits generated
+output only after fresh observation of the complete canonical closure and exact
+DAG. Regenerate explicitly to repair incomplete output. Do not manually delete
+a legacy v4 owner-state marker; it requires a pre-simplification recovery build.
+
 Copy `lockstep/recipes/examples/feature-dev.recipe.yaml` into `<project>/.lockstep/recipes/` as the
 skeleton for any new recipe — it exercises the full hardened vocabulary (`baseline_globs`,
 `unchanged`/`changed_in`/`diff_only`/`fresh`, `md_has_sections`, `file_matches`, `junit_gate`)
