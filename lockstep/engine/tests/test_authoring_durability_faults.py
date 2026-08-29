@@ -71,6 +71,7 @@ _CUTS = (
     "journal_progress[0].temp_fsync", "journal_progress[0].replace", "journal_progress[0].parent_fsync",
     "journal_progress[1].temp_fsync", "journal_progress[1].replace", "journal_progress[1].parent_fsync",
     "journal_progress[2].temp_fsync", "journal_progress[2].replace", "journal_progress[2].parent_fsync",
+    "committed.temp_fsync", "committed.replace", "committed.parent_fsync",
     "rollback_journal_cleanup.before_unlink", "rollback_journal_cleanup.after_unlink_before_parent_fsync",
     "committed_cleanup.after_unlink_before_owner_parent_fsync",
 )
@@ -86,6 +87,18 @@ _EXPECTED_BASELINE_EVENTS = (
 
 _BASELINE_EVENT_FOR_CUT = {
     **{cut: cut for cut in _CUTS if not cut.startswith("rollback_")},
+}
+
+_ALL_NEW_CUTS = {
+    "committed.replace",
+    "committed.parent_fsync",
+    "committed_cleanup.after_unlink_before_owner_parent_fsync",
+}
+
+_COMMIT_RECORD_CUTS = {
+    "committed.temp_fsync",
+    "committed.replace",
+    "committed.parent_fsync",
 }
 
 
@@ -231,6 +244,9 @@ class _DurabilityProtocolProbe:
         return result
 
     def unlink(self, path, *args, **kwargs):
+        if self.injected:
+            self.events.append("post_cut_unlink_blocked")
+            raise _ProcessDeath("mutation attempted after process death")
         if self.is_journal_path(path) and self.rollback_requested:
             self.hit("rollback_journal_cleanup.before_unlink")
         result = self.original_unlink(path, *args, **kwargs)
@@ -266,6 +282,50 @@ class _DurabilityProtocolProbe:
         parent = candidate.parent.stat()
         return (parent.st_dev, parent.st_ino) == self.journal_directory
 
+
+class _RecoveryRetirementProbe:
+    """Observe durable retirement of the trusted recovery journal."""
+
+    def __init__(self, scenario: _Scenario) -> None:
+        directory = next(
+            path.parent
+            for path in scenario.owner.rglob("transaction.lock")
+        )
+        info = directory.stat()
+        self.directory_identity = info.st_dev, info.st_ino
+        self.original_fsync, self.original_unlink = os.fsync, os.unlink
+        self.events: list[str] = []
+
+    def fsync(self, descriptor: int) -> None:
+        self.original_fsync(descriptor)
+        info = os.fstat(descriptor)
+        if (info.st_dev, info.st_ino) == self.directory_identity:
+            self.events.append("owner_parent_fsync")
+
+    def unlink(self, path, *args, **kwargs):
+        directory_fd = kwargs.get("dir_fd")
+        parent = (
+            os.fstat(directory_fd)
+            if directory_fd is not None
+            else Path(os.fsdecode(path)).parent.stat()
+        )
+        leaf = Path(os.fsdecode(path)).name
+        is_evidence = (
+            (parent.st_dev, parent.st_ino) == self.directory_identity
+            and (
+                leaf == "transaction.json"
+                or leaf.startswith(".transaction-") and leaf.endswith(".tmp")
+            )
+        )
+        result = self.original_unlink(path, *args, **kwargs)
+        if is_evidence:
+            self.events.append("evidence_unlink")
+        return result
+
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(os, "fsync", self.fsync)
+        monkeypatch.setattr(os, "unlink", self.unlink)
+
 def _run_durable_cut(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cut: str) -> None:
     scenario = _scenario(tmp_path)
     probe = _DurabilityProtocolProbe(scenario, cut)
@@ -274,8 +334,26 @@ def _run_durable_cut(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cut: str) 
         AuthoringPublisher(scenario.owner).publish(scenario.bundle)
     assert probe.injected, f"{cut} was not reached; trace={probe.events}"
     monkeypatch.undo()
-    AuthoringPublisher(scenario.owner).recover(scenario.project)
-    _assert_project_side(scenario, scenario.after if cut.startswith("committed") else scenario.before)
+    crash_owner = namespace_image(scenario.owner)
+    evidence_count = sum(
+        Path(relative).name == "transaction.json"
+        or (
+            Path(relative).name.startswith(".transaction-")
+            and Path(relative).name.endswith(".tmp")
+        )
+        for relative in crash_owner
+    )
+    if cut in _COMMIT_RECORD_CUTS:
+        assert crash_owner != scenario.owner_before
+    retirement = _RecoveryRetirementProbe(scenario)
+    with monkeypatch.context() as recovery_patch:
+        retirement.install(recovery_patch)
+        AuthoringPublisher(scenario.owner).recover(scenario.project)
+    assert retirement.events.count("evidence_unlink") == evidence_count
+    assert retirement.events[-1:] == ["owner_parent_fsync"]
+    _assert_project_side(
+        scenario, scenario.after if cut in _ALL_NEW_CUTS else scenario.before
+    )
     assert namespace_image(scenario.owner) == scenario.owner_before
     _assert_second_recovery_is_write_free(scenario, monkeypatch)
 
