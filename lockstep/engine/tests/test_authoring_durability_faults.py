@@ -14,6 +14,7 @@ from lockstep.authoring_bundle import ProjectCompilationBundle, plan_project_com
 from lockstep.authoring_journal import AuthoringJournal
 import lockstep.authoring_journal as authoring_journal
 from lockstep.authoring_publisher import AuthoringPublisher
+from lockstep.runtime.owner_state import InsecureStatePath
 
 from tests._authoring_crash_gate import (
     install_mutation_syscall_probe,
@@ -356,6 +357,53 @@ def _run_durable_cut(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cut: str) 
     )
     assert namespace_image(scenario.owner) == scenario.owner_before
     _assert_second_recovery_is_write_free(scenario, monkeypatch)
+
+
+def _crash_with_journal_temporary(
+    scenario: _Scenario, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, Path]:
+    probe = _DurabilityProtocolProbe(scenario, "committed.temp_fsync")
+    probe.install(monkeypatch)
+    with pytest.raises(_ProcessDeath):
+        AuthoringPublisher(scenario.owner).publish(scenario.bundle)
+    monkeypatch.undo()
+    journals = tuple(scenario.owner.rglob("transaction.json"))
+    temporaries = tuple(scenario.owner.rglob(".transaction-*.tmp"))
+    assert len(journals) == len(temporaries) == 1
+    return journals[0].parent, temporaries[0]
+
+
+@pytest.mark.parametrize("valid_first", (True, False))
+def test_recovery_preflights_all_journal_temporaries_before_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    valid_first: bool,
+) -> None:
+    scenario = _scenario(tmp_path)
+    directory, valid = _crash_with_journal_temporary(scenario, monkeypatch)
+    insecure = directory / ".transaction-insecure.tmp"
+    insecure.symlink_to(directory / "transaction.lock")
+    owner_before = namespace_image(scenario.owner)
+    project_before = namespace_image(scenario.project)
+    original_iterdir = Path.iterdir
+
+    def ordered_iterdir(path: Path):
+        entries = list(original_iterdir(path))
+        if path == directory:
+            first, second = (valid, insecure) if valid_first else (insecure, valid)
+            entries = [first, second, *(entry for entry in entries if entry not in {first, second})]
+        return iter(entries)
+
+    monkeypatch.setattr(Path, "iterdir", ordered_iterdir)
+    allowed = opaque_lock_identities({}, owner_before)
+    calls = install_mutation_syscall_probe(
+        monkeypatch, allowed_write_open_identities=allowed
+    )
+    with pytest.raises(InsecureStatePath):
+        AuthoringPublisher(scenario.owner).recover(scenario.project)
+    assert calls == []
+    assert namespace_image(scenario.project) == project_before
+    assert namespace_image(scenario.owner) == owner_before
 
 
 def test_unfaulted_three_destination_protocol_trace_is_exact(
