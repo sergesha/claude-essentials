@@ -12,11 +12,14 @@ import yaml
 from lockstep.authoring import (
     validate_logical_name,
 )
+from lockstep.authoring_compilation import workflow_call_names
+from lockstep.authoring_installation import installation_collision
 from lockstep.authoring_publisher import AuthoringPublisher
 from lockstep.template_installation import (
     TemplateRoleSource,
     plan_template_installation,
 )
+from lockstep.workflow.schema import load_workflow_bytes
 
 
 class TemplateCollision(ValueError):
@@ -90,36 +93,25 @@ def list_templates() -> tuple[str, ...]:
     return tuple(sorted(observed))
 
 
-def _role_dependencies(template: str, role: str) -> tuple[str, ...]:
-    document = yaml.safe_load(
-        _bundle(template).joinpath(_manifest(template)["files"][role]).read_text()
-    )
-    dependencies: list[str] = []
-
-    def walk(value):
-        if isinstance(value, dict):
-            call = value.get("call")
-            if isinstance(call, dict) and isinstance(call.get("workflow"), str):
-                target = call["workflow"]
-                for candidate, output in _manifest(template)["outputs"].items():
-                    if output == target:
-                        dependencies.append(candidate)
-            for item in value.values():
-                walk(item)
-        elif isinstance(value, list):
-            for item in value:
-                walk(item)
-
-    walk(document)
-    return tuple(dict.fromkeys(dependencies))
-
-
 def show_template(template: str, name: str) -> TemplateView:
     validate_logical_name(name)
     manifest = _manifest(template)
     roles = {role: output.replace("{name}", name) for role, output in manifest["outputs"].items()}
     sources = dict(manifest["files"])
-    role_dependencies = {role: _role_dependencies(template, role) for role in roles}
+    output_roles = {output: role for role, output in roles.items()}
+    captured = _captured_role_sources(template, name, manifest)
+    role_dependencies = {
+        output_roles[source.role]: tuple(
+            output_roles[child]
+            for child in workflow_call_names(
+                load_workflow_bytes(
+                    Path(f"{source.role}.workflow.yaml"), source.content
+                )
+            )
+            if child in output_roles
+        )
+        for source in captured
+    }
     order: list[str] = []
     active: set[str] = set()
 
@@ -179,13 +171,10 @@ def install_template(
         role_sources,
         root_role=outputs["parent"].replace("{name}", name),
     )
-    occupied = tuple(
-        target.path.relative_to(root)
-        for target in planned.plan.targets
-        if target.before is not None
-    )
-    if occupied:
-        raise TemplateCollision(f"template destination already exists: {occupied[0]}")
+    collision = installation_collision(planned.plan)
+    if collision is not None:
+        relative = collision.path.relative_to(root)
+        raise TemplateCollision(f"template destination already exists: {relative}")
     publisher.publish(planned.plan)
     return InstalledTemplate(
         planned.sources,

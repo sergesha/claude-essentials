@@ -9,7 +9,14 @@ import re
 from typing import Any, Iterable, Mapping, NoReturn
 
 import yaml
-from yaml.events import AliasEvent, MappingEndEvent, SequenceEndEvent
+from yaml.events import (
+    AliasEvent,
+    MappingEndEvent,
+    MappingStartEvent,
+    ScalarEvent,
+    SequenceEndEvent,
+    SequenceStartEvent,
+)
 from yaml.nodes import MappingNode, Node, SequenceNode
 
 from .diagnostics import Diagnostic, DiagnosticError
@@ -21,6 +28,10 @@ from .ir import (
 
 _ID = re.compile(r"^[a-z][a-z0-9-]*$")
 _WORKFLOW_SUFFIX = ".workflow.yaml"
+_MAX_YAML_DEPTH = 64
+_MAX_YAML_NODES = 50_000
+_MAX_YAML_COLLECTION_ITEMS = 10_000
+_MAX_YAML_SCALAR_BYTES = 2 * 1024 * 1024
 _BLOCKS = frozenset({"step", "verify", "decide", "choose", "repeat", "call", "accept", "parallel", "graph", "include_graph", "escalate"})
 _V2_KEYS = frozenset({
     "goto", "race", "cancel", "cancel_on_failure", "fail_fast", "speculative",
@@ -156,6 +167,44 @@ def _diagnostic_from_yaml(path: Path, exc: Exception) -> DiagnosticError:
     ),))
 
 
+def _structure_diagnostic(path: Path, message: str, mark: Any = None) -> DiagnosticError:
+    return DiagnosticError((Diagnostic(
+        "LSW111",
+        message,
+        path,
+        mark.line + 1 if mark else 1,
+        mark.column + 1 if mark else 1,
+        "",
+        "reduce the workflow YAML depth, node count, collection size, or scalar content",
+    ),))
+
+
+def _preflight_yaml_structure(path: Path, source_text: str) -> None:
+    stack: list[list[int]] = []
+    nodes = scalar_bytes = 0
+    for event in yaml.parse(source_text, Loader=_MarkedSafeLoader):
+        is_node = isinstance(event, (AliasEvent, MappingStartEvent, ScalarEvent, SequenceStartEvent))
+        if is_node:
+            nodes += 1
+            if nodes > _MAX_YAML_NODES:
+                raise _structure_diagnostic(path, "workflow YAML node limit exceeded", event.start_mark)
+            if stack:
+                stack[-1][1] += 1
+                limit = 2 * _MAX_YAML_COLLECTION_ITEMS if stack[-1][0] else _MAX_YAML_COLLECTION_ITEMS
+                if stack[-1][1] > limit:
+                    raise _structure_diagnostic(path, "workflow YAML collection item limit exceeded", event.start_mark)
+        if isinstance(event, ScalarEvent):
+            scalar_bytes += len(event.value.encode("utf-8"))
+            if scalar_bytes > _MAX_YAML_SCALAR_BYTES:
+                raise _structure_diagnostic(path, "workflow YAML scalar byte limit exceeded", event.start_mark)
+        elif isinstance(event, (MappingStartEvent, SequenceStartEvent)):
+            stack.append([int(isinstance(event, MappingStartEvent)), 0])
+            if len(stack) > _MAX_YAML_DEPTH:
+                raise _structure_diagnostic(path, "workflow YAML depth limit exceeded", event.start_mark)
+        elif isinstance(event, (MappingEndEvent, SequenceEndEvent)):
+            stack.pop()
+
+
 def load_workflow_bytes(path: str | Path, source_bytes: bytes) -> MarkedDocument:
     """Parse one already-captured workflow byte sequence."""
 
@@ -164,7 +213,9 @@ def load_workflow_bytes(path: str | Path, source_bytes: bytes) -> MarkedDocument
         raise TypeError("workflow source bytes must be bytes")
     try:
         source_sha256 = hashlib.sha256(source_bytes).hexdigest()
-        loader = _MarkedSafeLoader(source_bytes.decode("utf-8"))
+        source_text = source_bytes.decode("utf-8")
+        _preflight_yaml_structure(source, source_text)
+        loader = _MarkedSafeLoader(source_text)
         try:
             node = loader.get_single_node()
             if node is None:
@@ -181,6 +232,10 @@ def load_workflow_bytes(path: str | Path, source_bytes: bytes) -> MarkedDocument
         raise DiagnosticError((Diagnostic(exc.code, exc.message, source, mark.line, mark.column, exc.pointer, "remove the unsupported YAML construct"),)) from exc
     except yaml.YAMLError as exc:
         raise _diagnostic_from_yaml(source, exc) from exc
+    except RecursionError as exc:
+        raise _structure_diagnostic(
+            source, "workflow YAML recursion limit exceeded"
+        ) from exc
 
 
 def load_workflow(path: str | Path) -> MarkedDocument:

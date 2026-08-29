@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import re
-import stat
 from pathlib import Path
 from typing import Mapping
 
@@ -14,10 +13,11 @@ from lockstep.authoring_bundle import (
     canonical_recipe_bytes_for_children,
 )
 from lockstep.authoring_capture import capture_directory, capture_optional_regular_file, capture_regular_file, validate_directory
-from lockstep.authoring_capture import _AuthoringBudget, _validate_authoring_contents
+from lockstep.authoring_capture import _AuthoringBudget
 from lockstep.errors import AuthoringError
 from lockstep.workflow.compiler import CompilationResult, compile_workflow_document
-from lockstep.workflow.schema import MarkedDocument, load_workflow_bytes
+from lockstep.workflow.ir import BlockIR, CallIR, ChooseIR, ParallelIR, RepeatIR
+from lockstep.workflow.schema import MarkedDocument, load_workflow_bytes, parse_workflow
 from lockstep.workflow.semantics import ChildArtifactContract, ChildWorkflowContract, ResolvedCatalog, ResolvedChild, ValidatedWorkflow
 
 _WORKFLOW_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
@@ -34,20 +34,30 @@ def validate_logical_name(name: str) -> str:
     return name
 
 
+def _nested_blocks(block: BlockIR) -> tuple[BlockIR, ...]:
+    if isinstance(block, ChooseIR):
+        branches = tuple(block.cases.values())
+        if block.default is not None:
+            branches += (block.default,)
+        return tuple(child for branch in branches for child in branch)
+    if isinstance(block, RepeatIR):
+        return block.do
+    if isinstance(block, ParallelIR):
+        return tuple(child for branch in block.branches.values() for child in branch)
+    return ()
+
+
 def workflow_call_names(document: MarkedDocument) -> tuple[str, ...]:
     calls: list[str] = []
-    def walk(value: object) -> None:
-        if isinstance(value, dict):
-            raw = value.get("call")
-            if isinstance(raw, dict) and isinstance(raw.get("workflow"), str):
-                calls.append(validate_logical_name(raw["workflow"]))
-            for item in value.values():
-                walk(item)
-        elif isinstance(value, list):
-            for item in value:
-                walk(item)
-    walk(document.data)
-    return tuple(dict.fromkeys(calls))
+    seen: set[str] = set()
+    pending = list(reversed(parse_workflow(document).flow))
+    while pending:
+        block = pending.pop()
+        if isinstance(block, CallIR) and block.workflow not in seen:
+            seen.add(block.workflow)
+            calls.append(block.workflow)
+        pending.extend(reversed(_nested_blocks(block)))
+    return tuple(calls)
 
 
 def _child_contract(validated: ValidatedWorkflow) -> ChildWorkflowContract:

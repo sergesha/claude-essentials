@@ -18,12 +18,11 @@ from lockstep.errors import AuthoringError
 from lockstep.runtime.advisory_lock import advisory_file_lock
 from lockstep.runtime.errors import LockstepError
 from lockstep.runtime.owner_state import (ensure_owner_directory, fsync_owner_directory,
-    initialize_owner_state, take_bounded, verify_owner_directory, verify_owner_file)
+    initialize_owner_state, verify_owner_directory, verify_owner_file)
 
 __all__ = ["AuthoringPublisher", "observe_authoring_project"]
 Observation = TypeVar("Observation")
 _MAX_LEGACY_TRANSACTION_BYTES = 16 * 1024 * 1024
-_MAX_AUTHORING_NAMESPACES = 256
 _READ_FLAGS = (os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NONBLOCK", 0)
                | getattr(os, "O_NOFOLLOW", 0))
 
@@ -264,45 +263,32 @@ def _legacy_error(transaction: Path, project: Path, namespace: Path,
         "Do not delete transaction.json manually." + note
     )
 def _require_no_legacy_transaction(namespace: Path, project: Path) -> None:
+    note = _legacy_evidence_note(namespace)
+    if note is None:
+        return
+    raise _legacy_error(namespace / "transaction.json", project, namespace, note)
+def _legacy_evidence_note(namespace: Path) -> str | None:
     transaction = namespace / "transaction.json"
     try:
         descriptor = os.open(transaction, _READ_FLAGS)
     except FileNotFoundError:
-        return
-    except OSError as exc:
-        raise _legacy_error(transaction, project, namespace) from exc
+        return None
+    except OSError:
+        return ""
     try:
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
-            raise _legacy_error(transaction, project, namespace)
-        note = " The evidence also exceeds the legacy byte bound." if info.st_size > _MAX_LEGACY_TRANSACTION_BYTES else ""
+            return ""
+        return (" The evidence also exceeds the legacy byte bound."
+                if info.st_size > _MAX_LEGACY_TRANSACTION_BYTES else "")
     finally:
         os.close(descriptor)
-    raise _legacy_error(transaction, project, namespace, note)
 def _locate_existing_boundary(state_dir: Path,
         project: Path) -> _ExistingAuthoringBoundary | None:
     namespace, identity = _ready_boundary(state_dir, project)
     return None if namespace is None else _ExistingAuthoringBoundary(namespace, identity)
-def _refuse_retained_legacy_transactions(state_dir: Path, project: Path) -> None:
-    _locate_authoring_namespace(state_dir, project)
-    authoring = state_dir / "authoring"
-    if not authoring.exists() and not authoring.is_symlink():
-        return
-    verify_owner_directory(authoring)
-    namespaces = sorted(take_bounded(authoring.iterdir(), _MAX_AUTHORING_NAMESPACES,
-                                     "authoring namespaces"), key=lambda path: path.name)
-    for namespace in namespaces:
-        if len(namespace.name) != 64 or any(c not in "0123456789abcdef" for c in namespace.name):
-            raise AuthoringError("authoring namespace name is invalid")
-        verify_owner_directory(namespace)
-        try:
-            with _locked_authoring_namespace(namespace, create=False):
-                _require_no_legacy_transaction(namespace, project)
-        except FileNotFoundError as exc:
-            raise AuthoringError("authoring boundary initialization is incomplete") from exc
 def observe_authoring_project(state_dir: Path, project: Path,
                               operation: Callable[[], Observation]) -> Observation:
-    _refuse_retained_legacy_transactions(state_dir, project)
     boundary = _locate_existing_boundary(state_dir, project)
     if boundary is not None:
         return boundary.observe(operation)
@@ -326,7 +312,6 @@ class AuthoringPublisher:
 
     def publish(self, plan: AuthoringPlan) -> None:
         _preflight_plan(plan)
-        _refuse_retained_legacy_transactions(self._state_dir, plan.project)
         namespace = _create_authoring_namespace_for_identity(self._state_dir, plan.project_identity)
         with _locked_authoring_namespace(namespace, create=True):
             _require_no_legacy_transaction(namespace, plan.project)
@@ -335,7 +320,6 @@ class AuthoringPublisher:
     def require_ready(self, project: Path) -> None:
         if not isinstance(project, Path):
             raise TypeError("authoring project must be a Path")
-        _refuse_retained_legacy_transactions(self._state_dir, project)
         namespace, identity = _create_authoring_namespace_for_project(self._state_dir, project)
         with _locked_authoring_namespace(namespace, create=True):
             _require_no_legacy_transaction(namespace, identity.path)

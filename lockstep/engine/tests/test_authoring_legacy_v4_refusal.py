@@ -84,13 +84,6 @@ def test_live_v4_blocks_all_planning_and_runtime_admission(tmp_path, monkeypatch
     finally: service.close()
     assert reached == []
 
-def test_replacement_project_cannot_escape_retained_binding(tmp_path) -> None:
-    project, state, namespace = _project(tmp_path); _retain(namespace, live_v4_bytes(project)); retired = tmp_path / "retired"; project.rename(retired); project.mkdir(); write_workflow(project, "release")
-    before = tree_image(tmp_path); called = []
-    with pytest.raises(Exception, match="pre-simplification"): AuthoringPublisher(state).observe(project, lambda: called.append(True))
-    assert called == [] and tree_image(tmp_path) == before
-
-
 @pytest.mark.parametrize("layout", ("state-in-project", "project-in-state"))
 def test_state_and_project_namespaces_must_be_disjoint(tmp_path, layout) -> None:
     project = tmp_path / "project"; state = project / "state"

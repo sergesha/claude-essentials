@@ -124,6 +124,63 @@ def test_template_show_returns_exact_roles_outputs_sources_and_compile_order() -
     }
 
 
+def test_template_show_ignores_call_shaped_metadata_without_reopening_sources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    templates = _templates()
+    manifest = {
+        "template_version": "1",
+        "outputs": {"parent": "{name}", "review": "{name}-review"},
+        "files": {
+            "parent": "parent.workflow.yaml",
+            "review": "review.workflow.yaml",
+        },
+    }
+    reads = {name: 0 for name in manifest["files"].values()}
+    contents = {
+        "parent.workflow.yaml": """\
+workflow_version: '1'
+name: '{name}'
+description: parent
+protect: ['**']
+x-shadow: {call: {workflow: '{name}'}}
+flow:
+  - call: {workflow: '{name}-review', runner: codex}
+""",
+        "review.workflow.yaml": """\
+workflow_version: '1'
+name: '{name}-review'
+description: review
+protect: ['**']
+flow: [{escalate: {}}]
+""",
+    }
+
+    class Entry:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def read_text(self) -> str:
+            reads[self.name] += 1
+            return contents[self.name]
+
+    class Bundle:
+        def joinpath(self, name: str) -> Entry:
+            return Entry(name)
+
+    monkeypatch.setattr(templates, "_manifest", lambda _name: manifest)
+    monkeypatch.setattr(templates, "_bundle", lambda _name: Bundle())
+
+    shown = templates.show_template("synthetic", "release")
+
+    assert shown.dependencies == {
+        "release": ["release-review"],
+        "release-review": [],
+    }
+    assert shown.compile_order == ("release-review", "release")
+    assert reads == {"parent.workflow.yaml": 1, "review.workflow.yaml": 1}
+
+
 @pytest.mark.parametrize(
     "collision",
     [
@@ -261,7 +318,7 @@ def test_compile_failure_before_publish_leaves_no_bundle_destinations(
     assert not (tmp_path / ".lockstep/recipes").exists()
 
 
-def test_publish_fault_leaves_completed_prefix_and_next_init_refuses_collision(
+def test_publish_fault_leaves_completed_prefix_and_next_init_regenerates_remainder(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     original_link = os.link
@@ -286,10 +343,11 @@ def test_publish_fault_leaves_completed_prefix_and_next_init_refuses_collision(
     assert partial
 
     monkeypatch.setattr(os, "link", original_link)
-    with pytest.raises(_templates().TemplateCollision):
-        _install_template("reviewed-change", "release", tmp_path)
-    assert partial == {
+    _install_template("reviewed-change", "release", tmp_path)
+    complete = {
         path.relative_to(tmp_path): path.read_bytes()
         for path in tmp_path.rglob("*")
         if path.is_file()
     }
+    assert partial.items() <= complete.items()
+    assert len(complete) > len(partial)

@@ -61,6 +61,11 @@ from lockstep.runtime.config import (
     session_stale_minutes as _session_stale_minutes,
 )
 from lockstep.runtime.hook_projection import read_only_statuses
+from lockstep.runtime.owner_state import (
+    StorageLimitExceeded,
+    take_bounded,
+    verify_owner_directory,
+)
 
 # ---------------------------------------------------------------------------
 # fast path: both native catalog and policy.d/ empty/absent ->
@@ -500,7 +505,51 @@ def policy_clear(state_dir: Path, project: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+_ORPHAN_RECOVERY = (
+    "Use a pre-simplification Lockstep build against the original exact project "
+    "directory identity and this state directory, complete recovery there, and retry. "
+    "Do not delete transaction.json manually."
+)
+
+
+def _read_only_legacy_authoring_diagnostics(state_dir: Path) -> tuple[str, ...]:
+    """Bounded presence-only discovery for doctor; never creates owner state."""
+    from lockstep.authoring_publisher import _legacy_evidence_note
+
+    if not state_dir.exists() and not state_dir.is_symlink():
+        return ()
+    verify_owner_directory(state_dir)
+    authoring = state_dir / "authoring"
+    if not authoring.exists() and not authoring.is_symlink():
+        return ()
+    verify_owner_directory(authoring)
+    try:
+        namespaces = sorted(
+            take_bounded(authoring.iterdir(), 256, "authoring namespaces"),
+            key=lambda path: path.name,
+        )
+    except StorageLimitExceeded:
+        return (
+            "legacy authoring evidence audit is bounded to 256 namespaces; "
+            f"transaction evidence may remain undiscovered. {_ORPHAN_RECOVERY}",
+        )
+    findings: list[str] = []
+    for namespace in namespaces:
+        if len(namespace.name) != 64 or any(c not in "0123456789abcdef" for c in namespace.name):
+            raise ValueError("authoring namespace name is invalid")
+        verify_owner_directory(namespace)
+        note = _legacy_evidence_note(namespace)
+        if note is not None:
+            findings.append(
+                "legacy authoring transaction evidence is present in owner-state "
+                f"namespace {namespace.name}; it may be a v4 transaction. "
+                f"{_ORPHAN_RECOVERY}{note}"
+            )
+    return tuple(findings)
+
+
 def doctor(state_dir: Path, recipes_dir: Path) -> tuple[bool, str]:
+
     state_dir = Path(state_dir)
     recipes_dir = Path(recipes_dir)
     lines: list[str] = []
@@ -514,6 +563,20 @@ def doctor(state_dir: Path, recipes_dir: Path) -> tuple[bool, str]:
 
     check("state dir exists", state_dir.exists(), str(state_dir))
     check("recipes dir exists", recipes_dir.exists(), str(recipes_dir))
+    try:
+        legacy_findings = _read_only_legacy_authoring_diagnostics(state_dir)
+    except Exception:  # noqa: BLE001 - unreadable owner state is a doctor finding
+        legacy_findings = (
+            "read-only legacy authoring evidence audit failed; transaction "
+            "evidence may remain undiscovered. Use a pre-simplification Lockstep "
+            "build against the original exact project directory identity and "
+            "this state directory. Do not delete transaction.json manually.",
+        )
+    if legacy_findings:
+        for finding in legacy_findings:
+            check("legacy authoring evidence absent", False, finding)
+    else:
+        check("legacy authoring evidence absent", True)
 
     # Every worker-awaiting native run must have the PostToolUse-owned
     # session binding that makes the write gate usable. Engine-owned running

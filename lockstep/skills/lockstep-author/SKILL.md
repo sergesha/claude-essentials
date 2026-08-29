@@ -388,8 +388,13 @@ cooperating Lockstep writers serialize and each generated file replacement is
 atomic and durable. The set is not a multi-file transaction: after a crash it
 may contain old, new, or mixed generated files. Runtime start admits generated
 output only after fresh observation of the complete canonical closure and exact
-DAG. Regenerate explicitly to repair incomplete output. Do not manually delete
-a legacy v4 owner-state marker; it requires a pre-simplification recovery build.
+DAG. Repeating first initialization or packaged-template installation completes
+only a strict proper prefix with exact planned bytes and modes; full, holed, or
+mismatched sets remain collisions. Normal operations inspect legacy evidence
+only for the current exact project identity; `lockstep doctor` adds a bounded
+read-only cross-namespace audit. Never manually delete a legacy v4 marker; use a
+pre-simplification recovery build against the original exact project directory
+identity.
 
 Copy `lockstep/recipes/examples/feature-dev.recipe.yaml` into `<project>/.lockstep/recipes/` as the
 skeleton for any new recipe — it exercises the full hardened vocabulary (`baseline_globs`,

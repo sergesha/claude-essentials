@@ -409,9 +409,14 @@ status signal", not "process compliance".
   multi-file atomic transaction and has no authoring journal or automatic
   rollback/recovery. A crash may therefore leave old, new, or mixed generated
   files. Runtime start accepts generated output only after fresh observation
-  confirms a complete canonical closure and exact DAG; explicit regeneration
-  repairs incomplete output. A legacy v4 owner-state marker requires a
-  pre-simplification recovery build and must not be manually deleted.
+  confirms a complete canonical closure and exact DAG. Repeating first
+  initialization or packaged-template installation completes only a strict
+  proper prefix whose existing files have the exact planned bytes and modes;
+  full, holed, or mismatched sets remain collisions. Normal operations inspect
+  legacy evidence only in the current exact project namespace. `lockstep doctor`
+  adds a bounded read-only cross-namespace audit. A legacy v4 marker requires a
+  pre-simplification recovery build against the original exact project identity
+  and must not be manually deleted.
 
 - Unit: MemorySaver runs of fixture recipes; profile_check on a corpus of
   good/broken recipes; evidence schema accept/reject; example recipes pass

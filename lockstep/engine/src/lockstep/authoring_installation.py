@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import stat
 
 from lockstep.authoring_bundle import (
     AuthoringPlan,
+    PlannedTarget,
     canonical_recipe_bytes_for_children,
 )
 from lockstep.authoring_compilation import (
@@ -38,6 +40,25 @@ class PlannedWorkflowInstallation:
     sources: tuple[Path, ...]
     recipes: tuple[Path, ...]
     compile_order: tuple[str, ...]
+
+
+def installation_collision(plan: AuthoringPlan) -> PlannedTarget | None:
+    """Return the first collision, allowing only an exact canonical prefix."""
+    occupied = tuple(target.before is not None for target in plan.targets)
+    if not any(occupied):
+        return None
+    first = plan.targets[occupied.index(True)]
+    prefix = occupied.index(False) if False in occupied else len(occupied)
+    if prefix == len(occupied) or any(occupied[prefix:]):
+        return first
+    for target in plan.targets[:prefix]:
+        if (
+            target.before != target.after
+            or target.before_file is None
+            or stat.S_IMODE(target.before_file.mode) != target.mode
+        ):
+            return first
+    return None
 
 
 def _role_destinations(

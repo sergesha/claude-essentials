@@ -6,7 +6,7 @@ from types import MappingProxyType
 import pytest
 
 from lockstep.workflow.diagnostics import DiagnosticError
-from lockstep.workflow.schema import load_workflow, parse_workflow
+from lockstep.workflow.schema import load_workflow, load_workflow_bytes, parse_workflow
 
 
 BASE = '''\
@@ -91,6 +91,54 @@ def test_loader_reports_the_nested_pointer_for_an_alias(workflow_file: Path) -> 
     alias = raises_diagnostic("LSW102", workflow_file)
 
     assert alias.pointer == "/flow/0/verify/cwd"
+
+
+def _structure_error(workflow_file: Path, source: bytes):
+    with pytest.raises(DiagnosticError) as raised:
+        load_workflow_bytes(workflow_file, source)
+    error = raised.value.diagnostics[0]
+    assert error.code == "LSW111"
+    assert error.pointer == ""
+    assert error.line is not None and error.column is not None
+    assert "reduce" in error.hint.lower()
+    return error
+
+
+def test_loader_rejects_yaml_deeper_than_sixty_four_levels(
+    workflow_file: Path,
+) -> None:
+    error = _structure_error(workflow_file, b"- " * 65 + b"leaf\n")
+
+    assert "depth" in error.message
+
+
+def test_loader_rejects_more_than_fifty_thousand_yaml_nodes(
+    workflow_file: Path,
+) -> None:
+    nested = "".join(
+        f"-\n" + "".join(f"  - n-{group}-{index}\n" for index in range(9_000))
+        for group in range(6)
+    ).encode()
+
+    error = _structure_error(workflow_file, nested)
+
+    assert "node" in error.message
+
+
+def test_loader_rejects_more_than_ten_thousand_items_in_one_collection(
+    workflow_file: Path,
+) -> None:
+    error = _structure_error(workflow_file, b"- item\n" * 10_001)
+
+    assert "collection" in error.message
+
+
+def test_loader_rejects_more_than_two_mib_of_aggregate_scalar_bytes(
+    workflow_file: Path,
+) -> None:
+    error = _structure_error(workflow_file, b"value: " + b"x" * (2 * 1024 * 1024 + 1) + b"\n")
+
+    assert "scalar" in error.message
 
 
 def test_include_graph_accepts_the_documented_unquoted_on_key(workflow_file: Path) -> None:

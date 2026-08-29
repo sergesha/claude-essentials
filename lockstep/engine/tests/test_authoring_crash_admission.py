@@ -17,7 +17,7 @@ from lockstep.runtime.service import LockstepCommandService
 from lockstep.runtime.start_service import AuthorizedStartService
 from lockstep.workflow.compiler import canonical_execution_bytes
 from lockstep.template_installation import plan_template_installation
-from lockstep.templates import install_template
+from lockstep.templates import TemplateCollision, install_template
 from tests._authoring_gate import assert_no_durable_runtime_change, replace_marker, tree_image, write_workflow
 
 
@@ -84,6 +84,12 @@ def _public_write(scenario: Scenario, surface: str) -> None:
     if surface == "compile": authoring.publish_project_compilation(scenario.project, "release", state_dir=scenario.state)
     elif surface == "minimal": authoring.initialize_minimal(scenario.project, "release", state_dir=scenario.state)
     else: install_template("reviewed-change", "change", scenario.project, state_dir=scenario.state)
+
+
+def _materialize(target, content: bytes, mode: int) -> None:
+    target.path.parent.mkdir(parents=True, exist_ok=True)
+    target.path.write_bytes(content)
+    target.path.chmod(mode)
 
 
 def _crash_child(scenario: Scenario, surface: str, phase: str, ordinal: int, force_route: bool) -> None:
@@ -169,6 +175,89 @@ def test_every_public_writer_cut_has_canonical_iff_runtime_admission(
         assert not (old_complete and scenario.source is not None and scenario.source.read_bytes() == scenario.old_source)
         with monkeypatch.context() as runtime: _runtime_oracle(scenario, runtime, new_complete, surface)
         assert tree_image(scenario.project) == cut_project
+
+
+@pytest.mark.parametrize("surface", ("minimal", "template"))
+@pytest.mark.parametrize("phase", PHASES)
+def test_every_proper_crash_prefix_regenerates_through_the_same_public_initializer(
+    tmp_path, monkeypatch, surface, phase
+) -> None:
+    probe = _scenario(tmp_path / "probe", surface, False)
+    for ordinal in range(len(probe.targets)):
+        cell = tmp_path / f"{surface}-{phase}-{ordinal}"
+        cell.mkdir()
+        scenario = _scenario(cell, surface, False)
+        assert _run_cut(scenario, surface, phase, ordinal) == CUT_EXIT
+        changed, _old = _semantics(scenario)
+        before = tree_image(scenario.project)
+        if changed == len(scenario.targets):
+            error = TemplateCollision if surface == "template" else authoring.AuthoringError
+            with pytest.raises(error):
+                _public_write(scenario, surface)
+            assert tree_image(scenario.project) == before
+            continue
+        _public_write(scenario, surface)
+        assert _semantics(scenario) == (len(scenario.targets), False)
+        with monkeypatch.context() as runtime:
+            _runtime_oracle(scenario, runtime, True, surface)
+
+
+@pytest.mark.parametrize("surface", ("minimal", "template"))
+@pytest.mark.parametrize("shape", ("occupied-after-absence", "bytes", "mode", "full"))
+def test_noncanonical_or_full_installation_shapes_remain_collisions_without_mutation(
+    tmp_path, surface, shape
+) -> None:
+    scenario = _scenario(tmp_path, surface, False)
+    AuthoringPublisher(scenario.state).require_ready(scenario.project)
+    targets = scenario.plan.targets
+    if shape == "occupied-after-absence":
+        _materialize(targets[1], targets[1].after, targets[1].mode)
+    elif shape == "bytes":
+        _materialize(targets[0], b"foreign\n", targets[0].mode)
+    elif shape == "mode":
+        _materialize(targets[0], targets[0].after, 0o600)
+    else:
+        for target in targets:
+            _materialize(target, target.after, target.mode)
+    before_project, before_state = tree_image(scenario.project), tree_image(scenario.state)
+    error = TemplateCollision if surface == "template" else authoring.AuthoringError
+
+    with pytest.raises(error):
+        _public_write(scenario, surface)
+    assert tree_image(scenario.project) == before_project
+    assert tree_image(scenario.state) == before_state
+
+
+def test_present_unchanged_compile_cut_before_first_mutation_preserves_and_admits_old_canonical(
+    tmp_path, monkeypatch
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    state = (tmp_path / "state").resolve()
+    write_workflow(project, "release")
+    authoring.publish_project_compilation(project, "release", state_dir=state)
+    scenario = Scenario(
+        project, state, "release",
+        plan_project_compilation(authoring.project_paths(project, "release")),
+    )
+    before = {
+        target.path: (
+            target.path.read_bytes(),
+            stat.S_IMODE(target.path.stat().st_mode),
+            target.path.stat().st_ino,
+        )
+        for target in scenario.plan.targets
+    }
+    assert _run_cut(scenario, "compile", "after-final-validation", 0) == CUT_EXIT
+    assert {
+        target.path: (
+            target.path.read_bytes(),
+            stat.S_IMODE(target.path.stat().st_mode),
+            target.path.stat().st_ino,
+        )
+        for target in scenario.plan.targets
+    } == before
+    _runtime_oracle(scenario, monkeypatch, True, "compile")
 
 
 def test_subprocess_cut_skips_finally_cleanup_and_preserves_mixed_stale_tree(tmp_path, monkeypatch) -> None:

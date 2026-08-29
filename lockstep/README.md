@@ -522,10 +522,14 @@ Workflow compilation and packaged-template installation serialize cooperating
 Lockstep writers. Each generated file replacement is atomic and durable, but
 the generated set is **not** a multi-file transaction: a crash can leave old,
 new, or mixed generated files. Lockstep starts generated output only after a
-fresh observation confirms the complete canonical closure and exact DAG. Run
-the explicit generation command again to repair incomplete output; do not
-manually remove a legacy v4 owner-state marker, because it requires a
-pre-simplification recovery build.
+fresh observation confirms the complete canonical closure and exact DAG.
+Repeating first initialization or packaged-template installation completes only
+a strict proper prefix whose existing files still have the exact planned bytes
+and modes; a full set, hole, or mismatch remains a collision. Normal operations
+refuse legacy evidence only for the current exact project identity. `lockstep
+doctor` additionally performs a bounded read-only cross-project-namespace
+audit. Never manually remove a legacy v4 owner-state marker; recover it with a
+pre-simplification build against the original exact project directory identity.
 
 - **Glob semantics for `**`-prefixed patterns**: `unchanged`/`fresh` filter the
   stored manifest with `fnmatch` (where `**/` requires a literal `/`) while the

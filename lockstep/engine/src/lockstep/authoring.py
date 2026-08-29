@@ -11,7 +11,11 @@ from lockstep.authoring_compilation import (
     compile_project, compile_captured_source, validate_logical_name, workflow_call_names,
 )
 from lockstep.authoring_capture import capture_optional_regular_file
-from lockstep.authoring_installation import CapturedWorkflowSource, plan_captured_workflow_installation
+from lockstep.authoring_installation import (
+    CapturedWorkflowSource,
+    installation_collision,
+    plan_captured_workflow_installation,
+)
 from lockstep.authoring_results import CanonicalObservation, canonical_observation, diff_planned_compilation
 from lockstep.errors import AuthoringError
 from lockstep.recipe.authority import RecipeLimits, decode_recipe_document
@@ -250,9 +254,9 @@ def initialize_minimal(project: Path, name: str, *, state_dir: Path) -> Authored
     publisher.require_ready(root)
     planned = plan_captured_workflow_installation(root,
         (CapturedWorkflowSource(name, _minimal_workflow_source(name)),), root_role=name)
-    occupied = next((target for target in planned.plan.targets if target.before is not None), None)
-    if occupied is not None:
-        relative = occupied.path.relative_to(root)
+    collision = installation_collision(planned.plan)
+    if collision is not None:
+        relative = collision.path.relative_to(root)
         raise AuthoringError(f"destination already exists: {relative}")
     publisher.publish(planned.plan)
     return project_paths(root, name)

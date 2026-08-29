@@ -58,6 +58,23 @@ def test_public_compile_parse_semantic_and_graph_failures_are_write_free(tmp_pat
     _reject(project, "parent", tmp_path / "state", monkeypatch, capsys)
 
 
+def test_public_compile_rejects_excessive_yaml_depth_before_project_mutation(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    project = tmp_path / "project"
+    source = write_workflow(project, "leaf")
+    source.write_bytes(source.read_bytes() + b"x-depth: " + b"[" * 65 + b"0" + b"]" * 65 + b"\n")
+
+    _reject(
+        project,
+        "leaf",
+        tmp_path / "state",
+        monkeypatch,
+        capsys,
+        "LSW111",
+    )
+
+
 @pytest.mark.parametrize(("kind", "detail"), (("reads", "read set exceeds 256"), ("writes", "after images exceeds 256")))
 def test_public_compile_rejects_257th_record_before_project_mutation(tmp_path, monkeypatch, capsys, kind, detail) -> None:
     project = tmp_path / "project"; root = _chain(project, 257) if kind == "reads" else _star(project, 86)

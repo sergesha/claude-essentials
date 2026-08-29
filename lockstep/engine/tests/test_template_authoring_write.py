@@ -89,7 +89,7 @@ def test_owner_transaction_refusal_precedes_template_planning(tmp_path, monkeypa
     assert planned == [] and tree_image(project) == before_project and tree_image(state) == before_state
 
 
-def test_partial_template_write_is_not_rolled_back_and_requires_regeneration(
+def test_partial_template_write_is_not_rolled_back_and_regenerates_remainder(
     tmp_path, monkeypatch
 ) -> None:
     project = tmp_path / "project"; project.mkdir(); state = _state(project); published = []
@@ -104,5 +104,5 @@ def test_partial_template_write_is_not_rolled_back_and_requires_regeneration(
     assert len(published) == 1 and any(p.is_file() for p in project.rglob("*"))
     with monkeypatch.context() as clean:
         clean.setattr(os, "link", original_link)
-        with pytest.raises(TemplateCollision):
-            install_template("reviewed-change", "change", project, state_dir=state)
+        installed = install_template("reviewed-change", "change", project, state_dir=state)
+    assert all(path.is_file() for path in (*installed.sources, *installed.recipes))

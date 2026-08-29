@@ -5,7 +5,8 @@ import hashlib
 from pathlib import Path
 
 from lockstep.authoring import project_paths
-from lockstep.authoring_compilation import plan_project_compilation
+from lockstep.authoring_compilation import plan_project_compilation, workflow_call_names
+from lockstep.workflow.schema import load_workflow_bytes
 from tests._authoring_gate import assert_source_identity, expected_compilation_image, tree_image, write_workflow
 
 
@@ -77,3 +78,54 @@ def test_transitive_planner_captures_complete_three_role_bundle_without_writes(t
         ("grandchild", "child", "parent"),
         (("grandchild", ()), ("child", ("grandchild",)), ("parent", ("child",))),
     )
+
+
+def test_call_topology_follows_only_typed_executable_flow_in_declaration_order(
+    tmp_path: Path,
+) -> None:
+    source = b"""\
+workflow_version: '1'
+name: parent
+description: parent
+protect: ['**']
+x-shadow: {call: {workflow: metadata-only}}
+flow:
+  - call: {workflow: first, runner: codex}
+  - choose:
+      value: decision
+      cases:
+        one: [{call: {workflow: second, runner: codex}}]
+      default: [{call: {workflow: third, runner: codex}}]
+  - repeat:
+      limit: 1
+      until: done.passed
+      do: [{call: {workflow: fourth, runner: codex}}]
+      exhausted: escalate
+  - parallel:
+      join: all
+      branches:
+        left: [{call: {workflow: fifth, runner: codex}}]
+        right: [{call: {workflow: first, runner: codex}}]
+"""
+
+    calls = workflow_call_names(
+        load_workflow_bytes(tmp_path / "parent.workflow.yaml", source)
+    )
+
+    assert calls == ("first", "second", "third", "fourth", "fifth")
+
+
+def test_inert_call_shaped_metadata_cannot_add_dependencies_or_outputs(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    write_workflow(project, "child")
+    parent = write_workflow(project, "parent", children=("child",))
+    parent.write_text(
+        parent.read_text() + "x-shadow: {call: {workflow: metadata-only}}\n"
+    )
+
+    plan = plan_project_compilation(project_paths(project, "parent"))
+
+    assert plan.dependency_edges == (("child", ()), ("parent", ("child",)))
+    assert {target.role for target in plan.targets} == {"child", "parent"}
