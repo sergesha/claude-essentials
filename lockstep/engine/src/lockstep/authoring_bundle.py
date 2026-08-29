@@ -27,7 +27,7 @@ from lockstep.errors import AuthoringError
 from lockstep.workflow.canonical import canonical_yaml
 from lockstep.workflow.compiler import CompilationResult
 from lockstep.workflow.schema import load_workflow_bytes
-from lockstep.workflow.semantics import ValidatedWorkflow
+from lockstep.workflow.semantics import ResolvedCatalog, ValidatedWorkflow
 
 __all__ = [
     "DestinationImage",
@@ -56,6 +56,8 @@ class PlannedProjectCompilation:
     """One captured workflow closure and its same-pass root compilation."""
 
     bundle: ProjectCompilationBundle
+    root_validated: ValidatedWorkflow
+    root_catalog: ResolvedCatalog
     root_result: CompilationResult
 
 
@@ -332,7 +334,14 @@ def _plan_project_compilation(recipe: AuthoredRecipe) -> PlannedProjectCompilati
     project, source_path = _workflow_project_and_source(recipe)
     directory_identities: dict[Path, _PathIdentity] = {}
     project_identity = _cached_directory_identity(directory_identities, project)
-    sources, dependency_edges, compiled_roles, root_result = _compile_closure(
+    (
+        sources,
+        dependency_edges,
+        compiled_roles,
+        root_validated,
+        root_catalog,
+        root_result,
+    ) = _compile_closure(
         recipe, source_path, project, directory_identities
     )
     before_images, after_images = _destination_images(
@@ -347,6 +356,8 @@ def _plan_project_compilation(recipe: AuthoredRecipe) -> PlannedProjectCompilati
             before_images,
             after_images,
         ),
+        root_validated,
+        root_catalog,
         root_result,
     )
 
@@ -360,12 +371,15 @@ def _compile_closure(
     tuple[SourceIdentity, ...],
     tuple[tuple[str, tuple[str, ...]], ...],
     tuple[_ProjectedRole, ...],
+    ValidatedWorkflow,
+    ResolvedCatalog,
     CompilationResult,
 ]:
     sources: list[SourceIdentity] = []
     dependency_edges: list[tuple[str, tuple[str, ...]]] = []
     projected_roles: list[_ProjectedRole] = []
     completed: dict[str, _CompiledWorkflow] = {}
+    catalogs: dict[str, ResolvedCatalog] = {}
     active: set[str] = set()
     source_budget = AuthoringBudget("authoring read set")
     destination_budget = AuthoringBudget("authoring after images")
@@ -396,7 +410,7 @@ def _compile_closure(
                     raise AuthoringError("workflow source is required")
                 visit(child_recipe, child_path)
             children = {name: completed[name] for name in child_names}
-            validated, _catalog, compiled = compile_captured_source(
+            validated, catalog, compiled = compile_captured_source(
                 document, children=children
             )
             projected = _workflow_destinations(role_recipe, compiled, child_names)
@@ -406,6 +420,7 @@ def _compile_closure(
                 destination_budget.retain(content)
             destination_paths.update(projected)
             completed[role] = (validated, compiled)
+            catalogs[role] = catalog
             sources.append(source)
             dependency_edges.append((role, child_names))
             projected_roles.append((role, projected))
@@ -417,6 +432,8 @@ def _compile_closure(
         tuple(sources),
         tuple(dependency_edges),
         tuple(projected_roles),
+        completed[recipe.name][0],
+        catalogs[recipe.name],
         completed[recipe.name][1],
     )
 

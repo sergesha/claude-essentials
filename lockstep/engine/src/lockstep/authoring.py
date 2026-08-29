@@ -70,40 +70,19 @@ def compile_source(
 
 def compile_project_source(
     source: Path,
-    *,
-    _cache: dict[
-        Path, tuple[ValidatedWorkflow, ResolvedCatalog, CompilationResult]
-    ]
-    | None = None,
-    _active: set[Path] | None = None,
 ) -> tuple[ValidatedWorkflow, ResolvedCatalog, CompilationResult]:
-    """Compile the conventional authored child DAG entirely in memory."""
+    """Project root compilation values from one captured whole-DAG plan."""
 
     path = Path(source).resolve()
-    cache = {} if _cache is None else _cache
-    active = set() if _active is None else _active
-    if path in cache:
-        return cache[path]
-    if path in active:
-        raise AuthoringError("workflow source dependency graph is recursive")
-    active.add(path)
-    try:
-        children = {}
-        for child in workflow_call_names(load_workflow(path)):
-            child_path = path.parent / f"{child}.workflow.yaml"
-            if not child_path.is_file():
-                raise AuthoringError(
-                    f"workflow dependency source is missing: {child}.workflow.yaml"
-                )
-            child_validated, _child_catalog, child_compiled = compile_project_source(
-                child_path, _cache=cache, _active=active
-            )
-            children[child] = (child_validated, child_compiled)
-        result = compile_source(path, children=children)
-        cache[path] = result
-        return result
-    finally:
-        active.remove(path)
+    suffix = ".workflow.yaml"
+    if not path.name.endswith(suffix):
+        raise AuthoringError("workflow source is outside the canonical project layout")
+    recipe = project_paths(path.parent.parent.parent, path.name.removesuffix(suffix))
+    _project, canonical_source = _workflow_project_and_source(recipe)
+    if canonical_source != path:
+        raise AuthoringError("workflow source is outside the canonical project layout")
+    planned = _plan_project_compilation(recipe)
+    return planned.root_validated, planned.root_catalog, planned.root_result
 
 
 def link_recipe_dependencies(recipe_bytes: bytes, children: tuple[str, ...]) -> bytes:
@@ -312,9 +291,10 @@ def estimate_recipe(project: Path, name: str) -> dict[str, object]:
     recipe = project_paths(project, name)
     if recipe.kind == "manual":
         return estimate_manual_recipe(recipe.recipe_path).to_dict()
-    assert recipe.workflow_path is not None
-    validated, catalog, _compiled = compile_project_source(recipe.workflow_path)
-    return estimate_workflow(validated.workflow, catalog).to_dict()
+    planned = _plan_project_compilation(recipe)
+    return estimate_workflow(
+        planned.root_validated.workflow, planned.root_catalog
+    ).to_dict()
 
 
 def _minimal_workflow_source(name: str) -> bytes:
