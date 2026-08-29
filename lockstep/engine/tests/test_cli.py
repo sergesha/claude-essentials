@@ -361,27 +361,28 @@ def test_installed_cli_refuses_legacy_authoring_evidence(
     tmp_path, monkeypatch, capsys, arguments
 ) -> None:
     from lockstep import authoring
-    from lockstep.authoring_journal import AuthoringJournal
     from tests._authoring_gate import tree_image, write_workflow
-    from tests.test_authoring_legacy_v4_refusal import live_v4_bytes
+    from tests.test_authoring_legacy_v4_refusal import (
+        _locate_test_namespace,
+        _retain,
+        live_v4_bytes,
+    )
 
     project = tmp_path / "project"
     project.mkdir()
     state = (tmp_path / "state").resolve()
     write_workflow(project, "release")
     authoring.publish_project_compilation(project, "release", state_dir=state)
-    journal, _identity = AuthoringJournal.create_for_project(state, project)
-    journal.journal_path.write_bytes(live_v4_bytes(project))
-    journal.journal_path.chmod(0o600)
+    namespace, _identity = _locate_test_namespace(state, project)
+    transaction = _retain(namespace, live_v4_bytes(project))
     monkeypatch.chdir(project)
     monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(state))
-    before = journal.journal_path.read_bytes(); project_before, owner_before = tree_image(project), tree_image(state)
-    monkeypatch.setattr(AuthoringJournal, "read_recovery_model", lambda *_a, **_k: pytest.fail("CLI parsed retained transaction bytes"))
+    before = transaction.read_bytes(); project_before, owner_before = tree_image(project), tree_image(state)
 
     assert cli.main(list(arguments)) == 2
     error = capsys.readouterr().err
     assert "pre-simplification" in error
     assert str(project.resolve()) in error and str(state) in error
     assert "Do not delete transaction.json manually" in error
-    assert journal.journal_path.read_bytes() == before
+    assert transaction.read_bytes() == before
     assert tree_image(project) == project_before and tree_image(state) == owner_before

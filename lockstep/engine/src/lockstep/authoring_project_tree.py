@@ -11,10 +11,6 @@ from lockstep.authoring_bundle import (
     PathIdentity,
     ProjectCompilationBundle,
 )
-from lockstep.authoring_stage_paths import (
-    ReservedStageEvidence,
-    ReservedStagePaths,
-)
 from lockstep.errors import AuthoringError
 
 
@@ -52,24 +48,6 @@ class AuthoringProjectTree:
                 key=lambda path: (len(path.parts), str(path)),
             )
         )
-
-    @classmethod
-    def from_identities(
-        cls,
-        project_identity: PathIdentity,
-        ancestor_chains: tuple[tuple[PathIdentity, ...], ...],
-    ) -> AuthoringProjectTree:
-        tree = cls.__new__(cls)
-        tree._project = project_identity.resolved_path
-        tree._project_identity = project_identity
-        tree.created_directories = {}
-        recorded = {tree._project: project_identity}
-        for ancestors in ancestor_chains:
-            for identity in ancestors:
-                tree._record_identity(recorded, identity)
-        tree._recorded = recorded
-        tree._target_parents = ()
-        return tree
 
     def ensure_target_parents(self) -> None:
         """Create every planned parent in stable shallow-first order."""
@@ -170,18 +148,6 @@ class AuthoringProjectTree:
         parent = self._contained_parent(destination)
         return self.open_directory(parent), destination.name
 
-    def prove_reserved_stage_absence(
-        self,
-        operation_id: str,
-        stages: tuple[ReservedStagePaths, ...],
-    ) -> ReservedStageEvidence:
-        """Prove a complete planned stage set absent without creating parents."""
-
-        for stage in stages:
-            self._require_reserved_path_absent(stage.publication)
-            self._require_reserved_path_absent(stage.restoration)
-        return ReservedStageEvidence(operation_id, stages)
-
     def open_directory(self, directory: Path) -> int:
         try:
             relative = directory.relative_to(self._project)
@@ -208,146 +174,6 @@ class AuthoringProjectTree:
                 current = child
             return descriptor
         except BaseException:
-            os.close(descriptor)
-            raise
-
-    def inspect_created_directory(
-        self, directory: Path, expected: PathIdentity | None
-    ) -> frozenset[str] | None:
-        """Inspect one candidate and enroll only an exact journal-owned inode."""
-
-        if expected is not None and expected.resolved_path != directory:
-            raise AuthoringError("created directory identity names another path")
-        parent_descriptor = self.open_directory(directory.parent)
-        try:
-            try:
-                child_descriptor = os.open(
-                    directory.name, _DIRECTORY_FLAGS, dir_fd=parent_descriptor
-                )
-            except FileNotFoundError:
-                return None
-            except OSError as exc:
-                raise AuthoringError(
-                    "transaction-created directory is foreign"
-                ) from exc
-            try:
-                if expected is None:
-                    raise AuthoringError(
-                        "transaction-created directory ownership is ambiguous"
-                    )
-                self._verify_directory_descriptor(
-                    child_descriptor, expected=expected
-                )
-                children = frozenset(os.listdir(child_descriptor))
-            finally:
-                os.close(child_descriptor)
-        finally:
-            os.close(parent_descriptor)
-        self.created_directories[directory] = expected
-        return children
-
-    def durably_confirm_created_directory_absent(self, directory: Path) -> None:
-        parent_descriptor = self.open_directory(directory.parent)
-        try:
-            try:
-                os.stat(
-                    directory.name,
-                    dir_fd=parent_descriptor,
-                    follow_symlinks=False,
-                )
-            except FileNotFoundError:
-                os.fsync(parent_descriptor)
-                return
-            raise AuthoringError("transaction-created directory is not absent")
-        finally:
-            os.close(parent_descriptor)
-
-    def remove_created_directories(self) -> None:
-        for directory in sorted(
-            self.created_directories, key=lambda path: len(path.parts), reverse=True
-        ):
-            expected = self.created_directories[directory]
-            if expected is None:
-                raise AuthoringError(
-                    "transaction-created directory ownership is ambiguous"
-                )
-            parent_descriptor = self.open_directory(directory.parent)
-            try:
-                child_descriptor = os.open(
-                    directory.name, _DIRECTORY_FLAGS, dir_fd=parent_descriptor
-                )
-                try:
-                    self._verify_directory_descriptor(
-                        child_descriptor, expected=expected
-                    )
-                finally:
-                    os.close(child_descriptor)
-                os.rmdir(directory.name, dir_fd=parent_descriptor)
-                os.fsync(parent_descriptor)
-            except OSError as exc:
-                raise AuthoringError(
-                    "transaction-created directory could not be removed durably"
-                ) from exc
-            finally:
-                os.close(parent_descriptor)
-
-    def _require_reserved_path_absent(self, path: Path) -> None:
-        parent = self._contained_parent(path)
-        descriptor = self._open_reserved_parent(parent)
-        if descriptor is None:
-            return
-        try:
-            try:
-                os.stat(path.name, dir_fd=descriptor, follow_symlinks=False)
-            except FileNotFoundError:
-                return
-            raise AuthoringError("authoring reserved stage path is occupied")
-        finally:
-            os.close(descriptor)
-
-    def _open_reserved_parent(self, parent: Path) -> int | None:
-        relative = parent.relative_to(self._project)
-        descriptor = self._open_root()
-        current = self._project
-        try:
-            for part in relative.parts:
-                child = current / part
-                next_descriptor = self._open_reserved_child(
-                    descriptor, child, part
-                )
-                if next_descriptor is None:
-                    return None
-                os.close(descriptor)
-                descriptor = next_descriptor
-                current = child
-            result = descriptor
-            descriptor = -1
-            return result
-        finally:
-            if descriptor >= 0:
-                os.close(descriptor)
-
-    def _open_reserved_child(
-        self, parent_descriptor: int, child: Path, leaf: str
-    ) -> int | None:
-        expected = self._expected(child)
-        try:
-            descriptor = os.open(leaf, _DIRECTORY_FLAGS, dir_fd=parent_descriptor)
-        except FileNotFoundError:
-            if expected is not None:
-                raise AuthoringError("recorded destination ancestor disappeared")
-            return None
-        except OSError as exc:
-            raise AuthoringError(
-                "authoring reserved stage parent is unavailable"
-            ) from exc
-        if expected is None:
-            os.close(descriptor)
-            raise AuthoringError("destination ancestor was created after planning")
-        try:
-            self._verify_directory_descriptor(descriptor, expected=expected)
-            return descriptor
-        except Exception:
             os.close(descriptor)
             raise
 

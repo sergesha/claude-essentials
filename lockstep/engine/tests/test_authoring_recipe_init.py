@@ -8,14 +8,17 @@ import pytest
 
 from lockstep import authoring, cli
 from lockstep.authoring_bundle import plan_project_compilation
-from lockstep.authoring_journal import AuthoringJournal
 from lockstep.authoring_publisher import AuthoringPublisher
 from lockstep.mcp import server
 from tests._authoring_gate import (
     expected_compilation_image, mcp_context, observed_compilation_image,
     replace_marker, tree_image, write_workflow,
 )
-from tests.test_authoring_legacy_v4_refusal import live_v4_bytes
+from tests.test_authoring_legacy_v4_refusal import (
+    _create_test_namespace,
+    _retain,
+    live_v4_bytes,
+)
 
 
 def _state(project: Path) -> Path:
@@ -109,13 +112,11 @@ def test_successful_public_compile_materializes_only_the_planned_namespace(tmp_p
 
 def test_recipe_init_refuses_legacy_before_planning(tmp_path, monkeypatch) -> None:
     project = tmp_path / "project"; project.mkdir(); state = _state(project)
-    journal, _identity = AuthoringJournal.create_for_project(state, project)
-    with journal.locked(): pass
-    journal.journal_path.write_bytes(live_v4_bytes(project)); journal.journal_path.chmod(0o600)
+    namespace, _identity = _create_test_namespace(state, project)
+    _retain(namespace, live_v4_bytes(project))
     before_project, before_state = tree_image(project), tree_image(state)
     planned = []
     monkeypatch.setattr(authoring, "plan_captured_workflow_installation", lambda *_a, **_k: planned.append(True))
-    monkeypatch.setattr(AuthoringJournal, "read_recovery_model", lambda *_a, **_k: pytest.fail("legacy evidence was parsed"))
     with pytest.raises(Exception, match="pre-simplification"):
         authoring.initialize_minimal(project, "release", state_dir=state)
     assert planned == [] and tree_image(project) == before_project and tree_image(state) == before_state

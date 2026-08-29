@@ -35,11 +35,6 @@ CONFIRMED_GOD_METHODS = (
     ("authoring_bundle.py", "ProjectCompilationBundle.__post_init__"),
     ("authoring_identity.py", "classify_destination_ownership_at"),
     ("authoring_project_tree.py", "AuthoringProjectTree.ensure_directory"),
-    (
-        "authoring_project_tree.py",
-        "AuthoringProjectTree._require_reserved_path_absent",
-    ),
-    ("authoring_transaction.py", "AuthoringTransaction._rollback"),
 )
 
 

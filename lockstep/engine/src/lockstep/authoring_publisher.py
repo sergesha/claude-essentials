@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import secrets
 import stat
 from collections.abc import Callable
+from contextlib import contextmanager
 from pathlib import Path
-from typing import TypeVar
+from typing import Iterator, TypeVar
 
 from lockstep.authoring_bundle import (
     DestinationImage,
@@ -21,11 +24,18 @@ from lockstep.authoring_identity import (
     validate_sources,
     validate_temporary_descriptor as _validate_temporary_descriptor,
 )
-from lockstep.authoring_journal import AuthoringJournal
 from lockstep.authoring_project_tree import AuthoringProjectTree
 from lockstep.errors import AuthoringError
+from lockstep.runtime.advisory_lock import advisory_file_lock
 from lockstep.runtime.errors import LockstepError
-from lockstep.runtime.owner_state import take_bounded, verify_owner_directory
+from lockstep.runtime.owner_state import (
+    ensure_owner_directory,
+    fsync_owner_directory,
+    initialize_owner_state,
+    take_bounded,
+    verify_owner_directory,
+    verify_owner_file,
+)
 
 __all__ = ["AuthoringPublisher", "observe_authoring_project"]
 
@@ -35,7 +45,7 @@ _MAX_LEGACY_TRANSACTION_BYTES = 16 * 1024 * 1024
 _MAX_AUTHORING_NAMESPACES = 256
 
 
-class LegacyAuthoringTransaction(AuthoringError):
+class LegacyAuthoringEvidence(AuthoringError):
     """Retained transaction evidence needs the pre-simplification recovery path."""
 
 
@@ -253,21 +263,134 @@ def _fsync_regular_at(directory_descriptor: int, leaf: str) -> None:
         os.close(descriptor)
 
 
+def _validate_owner_state_location(state_dir: Path, project: Path) -> None:
+    if not state_dir.is_absolute() or any(part in {".", ".."} for part in state_dir.parts):
+        raise ValueError("authoring state directory must be absolute and canonical")
+    lexical = Path(os.path.abspath(state_dir))
+    resolved = state_dir.resolve(strict=False)
+    if (
+        lexical == project
+        or project in lexical.parents
+        or lexical in project.parents
+        or resolved == project
+        or project in resolved.parents
+        or resolved in project.parents
+    ):
+        raise ValueError("authoring state directory must be outside the project")
+
+
+def _current_project_identity(project: Path) -> PathIdentity:
+    try:
+        supplied = project.lstat()
+        if stat.S_ISLNK(supplied.st_mode) or not stat.S_ISDIR(supplied.st_mode):
+            raise AuthoringError("authoring recovery project must be a real directory")
+        resolved = project.resolve(strict=True)
+        info = resolved.lstat()
+    except (OSError, RuntimeError) as exc:
+        raise AuthoringError("authoring recovery project is unavailable") from exc
+    if not stat.S_ISDIR(info.st_mode) or _project_stability_facts(
+        supplied
+    ) != _project_stability_facts(info):
+        raise AuthoringError("authoring recovery project identity changed")
+    return PathIdentity(resolved, info.st_dev, info.st_ino)
+
+
+def _project_stability_facts(info: os.stat_result) -> tuple[int, int, int, int]:
+    return info.st_dev, info.st_ino, info.st_mode, info.st_ctime_ns
+
+
+def _project_namespace_for_identity(identity: PathIdentity) -> str:
+    encoded = json.dumps(
+        {
+            "path": str(identity.resolved_path),
+            "device": identity.device,
+            "inode": identity.inode,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _create_authoring_namespace_for_identity(
+    state_dir: Path, identity: PathIdentity
+) -> Path:
+    _validate_owner_state_location(state_dir, identity.resolved_path)
+    root = initialize_owner_state(state_dir)
+    authoring = ensure_owner_directory(root, "authoring")
+    return ensure_owner_directory(
+        authoring, _project_namespace_for_identity(identity)
+    )
+
+
+def _create_authoring_namespace_for_project(
+    state_dir: Path, project: Path
+) -> tuple[Path, PathIdentity]:
+    identity = _current_project_identity(project)
+    return _create_authoring_namespace_for_identity(state_dir, identity), identity
+
+
+def _locate_authoring_namespace(
+    state_dir: Path, project: Path
+) -> tuple[Path | None, PathIdentity]:
+    identity = _current_project_identity(project)
+    _validate_owner_state_location(state_dir, identity.resolved_path)
+    if not state_dir.exists() and not state_dir.is_symlink():
+        return None, identity
+    verify_owner_directory(state_dir)
+    authoring = state_dir / "authoring"
+    if not authoring.exists() and not authoring.is_symlink():
+        return None, identity
+    verify_owner_directory(authoring)
+    namespace = authoring / _project_namespace_for_identity(identity)
+    if not namespace.exists() and not namespace.is_symlink():
+        return None, identity
+    verify_owner_directory(namespace)
+    return namespace, identity
+
+
+def _locate_ready_authoring_namespace(
+    state_dir: Path, project: Path
+) -> tuple[Path | None, PathIdentity]:
+    namespace, identity = _locate_authoring_namespace(state_dir, project)
+    if namespace is None:
+        return None, identity
+    lock_path = namespace / "transaction.lock"
+    if not lock_path.exists() and not lock_path.is_symlink():
+        raise AuthoringError("authoring boundary initialization is incomplete")
+    verify_owner_file(lock_path)
+    return namespace, identity
+
+
+@contextmanager
+def _locked_authoring_namespace(
+    namespace: Path, *, create: bool
+) -> Iterator[None]:
+    lock_path = namespace / "transaction.lock"
+    existed = lock_path.exists() or lock_path.is_symlink()
+    with advisory_file_lock(lock_path, create=create):
+        verify_owner_file(lock_path)
+        if create and not existed:
+            fsync_owner_directory(namespace)
+        yield
+
+
 class _ExistingAuthoringBoundary:
     """The already-created authoring namespace that readers may lock."""
 
-    __slots__ = ("_journal", "_project_identity")
+    __slots__ = ("_namespace", "_project_identity")
 
     def __init__(
-        self, journal: AuthoringJournal, project_identity: PathIdentity
+        self, namespace: Path, project_identity: PathIdentity
     ) -> None:
-        self._journal = journal
+        self._namespace = namespace
         self._project_identity = project_identity
 
     def observe(self, operation: Callable[[], Observation]) -> Observation:
-        with self._journal.locked_existing():
+        with _locked_authoring_namespace(self._namespace, create=False):
             _require_no_legacy_transaction(
-                self._journal.directory,
+                self._namespace,
                 self._project_identity.resolved_path,
             )
             return operation()
@@ -312,8 +435,8 @@ def _legacy_transaction_error(
     project: Path,
     namespace: Path,
     size_note: str = "",
-) -> LegacyAuthoringTransaction:
-    return LegacyAuthoringTransaction(
+) -> LegacyAuthoringEvidence:
+    return LegacyAuthoringEvidence(
         "legacy authoring transaction evidence is present at "
         f"{transaction}; it may be a v4 transaction. Use a pre-simplification "
         f"Lockstep build against project {project} and state directory "
@@ -328,12 +451,12 @@ def _locate_existing_boundary(
 ) -> _ExistingAuthoringBoundary | None:
     """Find a reader-safe boundary without creating owner state."""
 
-    journal, project_identity = AuthoringJournal.locate_ready_for_project(
+    namespace, project_identity = _locate_ready_authoring_namespace(
         state_dir, project
     )
-    if journal is None:
+    if namespace is None:
         return None
-    return _ExistingAuthoringBoundary(journal, project_identity)
+    return _ExistingAuthoringBoundary(namespace, project_identity)
 
 
 def _refuse_retained_legacy_transactions(
@@ -342,7 +465,7 @@ def _refuse_retained_legacy_transactions(
 ) -> None:
     """Refuse evidence retained under an older inode binding for this state root."""
 
-    AuthoringJournal.locate_for_project(state_dir, project)
+    _locate_authoring_namespace(state_dir, project)
     authoring = state_dir / "authoring"
     if not authoring.exists() and not authoring.is_symlink():
         return
@@ -364,22 +487,13 @@ def _refuse_retained_legacy_transactions(
         ):
             raise AuthoringError("authoring namespace name is invalid")
         verify_owner_directory(namespace)
-        journal = AuthoringJournal(namespace)
         try:
-            with journal.locked_existing():
+            with _locked_authoring_namespace(namespace, create=False):
                 _require_no_legacy_transaction(namespace, project)
         except FileNotFoundError as exc:
             raise AuthoringError(
                 "authoring boundary initialization is incomplete"
             ) from exc
-
-
-def _observe_existing_authoring_project(
-    journal: AuthoringJournal,
-    project_identity: PathIdentity,
-    operation: Callable[[], Observation],
-) -> Observation:
-    return _ExistingAuthoringBoundary(journal, project_identity).observe(operation)
 
 
 def observe_authoring_project(
@@ -424,10 +538,12 @@ class AuthoringPublisher:
             self._state_dir,
             bundle.resolved_project,
         )
-        journal = AuthoringJournal.create_for_bundle(self._state_dir, bundle)
-        with journal.locked():
+        namespace = _create_authoring_namespace_for_identity(
+            self._state_dir, bundle.project_identity
+        )
+        with _locked_authoring_namespace(namespace, create=True):
             _require_no_legacy_transaction(
-                journal.directory,
+                namespace,
                 bundle.resolved_project,
             )
             _publish_per_file(bundle)
@@ -436,13 +552,13 @@ class AuthoringPublisher:
         if not isinstance(project, Path):
             raise TypeError("authoring project must be a Path")
         _refuse_retained_legacy_transactions(self._state_dir, project)
-        journal, identity = AuthoringJournal.create_for_project(
+        namespace, identity = _create_authoring_namespace_for_project(
             self._state_dir,
             project,
         )
-        with journal.locked():
+        with _locked_authoring_namespace(namespace, create=True):
             _require_no_legacy_transaction(
-                journal.directory,
+                namespace,
                 identity.resolved_path,
             )
 

@@ -8,7 +8,6 @@ import pytest
 
 import lockstep.authoring_publisher as publisher_module
 from lockstep import authoring
-from lockstep.authoring_journal import AuthoringJournal
 from lockstep.authoring_publisher import AuthoringPublisher, observe_authoring_project
 from lockstep.runtime.engine import LockstepError
 from lockstep.runtime.service import LockstepCommandService
@@ -17,7 +16,12 @@ from lockstep.recipe._authority_models import RecipeCandidate
 from lockstep.workflow.compiler import canonical_execution_bytes
 from lockstep.templates import install_template
 from tests._authoring_gate import assert_no_durable_runtime_change, mcp_context, tree_image, write_workflow
-from tests.test_authoring_legacy_v4_refusal import live_v4_bytes
+from tests.test_authoring_legacy_v4_refusal import (
+    _create_test_namespace,
+    _locate_test_namespace,
+    _retain,
+    live_v4_bytes,
+)
 
 
 def _ready(tmp_path: Path, *, state_name: str = "state") -> tuple[Path, Path]:
@@ -134,8 +138,7 @@ def test_observer_discards_optimistic_result_when_boundary_appears(tmp_path, out
     def operation():
         calls.append(len(calls));
         if len(calls) == 1:
-            journal, _identity = AuthoringJournal.create_for_project(state, project)
-            with journal.locked(): pass
+            _create_test_namespace(state, project)
             if outcome == "failure": raise LockstepError("optimistic failure")
         return f"result-{len(calls)}"
     assert observe_authoring_project(state, project, operation) == "result-2"
@@ -161,15 +164,15 @@ def test_observer_reraises_original_optimistic_error_without_creating_boundary(t
 
 def test_unready_boundary_is_read_only_and_never_repaired(tmp_path) -> None:
     project = tmp_path / "project"; project.mkdir(); state = (tmp_path / "state").resolve()
-    journal, _identity = AuthoringJournal.create_for_project(state, project); before = tree_image(state)
+    namespace, _identity = _create_test_namespace(state, project, ready=False); before = tree_image(state)
     with pytest.raises(Exception, match="initialization is incomplete"):
         AuthoringPublisher(state).observe(project, lambda: "forbidden")
-    assert tree_image(state) == before and not (journal.directory / "transaction.lock").exists()
+    assert tree_image(state) == before and not (namespace / "transaction.lock").exists()
 
 
 def _require_kernel_lock(state: Path, project: Path) -> None:
-    journal, _identity = AuthoringJournal.locate_for_project(state, project); assert journal is not None
-    descriptor = os.open(journal.directory / "transaction.lock", os.O_RDONLY)
+    namespace, _identity = _locate_test_namespace(state, project)
+    descriptor = os.open(namespace / "transaction.lock", os.O_RDONLY)
     try:
         with pytest.raises(BlockingIOError): fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
     finally: os.close(descriptor)
@@ -207,11 +210,10 @@ def test_named_and_check_all_hold_lock_through_enumeration_and_complete_observat
 
 def test_legacy_check_all_refuses_before_enumeration(tmp_path, monkeypatch, capsys) -> None:
     from lockstep import cli
-    project, state = _ready(tmp_path); journal, _identity = AuthoringJournal.create_for_project(state, project)
-    journal.journal_path.write_bytes(live_v4_bytes(project)); journal.journal_path.chmod(0o600); enumerated = []
+    project, state = _ready(tmp_path); namespace, _identity = _locate_test_namespace(state, project)
+    _retain(namespace, live_v4_bytes(project)); enumerated = []
     original = Path.glob
     monkeypatch.setattr(Path, "glob", lambda path, pattern: enumerated.append((path, pattern)) or original(path, pattern))
-    monkeypatch.setattr(AuthoringJournal, "read_recovery_model", lambda *_a, **_k: pytest.fail("check --all parsed legacy bytes"))
     monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(state)); monkeypatch.chdir(project); before = tree_image(tmp_path)
     assert cli.main(["recipe", "check", "--all"]) == 2
     assert "pre-simplification" in capsys.readouterr().err and enumerated == [] and tree_image(tmp_path) == before
@@ -235,7 +237,7 @@ def test_invalid_check_and_diff_are_state_free_and_write_free(tmp_path, monkeypa
 
 def test_raw_render_and_estimate_ignore_ambient_authoring_state_deterministically(tmp_path, monkeypatch) -> None:
     project, state = _ready(tmp_path); baseline = (authoring.render_recipe(project, "release", "workflow"), authoring.estimate_recipe(project, "release"))
-    journal, _identity = AuthoringJournal.create_for_project(state, project); raw_fixture = Path(__file__).parent / "fixtures/authoring-v4/transaction.json"; immutable = raw_fixture.read_bytes()
-    journal.journal_path.write_bytes(live_v4_bytes(project)); journal.journal_path.chmod(0o600); monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(state)); before = tree_image(tmp_path)
+    namespace, _identity = _locate_test_namespace(state, project); raw_fixture = Path(__file__).parent / "fixtures/authoring-v4/transaction.json"; immutable = raw_fixture.read_bytes()
+    _retain(namespace, live_v4_bytes(project)); monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(state)); before = tree_image(tmp_path)
     assert tuple((authoring.render_recipe(project, "release", "workflow"), authoring.estimate_recipe(project, "release")) for _ in range(2)) == (baseline, baseline)
     assert tree_image(tmp_path) == before and raw_fixture.read_bytes() == immutable

@@ -9,11 +9,14 @@ import pytest
 import lockstep.authoring_publisher as publisher_module
 from lockstep import authoring
 from lockstep.authoring_bundle import plan_project_compilation
-from lockstep.authoring_journal import AuthoringJournal
 from lockstep.authoring_publisher import AuthoringPublisher
 from lockstep.runtime.advisory_lock import advisory_file_lock
 from lockstep.template_installation import plan_template_installation
 from tests._authoring_gate import replace_marker, write_workflow
+from tests.test_authoring_legacy_v4_refusal import (
+    _create_test_namespace,
+    _locate_test_namespace,
+)
 
 
 def _compilation(tmp_path: Path):
@@ -49,10 +52,9 @@ def _assert_exact(bundle) -> None:
 
 
 def _one_lock(state: Path, project: Path) -> Path:
-    journal, _identity = AuthoringJournal.locate_for_project(state, project)
-    assert journal is not None
+    namespace, _identity = _locate_test_namespace(state, project)
     locks = tuple((state / "authoring").rglob("transaction.lock"))
-    assert locks == (journal.directory / "transaction.lock",)
+    assert locks == (namespace / "transaction.lock",)
     return locks[0]
 
 
@@ -82,14 +84,13 @@ def test_disjoint_replacement_and_template_writers_serialize_under_one_lock(tmp_
 
 
 def test_queued_writer_revalidates_sources_after_lock_acquisition(tmp_path) -> None:
-    project, state, source, bundle = _compilation(tmp_path); journal, _identity = AuthoringJournal.create_for_project(state, project)
-    with journal.locked(): pass
+    project, state, source, bundle = _compilation(tmp_path); namespace, _identity = _create_test_namespace(state, project)
     result = []; started = threading.Event()
     def queued():
         started.set()
         try: AuthoringPublisher(state).publish(bundle); result.append(None)
         except BaseException as exc: result.append(exc)
-    with advisory_file_lock(journal.directory / "transaction.lock"):
+    with advisory_file_lock(namespace / "transaction.lock"):
         thread = threading.Thread(target=queued); thread.start(); assert started.wait(5)
         source.write_bytes(b"foreign source\n")
     thread.join(10)

@@ -1,20 +1,16 @@
 """Presence-only refusal for every retained authoring transaction byte shape."""
 from __future__ import annotations
-
-import json
+import hashlib, json
 from pathlib import Path
-
 import pytest
-
 from lockstep import authoring
-from lockstep.authoring_journal import AuthoringJournal
+import lockstep.authoring_publisher as publisher_module
 from lockstep.authoring_publisher import AuthoringPublisher
 from lockstep.recipe._authority_models import RecipeCandidate
 from lockstep.runtime.service import LockstepCommandService
 from lockstep.runtime.start_service import AuthorizedStartService
 from lockstep.templates import install_template
 from tests._authoring_gate import replace_marker, tree_image, write_workflow
-
 FIXTURE = Path(__file__).parent / "fixtures/authoring-v4/transaction.json"
 PAYLOADS = (pytest.param(FIXTURE.read_bytes(), id="real-v4"), pytest.param(b"{malformed", id="malformed"), pytest.param(b'{"schema":"unknown/v99"}', id="unknown"), pytest.param(b'{"schema":"lockstep.authoring-transaction/v2"}', id="v2"),
     pytest.param(b'{"schema":"lockstep.authoring-transaction/v3"}', id="v3"))
@@ -31,18 +27,25 @@ def live_v4_bytes(project: Path) -> bytes:
         if isinstance(value, str) and value.startswith(old): return str(root) + value[len(old):]
         return value
     return json.dumps(bind(document), sort_keys=True, separators=(",", ":")).encode()
-
+def _create_test_namespace(state: Path, project: Path, *, ready: bool = True):
+    namespace, identity = publisher_module._create_authoring_namespace_for_project(state, project)
+    if ready:
+        with publisher_module._locked_authoring_namespace(namespace, create=True): pass
+    return namespace, identity
+def _locate_test_namespace(state: Path, project: Path):
+    namespace, identity = publisher_module._locate_authoring_namespace(state, project)
+    assert namespace is not None
+    return namespace, identity
 def _project(tmp_path: Path):
     project = tmp_path / "project"; project.mkdir(); state = (tmp_path / "owner-state").resolve()
     write_workflow(project, "release"); authoring.publish_project_compilation(project, "release", state_dir=state)
-    journal, identity = AuthoringJournal.create_for_project(state, project)
-    with journal.locked(): pass
-    assert identity.resolved_path == project.resolve()
-    return project, state, journal
-
-def _retain(journal: AuthoringJournal, payload: bytes) -> None: journal.journal_path.write_bytes(payload); journal.journal_path.chmod(0o600)
-
-def _guidance(call, project: Path, state: Path, journal: AuthoringJournal) -> None:
+    namespace, identity = _locate_test_namespace(state, project)
+    digest = hashlib.sha256(json.dumps({"path": str(identity.resolved_path), "device": identity.device, "inode": identity.inode}, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+    assert identity.resolved_path == project.resolve() and namespace == state / "authoring" / digest
+    return project, state, namespace
+def _retain(namespace: Path, payload: bytes) -> Path:
+    transaction = namespace / "transaction.json"; transaction.write_bytes(payload); transaction.chmod(0o600); return transaction
+def _guidance(call, project: Path, state: Path) -> None:
     project_before, owner_before = tree_image(project), tree_image(state)
     with pytest.raises(Exception) as raised:
         call()
@@ -52,39 +55,37 @@ def _guidance(call, project: Path, state: Path, journal: AuthoringJournal) -> No
     assert "Do not delete transaction.json manually" in message
     assert tree_image(project) == project_before and tree_image(state) == owner_before
 
-def test_checked_fixture_rebinds_to_recognized_live_v4(tmp_path) -> None:
-    project, state, journal = _project(tmp_path); raw = FIXTURE.read_bytes(); _retain(journal, live_v4_bytes(project))
-    with journal.locked(): model = journal.read_recovery_model(expected_project=AuthoringJournal.create_for_project(state, project)[1])
-    assert model.project.resolved_path == project.resolve() and len(model.write_set) == 2 and FIXTURE.read_bytes() == raw
-
+def test_checked_fixture_is_immutable_pre_simplification_v4_evidence() -> None:
+    raw = FIXTURE.read_bytes(); document = json.loads(raw)
+    assert hashlib.sha256(raw).hexdigest() == "6012078b86ef3d76ab48ba2f1d2bda538b7678f4c349bedffe61060c5d8967a0"
+    assert len(raw) == 1964 and document["schema"] == "lockstep.authoring-transaction/v4"
+    assert document["operation_id"] == "0123456789abcdef0123456789abcdef"
+    assert document["committed"] is False and len(document["write_set"]) == 2
 @pytest.mark.parametrize("payload", PAYLOADS)
-def test_present_bytes_are_refused_without_parsing_or_mutation(tmp_path, monkeypatch, payload) -> None:
-    project, state, journal = _project(tmp_path); raw = FIXTURE.read_bytes()
-    _retain(journal, live_v4_bytes(project) if payload == raw else payload)
-    monkeypatch.setattr(AuthoringJournal, "read_recovery_model", lambda *_a, **_k: pytest.fail("presence refusal parsed transaction bytes"))
-    _guidance(lambda: AuthoringPublisher(state).observe(project, lambda: pytest.fail("operation ran")), project, state, journal)
+def test_present_bytes_are_refused_without_parsing_or_mutation(tmp_path, payload) -> None:
+    project, state, namespace = _project(tmp_path); raw = FIXTURE.read_bytes()
+    _retain(namespace, live_v4_bytes(project) if payload == raw else payload)
+    _guidance(lambda: AuthoringPublisher(state).observe(project, lambda: pytest.fail("operation ran")), project, state)
     assert FIXTURE.read_bytes() == raw
 
 def test_live_v4_blocks_all_planning_and_runtime_admission(tmp_path, monkeypatch) -> None:
     import lockstep.templates as templates
-    project, state, journal = _project(tmp_path); _retain(journal, live_v4_bytes(project)); replace_marker(project / ".lockstep/workflows/release.workflow.yaml", "initial", "edited")
+    project, state, namespace = _project(tmp_path); _retain(namespace, live_v4_bytes(project)); replace_marker(project / ".lockstep/workflows/release.workflow.yaml", "initial", "edited")
     reached = []
     def blocked(*_a, **_k): reached.append(True); pytest.fail("planning or admission ran")
     for owner, name in ((authoring, "_plan_project_compilation"), (authoring, "plan_captured_workflow_installation"),
                         (templates, "plan_template_installation"), (RecipeCandidate, "authorize"), (AuthorizedStartService, "start")):
         monkeypatch.setattr(owner, name, blocked)
-    monkeypatch.setattr(AuthoringJournal, "read_recovery_model", blocked)
     service = LockstepCommandService(state, project / ".lockstep/recipes")
     calls = (lambda: authoring.publish_project_compilation(project, "release", state_dir=state), lambda: authoring.initialize_minimal(project, "other", state_dir=state),
              lambda: install_template("reviewed-change", "change", project, state_dir=state), lambda: service.start("release", {}, str(project)))
     try:
-        for call in calls: _guidance(call, project, state, journal)
+        for call in calls: _guidance(call, project, state)
     finally: service.close()
     assert reached == []
 
-
 def test_replacement_project_cannot_escape_retained_binding(tmp_path) -> None:
-    project, state, journal = _project(tmp_path); _retain(journal, live_v4_bytes(project)); retired = tmp_path / "retired"; project.rename(retired); project.mkdir(); write_workflow(project, "release")
+    project, state, namespace = _project(tmp_path); _retain(namespace, live_v4_bytes(project)); retired = tmp_path / "retired"; project.rename(retired); project.mkdir(); write_workflow(project, "release")
     before = tree_image(tmp_path); called = []
     with pytest.raises(Exception, match="pre-simplification"): AuthoringPublisher(state).observe(project, lambda: called.append(True))
     assert called == [] and tree_image(tmp_path) == before
