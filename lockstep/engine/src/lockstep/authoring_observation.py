@@ -1,4 +1,4 @@
-"""Serialized recovery boundary for authoring filesystem observations."""
+"""Serialized read-only boundary with presence-only legacy refusal."""
 
 from __future__ import annotations
 
@@ -21,6 +21,6 @@ def observe_existing_authoring_project(
     project_identity: PathIdentity,
     operation: Callable[[], Observation],
 ) -> Observation:
-    """Recover and observe through a reader-opened persistent boundary."""
+    """Observe under an existing persistent lock after legacy refusal."""
 
     return _observe_existing_authoring_project(journal, project_identity, operation)

@@ -57,7 +57,6 @@ def test_checked_fixture_rebinds_to_recognized_live_v4(tmp_path) -> None:
     with journal.locked(): model = journal.read_recovery_model(expected_project=AuthoringJournal.create_for_project(state, project)[1])
     assert model.project.resolved_path == project.resolve() and len(model.write_set) == 2 and FIXTURE.read_bytes() == raw
 
-
 @pytest.mark.parametrize("payload", PAYLOADS)
 def test_present_bytes_are_refused_without_parsing_or_mutation(tmp_path, monkeypatch, payload) -> None:
     project, state, journal = _project(tmp_path); raw = FIXTURE.read_bytes()
@@ -65,7 +64,6 @@ def test_present_bytes_are_refused_without_parsing_or_mutation(tmp_path, monkeyp
     monkeypatch.setattr(AuthoringJournal, "read_recovery_model", lambda *_a, **_k: pytest.fail("presence refusal parsed transaction bytes"))
     _guidance(lambda: AuthoringPublisher(state).observe(project, lambda: pytest.fail("operation ran")), project, state, journal)
     assert FIXTURE.read_bytes() == raw
-
 
 def test_live_v4_blocks_all_planning_and_runtime_admission(tmp_path, monkeypatch) -> None:
     import lockstep.templates as templates

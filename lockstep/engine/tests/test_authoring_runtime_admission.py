@@ -148,6 +148,17 @@ def test_observer_uses_one_optimistic_plan_while_boundary_absent(tmp_path) -> No
     assert calls == [1] and not state.exists()
 
 
+def test_observer_reraises_original_optimistic_error_without_creating_boundary(tmp_path) -> None:
+    project = tmp_path / "project"; project.mkdir(); state = (tmp_path / "state").resolve(); calls = []
+    failure = LockstepError("optimistic failure")
+    def operation():
+        calls.append(1)
+        raise failure
+    with pytest.raises(LockstepError) as raised:
+        observe_authoring_project(state, project, operation)
+    assert raised.value is failure and calls == [1] and not state.exists()
+
+
 def test_unready_boundary_is_read_only_and_never_repaired(tmp_path) -> None:
     project = tmp_path / "project"; project.mkdir(); state = (tmp_path / "state").resolve()
     journal, _identity = AuthoringJournal.create_for_project(state, project); before = tree_image(state)
@@ -162,6 +173,14 @@ def _require_kernel_lock(state: Path, project: Path) -> None:
     try:
         with pytest.raises(BlockingIOError): fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
     finally: os.close(descriptor)
+
+
+def test_publisher_observe_holds_existing_transaction_lock_through_successful_callback(tmp_path) -> None:
+    project, state = _ready(tmp_path); calls = []
+    def operation():
+        _require_kernel_lock(state, project); calls.append("locked"); return "observed"
+    assert AuthoringPublisher(state).observe(project, operation) == "observed"
+    assert calls == ["locked"]
 
 
 @pytest.mark.parametrize(("adapter", "all_names"), (("cli", False), ("mcp", False), ("cli", True)))
