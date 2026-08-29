@@ -1,264 +1,161 @@
-"""Direct crash-cut evidence for the private bounded per-file writer."""
-
+"""Canonical-iff runtime admission after every bounded-writer crash cut."""
 from __future__ import annotations
 
-import os
-import stat
+import os, stat
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
 import lockstep.authoring_publisher as publisher
-from lockstep.authoring import project_paths
+from lockstep import authoring
 from lockstep.authoring_bundle import ProjectCompilationBundle, plan_project_compilation
-from lockstep.authoring_project_tree import AuthoringProjectTree
-from lockstep.errors import AuthoringError
-from tests._authoring_crash_gate import NamespaceEntry, namespace_entry
-from tests._authoring_gate import replace_marker, write_workflow
-from tests._authoring_writer_gate import SimulatedProcessDeath
+from lockstep.authoring_installation import CapturedWorkflowSource, plan_captured_workflow_installation
+from lockstep.authoring_publisher import AuthoringPublisher
+from lockstep.runtime.service import LockstepCommandService
+from lockstep.runtime.start_service import AuthorizedStartService
+from lockstep.workflow.compiler import canonical_execution_bytes
+from lockstep.template_installation import plan_template_installation
+from lockstep.templates import install_template
+from tests._authoring_gate import assert_no_durable_runtime_change, replace_marker, tree_image, write_workflow
 
 
-@dataclass(frozen=True, slots=True)
-class _Scenario:
-    project: Path
-    bundle: ProjectCompilationBundle
-    before: tuple[NamespaceEntry | None, ...]
+class ProcessDeath(BaseException): pass
+
+
+@dataclass(frozen=True)
+class Scenario:
+    project: Path; state: Path; root: str; bundle: ProjectCompilationBundle
+    source: Path | None = None; old_source: bytes | None = None
 
     @property
-    def targets(self) -> tuple[Path, ...]:
-        return tuple(image.resolved_path for image in self.bundle.after_images)
+    def targets(self): return tuple(item.resolved_path for item in self.bundle.after_images)
 
 
-def _scenario(tmp_path: Path, *, absent: bool) -> _Scenario:
-    project = tmp_path / "project"
-    source = write_workflow(project, "release", marker="old")
-    source.chmod(0o640)
-    if not absent:
-        initial = plan_project_compilation(project_paths(project, "release"))
-        publisher.AuthoringPublisher((tmp_path / "owner").resolve()).publish(initial)
-        replace_marker(source, "old", "new")
-        source.chmod(0o640)
-    bundle = plan_project_compilation(project_paths(project, "release"))
-    targets = tuple(image.resolved_path for image in bundle.after_images)
-    assert len(targets) == 3
-    assert all((image.content is None) is absent for image in bundle.before_images)
-    return _Scenario(
-        project,
-        bundle,
-        tuple(namespace_entry(path) if path.exists() else None for path in targets),
-    )
+def _scenario(root: Path, surface: str, present: bool) -> Scenario:
+    root.mkdir(parents=True, exist_ok=True); project = root / "project"; project.mkdir(); state = (root / "state").resolve()
+    if surface == "compile":
+        source = write_workflow(project, "release"); old = source.read_bytes()
+        if present: authoring.publish_project_compilation(project, "release", state_dir=state); replace_marker(source, "initial", "new")
+        return Scenario(project, state, "release", plan_project_compilation(authoring.project_paths(project, "release")), source, old)
+    if surface == "minimal":
+        source = authoring._minimal_workflow_source("release")
+        plan = plan_captured_workflow_installation(project, (CapturedWorkflowSource("release", source),), root_role="release")
+        return Scenario(project, state, "release", plan.bundle)
+    import lockstep.templates as templates
+    manifest = templates._manifest("reviewed-change")
+    sources = templates._captured_role_sources("reviewed-change", "change", manifest)
+    plan = plan_template_installation(project, sources, root_role="change")
+    return Scenario(project, state, "change", plan.bundle)
 
 
-def _raise_cut() -> None:
-    raise SimulatedProcessDeath
+def _die() -> None: raise ProcessDeath("writer cut")
 
 
-def _install_cut(
-    monkeypatch: pytest.MonkeyPatch,
-    scenario: _Scenario,
-    phase: str,
-    cut_index: int,
-) -> None:
-    target = scenario.targets[cut_index]
-    if phase == "before-preflight":
-        monkeypatch.setattr(
-            publisher,
-            "validate_bundle_preconditions",
-            lambda _bundle: _raise_cut(),
-        )
-        return
-    if phase == "after-parent-creation":
-        original = AuthoringProjectTree.ensure_target_parents
+def _nth(original, ordinal: int):
+    calls = 0
+    def wrapped(*args, **kwargs):
+        nonlocal calls; result = original(*args, **kwargs)
+        if calls == ordinal: _die()
+        calls += 1; return result
+    return wrapped
 
-        def create_then_cut(tree: AuthoringProjectTree) -> None:
-            original(tree)
-            _raise_cut()
 
-        monkeypatch.setattr(
-            AuthoringProjectTree, "ensure_target_parents", create_then_cut
-        )
-        return
-    if phase == "after-temporary-fsync":
-        monkeypatch.setattr(
-            publisher,
-            "_validate_temporary_descriptor",
-            lambda _descriptor, _after: _raise_cut(),
-        )
-        return
+def _install_cut(monkeypatch, phase: str, ordinal: int) -> None:
+    if phase == "after-temp-creation": monkeypatch.setattr(publisher, "_create_temporary", _nth(publisher._create_temporary, ordinal)); return
+    if phase == "after-temp-fsync": monkeypatch.setattr(publisher, "_write_temporary", _nth(publisher._write_temporary, ordinal)); return
+    if phase == "after-final-validation": monkeypatch.setattr(publisher, "validate_destination_before_at", _nth(publisher.validate_destination_before_at, ordinal)); return
     if phase == "after-mutation":
-        name = "link" if scenario.bundle.before_images[0].content is None else "replace"
-        original = getattr(os, name)
-
-        def mutate_then_cut(source, destination, *args, **kwargs):
-            result = original(source, destination, *args, **kwargs)
-            directory_fd = kwargs.get("dst_dir_fd")
-            if directory_fd is not None and os.fsdecode(destination) == target.name:
-                _raise_cut()
-            return result
-
-        monkeypatch.setattr(os, name, mutate_then_cut)
-        return
-    if phase == "after-target-fsync":
-        def fsync_then_cut(directory_descriptor: int, leaf: str) -> None:
-            descriptor = os.open(
-                leaf,
-                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
-                dir_fd=directory_descriptor,
-            )
-            try:
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-            if leaf == target.name:
-                _raise_cut()
-
-        monkeypatch.setattr(
-            publisher, "_fsync_regular_at", fsync_then_cut, raising=False
-        )
-        return
+        calls = 0; original_link, original_replace = os.link, os.replace
+        def mutation(original):
+            def wrapped(*args, **kwargs):
+                nonlocal calls; result = original(*args, **kwargs); current = calls; calls += 1
+                if current == ordinal: _die()
+                return result
+            return wrapped
+        monkeypatch.setattr(os, "link", mutation(original_link)); monkeypatch.setattr(os, "replace", mutation(original_replace)); return
+    if phase == "after-target-fsync": monkeypatch.setattr(publisher, "_fsync_regular_at", _nth(publisher._fsync_regular_at, ordinal)); return
     if phase == "after-parent-fsync":
-        original_target_fsync = publisher._fsync_regular_at
-        original_fsync = os.fsync
-        target_synced = False
-
-        def observe_target_fsync(directory_descriptor: int, leaf: str) -> None:
-            nonlocal target_synced
-            original_target_fsync(directory_descriptor, leaf)
-            if leaf == target.name:
-                target_synced = True
-
-        def fsync_parent_then_cut(descriptor: int) -> None:
-            original_fsync(descriptor)
-            info = os.fstat(descriptor)
-            expected = target.parent.stat()
-            if target_synced and stat.S_ISDIR(info.st_mode) and (
-                info.st_dev,
-                info.st_ino,
-            ) == (expected.st_dev, expected.st_ino):
-                _raise_cut()
-
-        monkeypatch.setattr(
-            publisher,
-            "_fsync_regular_at",
-            observe_target_fsync,
-        )
-        monkeypatch.setattr(os, "fsync", fsync_parent_then_cut)
-        return
-    raise AssertionError(f"unknown cut: {phase}")
+        current = -1; original_target, original_fsync = publisher._fsync_regular_at, os.fsync
+        def target(*args, **kwargs):
+            nonlocal current; original_target(*args, **kwargs); current += 1
+        def fsync(descriptor):
+            result = original_fsync(descriptor)
+            if current == ordinal and stat.S_ISDIR(os.fstat(descriptor).st_mode): _die()
+            return result
+        monkeypatch.setattr(publisher, "_fsync_regular_at", target); monkeypatch.setattr(os, "fsync", fsync); return
+    raise AssertionError(phase)
 
 
-@pytest.mark.parametrize("absent", (True, False), ids=("link", "replace"))
-@pytest.mark.parametrize(
-    ("phase", "cut_index"),
-    (
-        ("before-preflight", 0),
-        ("after-parent-creation", 0),
-        ("after-temporary-fsync", 0),
-        *((phase, index) for phase in (
-            "after-mutation",
-            "after-target-fsync",
-            "after-parent-fsync",
-        ) for index in range(3)),
-    ),
-)
-def test_private_writer_cut_keeps_only_completed_per_file_mutations(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    absent: bool,
-    phase: str,
-    cut_index: int,
+def _semantics(scenario: Scenario) -> tuple[int, bool]:
+    changed = 0
+    for target, after in zip(scenario.targets, scenario.bundle.after_images, strict=True):
+        if target.is_file() and not target.is_symlink() and target.read_bytes() == after.content and stat.S_IMODE(target.stat().st_mode) == after.mode: changed += 1
+    old_complete = all(item.content is not None for item in scenario.bundle.before_images) and changed == 0
+    return changed, old_complete
+
+
+def _runtime_oracle(scenario: Scenario, monkeypatch, accept: bool) -> None:
+    captured = []
+    def stop(_self, recipe, plan, _values, *, canonical_input):
+        captured.append((recipe, plan, canonical_input)); return {"status": "captured", "run_id": "probe"}
+    monkeypatch.setattr(AuthorizedStartService, "start", stop)
+    service = LockstepCommandService(scenario.state, scenario.project / ".lockstep/recipes")
+    before = tree_image(scenario.state)
+    try:
+        if not accept:
+            with pytest.raises(Exception): service.start(scenario.root, {}, str(scenario.project))
+            assert captured == []; assert_no_durable_runtime_change(before, scenario.state); return
+        assert service.start(scenario.root, {}, str(scenario.project))["run_id"] == "probe"
+    finally: service.close()
+    assert len(captured) == 1
+    _recipe, plan, canonical_input = captured[0]; recipes = scenario.project / ".lockstep/recipes"
+    expected = {path.relative_to(recipes).as_posix(): canonical_execution_bytes(path.read_bytes(), logical_path=path.relative_to(recipes).as_posix()) for path in recipes.rglob("*.recipe.yaml")}
+    assert {item.path: item.bytes for item in plan.authorized.files} == expected
+    proof = plan.compiler_provenance; assert proof is not None and proof.context == "canonical-match"
+    assert {item.relative_path: item.canonical_execution_bytes for item in proof.files} == expected
+    assert proof.source_bundle_sha256 == plan.authorized.source_bundle_sha256 and canonical_input == b"{}"
+
+
+CASES = (("compile", False), ("compile", True), ("minimal", False), ("template", False))
+PHASES = ("after-temp-creation", "after-temp-fsync", "after-final-validation", "after-mutation", "after-target-fsync", "after-parent-fsync")
+
+
+@pytest.mark.parametrize(("surface", "present"), CASES)
+@pytest.mark.parametrize("phase", PHASES)
+def test_every_public_writer_cut_has_canonical_iff_runtime_admission(
+    tmp_path, monkeypatch, surface, present, phase
 ) -> None:
-    """Removing rollback must leave prior files/directories and no later target."""
-
-    scenario = _scenario(tmp_path, absent=absent)
-    _install_cut(monkeypatch, scenario, phase, cut_index)
-
-    with pytest.raises(SimulatedProcessDeath):
-        publisher._publish_per_file(scenario.bundle)
-
-    first_is_new = phase in {
-        "after-mutation",
-        "after-target-fsync",
-        "after-parent-fsync",
-    }
-    for index, (path, before, after) in enumerate(
-        zip(
-            scenario.targets,
-            scenario.before,
-            scenario.bundle.after_images,
-            strict=True,
-        )
-    ):
-        observed = namespace_entry(path) if path.exists() else None
-        if first_is_new and index <= cut_index:
-            assert observed is not None
-            assert (observed.kind, observed.content, observed.mode) == (
-                "regular",
-                after.content,
-                after.mode,
-            )
-        else:
-            assert observed == before
-    if phase != "before-preflight":
-        assert all(path.parent.is_dir() for path in scenario.targets)
+    probe = _scenario(tmp_path / "probe", surface, present)
+    for ordinal in range(len(probe.targets)):
+        cell = tmp_path / f"{surface}-{present}-{phase}-{ordinal}"; cell.mkdir()
+        scenario = _scenario(cell, surface, present)
+        with monkeypatch.context() as cut:
+            _install_cut(cut, phase, ordinal)
+            with pytest.raises(ProcessDeath): publisher._publish_per_file(scenario.bundle)
+        changed, old_complete = _semantics(scenario)
+        new_complete = changed == len(scenario.targets)
+        if scenario.source is not None and old_complete and scenario.old_source is not None: scenario.source.write_bytes(scenario.old_source)
+        with monkeypatch.context() as runtime: _runtime_oracle(scenario, runtime, old_complete or new_complete)
 
 
-def test_private_writer_publishes_each_target_as_an_exact_regular_after_image(
-    tmp_path: Path,
-) -> None:
-    """A wrong mutation primitive, content, mode, or final verification must fail."""
-
-    scenario = _scenario(tmp_path, absent=True)
-
-    publisher._publish_per_file(scenario.bundle)
-
-    for target, after in zip(
-        scenario.targets, scenario.bundle.after_images, strict=True
-    ):
-        observed = namespace_entry(target)
-        assert (observed.kind, observed.content, observed.mode) == (
-            "regular",
-            after.content,
-            after.mode,
-        )
+@pytest.mark.parametrize("surface", ("compile", "minimal", "template"))
+def test_public_writer_surfaces_route_to_the_bounded_per_file_writer(tmp_path, monkeypatch, surface) -> None:
+    scenario = _scenario(tmp_path, surface, False); seen = []; original = publisher._publish_per_file
+    monkeypatch.setattr(publisher, "_publish_per_file", lambda bundle: seen.append(bundle) or original(bundle))
+    if surface == "compile": authoring.publish_project_compilation(scenario.project, "release", state_dir=scenario.state)
+    elif surface == "minimal": authoring.initialize_minimal(scenario.project, "release", state_dir=scenario.state)
+    else: install_template("reviewed-change", "change", scenario.project, state_dir=scenario.state)
+    assert seen == [scenario.bundle]
 
 
-def test_private_writer_final_verification_rejects_an_earlier_target_tamper(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Deleting final whole-bundle verification would accept stale earlier bytes."""
-
-    scenario = _scenario(tmp_path, absent=True)
-    first, last = scenario.targets[0], scenario.targets[-1]
-    original = publisher.capture_after_identity_at
-    foreign = b"changed after immediate target verification\n"
-    tampered = False
-
-    def capture_then_tamper(directory_descriptor: int, after):
-        nonlocal tampered
-        observed = original(directory_descriptor, after)
-        if after.resolved_path == last and not tampered:
-            first.write_bytes(foreign)
-            first.chmod(0o600)
-            tampered = True
-        return observed
-
-    monkeypatch.setattr(
-        publisher, "capture_after_identity_at", capture_then_tamper
-    )
-
-    with pytest.raises(AuthoringError):
-        publisher._publish_per_file(scenario.bundle)
-
-    assert tampered
-    assert (namespace_entry(first).content, namespace_entry(first).mode) == (
-        foreign,
-        0o600,
-    )
-    for target, after in zip(
-        scenario.targets[1:], scenario.bundle.after_images[1:], strict=True
-    ):
-        observed = namespace_entry(target)
-        assert (observed.content, observed.mode) == (after.content, after.mode)
+def test_final_verification_rejects_foreign_earlier_target_without_rollback(tmp_path, monkeypatch) -> None:
+    scenario = _scenario(tmp_path, "minimal", False); first, last = scenario.targets[0], scenario.targets[-1]
+    original = publisher.capture_after_identity_at; tampered = b"foreign\n"
+    def capture(parent, after):
+        value = original(parent, after)
+        if after.resolved_path == last: first.write_bytes(tampered)
+        return value
+    monkeypatch.setattr(publisher, "capture_after_identity_at", capture)
+    with pytest.raises(Exception): publisher._publish_per_file(scenario.bundle)
+    assert first.read_bytes() == tampered

@@ -1,109 +1,80 @@
-"""Immutable authoring bundle and public publisher contracts."""
-
+"""Immutable whole-project bundle contracts retained through Task 4."""
 from __future__ import annotations
 
-import inspect
-from dataclasses import replace
+import dataclasses, inspect
 from pathlib import Path
 
 import pytest
 
 from lockstep.authoring import project_paths
+from lockstep.authoring_bundle import DestinationImage, ProjectCompilationBundle, SourceIdentity, plan_project_compilation
+from lockstep.authoring_publisher import AuthoringPublisher
 from tests._authoring_gate import write_workflow
 
 
-def test_whole_dag_bundle_contracts_are_explicit() -> None:
-    from lockstep.authoring import AuthoredRecipe as PublicAuthoredRecipe
-    from lockstep.authoring_bundle import (
-        AuthoredRecipe,
-        DestinationImage,
-        ProjectCompilationBundle,
-        SourceIdentity,
-    )
-
-    assert all(
-        isinstance(contract, type)
-        for contract in (SourceIdentity, DestinationImage, ProjectCompilationBundle)
-    )
-    assert PublicAuthoredRecipe is AuthoredRecipe
-
-
-def test_authoring_publisher_surface_has_only_the_frozen_operations() -> None:
-    from lockstep.authoring_publisher import AuthoringPublisher
-
-    assert tuple(inspect.signature(AuthoringPublisher.__init__).parameters) == (
-        "self",
-        "state_dir",
-    )
-    assert tuple(inspect.signature(AuthoringPublisher.publish).parameters) == (
-        "self",
-        "bundle",
-    )
-    assert tuple(inspect.signature(AuthoringPublisher.recover).parameters) == (
-        "self",
-        "project",
-    )
-
-
-def _two_role_bundle(project: Path):
-    from lockstep.authoring_bundle import plan_project_compilation
-
-    write_workflow(project, "child")
-    write_workflow(project, "parent", children=("child",))
+def _bundle(tmp_path: Path) -> ProjectCompilationBundle:
+    project = tmp_path / "project"; project.mkdir()
+    write_workflow(project, "child"); write_workflow(project, "parent", children=("child",))
     return plan_project_compilation(project_paths(project, "parent"))
 
 
-def test_destination_only_bundle_roles_are_owned_by_dependency_topology(
-    tmp_path: Path,
-) -> None:
-    ordinary = _two_role_bundle(tmp_path / "project")
-    template = replace(ordinary, sources=())
-
-    assert template.sources == ()
-    assert tuple(role for role, _children in template.dependency_edges) == (
-        "child",
-        "parent",
+def test_whole_dag_bundle_contracts_are_explicit() -> None:
+    assert tuple(field.name for field in dataclasses.fields(ProjectCompilationBundle)) == (
+        "resolved_project", "project_identity", "sources", "dependency_edges", "before_images", "after_images",
     )
-    assert {image.role for image in template.after_images} == {"child", "parent"}
+    assert tuple(field.name for field in dataclasses.fields(SourceIdentity)) == (
+        "role", "resolved_path", "content", "sha256", "leaf", "ancestors",
+    )
+    assert tuple(field.name for field in dataclasses.fields(DestinationImage)) == (
+        "role", "resolved_path", "content", "sha256", "mode", "leaf", "ancestors",
+    )
 
 
-def test_bundle_rejects_a_partial_source_role_inventory(tmp_path: Path) -> None:
-    ordinary = _two_role_bundle(tmp_path / "project")
-    with pytest.raises(ValueError):
-        replace(ordinary, sources=ordinary.sources[:1])
+def test_publisher_surface_has_only_frozen_authoring_operations() -> None:
+    operations = {name for name, value in inspect.getmembers(AuthoringPublisher, inspect.isfunction) if not name.startswith("_")}
+    assert operations == {"require_ready", "publish", "observe"}
 
 
-def test_destination_only_bundle_requires_nonempty_topology(tmp_path: Path) -> None:
-    ordinary = _two_role_bundle(tmp_path / "project")
-    with pytest.raises(ValueError):
-        replace(ordinary, sources=(), dependency_edges=())
+def test_planner_emits_closed_child_first_topology_and_complete_inventory(tmp_path: Path) -> None:
+    bundle = _bundle(tmp_path)
+    assert bundle.dependency_edges == (("child", ()), ("parent", ("child",)))
+    assert tuple(source.role for source in bundle.sources) == ("child", "parent")
+    assert {image.role for image in bundle.after_images} == {"child", "parent"}
 
 
-def test_destination_only_bundle_rejects_an_unowned_write_role(
-    tmp_path: Path,
-) -> None:
-    ordinary = _two_role_bundle(tmp_path / "project")
-    changed_before = replace(ordinary.before_images[0], role="foreign")
-    changed_after = replace(ordinary.after_images[0], role="foreign")
-
-    with pytest.raises(ValueError):
-        replace(
-            ordinary,
-            sources=(),
-            before_images=(changed_before, *ordinary.before_images[1:]),
-            after_images=(changed_after, *ordinary.after_images[1:]),
-        )
+def test_targets_are_unique_owned_and_bound_to_exact_project_parent(tmp_path: Path) -> None:
+    bundle = _bundle(tmp_path)
+    paths = tuple(image.resolved_path for image in bundle.after_images)
+    assert len(paths) == len(set(paths))
+    assert all(image.ancestors[0] == bundle.project_identity for image in (*bundle.before_images, *bundle.after_images))
 
 
-def test_project_compilation_bundle_rejects_mismatched_paired_ancestors(
-    tmp_path: Path,
-) -> None:
-    from lockstep.authoring_bundle import plan_project_compilation
+def test_bundle_rejects_partial_source_inventory(tmp_path: Path) -> None:
+    bundle = _bundle(tmp_path)
+    with pytest.raises(ValueError, match="complete or empty"):
+        dataclasses.replace(bundle, sources=bundle.sources[:1])
 
-    project = tmp_path / "project"
-    write_workflow(project, "leaf")
-    bundle = plan_project_compilation(project_paths(project, "leaf"))
-    changed_after = replace(bundle.after_images[0], ancestors=())
 
+def test_bundle_requires_nonempty_closed_topology(tmp_path: Path) -> None:
+    bundle = _bundle(tmp_path)
+    with pytest.raises(ValueError, match="non-empty"):
+        dataclasses.replace(bundle, sources=(), dependency_edges=())
+    with pytest.raises(ValueError, match="earlier child"):
+        dataclasses.replace(bundle, dependency_edges=(("parent", ("child",)), ("child", ())))
+
+
+def test_bundle_rejects_unowned_or_duplicate_targets(tmp_path: Path) -> None:
+    bundle = _bundle(tmp_path)
+    foreign_before = dataclasses.replace(bundle.before_images[0], role="foreign")
+    foreign_after = dataclasses.replace(bundle.after_images[0], role="foreign")
+    with pytest.raises(ValueError, match="roles"):
+        dataclasses.replace(bundle, before_images=(foreign_before, *bundle.before_images[1:]), after_images=(foreign_after, *bundle.after_images[1:]))
+    with pytest.raises(ValueError, match="match exactly"):
+        dataclasses.replace(bundle, before_images=(bundle.before_images[0], bundle.before_images[0], *bundle.before_images[2:]))
+
+
+def test_bundle_rejects_mismatched_paired_parent_identity(tmp_path: Path) -> None:
+    bundle = _bundle(tmp_path)
+    changed = dataclasses.replace(bundle.after_images[0], ancestors=bundle.after_images[0].ancestors[1:])
     with pytest.raises(ValueError, match="paired destination ancestors"):
-        replace(bundle, after_images=(changed_after, *bundle.after_images[1:]))
+        dataclasses.replace(bundle, after_images=(changed, *bundle.after_images[1:]))

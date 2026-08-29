@@ -1,681 +1,136 @@
-"""Reachable foreign-destination freeze at the authoring mutation boundary."""
-
+"""Descriptor-relative ownership, collision, and source-currentness controls."""
 from __future__ import annotations
 
-import os
-import stat
-from errno import EIO
-from dataclasses import dataclass, field, replace
+import os, stat
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
 import lockstep.authoring_publisher as publisher
-import lockstep.authoring_transaction as transaction
-from lockstep.authoring import project_paths
+from lockstep import authoring
 from lockstep.authoring_bundle import ProjectCompilationBundle, plan_project_compilation
-from lockstep.authoring_journal import AuthoringJournal
-from lockstep.authoring_publisher import AuthoringPublisher
 from lockstep.errors import AuthoringError
+from tests._authoring_gate import replace_marker, tree_image, write_workflow
 
-from tests._authoring_crash_gate import (
-    install_mutation_syscall_probe,
-    namespace_entry,
-    namespace_image,
-    opaque_lock_identities,
-)
-from tests._authoring_gate import replace_marker, write_workflow
+
+@dataclass(frozen=True)
+class Scenario:
+    project: Path; state: Path; source: Path; bundle: ProjectCompilationBundle
+    @property
+    def targets(self): return tuple(item.resolved_path for item in self.bundle.after_images)
+
+
+def _scenario(tmp_path: Path, *, present: bool) -> Scenario:
+    project = tmp_path / "project"; project.mkdir(); state = (tmp_path / "state").resolve()
+    source = write_workflow(project, "release")
+    if present:
+        authoring.publish_project_compilation(project, "release", state_dir=state)
+        replace_marker(source, "initial", "changed")
+    return Scenario(project, state, source, plan_project_compilation(authoring.project_paths(project, "release")))
+
+
+def _exact(path: Path, image) -> bool:
+    return path.is_file() and not path.is_symlink() and path.read_bytes() == image.content and stat.S_IMODE(path.stat().st_mode) == image.mode
 
 
 @pytest.mark.parametrize("fault", ("write", "fchmod", "fsync"))
-def test_private_writer_cleans_its_live_temporary_after_initialization_fault(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    fault: str,
-) -> None:
-    """Ownership must be known before write, chmod, or fsync can fail."""
-
-    scenario = _scenario(tmp_path, absent=True)
-    target = scenario.destinations[0]
-    original_open = os.open
-    original_operation = getattr(os, fault)
-    temporary: list[Path] = []
-    owned: list[tuple[int, int]] = []
-
-    def record_open(path, flags, mode=0o777, *, dir_fd=None):
-        descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
-        if flags & os.O_CREAT and flags & os.O_EXCL and dir_fd is not None:
-            parent = os.fstat(dir_fd)
-            expected = target.parent.stat()
-            if (parent.st_dev, parent.st_ino) == (
-                expected.st_dev,
-                expected.st_ino,
-            ):
-                temporary.append(target.parent / os.fsdecode(path))
-                info = os.fstat(descriptor)
-                owned.append((info.st_dev, info.st_ino))
-        return descriptor
-
-    def fail_owned_descriptor(descriptor: int, *args, **kwargs):
-        info = os.fstat(descriptor)
-        if owned and (info.st_dev, info.st_ino) == owned[0]:
-            raise OSError(EIO, f"injected temporary {fault} failure")
-        return original_operation(descriptor, *args, **kwargs)
-
-    monkeypatch.setattr(os, "open", record_open)
-    monkeypatch.setattr(os, fault, fail_owned_descriptor)
-
-    with pytest.raises(OSError, match=f"temporary {fault} failure"):
-        publisher._publish_per_file(scenario.bundle)
-
-    assert len(temporary) == len(owned) == 1
-    assert not temporary[0].exists()
-    assert namespace_image(scenario.project) == scenario.project_before
+def test_live_owned_temporary_is_cleaned_after_initialization_fault(tmp_path, monkeypatch, fault) -> None:
+    scenario = _scenario(tmp_path, present=False); target = scenario.targets[0]; original = getattr(os, fault)
+    def fail(*args, **kwargs): raise OSError("fault")
+    monkeypatch.setattr(os, fault, fail)
+    with pytest.raises(OSError, match="fault"): publisher._publish_per_file(scenario.bundle)
+    monkeypatch.setattr(os, fault, original)
+    assert not tuple(target.parent.glob(".lockstep-authoring-*.tmp")) and not target.exists()
 
 
-@pytest.mark.parametrize("absent", (True, False), ids=("link", "replace"))
-def test_private_writer_rejects_a_same_content_temporary_inode_swap(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    absent: bool,
-) -> None:
-    """A foreign inode must not publish even when its bytes and mode are exact."""
-
-    scenario = _scenario(tmp_path, absent=absent)
-    target = scenario.destinations[0]
-    after = scenario.bundle.after_images[0]
-    assert after.content is not None and after.mode is not None
-    foreign_source = target.parent / "foreign-temporary-source"
-    foreign_source.write_bytes(after.content)
-    foreign_source.chmod(after.mode)
-    foreign_identity = namespace_entry(foreign_source)
-    original_open, original_fsync = os.open, os.fsync
-    original_replace = os.replace
-    temporary: list[Path] = []
-    owned: list[tuple[int, int]] = []
-    swapped = False
-
-    def record_open(path, flags, mode=0o777, *, dir_fd=None):
-        descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
-        if flags & os.O_CREAT and flags & os.O_EXCL and dir_fd is not None:
-            parent = os.fstat(dir_fd)
-            expected = target.parent.stat()
-            if (parent.st_dev, parent.st_ino) == (
-                expected.st_dev,
-                expected.st_ino,
-            ):
-                temporary.append(target.parent / os.fsdecode(path))
-                info = os.fstat(descriptor)
-                owned.append((info.st_dev, info.st_ino))
-        return descriptor
-
-    def swap_after_fsync(descriptor: int) -> None:
-        nonlocal swapped
-        original_fsync(descriptor)
-        info = os.fstat(descriptor)
-        if not swapped and owned and (info.st_dev, info.st_ino) == owned[0]:
-            assert temporary
-            original_replace(foreign_source, temporary[0])
-            swapped = True
-
-    monkeypatch.setattr(os, "open", record_open)
-    monkeypatch.setattr(os, "fsync", swap_after_fsync)
-
-    with pytest.raises(AuthoringError, match="temporary ownership changed"):
-        publisher._publish_per_file(scenario.bundle)
-
-    assert swapped and len(temporary) == len(owned) == 1
-    assert namespace_entry(temporary[0]) == foreign_identity
-    expected = scenario.before[0]
-    assert (namespace_entry(target) if target.exists() else None) == expected
+def test_temporary_creation_is_exclusive_nofollow_and_occupied_name_is_preserved(tmp_path, monkeypatch) -> None:
+    scenario = _scenario(tmp_path, present=False); target = scenario.targets[0]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    scenario = Scenario(scenario.project, scenario.state, scenario.source, plan_project_compilation(authoring.project_paths(scenario.project, "release"))); target = scenario.targets[0]
+    foreign = target.parent / (".lockstep-authoring-" + "a" * 32 + ".tmp")
+    foreign.write_bytes(b"foreign\n"); calls = []; original = os.open
+    monkeypatch.setattr(publisher.secrets, "token_hex", lambda _n: "a" * 32)
+    def observe(path, flags, *args, **kwargs):
+        if os.fsdecode(path) == foreign.name: calls.append(flags)
+        return original(path, flags, *args, **kwargs)
+    monkeypatch.setattr(os, "open", observe)
+    with pytest.raises(AuthoringError, match="temporary already exists"): publisher._publish_per_file(scenario.bundle)
+    assert calls and all(flags & os.O_CREAT and flags & os.O_EXCL and flags & getattr(os, "O_NOFOLLOW", 0) for flags in calls)
+    assert foreign.read_bytes() == b"foreign\n"
 
 
-@pytest.mark.parametrize("absent", (True, False), ids=("link", "replace"))
-@pytest.mark.parametrize("tamper", ("content", "mode"))
-def test_private_writer_rejects_same_inode_temporary_tampering(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    absent: bool,
-    tamper: str,
-) -> None:
-    """Removing final byte or mode proof would publish a changed live temp."""
-
-    scenario = _scenario(tmp_path, absent=absent)
-    target = scenario.destinations[0]
-    original_open, original_fsync = os.open, os.fsync
-    temporary: list[Path] = []
-    owned: list[tuple[int, int]] = []
-    tampered = False
-
-    def record_open(path, flags, mode=0o777, *, dir_fd=None):
-        descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
-        if flags & os.O_CREAT and flags & os.O_EXCL and dir_fd is not None:
-            parent = os.fstat(dir_fd)
-            expected = target.parent.stat()
-            if (parent.st_dev, parent.st_ino) == (
-                expected.st_dev,
-                expected.st_ino,
-            ):
-                temporary.append(target.parent / os.fsdecode(path))
-                info = os.fstat(descriptor)
-                owned.append((info.st_dev, info.st_ino))
-        return descriptor
-
-    def tamper_after_fsync(descriptor: int) -> None:
-        nonlocal tampered
-        original_fsync(descriptor)
-        info = os.fstat(descriptor)
-        if not tampered and owned and (info.st_dev, info.st_ino) == owned[0]:
-            if tamper == "content":
-                os.lseek(descriptor, 0, os.SEEK_SET)
-                os.ftruncate(descriptor, 0)
-                os.write(descriptor, b"changed temporary bytes\n")
-            else:
-                changed_mode = (
-                    0o600 if stat.S_IMODE(info.st_mode) != 0o600 else 0o640
-                )
-                os.fchmod(descriptor, changed_mode)
-            tampered = True
-
-    monkeypatch.setattr(os, "open", record_open)
-    monkeypatch.setattr(os, "fsync", tamper_after_fsync)
-
-    with pytest.raises(AuthoringError, match="temporary does not match"):
-        publisher._publish_per_file(scenario.bundle)
-
-    assert tampered and len(temporary) == len(owned) == 1
-    assert not temporary[0].exists()
-    expected = scenario.before[0]
-    assert (namespace_entry(target) if target.exists() else None) == expected
+def test_swapped_temporary_inode_is_never_deleted_as_owned(tmp_path, monkeypatch) -> None:
+    scenario = _scenario(tmp_path, present=False); original = publisher._prove_owned_temporary; foreign = b"swapped\n"; observed = []
+    def swap(parent, leaf, owned, after):
+        os.unlink(leaf, dir_fd=parent); descriptor = os.open(leaf, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=parent)
+        os.write(descriptor, foreign); os.close(descriptor); observed.append(after.resolved_path.parent / leaf)
+        return original(parent, leaf, owned, after)
+    monkeypatch.setattr(publisher, "_prove_owned_temporary", swap)
+    with pytest.raises(AuthoringError, match="ownership changed"): publisher._publish_per_file(scenario.bundle)
+    assert len(observed) == 1 and observed[0].read_bytes() == foreign
 
 
-def test_private_writer_absent_link_never_clobbers_a_foreign_destination(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Replacing the no-clobber link with rename would overwrite foreign bytes."""
-
-    scenario = _scenario(tmp_path, absent=True)
-    target = scenario.destinations[0]
-    foreign = b"foreign wins the no-clobber race\n"
-    original_open, original_link = os.open, os.link
-    temporary: list[Path] = []
-
-    def record_open(path, flags, mode=0o777, *, dir_fd=None):
-        descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
-        if flags & os.O_CREAT and flags & os.O_EXCL and dir_fd is not None:
-            parent = os.fstat(dir_fd)
-            expected = target.parent.stat()
-            if (parent.st_dev, parent.st_ino) == (
-                expected.st_dev,
-                expected.st_ino,
-            ):
-                temporary.append(target.parent / os.fsdecode(path))
-        return descriptor
-
-    def create_then_link(source, destination, *args, **kwargs):
-        if (
-            kwargs.get("dst_dir_fd") is not None
-            and os.fsdecode(destination) == target.name
-        ):
-            target.write_bytes(foreign)
-            target.chmod(0o600)
-        return original_link(source, destination, *args, **kwargs)
-
-    monkeypatch.setattr(os, "open", record_open)
-    monkeypatch.setattr(os, "link", create_then_link)
-
-    with pytest.raises(AuthoringError, match="created before publication"):
-        publisher._publish_per_file(scenario.bundle)
-
-    assert namespace_entry(target).content == foreign
-    assert len(temporary) == 1 and not temporary[0].exists()
+def test_absent_target_no_clobber_preserves_foreign_destination(tmp_path, monkeypatch) -> None:
+    scenario = _scenario(tmp_path, present=False); target = scenario.targets[0]; original = os.link; foreign = b"foreign\n"
+    def race(source, destination, *args, **kwargs):
+        target.write_bytes(foreign); return original(source, destination, *args, **kwargs)
+    monkeypatch.setattr(os, "link", race)
+    with pytest.raises(AuthoringError, match="created before publication"): publisher._publish_per_file(scenario.bundle)
+    assert target.read_bytes() == foreign
 
 
-@dataclass(frozen=True, slots=True)
-class _Scenario:
-    project: Path
-    owner: Path
-    bundle: ProjectCompilationBundle
-    destinations: tuple[Path, ...]
-    before: tuple[object, ...]
-    project_before: dict[str, object]
-    owner_before: dict[str, object]
-    sentinels: dict[Path, object]
+def test_exact_before_edit_rejects_without_restoring_earlier_target(tmp_path, monkeypatch) -> None:
+    scenario = _scenario(tmp_path, present=True); first, second = scenario.targets[:2]; foreign = b"foreign\n"
+    original = publisher.validate_destination_before_at; calls = 0
+    def validate(parent, before):
+        nonlocal calls
+        if calls == 1: second.write_bytes(foreign)
+        calls += 1; return original(parent, before)
+    monkeypatch.setattr(publisher, "validate_destination_before_at", validate)
+    with pytest.raises(AuthoringError): publisher._publish_per_file(scenario.bundle)
+    assert _exact(first, scenario.bundle.after_images[0]) and second.read_bytes() == foreign
 
 
-def _scenario(tmp_path: Path, *, absent: bool) -> _Scenario:
-    project = tmp_path / "project"
-    source = write_workflow(project, "leaf", marker="old")
-    source.chmod(0o640)
-    owner = (tmp_path / "owner-state").resolve()
-    owner.mkdir(mode=0o700)
-    sentinel = project / "notes" / "sentinel.bin"
-    sentinel.parent.mkdir()
-    sentinel.write_bytes(b"sentinel\n")
-    sentinel.chmod(0o640)
-    if absent:
-        (project / ".lockstep" / "recipes").mkdir(exist_ok=True)
-        bundle = replace(plan_project_compilation(project_paths(project, "leaf")), sources=())
-    else:
-        initial = plan_project_compilation(project_paths(project, "leaf"))
-        AuthoringPublisher(owner).publish(initial)
-        replace_marker(source, "old", "new")
-        source.chmod(0o640)
-        bundle = plan_project_compilation(project_paths(project, "leaf"))
-    destinations = tuple(image.resolved_path for image in bundle.after_images)
-    assert len(destinations) == 3
-    assert all((image.content is None) is absent for image in bundle.before_images)
-    parent_sentinels: dict[Path, object] = {sentinel: namespace_entry(sentinel)}
-    for index, parent in enumerate(sorted({path.parent for path in destinations})):
-        sibling = parent / f"foreign-sentinel-{index}.bin"
-        sibling.write_bytes(f"sibling-{index}\n".encode())
-        sibling.chmod(0o600 if index % 2 else 0o640)
-        parent_sentinels[sibling] = namespace_entry(sibling)
-    if absent:
-        journal = AuthoringJournal.create_for_bundle(owner, bundle)
-        with journal.locked():
-            pass
-        assert not journal.journal_path.exists()
-        assert not journal.journal_path.is_symlink()
-    return _Scenario(
-        project, owner, bundle, destinations,
-        tuple(namespace_entry(path) if path.exists() else None for path in destinations),
-        namespace_image(project), namespace_image(owner), parent_sentinels,
-    )
+def test_ordinary_link_error_preserves_completed_prefix_without_rollback(tmp_path, monkeypatch) -> None:
+    scenario = _scenario(tmp_path, present=False); original = os.link; calls = 0
+    def link(*args, **kwargs):
+        nonlocal calls
+        if calls == 1: raise OSError("ordinary link failure")
+        calls += 1; return original(*args, **kwargs)
+    monkeypatch.setattr(os, "link", link)
+    with pytest.raises(OSError, match="ordinary link failure"): publisher._publish_per_file(scenario.bundle)
+    assert _exact(scenario.targets[0], scenario.bundle.after_images[0]) and not scenario.targets[1].exists()
 
 
-def _assert_prefix_restored(scenario: _Scenario, index: int) -> None:
-    for candidate, expected in zip(scenario.destinations, scenario.before, strict=True):
-        if candidate == scenario.destinations[index]:
-            continue
-        if expected is None:
-            assert not candidate.exists()
-            assert not candidate.is_symlink()
-        else:
-            observed = namespace_entry(candidate)
-            assert (observed.kind, observed.content, observed.mode) == (
-                expected.kind,
-                expected.content,
-                expected.mode,
-            )
-    assert {path: namespace_entry(path) for path in scenario.sentinels} == scenario.sentinels
+@pytest.mark.parametrize("kind", ("symlink", "directory", "fifo"))
+def test_nonregular_or_linked_destination_is_rejected_before_mutation(tmp_path, kind) -> None:
+    scenario = _scenario(tmp_path, present=False); target = scenario.targets[-1]; target.parent.mkdir(parents=True, exist_ok=True)
+    if kind == "symlink": target.symlink_to(scenario.source)
+    elif kind == "directory": target.mkdir()
+    else: os.mkfifo(target)
+    before = tree_image(scenario.project)
+    with pytest.raises(AuthoringError): publisher._publish_per_file(scenario.bundle)
+    assert tree_image(scenario.project) == before
 
 
-def _assert_project_modulo_target(scenario: _Scenario, target: Path) -> None:
-    """All non-transaction namespace facts remain exact; target is foreign."""
-
-    before = dict(scenario.project_before)
-    after = namespace_image(scenario.project)
-    target_key = target.relative_to(scenario.project).as_posix()
-    before.pop(target_key, None)
-    after.pop(target_key, None)
-    for destination in scenario.destinations:
-        if destination == target:
-            continue
-        key = destination.relative_to(scenario.project).as_posix()
-        before.pop(key, None)
-        after.pop(key, None)
-    assert after == before
+def test_destination_parent_swap_cannot_escape_project(tmp_path) -> None:
+    scenario = _scenario(tmp_path, present=False); parent = scenario.targets[0].parent; outside = tmp_path / "outside"; outside.mkdir()
+    parent.mkdir(parents=True, exist_ok=True); parent.rmdir(); parent.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(AuthoringError): publisher._publish_per_file(scenario.bundle)
+    assert not tuple(outside.iterdir())
 
 
-@dataclass(slots=True)
-class _RollbackDurabilityProbe:
-    scenario: _Scenario
-    active: bool = False
-    target_index: int | None = None
-    target_is_owned: bool = False
-    events: list[str] = field(default_factory=list)
-    stage_paths: dict[tuple[tuple[int, int], str], tuple[int, tuple[int, int]]] = field(
-        default_factory=dict
-    )
-    pending_files: dict[int, tuple[int, int]] = field(default_factory=dict)
-    pending_parents: dict[str, tuple[int, int]] = field(default_factory=dict)
-    journal_directory: tuple[int, int] | None = field(init=False, default=None)
-    original_open: object = field(init=False)
-    original_fsync: object = field(init=False)
-    original_replace: object = field(init=False)
-    original_unlink: object = field(init=False)
-    original_create_journal: object = field(init=False)
-
-    def activate(self, index: int) -> None:
-        self.active, self.target_index = True, index
-
-    def include_target_in_rollback(self) -> None:
-        self.target_is_owned = True
-
-    def owns_destination(self, index: int) -> bool:
-        return self.target_index is not None and (
-            index < self.target_index
-            or self.target_is_owned and index == self.target_index
-        )
-
-    def destination_index(self, value: object, directory_fd: int | None) -> int | None:
-        if directory_fd is None:
-            return None
-        parent = os.fstat(directory_fd)
-        leaf = os.fsdecode(value)
-        return next(
-            (
-                index
-                for index, path in enumerate(self.scenario.destinations)
-                if path.name == leaf
-                and (path.parent.stat().st_dev, path.parent.stat().st_ino)
-                == (parent.st_dev, parent.st_ino)
-            ),
-            None,
-        )
-
-    def is_journal_path(self, value: object) -> bool:
-        path = Path(os.fsdecode(value))
-        if path.name != "transaction.json":
-            return False
-        if self.journal_directory is None:
-            return False
-        parent = path.parent.stat()
-        return (parent.st_dev, parent.st_ino) == self.journal_directory
-
-    def open_(self, path, flags, mode=0o777, *, dir_fd=None):
-        descriptor = self.original_open(path, flags, mode, dir_fd=dir_fd)
-        if flags & os.O_CREAT and flags & os.O_EXCL and dir_fd is not None:
-            index = self.destination_index(path, dir_fd)
-            if index is None:
-                parent = os.fstat(dir_fd)
-                info = os.fstat(descriptor)
-                key = (parent.st_dev, parent.st_ino), os.fsdecode(path)
-                self.stage_paths[key] = len(self.stage_paths), (info.st_dev, info.st_ino)
-        return descriptor
-
-    def fsync(self, descriptor: int) -> None:
-        self.original_fsync(descriptor)
-        if not self.active:
-            return
-        info = os.fstat(descriptor)
-        identity = info.st_dev, info.st_ino
-        for index, expected in tuple(self.pending_files.items()):
-            if identity == expected:
-                self.events.append(f"restore-file-fsync[{index}]")
-                del self.pending_files[index]
-        for label, parent in tuple(self.pending_parents.items()):
-            if identity == parent:
-                self.events.append(label)
-                del self.pending_parents[label]
-
-    def replace_(self, source, destination, *args, **kwargs):
-        result = self.original_replace(source, destination, *args, **kwargs)
-        index = self.destination_index(destination, kwargs.get("dst_dir_fd"))
-        if self.active and index is not None and self.owns_destination(index):
-            info = self.scenario.destinations[index].stat()
-            self.events.append(f"restore-replace[{index}]")
-            self.pending_files[index] = info.st_dev, info.st_ino
-            parent = self.scenario.destinations[index].parent.stat()
-            self.pending_parents[f"restore-parent-fsync[{index}]"] = (
-                parent.st_dev,
-                parent.st_ino,
-            )
+@pytest.mark.parametrize("when", ("before", "between", "terminal"))
+def test_source_currentness_rejects_without_rolling_back_completed_prefix(tmp_path, monkeypatch, when) -> None:
+    scenario = _scenario(tmp_path, present=True); original = publisher._publish_target; calls = 0
+    if when == "before": scenario.source.write_bytes(b"foreign source\n")
+    def publish_target(*args, **kwargs):
+        nonlocal calls; result = original(*args, **kwargs); calls += 1
+        if (when == "between" and calls == 1) or (when == "terminal" and calls == len(scenario.targets)):
+            scenario.source.write_bytes(b"foreign source\n")
         return result
-
-    def unlink(self, path, *args, **kwargs):
-        directory_fd = kwargs.get("dir_fd")
-        index = self.destination_index(path, directory_fd)
-        parent_identity = None
-        if directory_fd is not None:
-            parent = os.fstat(directory_fd)
-            parent_identity = parent.st_dev, parent.st_ino
-        stage = (
-            self.stage_paths.get((parent_identity, os.fsdecode(path)))
-            if parent_identity is not None
-            else None
-        )
-        if stage is not None:
-            observed = os.stat(path, dir_fd=directory_fd, follow_symlinks=False)
-            assert (observed.st_dev, observed.st_ino) == stage[1]
-        journal = self.is_journal_path(path)
-        result = self.original_unlink(path, *args, **kwargs)
-        if not self.active:
-            return result
-        if index is not None and self.owns_destination(index):
-            parent = self.scenario.destinations[index].parent.stat()
-            self.events.append(f"remove-destination[{index}]")
-            self.pending_parents[f"destination-parent-fsync[{index}]"] = (
-                parent.st_dev,
-                parent.st_ino,
-            )
-        elif stage is not None:
-            ordinal, _identity = stage
-            self.events.append(f"remove-stage[{ordinal}]")
-            self.pending_parents[f"stage-parent-fsync[{ordinal}]"] = parent_identity
-        if journal:
-            self.events.append("journal-unlink")
-            assert not self.pending_files and not self.pending_parents
-        return result
-
-    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        self.original_open, self.original_fsync = os.open, os.fsync
-        self.original_replace, self.original_unlink = os.replace, os.unlink
-        self.original_create_journal = AuthoringJournal.create_for_bundle
-
-        def create_for_bundle(cls, state_dir, bundle):
-            journal = self.original_create_journal(state_dir, bundle)
-            info = journal.directory.stat()
-            self.journal_directory = info.st_dev, info.st_ino
-            return journal
-
-        monkeypatch.setattr(os, "open", self.open_)
-        monkeypatch.setattr(os, "fsync", self.fsync)
-        monkeypatch.setattr(os, "replace", self.replace_)
-        monkeypatch.setattr(os, "unlink", self.unlink)
-        monkeypatch.setattr(
-            AuthoringJournal, "create_for_bundle", classmethod(create_for_bundle)
-        )
-
-
-def _install_rollback_durability_trace(
-    monkeypatch: pytest.MonkeyPatch, scenario: _Scenario
-) -> _RollbackDurabilityProbe:
-    probe = _RollbackDurabilityProbe(scenario)
-    probe.install(monkeypatch)
-    return probe
-
-
-def _assert_no_active_evidence(scenario: _Scenario) -> None:
-    assert namespace_image(scenario.owner) == scenario.owner_before
-
-
-def _assert_all_old(scenario: _Scenario) -> None:
-    assert namespace_image(scenario.project) == scenario.project_before
-    assert all(not destination.exists() for destination in scenario.destinations)
-
-
-def _assert_untouched_suffix(scenario: _Scenario, index: int) -> None:
-    for suffix, expected in zip(
-        scenario.destinations[index + 1:], scenario.before[index + 1:], strict=True
-    ):
-        if expected is None:
-            assert not suffix.exists()
-            assert not suffix.is_symlink()
-        else:
-            assert namespace_entry(suffix) == expected
-
-
-def _assert_edit_rollback_durability(
-    probe: _RollbackDurabilityProbe, index: int
-) -> None:
-    if not index:
-        return
-    journal = probe.events.index("journal-unlink")
-    for ordinal in range(index):
-        replace = f"restore-replace[{ordinal}]"
-        file_fsync = f"restore-file-fsync[{ordinal}]"
-        parent_fsync = f"restore-parent-fsync[{ordinal}]"
-        assert probe.events.count(replace) == 1
-        assert probe.events.count(file_fsync) == 1
-        assert probe.events.count(parent_fsync) == 1
-        assert probe.events.index(replace) < probe.events.index(file_fsync)
-        assert probe.events.index(file_fsync) < probe.events.index(parent_fsync) < journal
-
-
-def _assert_create_rollback_durability(
-    probe: _RollbackDurabilityProbe, expected_removals: int
-) -> None:
-    journal = probe.events.index("journal-unlink")
-    removals = tuple(
-        event for event in probe.events if event.startswith("remove-destination[")
-    )
-    assert removals == tuple(
-        f"remove-destination[{ordinal}]"
-        for ordinal in reversed(range(expected_removals))
-    )
-    for ordinal in range(expected_removals):
-        removal = f"remove-destination[{ordinal}]"
-        parent_fsync = f"destination-parent-fsync[{ordinal}]"
-        assert probe.events.count(removal) == 1
-        assert probe.events.count(parent_fsync) == 1
-        assert probe.events.index(removal) < probe.events.index(parent_fsync) < journal
-    for removal in (event for event in probe.events if event.startswith("remove-stage[")):
-        ordinal = removal.removeprefix("remove-stage[").removesuffix("]")
-        parent_fsync = f"stage-parent-fsync[{ordinal}]"
-        assert probe.events.count(removal) == 1
-        assert probe.events.count(parent_fsync) == 1
-        assert probe.events.index(removal) < probe.events.index(parent_fsync) < journal
-
-
-@pytest.mark.parametrize("index", (0, 1, 2), ids=lambda index: f"edit[{index}]")
-def test_foreign_edit_before_own_validation_preserves_leaf_and_restores_prefix(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, index: int
-) -> None:
-    """A changed future existing leaf must never be claimed by this transaction."""
-
-    scenario = _scenario(tmp_path, absent=False)
-    target = scenario.destinations[index]
-    original = transaction.validate_destination_before_at
-    calls: list[tuple[int, str]] = []
-    foreign = b"foreign existing leaf\n"
-    injected_identity: list[object] = []
-    trace = _install_rollback_durability_trace(monkeypatch, scenario)
-
-    def mutate_then_validate(directory_fd: int, image) -> None:
-        parent = os.fstat(directory_fd)
-        if (
-            image.resolved_path == target
-            and not calls
-            and (parent.st_dev, parent.st_ino)
-            == (target.parent.stat().st_dev, target.parent.stat().st_ino)
-        ):
-            target.write_bytes(foreign)
-            target.chmod(0o600)
-            calls.append((index, image.resolved_path.name))
-            injected_identity.append(namespace_entry(target))
-            trace.activate(index)
-        original(directory_fd, image)
-
-    monkeypatch.setattr(transaction, "validate_destination_before_at", mutate_then_validate)
-    with pytest.raises(AuthoringError):
-        AuthoringPublisher(scenario.owner).publish(scenario.bundle)
-
-    assert calls == [(index, target.name)]
-    assert len(injected_identity) == 1
-    foreign_identity = injected_identity[0]
-    assert (foreign_identity.content, foreign_identity.mode) == (foreign, 0o600)
-    _assert_prefix_restored(scenario, index)
-    assert namespace_entry(target) == foreign_identity
-    _assert_untouched_suffix(scenario, index)
-    _assert_edit_rollback_durability(trace, index)
-    _assert_project_modulo_target(scenario, target)
-    _assert_no_active_evidence(scenario)
-    snapshot = namespace_image(scenario.project), namespace_image(scenario.owner)
-    AuthoringPublisher(scenario.owner).recover(scenario.project)
-    assert (namespace_image(scenario.project), namespace_image(scenario.owner)) == snapshot
-
-
-@pytest.mark.parametrize("index", (0, 1, 2), ids=lambda index: f"create[{index}]")
-def test_foreign_create_at_real_no_clobber_edge_preserves_leaf_and_restores_prefix(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, index: int
-) -> None:
-    """A foreign absent-before leaf created at ``link`` must win over publication."""
-
-    scenario = _scenario(tmp_path, absent=True)
-    target = scenario.destinations[index]
-    original = os.link
-    calls: list[tuple[int, str]] = []
-    foreign = b"foreign created leaf\n"
-    injected_identity: list[object] = []
-    trace = _install_rollback_durability_trace(monkeypatch, scenario)
-
-    def create_then_link(source, destination, *args, **kwargs):
-        directory_fd = kwargs.get("dst_dir_fd")
-        if (
-            not calls
-            and directory_fd is not None
-            and os.fsdecode(destination) == target.name
-            and (os.fstat(directory_fd).st_dev, os.fstat(directory_fd).st_ino)
-            == (target.parent.stat().st_dev, target.parent.stat().st_ino)
-        ):
-            target.write_bytes(foreign)
-            target.chmod(0o600)
-            calls.append((index, target.name))
-            injected_identity.append(namespace_entry(target))
-            trace.activate(index)
-        return original(source, destination, *args, **kwargs)
-
-    monkeypatch.setattr(os, "link", create_then_link)
-    with pytest.raises(AuthoringError):
-        AuthoringPublisher(scenario.owner).publish(scenario.bundle)
-
-    assert calls == [(index, target.name)]
-    assert len(injected_identity) == 1
-    foreign_identity = injected_identity[0]
-    assert (foreign_identity.content, foreign_identity.mode) == (foreign, 0o600)
-    _assert_prefix_restored(scenario, index)
-    assert namespace_entry(target) == foreign_identity
-    _assert_untouched_suffix(scenario, index)
-    _assert_project_modulo_target(scenario, target)
-    _assert_no_active_evidence(scenario)
-    _assert_create_rollback_durability(trace, index)
-
-
-@pytest.mark.parametrize("phase", ("before-link", "after-real-link"))
-@pytest.mark.parametrize("index", (0, 1, 2), ids=lambda index: f"create[{index}]")
-def test_ordinary_link_oserror_rolls_back_only_proven_owned_absent_destinations(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str, index: int
-) -> None:
-    """Ordinary link errors distinguish no publication from an owned link."""
-
-    scenario = _scenario(tmp_path, absent=True)
-    target = scenario.destinations[index]
-    original = os.link
-    calls: list[tuple[str, int]] = []
-    trace = _install_rollback_durability_trace(monkeypatch, scenario)
-
-    def fail_target_link(source, destination, *args, **kwargs):
-        directory_fd = kwargs.get("dst_dir_fd")
-        if (
-            not calls
-            and directory_fd is not None
-            and os.fsdecode(destination) == target.name
-            and (os.fstat(directory_fd).st_dev, os.fstat(directory_fd).st_ino)
-            == (target.parent.stat().st_dev, target.parent.stat().st_ino)
-        ):
-            calls.append((phase, index))
-            trace.activate(index)
-            if phase == "before-link":
-                raise OSError(EIO, "injected link failure before publication")
-            original(source, destination, *args, **kwargs)
-            trace.include_target_in_rollback()
-            raise OSError(EIO, "injected link failure after publication")
-        return original(source, destination, *args, **kwargs)
-
-    monkeypatch.setattr(os, "link", fail_target_link)
-    with pytest.raises(OSError) as failure:
-        AuthoringPublisher(scenario.owner).publish(scenario.bundle)
-
-    assert failure.value.errno == EIO
-    assert calls == [(phase, index)]
-    _assert_all_old(scenario)
-    _assert_no_active_evidence(scenario)
-    _assert_create_rollback_durability(
-        trace, index + (phase == "after-real-link")
-    )
-    snapshot = namespace_image(scenario.project), namespace_image(scenario.owner)
-    AuthoringPublisher(scenario.owner).recover(scenario.project)
-    assert (namespace_image(scenario.project), namespace_image(scenario.owner)) == snapshot
+    monkeypatch.setattr(publisher, "_publish_target", publish_target)
+    with pytest.raises(AuthoringError): publisher._publish_per_file(scenario.bundle)
+    if when == "before": assert all(_exact(before.resolved_path, before) for before in scenario.bundle.before_images)
+    else: assert _exact(scenario.targets[0], scenario.bundle.after_images[0])

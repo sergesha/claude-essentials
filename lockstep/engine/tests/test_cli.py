@@ -345,3 +345,41 @@ def test_consent_accept_allows_one_maximum_bounded_piped_token(
 
     assert cli.main(["consent", "accept"]) == 0
     assert calls == [(token, str(project.resolve())), ("close",)]
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    (
+        ("recipe", "compile", "release"),
+        ("recipe", "check", "release"),
+        ("recipe", "diff", "release"),
+        ("recipe", "render", "release", "--view", "workflow"),
+        ("recipe", "estimate", "release"),
+    ),
+)
+def test_installed_cli_refuses_legacy_authoring_evidence(
+    tmp_path, monkeypatch, capsys, arguments
+) -> None:
+    from lockstep import authoring
+    from lockstep.authoring_journal import AuthoringJournal
+    from tests._authoring_gate import write_workflow
+
+    project = tmp_path / "project"
+    project.mkdir()
+    state = (tmp_path / "state").resolve()
+    write_workflow(project, "release")
+    authoring.publish_project_compilation(project, "release", state_dir=state)
+    journal, _identity = AuthoringJournal.create_for_project(state, project)
+    fixture = Path(__file__).parent / "fixtures/authoring-v4/transaction.json"
+    journal.journal_path.write_bytes(fixture.read_bytes())
+    journal.journal_path.chmod(0o600)
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(state))
+    before = journal.journal_path.read_bytes()
+
+    assert cli.main(list(arguments)) == 2
+    error = capsys.readouterr().err
+    assert "pre-simplification" in error
+    assert str(project.resolve()) in error and str(state) in error
+    assert "Do not delete transaction.json manually" in error
+    assert journal.journal_path.read_bytes() == before

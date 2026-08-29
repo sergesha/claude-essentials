@@ -598,3 +598,42 @@ def test_dryrun_runs_profile_before_any_persistent_service_init(tmp_path, monkey
         )
     assert called == [True]
     assert not (tmp_path / "state").exists()
+
+
+@pytest.mark.parametrize(
+    "operation",
+    (
+        lambda ctx: server.recipe_compile("release", ctx=ctx),
+        lambda ctx: server.recipe_check("release", ctx=ctx),
+        lambda ctx: server.recipe_diff("release", ctx=ctx),
+        lambda ctx: server.recipe_render("release", ctx=ctx),
+        lambda ctx: server.recipe_estimate("release", ctx=ctx),
+    ),
+    ids=("compile", "check", "diff", "render", "estimate"),
+)
+def test_installed_mcp_refuses_legacy_authoring_evidence(
+    tmp_path, monkeypatch, operation
+) -> None:
+    from lockstep import authoring
+    from lockstep.authoring_journal import AuthoringJournal
+    from tests._authoring_gate import write_workflow
+
+    project = tmp_path / "project"
+    project.mkdir()
+    state = (tmp_path / "state").resolve()
+    write_workflow(project, "release")
+    authoring.publish_project_compilation(project, "release", state_dir=state)
+    journal, _identity = AuthoringJournal.create_for_project(state, project)
+    fixture = Path(__file__).parent / "fixtures/authoring-v4/transaction.json"
+    journal.journal_path.write_bytes(fixture.read_bytes())
+    journal.journal_path.chmod(0o600)
+    monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(state))
+    before = journal.journal_path.read_bytes()
+
+    with pytest.raises(Exception) as raised:
+        operation(_ctx(project))
+    error = str(raised.value)
+    assert "pre-simplification" in error
+    assert str(project.resolve()) in error and str(state) in error
+    assert "Do not delete transaction.json manually" in error
+    assert journal.journal_path.read_bytes() == before
