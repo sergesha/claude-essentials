@@ -61,8 +61,10 @@ def recover_locked_authoring_project(
 ) -> None:
     """Recover one project while its authoring journal lock is already held."""
 
+    namespace_synced = journal.retire_temporary_evidence()
     if not journal.has_active_transaction():
-        journal.sync_namespace()
+        if not namespace_synced:
+            journal.sync_namespace()
         return
     model = journal.read_recovery_model(expected_project=project_identity)
     if model.committed:

@@ -35,9 +35,12 @@ from lockstep.runtime.owner_state import (
     fsync_owner_directory,
     initialize_owner_state,
     seal_owner_file,
+    take_bounded,
     verify_owner_directory,
     verify_owner_file,
 )
+
+_MAX_JOURNAL_TEMPORARIES = 64
 
 
 class AuthoringRecoveryRequired(AuthoringError):
@@ -154,6 +157,32 @@ class AuthoringJournal:
         """Complete durability after a prior journal unlink cut."""
 
         fsync_owner_directory(self.directory)
+
+    def retire_temporary_evidence(self) -> bool:
+        """Durably remove preflighted journal temporaries after process death."""
+
+        candidates = tuple(
+            sorted(
+                take_bounded(
+                    (
+                        entry
+                        for entry in self.directory.iterdir()
+                        if entry.name.startswith(".transaction-")
+                        and entry.name.endswith(".tmp")
+                    ),
+                    _MAX_JOURNAL_TEMPORARIES,
+                    "authoring journal temporaries",
+                ),
+                key=lambda entry: entry.name,
+            )
+        )
+        for candidate in candidates:
+            verify_owner_file(candidate)
+        for candidate in candidates:
+            candidate.unlink()
+        if candidates:
+            fsync_owner_directory(self.directory)
+        return bool(candidates)
 
     def read_recovery_model(
         self, *, expected_project: PathIdentity
