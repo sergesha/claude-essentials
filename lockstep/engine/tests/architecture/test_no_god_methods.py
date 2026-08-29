@@ -32,6 +32,14 @@ CONFIRMED_GOD_METHODS = (
     ("runtime/status.py", "project_status"),
     ("runtime/service.py", "LockstepCommandService.start_authorized"),
     ("runtime/effects/coordinator.py", "EffectCoordinator.submit_manual"),
+    ("authoring_bundle.py", "ProjectCompilationBundle.__post_init__"),
+    ("authoring_identity.py", "classify_destination_ownership_at"),
+    ("authoring_project_tree.py", "AuthoringProjectTree.ensure_directory"),
+    (
+        "authoring_project_tree.py",
+        "AuthoringProjectTree._require_reserved_path_absent",
+    ),
+    ("authoring_transaction.py", "AuthoringTransaction._rollback"),
 )
 
 
