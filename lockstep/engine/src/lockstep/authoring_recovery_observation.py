@@ -8,6 +8,12 @@ import stat
 from dataclasses import dataclass
 from pathlib import Path
 
+from lockstep.authoring_file_observation import (
+    DescriptorChanged,
+    DescriptorNotRegular,
+    DescriptorTooLarge,
+    observe_regular_descriptor,
+)
 from lockstep.authoring_recovery_model import (
     RecoveryBeforeImage,
     RecoveryWriteEntry,
@@ -36,6 +42,7 @@ def observe_recovery_file(
 ) -> ObservedRecoveryFile | None:
     flags = (
         os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
         | getattr(os, "O_NOFOLLOW", 0)
         | getattr(os, "O_NONBLOCK", 0)
     )
@@ -48,33 +55,24 @@ def observe_recovery_file(
             f"authoring recovery path is unavailable: {path}"
         ) from exc
     try:
-        first = os.fstat(descriptor)
-        if not stat.S_ISREG(first.st_mode):
-            raise AuthoringError(
-                f"authoring recovery path is not regular: {path}"
-            )
-        if first.st_size > _MAX_FILE_BYTES:
-            raise AuthoringError(
-                f"authoring recovery path exceeds its byte limit: {path}"
-            )
-        chunks: list[bytes] = []
-        remaining = first.st_size + 1
-        while remaining:
-            chunk = os.read(descriptor, min(1024 * 1024, remaining))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        last = os.fstat(descriptor)
-    finally:
-        os.close(descriptor)
-    if file_facts(first) != file_facts(last):
+        observed = observe_regular_descriptor(
+            descriptor,
+            max_bytes=_MAX_FILE_BYTES,
+        )
+    except DescriptorNotRegular as exc:
+        raise AuthoringError(
+            f"authoring recovery path is not regular: {path}"
+        ) from exc
+    except DescriptorTooLarge as exc:
+        raise AuthoringError(
+            f"authoring recovery path exceeds its byte limit: {path}"
+        ) from exc
+    except DescriptorChanged as exc:
         raise AuthoringError(
             f"authoring recovery path changed while reading: {path}"
-        )
-    content = b"".join(chunks)
-    if len(content) != first.st_size:
-        raise AuthoringError(f"authoring recovery path changed size: {path}")
+        ) from exc
+    first = observed.info
+    content = observed.content
     return ObservedRecoveryFile(
         first.st_dev,
         first.st_ino,

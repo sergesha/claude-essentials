@@ -18,6 +18,12 @@ from lockstep.authoring_bundle import (
     PathIdentity,
     ProjectCompilationBundle,
 )
+from lockstep.authoring_file_observation import (
+    DescriptorChanged,
+    DescriptorNotRegular,
+    DescriptorTooLarge,
+    observe_regular_descriptor,
+)
 from lockstep.authoring_recovery_model import (
     MAX_RECOVERY_JOURNAL_BYTES,
     AuthoringRecoveryModel,
@@ -189,49 +195,29 @@ class AuthoringJournal:
     ) -> AuthoringRecoveryModel:
         if not self.has_active_transaction():
             raise AuthoringRecoveryRequired("authoring recovery journal disappeared")
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
         descriptor = os.open(self.journal_path, flags)
         try:
-            first = os.fstat(descriptor)
-            if (
-                not stat.S_ISREG(first.st_mode)
-                or first.st_uid != os.getuid()
-                or first.st_mode & 0o077
-                or first.st_size > MAX_RECOVERY_JOURNAL_BYTES
-            ):
-                raise AuthoringError("authoring recovery journal is insecure")
-            chunks: list[bytes] = []
-            remaining = MAX_RECOVERY_JOURNAL_BYTES + 1
-            while remaining:
-                chunk = os.read(descriptor, min(1024 * 1024, remaining))
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                remaining -= len(chunk)
-            last = os.fstat(descriptor)
-        finally:
-            os.close(descriptor)
-        if (
-            (
-                first.st_dev,
-                first.st_ino,
-                first.st_mode,
-                first.st_size,
-                first.st_mtime_ns,
-                first.st_ctime_ns,
+            observed = observe_regular_descriptor(
+                descriptor,
+                max_bytes=MAX_RECOVERY_JOURNAL_BYTES,
             )
-            != (
-                last.st_dev,
-                last.st_ino,
-                last.st_mode,
-                last.st_size,
-                last.st_mtime_ns,
-                last.st_ctime_ns,
-            )
-        ):
-            raise AuthoringError("authoring recovery journal changed while reading")
+        except (DescriptorNotRegular, DescriptorTooLarge) as exc:
+            raise AuthoringError("authoring recovery journal is insecure") from exc
+        except DescriptorChanged as exc:
+            raise AuthoringError(
+                "authoring recovery journal changed while reading"
+            ) from exc
+        first = observed.info
+        if first.st_uid != os.getuid() or first.st_mode & 0o077:
+            raise AuthoringError("authoring recovery journal is insecure")
         return parse_recovery_journal(
-            b"".join(chunks), expected_project=expected_project
+            observed.content, expected_project=expected_project
         )
 
     def begin(

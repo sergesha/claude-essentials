@@ -15,6 +15,15 @@ from lockstep.authoring_bundle import (
     ProjectCompilationBundle,
     SourceIdentity,
 )
+from lockstep.authoring_file_observation import (
+    DescriptorChanged,
+    DescriptorNotRegular,
+    DescriptorObservationError,
+    DescriptorSizeMismatch,
+    DescriptorTooLarge,
+    RegularFileObservation,
+    observe_regular_descriptor,
+)
 from lockstep.authoring_limits import validate_authoring_contents
 from lockstep.errors import AuthoringError
 
@@ -193,70 +202,91 @@ def classify_destination_ownership_at(
 ) -> Literal["before", "after"]:
     """Classify one reserved mutation from a single verified-parent observation."""
 
-    leaf = before.resolved_path.name
-    flags = (
-        os.O_RDONLY
-        | getattr(os, "O_NOFOLLOW", 0)
-        | getattr(os, "O_NONBLOCK", 0)
+    expected_sizes = {after.size}
+    if before.content is not None:
+        expected_sizes.add(len(before.content))
+    observed = _observe_destination_at(
+        directory_descriptor,
+        before.resolved_path,
+        max_bytes=max(expected_sizes),
     )
-    try:
-        descriptor = os.open(leaf, flags, dir_fd=directory_descriptor)
-    except FileNotFoundError:
-        before_matches = before.content is None
-        after_matches = False
-    except OSError as exc:
+    if observed is not None and observed.info.st_size not in expected_sizes:
         raise AuthoringError(
-            f"authoring destination is unavailable: {before.resolved_path}"
-        ) from exc
-    else:
-        try:
-            initial = os.fstat(descriptor)
-            expected_sizes = {after.size}
-            if before.content is not None:
-                expected_sizes.add(len(before.content))
-            if (
-                not stat.S_ISREG(initial.st_mode)
-                or initial.st_size not in expected_sizes
-            ):
-                raise AuthoringError(
-                    "reserved authoring destination matches neither transaction image"
-                )
-        except Exception:
-            os.close(descriptor)
-            raise
-        content, info = _read_descriptor(
-            descriptor,
-            before.resolved_path,
-            expected_size=initial.st_size,
+            "reserved authoring destination matches neither transaction image"
         )
-        expected_before = before.leaf
-        before_matches = (
-            before.content is not None
-            and expected_before is not None
-            and _leaf_facts(info)
-            == (
-                expected_before.device,
-                expected_before.inode,
-                expected_before.mode,
-                expected_before.size,
-                expected_before.mtime_ns,
-                expected_before.ctime_ns,
-            )
-            and content == before.content
-            and _sha256(content) == before.sha256
-        )
-        after_matches = (
-            info.st_dev == after.device
-            and info.st_ino == after.inode
-            and info.st_mode == after.mode
-            and info.st_size == after.size
-            and _sha256(content) == after.sha256
-        )
+    before_matches = _matches_before_image(observed, before)
+    after_matches = _matches_published_image(observed, after)
     if before_matches == after_matches:
         raise AuthoringError(
             "reserved authoring destination ownership is ambiguous"
         )
     return "before" if before_matches else "after"
+
+
+def _observe_destination_at(
+    directory_descriptor: int,
+    path: Path,
+    *,
+    max_bytes: int,
+) -> RegularFileObservation | None:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    try:
+        descriptor = os.open(path.name, flags, dir_fd=directory_descriptor)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise AuthoringError(f"authoring destination is unavailable: {path}") from exc
+    try:
+        return observe_regular_descriptor(descriptor, max_bytes=max_bytes)
+    except DescriptorObservationError as exc:
+        raise AuthoringError(
+            "reserved authoring destination matches neither transaction image"
+        ) from exc
+
+
+def _matches_before_image(
+    observed: RegularFileObservation | None,
+    before: DestinationImage,
+) -> bool:
+    if before.content is None:
+        return observed is None
+    expected = before.leaf
+    if observed is None or expected is None:
+        return False
+    return (
+        _leaf_facts(observed.info)
+        == (
+            expected.device,
+            expected.inode,
+            expected.mode,
+            expected.size,
+            expected.mtime_ns,
+            expected.ctime_ns,
+        )
+        and observed.content == before.content
+        and _sha256(observed.content) == before.sha256
+    )
+
+
+def _matches_published_image(
+    observed: RegularFileObservation | None,
+    after: PublishedIdentity,
+) -> bool:
+    if observed is None:
+        return False
+    info = observed.info
+    return (
+        info.st_dev == after.device
+        and info.st_ino == after.inode
+        and info.st_mode == after.mode
+        and info.st_size == after.size
+        and _sha256(observed.content) == after.sha256
+    )
 
 
 def _validate_destination_shape(
@@ -382,28 +412,20 @@ def _read_descriptor(
     descriptor: int, path: Path, *, expected_size: int
 ) -> tuple[bytes, os.stat_result]:
     try:
-        first = os.fstat(descriptor)
-        if not stat.S_ISREG(first.st_mode):
-            raise AuthoringError(f"authoring path is not a regular file: {path}")
-        if first.st_size != expected_size:
-            raise AuthoringError(f"authoring file size changed before reading: {path}")
-        chunks: list[bytes] = []
-        remaining = expected_size + 1
-        while remaining:
-            chunk = os.read(descriptor, min(1024 * 1024, remaining))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        last = os.fstat(descriptor)
-    finally:
-        os.close(descriptor)
-    if _leaf_facts(first) != _leaf_facts(last):
-        raise AuthoringError(f"authoring file changed while reading: {path}")
-    content = b"".join(chunks)
-    if len(content) != expected_size:
-        raise AuthoringError(f"authoring file size changed while reading: {path}")
-    return content, first
+        observed = observe_regular_descriptor(
+            descriptor,
+            max_bytes=expected_size,
+            expected_size=expected_size,
+        )
+    except DescriptorNotRegular as exc:
+        raise AuthoringError(f"authoring path is not a regular file: {path}") from exc
+    except (DescriptorTooLarge, DescriptorSizeMismatch) as exc:
+        raise AuthoringError(
+            f"authoring file size changed before reading: {path}"
+        ) from exc
+    except DescriptorChanged as exc:
+        raise AuthoringError(f"authoring file changed while reading: {path}") from exc
+    return observed.content, observed.info
 
 
 def _leaf_facts(info: os.stat_result) -> tuple[int, int, int, int, int, int]:

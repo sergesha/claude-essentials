@@ -222,69 +222,105 @@ class ProjectCompilationBundle:
     after_images: tuple[DestinationImage, ...]
 
     def __post_init__(self) -> None:
-        project = _absolute(self.resolved_project, "project path")
-        if not isinstance(self.project_identity, _PathIdentity):
-            raise TypeError("project identity is invalid")
-        if self.project_identity.resolved_path != project:
-            raise ValueError("project identity does not match its resolved path")
-        for label, value in (
-            ("sources", self.sources),
-            ("dependency edges", self.dependency_edges),
-            ("before images", self.before_images),
-            ("after images", self.after_images),
-        ):
-            if not isinstance(value, tuple):
-                raise TypeError(f"bundle {label} must be a tuple")
-        if any(not isinstance(item, SourceIdentity) for item in self.sources):
-            raise TypeError("bundle source identity is invalid")
-        source_roles = tuple(item.role for item in self.sources)
-        source_paths = tuple(item.resolved_path for item in self.sources)
-        if len(source_paths) != len(set(source_paths)):
-            raise ValueError("bundle source paths must be unique")
-        if any(
-            not isinstance(edge, tuple) or len(edge) != 2
-            for edge in self.dependency_edges
-        ):
-            raise TypeError("bundle dependency edge is invalid")
-        roles = tuple(role for role, _children in self.dependency_edges)
-        if (
-            not roles
-            or any(not isinstance(role, str) or not role for role in roles)
-            or len(roles) != len(set(roles))
-        ):
-            raise ValueError("bundle dependency roles must be non-empty and unique")
+        _validate_bundle_project(self)
+        _validate_bundle_collections(self)
+        source_roles = _validate_bundle_sources(self.sources)
+        roles = _validate_dependency_topology(self.dependency_edges)
         if source_roles not in ((), roles):
             raise ValueError("bundle source roles must be complete or empty")
-        seen: set[str] = set()
-        for role, children in self.dependency_edges:
-            if (
-                not isinstance(role, str)
-                or not isinstance(children, tuple)
-                or any(not isinstance(child, str) for child in children)
-                or len(children) != len(set(children))
-                or any(child not in seen for child in children)
-            ):
-                raise ValueError("bundle dependencies must reference earlier child roles")
-            seen.add(role)
-        if any(not isinstance(item, DestinationImage) for item in self.before_images):
-            raise TypeError("bundle before-image is invalid")
-        if any(not isinstance(item, DestinationImage) for item in self.after_images):
-            raise TypeError("bundle after-image is invalid")
-        before_paths = tuple(item.resolved_path for item in self.before_images)
-        after_paths = tuple(item.resolved_path for item in self.after_images)
-        if before_paths != after_paths or len(after_paths) != len(set(after_paths)):
-            raise ValueError("bundle before and after destination maps must match exactly")
-        if any(item.content is None for item in self.after_images):
-            raise ValueError("bundle after-images must contain exact destination bytes")
-        for before, after in zip(self.before_images, self.after_images, strict=True):
-            if before.role != after.role or before.role not in roles:
-                raise ValueError("bundle destination roles must match dependency roles")
-            if before.ancestors != after.ancestors:
-                raise ValueError("paired destination ancestors must match")
-            if before.content is not None and before.leaf is None:
-                raise ValueError("a present before-image requires its captured leaf identity")
-            if after.leaf is not None:
-                raise ValueError("a planned after-image cannot contain a captured leaf identity")
+        _validate_destination_pairs(self.before_images, self.after_images, roles)
+
+
+def _validate_bundle_project(bundle: ProjectCompilationBundle) -> None:
+    project = _absolute(bundle.resolved_project, "project path")
+    if not isinstance(bundle.project_identity, _PathIdentity):
+        raise TypeError("project identity is invalid")
+    if bundle.project_identity.resolved_path != project:
+        raise ValueError("project identity does not match its resolved path")
+
+
+def _validate_bundle_collections(bundle: ProjectCompilationBundle) -> None:
+    for label, value in (
+        ("sources", bundle.sources),
+        ("dependency edges", bundle.dependency_edges),
+        ("before images", bundle.before_images),
+        ("after images", bundle.after_images),
+    ):
+        if not isinstance(value, tuple):
+            raise TypeError(f"bundle {label} must be a tuple")
+
+
+def _validate_bundle_sources(sources: tuple[SourceIdentity, ...]) -> tuple[str, ...]:
+    if any(not isinstance(item, SourceIdentity) for item in sources):
+        raise TypeError("bundle source identity is invalid")
+    source_paths = tuple(item.resolved_path for item in sources)
+    if len(source_paths) != len(set(source_paths)):
+        raise ValueError("bundle source paths must be unique")
+    return tuple(item.role for item in sources)
+
+
+def _validate_dependency_topology(
+    dependency_edges: tuple[tuple[str, tuple[str, ...]], ...],
+) -> tuple[str, ...]:
+    if any(not isinstance(edge, tuple) or len(edge) != 2 for edge in dependency_edges):
+        raise TypeError("bundle dependency edge is invalid")
+    roles = tuple(role for role, _children in dependency_edges)
+    if not roles or len(roles) != len(set(roles)):
+        raise ValueError("bundle dependency roles must be non-empty and unique")
+    seen: set[str] = set()
+    for role, children in dependency_edges:
+        _validate_dependency_edge(role, children, seen)
+        seen.add(role)
+    return roles
+
+
+def _validate_dependency_edge(
+    role: object,
+    children: object,
+    seen: set[str],
+) -> None:
+    if not isinstance(role, str) or not role:
+        raise ValueError("bundle dependency roles must be non-empty and unique")
+    if not isinstance(children, tuple):
+        raise ValueError("bundle dependencies must reference earlier child roles")
+    if any(not isinstance(child, str) for child in children):
+        raise ValueError("bundle dependencies must reference earlier child roles")
+    if len(children) != len(set(children)) or any(child not in seen for child in children):
+        raise ValueError("bundle dependencies must reference earlier child roles")
+
+
+def _validate_destination_pairs(
+    before_images: tuple[DestinationImage, ...],
+    after_images: tuple[DestinationImage, ...],
+    roles: tuple[str, ...],
+) -> None:
+    if any(not isinstance(item, DestinationImage) for item in before_images):
+        raise TypeError("bundle before-image is invalid")
+    if any(not isinstance(item, DestinationImage) for item in after_images):
+        raise TypeError("bundle after-image is invalid")
+    before_paths = tuple(item.resolved_path for item in before_images)
+    after_paths = tuple(item.resolved_path for item in after_images)
+    if before_paths != after_paths or len(after_paths) != len(set(after_paths)):
+        raise ValueError("bundle before and after destination maps must match exactly")
+    if any(item.content is None for item in after_images):
+        raise ValueError("bundle after-images must contain exact destination bytes")
+    for before, after in zip(before_images, after_images, strict=True):
+        _validate_destination_pair(before, after, roles)
+
+
+def _validate_destination_pair(
+    before: DestinationImage,
+    after: DestinationImage,
+    roles: tuple[str, ...],
+) -> None:
+    if before.role != after.role or before.role not in roles:
+        raise ValueError("bundle destination roles must match dependency roles")
+    if before.ancestors != after.ancestors:
+        raise ValueError("paired destination ancestors must match")
+    if before.content is not None and before.leaf is None:
+        raise ValueError("a present before-image requires its captured leaf identity")
+    if after.leaf is not None:
+        raise ValueError("a planned after-image cannot contain a captured leaf identity")
 
 
 def plan_project_compilation(recipe: AuthoredRecipe) -> ProjectCompilationBundle:

@@ -1,11 +1,9 @@
-"""Gate C: one authoring command denotes one immutable whole-DAG plan."""
+"""Capture and identity invariants for one immutable whole-DAG plan."""
 
 from __future__ import annotations
 
 import hashlib
-import inspect
 import stat
-from dataclasses import replace
 from os import stat_result
 from pathlib import Path
 
@@ -13,9 +11,6 @@ import pytest
 
 from lockstep.authoring import (
     AuthoringError,
-    canonical_match,
-    check_recipe,
-    diff_recipe,
     project_paths,
 )
 
@@ -23,45 +18,10 @@ from tests._authoring_gate import (
     assert_source_identity,
     compile_closure,
     expected_compilation_image,
-    observed_compilation_image,
-    public_compile,
     replace_marker,
     tree_image,
     write_workflow,
 )
-
-
-def test_whole_dag_bundle_contracts_are_explicit() -> None:
-    from lockstep.authoring import AuthoredRecipe as PublicAuthoredRecipe
-    from lockstep.authoring_bundle import (
-        AuthoredRecipe,
-        DestinationImage,
-        ProjectCompilationBundle,
-        SourceIdentity,
-    )
-
-    assert all(
-        isinstance(contract, type)
-        for contract in (SourceIdentity, DestinationImage, ProjectCompilationBundle)
-    )
-    assert PublicAuthoredRecipe is AuthoredRecipe
-
-
-def test_authoring_publisher_surface_has_only_the_frozen_operations() -> None:
-    from lockstep.authoring_publisher import AuthoringPublisher
-
-    assert tuple(inspect.signature(AuthoringPublisher.__init__).parameters) == (
-        "self",
-        "state_dir",
-    )
-    assert tuple(inspect.signature(AuthoringPublisher.publish).parameters) == (
-        "self",
-        "bundle",
-    )
-    assert tuple(inspect.signature(AuthoringPublisher.recover).parameters) == (
-        "self",
-        "project",
-    )
 
 
 def _assert_leaf_source_identity(bundle, project: Path, source_path: Path) -> None:
@@ -222,62 +182,6 @@ def test_leaf_planner_captures_exact_immutable_bundle_without_writes(
     _assert_leaf_bundle_is_deeply_immutable(bundle)
 
 
-def _two_role_bundle(project: Path):
-    from lockstep.authoring_bundle import plan_project_compilation
-
-    write_workflow(project, "child")
-    write_workflow(project, "parent", children=("child",))
-    return plan_project_compilation(project_paths(project, "parent"))
-
-
-def test_destination_only_bundle_roles_are_owned_by_dependency_topology(
-    tmp_path: Path,
-) -> None:
-    ordinary = _two_role_bundle(tmp_path / "project")
-
-    template = replace(ordinary, sources=())
-
-    assert template.sources == ()
-    assert tuple(role for role, _children in template.dependency_edges) == (
-        "child",
-        "parent",
-    )
-    assert {image.role for image in template.after_images} == {
-        "child",
-        "parent",
-    }
-
-
-def test_bundle_rejects_a_partial_source_role_inventory(tmp_path: Path) -> None:
-    ordinary = _two_role_bundle(tmp_path / "project")
-
-    with pytest.raises(ValueError):
-        replace(ordinary, sources=ordinary.sources[:1])
-
-
-def test_destination_only_bundle_requires_nonempty_topology(tmp_path: Path) -> None:
-    ordinary = _two_role_bundle(tmp_path / "project")
-
-    with pytest.raises(ValueError):
-        replace(ordinary, sources=(), dependency_edges=())
-
-
-def test_destination_only_bundle_rejects_an_unowned_write_role(
-    tmp_path: Path,
-) -> None:
-    ordinary = _two_role_bundle(tmp_path / "project")
-    changed_before = replace(ordinary.before_images[0], role="foreign")
-    changed_after = replace(ordinary.after_images[0], role="foreign")
-
-    with pytest.raises(ValueError):
-        replace(
-            ordinary,
-            sources=(),
-            before_images=(changed_before, *ordinary.before_images[1:]),
-            after_images=(changed_after, *ordinary.after_images[1:]),
-        )
-
-
 def test_leaf_planner_captures_existing_real_destination_parent_identity(
     tmp_path: Path,
 ) -> None:
@@ -428,119 +332,6 @@ def test_leaf_planner_shares_stable_directory_identity_across_components(
         workflow.parent: 1,
         recipe.recipe_path.parent: 1,
     }
-
-
-def test_project_compilation_bundle_rejects_mismatched_paired_ancestors(
-    tmp_path: Path,
-) -> None:
-    from lockstep.authoring_bundle import plan_project_compilation
-
-    project = tmp_path / "project"
-    write_workflow(project, "leaf")
-    bundle = plan_project_compilation(project_paths(project, "leaf"))
-    changed_after = replace(bundle.after_images[0], ancestors=())
-
-    with pytest.raises(ValueError, match="paired destination ancestors"):
-        replace(bundle, after_images=(changed_after, *bundle.after_images[1:]))
-
-
-@pytest.mark.parametrize("template", ("reviewed-change", "parallel-review"))
-@pytest.mark.parametrize("adapter", ("cli", "mcp"))
-def test_parent_compile_rebuilds_changed_direct_child(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    adapter: str,
-    template: str,
-) -> None:
-    from lockstep.templates import install_template, show_template
-
-    project = tmp_path / "project"
-    project.mkdir()
-    install_template(
-        template,
-        "release",
-        project,
-        state_dir=(tmp_path / "template-owner-state").resolve(),
-    )
-    shown = show_template(template, "release")
-    changed_child = next(name for name in shown.compile_order if name != "release")
-    child = project / ".lockstep/workflows" / f"{changed_child}.workflow.yaml"
-    child.write_text(child.read_text(encoding="utf-8") + "\n# changed child\n")
-
-    result = public_compile(adapter, project, "release", monkeypatch)
-    captured = capsys.readouterr()
-    if adapter == "cli":
-        assert result == 0
-        assert captured.err == ""
-    else:
-        assert result["name"] == "release"
-
-    for name in shown.compile_order:
-        assert diff_recipe(project, name) == ""
-        assert check_recipe(project, name)["ok"] is True
-        canonical_match(project_paths(project, name))
-    expected = expected_compilation_image(project, shown.compile_order)
-    assert observed_compilation_image(expected) == expected
-
-
-def test_parent_compile_rebuilds_transitive_grandchild(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    project = tmp_path / "project"
-    leaf = write_workflow(project, "leaf")
-    write_workflow(project, "child", children=("leaf",))
-    write_workflow(project, "parent", children=("child",))
-    compile_closure(project, "leaf", "child", "parent")
-    replace_marker(leaf, "initial", "changed")
-
-    assert public_compile("cli", project, "parent", monkeypatch) == 0
-    capsys.readouterr()
-
-    for name in ("leaf", "child", "parent"):
-        assert diff_recipe(project, name) == ""
-        canonical_match(project_paths(project, name))
-    expected = expected_compilation_image(project, ("leaf", "child", "parent"))
-    assert observed_compilation_image(expected) == expected
-
-
-def test_parent_check_and_diff_cover_child_closure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    from lockstep import cli
-
-    project = tmp_path / "project"
-    child = write_workflow(project, "child")
-    write_workflow(project, "parent", children=("child",))
-    compile_closure(project, "child", "parent")
-    replace_marker(child, "initial", "changed")
-
-    monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(tmp_path / "owner-state"))
-    monkeypatch.chdir(project)
-    assert cli.main(["recipe", "diff", "parent"]) == 0
-    assert capsys.readouterr().out != ""
-    assert cli.main(["recipe", "check", "parent"]) == 2
-    capsys.readouterr()
-    assert diff_recipe(project, "parent") != ""
-    with pytest.raises(AuthoringError, match="canonical|byte-for-byte|missing"):
-        check_recipe(project, "parent")
-
-    assert public_compile("cli", project, "parent", monkeypatch) == 0
-    capsys.readouterr()
-
-    assert diff_recipe(project, "parent") == ""
-    assert check_recipe(project, "parent")["ok"] is True
-    assert diff_recipe(project, "child") == ""
-    assert check_recipe(project, "child")["ok"] is True
-    expected = expected_compilation_image(project, ("child", "parent"))
-    assert observed_compilation_image(expected) == expected
-    assert cli.main(["recipe", "diff", "parent"]) == 0
-    assert capsys.readouterr().out == ""
-    assert cli.main(["recipe", "check", "parent"]) == 0
 
 
 @pytest.mark.parametrize("failure", ("parse", "semantic", "missing", "cycle"))

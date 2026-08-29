@@ -265,54 +265,87 @@ class AuthoringTransaction:
     ) -> None:
         ownership_error: AuthoringError | None = None
         for replacement in reversed(owned_replacements):
-            destination = replacement.after.resolved_path
-            parent_descriptor, destination_leaf = self.tree.open_parent(destination)
-            try:
-                try:
-                    state = classify_destination_ownership_at(
-                        parent_descriptor,
-                        replacement.before,
-                        replacement.identity,
-                    )
-                except AuthoringError as exc:
-                    if ownership_error is None:
-                        ownership_error = exc
-                    continue
-                if state == "before":
-                    continue
-                if replacement.reservation.publication in stage_consumption_attempts:
-                    consumed_stages.add(replacement.reservation.publication)
-                if replacement.before.content is None:
-                    validate_after_identity_at(parent_descriptor, replacement.identity)
-                    os.unlink(destination_leaf, dir_fd=parent_descriptor)
-                    os.fsync(parent_descriptor)
-                    continue
-                before = replacement.before
-                if before.mode is None or before.content is None:
-                    raise AuthoringError("authoring before-image is incomplete")
-                restoration = self._stage_file(
-                    before,
-                    replacement.reservation.restoration,
-                    before.content,
-                    before.mode,
-                    owned_stages=owned_stages,
-                )
-                validate_after_identity_at(parent_descriptor, replacement.identity)
-                os.replace(
-                    restoration.path.name,
-                    destination_leaf,
-                    src_dir_fd=parent_descriptor,
-                    dst_dir_fd=parent_descriptor,
-                )
-                consumed_stages.add(restoration.path)
-                _fsync_regular_at(parent_descriptor, destination_leaf)
-                os.fsync(parent_descriptor)
-            finally:
-                os.close(parent_descriptor)
+            error = self._rollback_one(
+                replacement,
+                owned_stages=owned_stages,
+                consumed_stages=consumed_stages,
+                stage_consumption_attempts=stage_consumption_attempts,
+            )
+            if ownership_error is None and error is not None:
+                ownership_error = error
         if ownership_error is not None:
             raise AuthoringError(
                 "authoring rollback found an ambiguous destination"
             ) from ownership_error
+
+    def _rollback_one(
+        self,
+        replacement: _ReplacementOwnership,
+        *,
+        owned_stages: dict[Path, _StageOwnership | None],
+        consumed_stages: set[Path],
+        stage_consumption_attempts: set[Path],
+    ) -> AuthoringError | None:
+        destination = replacement.after.resolved_path
+        parent_descriptor, destination_leaf = self.tree.open_parent(destination)
+        try:
+            try:
+                state = classify_destination_ownership_at(
+                    parent_descriptor,
+                    replacement.before,
+                    replacement.identity,
+                )
+            except AuthoringError as exc:
+                return exc
+            if state == "before":
+                return None
+            if replacement.reservation.publication in stage_consumption_attempts:
+                consumed_stages.add(replacement.reservation.publication)
+            self._restore_before_image(
+                parent_descriptor,
+                destination_leaf,
+                replacement,
+                owned_stages=owned_stages,
+                consumed_stages=consumed_stages,
+            )
+            return None
+        finally:
+            os.close(parent_descriptor)
+
+    def _restore_before_image(
+        self,
+        parent_descriptor: int,
+        destination_leaf: str,
+        replacement: _ReplacementOwnership,
+        *,
+        owned_stages: dict[Path, _StageOwnership | None],
+        consumed_stages: set[Path],
+    ) -> None:
+        before = replacement.before
+        if before.content is None:
+            validate_after_identity_at(parent_descriptor, replacement.identity)
+            os.unlink(destination_leaf, dir_fd=parent_descriptor)
+            os.fsync(parent_descriptor)
+            return
+        if before.mode is None:
+            raise AuthoringError("authoring before-image is incomplete")
+        restoration = self._stage_file(
+            before,
+            replacement.reservation.restoration,
+            before.content,
+            before.mode,
+            owned_stages=owned_stages,
+        )
+        validate_after_identity_at(parent_descriptor, replacement.identity)
+        os.replace(
+            restoration.path.name,
+            destination_leaf,
+            src_dir_fd=parent_descriptor,
+            dst_dir_fd=parent_descriptor,
+        )
+        consumed_stages.add(restoration.path)
+        _fsync_regular_at(parent_descriptor, destination_leaf)
+        os.fsync(parent_descriptor)
 
     def _cleanup_stages(
         self,

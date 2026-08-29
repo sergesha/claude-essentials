@@ -6,6 +6,10 @@ import os
 import stat
 from pathlib import Path
 
+from lockstep.authoring_file_observation import (
+    DescriptorObservationError,
+    observe_regular_descriptor,
+)
 from lockstep.errors import AuthoringError
 from lockstep.runtime.owner_state import StorageLimitExceeded
 
@@ -38,34 +42,22 @@ def capture_regular_file(
     except OSError as exc:
         raise AuthoringError(f"{label} changed while it was captured") from exc
     try:
-        opened = os.fstat(descriptor)
-        if not stat.S_ISREG(opened.st_mode) or _leaf_facts(
-            opened
-        ) != _leaf_facts(first):
-            raise AuthoringError(f"{label} changed while it was captured")
-        chunks: list[bytes] = []
-        remaining = first.st_size + 1
-        while remaining:
-            chunk = os.read(descriptor, min(1024 * 1024, remaining))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
-        last = os.fstat(descriptor)
-    finally:
-        os.close(descriptor)
+        observed = observe_regular_descriptor(
+            descriptor,
+            max_bytes=max_bytes,
+            expected_size=first.st_size,
+        )
+    except DescriptorObservationError as exc:
+        raise AuthoringError(f"{label} changed while it was captured") from exc
+    if _leaf_facts(observed.info) != _leaf_facts(first):
+        raise AuthoringError(f"{label} changed while it was captured")
     try:
         named = path.lstat()
     except OSError as exc:
         raise AuthoringError(f"{label} changed while it was captured") from exc
-    content = b"".join(chunks)
-    if (
-        _leaf_facts(last) != _leaf_facts(first)
-        or _leaf_facts(named) != _leaf_facts(first)
-        or len(content) != first.st_size
-    ):
+    if _leaf_facts(named) != _leaf_facts(first):
         raise AuthoringError(f"{label} changed while it was captured")
-    return content, opened
+    return observed.content, observed.info
 
 
 def capture_optional_regular_file(

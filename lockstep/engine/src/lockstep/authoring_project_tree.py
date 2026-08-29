@@ -68,57 +68,74 @@ class AuthoringProjectTree:
         directory: Path,
         persist_created_directory_identity: Callable[[PathIdentity], None],
     ) -> None:
-        try:
-            relative = directory.relative_to(self._project)
-        except ValueError as exc:
-            raise AuthoringError("authoring directory is outside the project") from exc
+        relative = self._relative_directory(directory)
         descriptor = self._open_root()
         current = self._project
         try:
             for part in relative.parts:
                 child = current / part
-                expected = self._expected(child)
-                try:
-                    next_descriptor = os.open(part, _DIRECTORY_FLAGS, dir_fd=descriptor)
-                except FileNotFoundError:
-                    if expected is not None:
-                        raise AuthoringError("recorded destination ancestor disappeared")
-                    # Register the ambiguous namespace edge before mkdir itself;
-                    # any failure from here retains the active journal.
-                    self.created_directories[child] = None
-                    os.mkdir(part, mode=0o755, dir_fd=descriptor)
-                    next_descriptor = os.open(part, _DIRECTORY_FLAGS, dir_fd=descriptor)
-                    try:
-                        info = self._verify_directory_descriptor(
-                            next_descriptor, expected=None
-                        )
-                        identity = PathIdentity(
-                            child, info.st_dev, info.st_ino
-                        )
-                        self.created_directories[child] = identity
-                        persist_created_directory_identity(identity)
-                        os.fsync(descriptor)
-                    except BaseException:
-                        os.close(next_descriptor)
-                        raise
-                else:
-                    if expected is None:
-                        os.close(next_descriptor)
-                        raise AuthoringError(
-                            "destination ancestor was created after planning"
-                        )
-                    try:
-                        self._verify_directory_descriptor(
-                            next_descriptor, expected=expected
-                        )
-                    except BaseException:
-                        os.close(next_descriptor)
-                        raise
+                next_descriptor = self._ensure_child_directory(
+                    descriptor,
+                    child,
+                    part,
+                    persist_created_directory_identity,
+                )
                 os.close(descriptor)
                 descriptor = next_descriptor
                 current = child
         finally:
             os.close(descriptor)
+
+    def _ensure_child_directory(
+        self,
+        parent_descriptor: int,
+        child: Path,
+        leaf: str,
+        persist_created_directory_identity: Callable[[PathIdentity], None],
+    ) -> int:
+        expected = self._expected(child)
+        try:
+            descriptor = os.open(leaf, _DIRECTORY_FLAGS, dir_fd=parent_descriptor)
+        except FileNotFoundError:
+            if expected is not None:
+                raise AuthoringError("recorded destination ancestor disappeared")
+            return self._create_child_directory(
+                parent_descriptor,
+                child,
+                leaf,
+                persist_created_directory_identity,
+            )
+        if expected is None:
+            os.close(descriptor)
+            raise AuthoringError("destination ancestor was created after planning")
+        try:
+            self._verify_directory_descriptor(descriptor, expected=expected)
+            return descriptor
+        except BaseException:
+            os.close(descriptor)
+            raise
+
+    def _create_child_directory(
+        self,
+        parent_descriptor: int,
+        child: Path,
+        leaf: str,
+        persist_created_directory_identity: Callable[[PathIdentity], None],
+    ) -> int:
+        # Enrollment precedes mkdir so any ambiguous failure retains the journal.
+        self.created_directories[child] = None
+        os.mkdir(leaf, mode=0o755, dir_fd=parent_descriptor)
+        descriptor = os.open(leaf, _DIRECTORY_FLAGS, dir_fd=parent_descriptor)
+        try:
+            info = self._verify_directory_descriptor(descriptor, expected=None)
+            identity = PathIdentity(child, info.st_dev, info.st_ino)
+            self.created_directories[child] = identity
+            persist_created_directory_identity(identity)
+            os.fsync(parent_descriptor)
+            return descriptor
+        except BaseException:
+            os.close(descriptor)
+            raise
 
     def open_parent(self, destination: Path) -> tuple[int, str]:
         parent = self._contained_parent(destination)
@@ -247,39 +264,10 @@ class AuthoringProjectTree:
 
     def _require_reserved_path_absent(self, path: Path) -> None:
         parent = self._contained_parent(path)
-        relative = parent.relative_to(self._project)
-        descriptor = self._open_root()
-        current = self._project
+        descriptor = self._open_reserved_parent(parent)
+        if descriptor is None:
+            return
         try:
-            for part in relative.parts:
-                child = current / part
-                expected = self._expected(child)
-                try:
-                    next_descriptor = os.open(part, _DIRECTORY_FLAGS, dir_fd=descriptor)
-                except FileNotFoundError:
-                    if expected is not None:
-                        raise AuthoringError(
-                            "recorded destination ancestor disappeared"
-                        )
-                    return
-                except OSError as exc:
-                    raise AuthoringError(
-                        "authoring reserved stage parent is unavailable"
-                    ) from exc
-                try:
-                    if expected is None:
-                        raise AuthoringError(
-                            "destination ancestor was created after planning"
-                        )
-                    self._verify_directory_descriptor(
-                        next_descriptor, expected=expected
-                    )
-                except Exception:
-                    os.close(next_descriptor)
-                    raise
-                os.close(descriptor)
-                descriptor = next_descriptor
-                current = child
             try:
                 os.stat(path.name, dir_fd=descriptor, follow_symlinks=False)
             except FileNotFoundError:
@@ -287,6 +275,58 @@ class AuthoringProjectTree:
             raise AuthoringError("authoring reserved stage path is occupied")
         finally:
             os.close(descriptor)
+
+    def _open_reserved_parent(self, parent: Path) -> int | None:
+        relative = parent.relative_to(self._project)
+        descriptor = self._open_root()
+        current = self._project
+        try:
+            for part in relative.parts:
+                child = current / part
+                next_descriptor = self._open_reserved_child(
+                    descriptor, child, part
+                )
+                if next_descriptor is None:
+                    return None
+                os.close(descriptor)
+                descriptor = next_descriptor
+                current = child
+            result = descriptor
+            descriptor = -1
+            return result
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
+    def _open_reserved_child(
+        self, parent_descriptor: int, child: Path, leaf: str
+    ) -> int | None:
+        expected = self._expected(child)
+        try:
+            descriptor = os.open(leaf, _DIRECTORY_FLAGS, dir_fd=parent_descriptor)
+        except FileNotFoundError:
+            if expected is not None:
+                raise AuthoringError("recorded destination ancestor disappeared")
+            return None
+        except OSError as exc:
+            raise AuthoringError(
+                "authoring reserved stage parent is unavailable"
+            ) from exc
+        if expected is None:
+            os.close(descriptor)
+            raise AuthoringError("destination ancestor was created after planning")
+        try:
+            self._verify_directory_descriptor(descriptor, expected=expected)
+            return descriptor
+        except Exception:
+            os.close(descriptor)
+            raise
+
+    def _relative_directory(self, directory: Path) -> Path:
+        try:
+            return directory.relative_to(self._project)
+        except ValueError as exc:
+            raise AuthoringError("authoring directory is outside the project") from exc
 
     def _open_root(self) -> int:
         descriptor = os.open(self._project, _DIRECTORY_FLAGS)
