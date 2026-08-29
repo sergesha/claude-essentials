@@ -86,6 +86,49 @@ def test_canonical_match_uses_one_captured_transitive_plan(
     assert observed_compilation_image(destinations) == destinations
 
 
+@pytest.mark.parametrize("operation", ("compile", "estimate"))
+def test_public_compilation_projections_use_one_captured_transitive_plan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    import lockstep.authoring as authoring
+
+    project = tmp_path / "project"
+    child = write_workflow(project, "child")
+    write_workflow(project, "other")
+    parent = write_workflow(project, "parent", children=("child",))
+    expected_compilation = authoring.compile_project_source(parent)
+    expected_estimate = authoring.estimate_recipe(project, "parent")
+    write_workflow(project, "parent", children=("child", "other"))
+    changed_estimate = authoring.estimate_recipe(project, "parent")
+    write_workflow(project, "parent", children=("child",))
+    assert changed_estimate != expected_estimate
+    original_plan = authoring._plan_project_compilation
+    calls: list[str] = []
+
+    def planned_boundary(recipe):
+        plan = original_plan(recipe)
+        calls.append("whole-dag-plan")
+        if operation == "compile":
+            replace_marker(child, "initial", "changed")
+        else:
+            write_workflow(project, "parent", children=("child", "other"))
+        return plan
+
+    monkeypatch.setattr(authoring, "_plan_project_compilation", planned_boundary)
+    if operation == "compile":
+        assert authoring.compile_project_source(parent) == expected_compilation
+    else:
+        assert authoring.estimate_recipe(project, "parent") == expected_estimate
+
+    assert calls == ["whole-dag-plan"]
+    if operation == "compile":
+        assert "description: changed" in child.read_text(encoding="utf-8")
+    else:
+        assert "workflow: other" in parent.read_text(encoding="utf-8")
+
+
 @pytest.mark.parametrize("adapter", ("cli", "mcp"))
 def test_public_check_uses_one_captured_transitive_plan(
     tmp_path: Path,
