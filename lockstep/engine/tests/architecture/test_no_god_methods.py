@@ -8,8 +8,56 @@ import warnings
 
 import pytest
 
+from architecture_candidate_policy import evaluate_candidates
+from architecture_call_resolver import resolve_calls
+from architecture_diagnostics import render_report
+from architecture_domain_lifecycle import propagate_semantics
+from architecture_legacy_metrics import measure_legacy_metrics
+from architecture_manifest_verifier import verify_manifest
+from architecture_source_index import build_source_index
+
 
 SOURCE_ROOT = Path(__file__).parents[2] / "src" / "lockstep"
+ARCHITECTURE_TEST_ROOT = Path(__file__).parent
+
+ANALYZER_ROLE_MODULES = frozenset(
+    {
+        "architecture_source_index",
+        "architecture_legacy_metrics",
+        "architecture_call_resolver",
+        "architecture_domain_lifecycle",
+        "architecture_candidate_policy",
+        "architecture_manifest_verifier",
+        "architecture_diagnostics",
+    }
+)
+
+ALLOWED_ANALYZER_INTERNAL_IMPORT_EDGES = frozenset(
+    {
+        ("architecture_legacy_metrics", "architecture_source_index"),
+        ("architecture_call_resolver", "architecture_source_index"),
+        ("architecture_domain_lifecycle", "architecture_source_index"),
+        ("architecture_domain_lifecycle", "architecture_call_resolver"),
+        ("architecture_candidate_policy", "architecture_source_index"),
+        ("architecture_candidate_policy", "architecture_legacy_metrics"),
+        ("architecture_candidate_policy", "architecture_domain_lifecycle"),
+        ("architecture_manifest_verifier", "architecture_source_index"),
+        ("architecture_manifest_verifier", "architecture_candidate_policy"),
+        ("architecture_diagnostics", "architecture_source_index"),
+        ("architecture_diagnostics", "architecture_candidate_policy"),
+        ("architecture_diagnostics", "architecture_manifest_verifier"),
+    }
+)
+
+ANALYZER_ROLE_ENTRYPOINTS = {
+    "architecture_source_index": build_source_index,
+    "architecture_legacy_metrics": measure_legacy_metrics,
+    "architecture_call_resolver": resolve_calls,
+    "architecture_domain_lifecycle": propagate_semantics,
+    "architecture_candidate_policy": evaluate_candidates,
+    "architecture_manifest_verifier": verify_manifest,
+    "architecture_diagnostics": render_report,
+}
 
 CONFIRMED_GOD_METHODS = (
     ("runtime/effects/coordinator.py", "EffectCoordinator.reconcile"),
@@ -280,3 +328,59 @@ def test_authoring_project_tree_has_no_retired_lifecycle_responsibility() -> Non
         if isinstance(member, ast.FunctionDef)
         and (member.name == "__init__" or not member.name.startswith("_"))
     } == {"__init__", "preflight", "ensure_parent", "open_parent"}
+
+
+def test_analyzer_role_modules_are_the_complete_test_owned_role_set() -> None:
+    role_paths = tuple(sorted(ARCHITECTURE_TEST_ROOT.glob("architecture_*.py")))
+    assert {path.stem for path in role_paths} == ANALYZER_ROLE_MODULES
+    assert {
+        role: (entrypoint.__module__, entrypoint.__name__)
+        for role, entrypoint in ANALYZER_ROLE_ENTRYPOINTS.items()
+    } == {
+        "architecture_source_index": ("architecture_source_index", "build_source_index"),
+        "architecture_legacy_metrics": (
+            "architecture_legacy_metrics",
+            "measure_legacy_metrics",
+        ),
+        "architecture_call_resolver": ("architecture_call_resolver", "resolve_calls"),
+        "architecture_domain_lifecycle": (
+            "architecture_domain_lifecycle",
+            "propagate_semantics",
+        ),
+        "architecture_candidate_policy": (
+            "architecture_candidate_policy",
+            "evaluate_candidates",
+        ),
+        "architecture_manifest_verifier": (
+            "architecture_manifest_verifier",
+            "verify_manifest",
+        ),
+        "architecture_diagnostics": ("architecture_diagnostics", "render_report"),
+    }
+
+
+def _analyzer_internal_import_edges(path: Path) -> set[tuple[str, str]]:
+    edges: set[tuple[str, str]] = set()
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        targets: set[str] = set()
+        if isinstance(node, ast.Import):
+            targets = {alias.name.split(".", 1)[0] for alias in node.names}
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                targets = {node.module.split(".", 1)[0]}
+            else:
+                targets = {alias.name.split(".", 1)[0] for alias in node.names}
+        edges.update(
+            (path.stem, target) for target in targets if target in ANALYZER_ROLE_MODULES
+        )
+    return edges
+
+
+def test_analyzer_import_direction_is_frozen_to_the_specified_role_edges() -> None:
+    actual_edges = set().union(
+        *(
+            _analyzer_internal_import_edges(ARCHITECTURE_TEST_ROOT / f"{role}.py")
+            for role in ANALYZER_ROLE_MODULES
+        )
+    )
+    assert actual_edges <= ALLOWED_ANALYZER_INTERNAL_IMPORT_EDGES
