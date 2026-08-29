@@ -169,7 +169,7 @@ def install_template(
     manifest = _manifest(template)
     root = Path(project).resolve()
     publisher = AuthoringPublisher(state_dir)
-    publisher.recover(root)
+    publisher.require_ready(root)
     role_sources = _captured_role_sources(template, name, manifest)
     outputs = manifest["outputs"]
     if not isinstance(outputs, dict) or not isinstance(outputs.get("parent"), str):

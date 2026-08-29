@@ -123,17 +123,17 @@ def test_destination_parent_swap_cannot_escape_project(tmp_path) -> None:
 
 @pytest.mark.parametrize("race", ("empty-replacement", "foreign-child"))
 def test_created_parent_race_refuses_foreign_replacement_or_child(tmp_path, monkeypatch, race) -> None:
-    scenario = _scenario(tmp_path, present=False); parent = scenario.targets[0].parent; original = os.mkdir; injected = []; foreign_directory = []
-    def mkdir(path, *args, **kwargs):
-        result = original(path, *args, **kwargs)
+    scenario = _scenario(tmp_path, present=False); parent = scenario.targets[0].parent; original_open, original_mkdir = os.open, os.mkdir; injected = []; foreign_directory = []
+    def open_directory(path, flags, *args, **kwargs):
+        descriptor = original_open(path, flags, *args, **kwargs)
         if os.fsdecode(path) == parent.name and not injected:
             injected.append(True)
             if race == "empty-replacement":
-                os.rmdir(path, dir_fd=kwargs.get("dir_fd")); original(path, *args, **kwargs)
+                os.rmdir(path, dir_fd=kwargs.get("dir_fd")); original_mkdir(path, dir_fd=kwargs.get("dir_fd"))
                 info = parent.stat(); foreign_directory.append(((info.st_dev, info.st_ino), tree_image(parent)))
             else: (parent / "foreign.txt").write_bytes(b"foreign\n")
-        return result
-    monkeypatch.setattr(os, "mkdir", mkdir)
+        return descriptor
+    monkeypatch.setattr(os, "open", open_directory)
     with pytest.raises(AuthoringError, match="foreign|ownership|created"):
         publisher._publish_per_file(scenario.bundle)
     assert injected == [True] and all(not path.exists() for path in scenario.targets)

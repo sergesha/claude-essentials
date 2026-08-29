@@ -47,6 +47,7 @@ from lockstep.authoring import (
     publish_project_compilation,
     render_recipe,
 )
+from lockstep.authoring_publisher import observe_authoring_project
 from lockstep.recipe import yamlgraph_adapter as yg
 from lockstep.recipe.authority import (
     RecipeAuthorityError,
@@ -442,12 +443,24 @@ def recipe_diff(name: str, ctx: Context | None = None) -> str:
 def recipe_render(
     name: str, view: str = "workflow", ctx: Context | None = None
 ) -> str:
-    return render_recipe(_project_for_context(ctx), name, view)
+    project = _project_for_context(ctx)
+    owner_state, _recipes = _configured_paths(project)
+    return observe_authoring_project(
+        owner_state,
+        project,
+        lambda: render_recipe(project, name, view),
+    )
 
 
 @app.tool()
 def recipe_estimate(name: str, ctx: Context | None = None) -> dict:
-    return estimate_recipe(_project_for_context(ctx), name)
+    project = _project_for_context(ctx)
+    owner_state, _recipes = _configured_paths(project)
+    return observe_authoring_project(
+        owner_state,
+        project,
+        lambda: estimate_recipe(project, name),
+    )
 
 
 @app.tool()

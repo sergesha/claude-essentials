@@ -127,6 +127,7 @@ def _cmd_recipe(args: argparse.Namespace) -> int:
         publish_project_compilation,
         render_recipe,
     )
+    from lockstep.authoring_publisher import observe_authoring_project
 
     project = Path.cwd()
     if args.action == "init":
@@ -166,13 +167,24 @@ def _cmd_recipe(args: argparse.Namespace) -> int:
         )
         return 0
     if args.action == "render":
-        sys.stdout.write(render_recipe(project, args.name, args.view))
+        sys.stdout.write(
+            observe_authoring_project(
+                state_dir().absolute(),
+                project,
+                lambda: render_recipe(project, args.name, args.view),
+            )
+        )
         return 0
     if args.action == "estimate":
         # The stable JSON schema is also the human-readable representation in
         # v1; --json is retained so callers can request that contract explicitly.
         del args.json
-        sys.stdout.write(json_text(estimate_recipe(project, args.name)))
+        result = observe_authoring_project(
+            state_dir().absolute(),
+            project,
+            lambda: estimate_recipe(project, args.name),
+        )
+        sys.stdout.write(json_text(result))
         return 0
     raise CliError("unknown recipe action")
 

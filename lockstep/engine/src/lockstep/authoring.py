@@ -191,21 +191,21 @@ def write_compilation(
     from lockstep.authoring_publisher import AuthoringPublisher
 
     publisher = AuthoringPublisher(state_dir)
-    publisher.recover(project)
+    publisher.require_ready(project)
     return _publish_planned_compilation(publisher, recipe)
 
 
 def publish_project_compilation(
     project: Path, name: str, *, state_dir: Path
 ) -> CompilationResult:
-    """Recover, plan once, and atomically publish one authored closure."""
+    """Validate readiness, plan once, and publish one authored closure."""
 
     validate_logical_name(name)
     root = Path(project).resolve()
     from lockstep.authoring_publisher import AuthoringPublisher
 
     publisher = AuthoringPublisher(state_dir)
-    publisher.recover(root)
+    publisher.require_ready(root)
     recipe = project_paths(root, name)
     _require_workflow_compilation(recipe)
     return _publish_planned_compilation(publisher, recipe)
@@ -316,7 +316,7 @@ def initialize_minimal(
     from lockstep.authoring_publisher import AuthoringPublisher
 
     publisher = AuthoringPublisher(state_dir)
-    publisher.recover(root)
+    publisher.require_ready(root)
     planned = plan_captured_workflow_installation(
         root,
         (CapturedWorkflowSource(name, _minimal_workflow_source(name)),),

@@ -136,13 +136,28 @@ class AuthoringProjectTree:
         leaf: str,
         persist_created_directory_identity: Callable[[PathIdentity], None],
     ) -> int:
-        # Enrollment precedes mkdir so any ambiguous failure retains the journal.
+        # Record ambiguity before mkdir; enroll an inode only after proving the
+        # open and named directories are the same empty directory.
         self.created_directories[child] = None
         os.mkdir(leaf, mode=0o755, dir_fd=parent_descriptor)
         descriptor = os.open(leaf, _DIRECTORY_FLAGS, dir_fd=parent_descriptor)
         try:
             info = self._verify_directory_descriptor(descriptor, expected=None)
             identity = PathIdentity(child, info.st_dev, info.st_ino)
+            proof = os.open(leaf, _DIRECTORY_FLAGS, dir_fd=parent_descriptor)
+            try:
+                try:
+                    self._verify_directory_descriptor(proof, expected=identity)
+                except AuthoringError as exc:
+                    raise AuthoringError(
+                        "created authoring directory ownership changed"
+                    ) from exc
+                if os.listdir(descriptor) or os.listdir(proof):
+                    raise AuthoringError(
+                        "created authoring directory contains foreign entries"
+                    )
+            finally:
+                os.close(proof)
             self.created_directories[child] = identity
             persist_created_directory_identity(identity)
             os.fsync(parent_descriptor)

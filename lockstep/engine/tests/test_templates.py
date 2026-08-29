@@ -261,7 +261,7 @@ def test_compile_failure_before_publish_leaves_no_bundle_destinations(
     assert not (tmp_path / ".lockstep/recipes").exists()
 
 
-def test_publish_fault_rolls_back_every_destination_and_next_init_recovers(
+def test_publish_fault_leaves_completed_prefix_and_next_init_refuses_collision(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     original_link = os.link
@@ -278,8 +278,18 @@ def test_publish_fault_rolls_back_every_destination_and_next_init_recovers(
     monkeypatch.setattr(os, "link", fail_second)
     with pytest.raises(OSError, match="publish fault"):
         _install_template("reviewed-change", "release", tmp_path)
-    assert not any(path.is_file() for path in tmp_path.rglob("*"))
+    partial = {
+        path.relative_to(tmp_path): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+    assert partial
 
     monkeypatch.setattr(os, "link", original_link)
-    installed = _install_template("reviewed-change", "release", tmp_path)
-    assert all(path.is_file() for path in (*installed.sources, *installed.recipes))
+    with pytest.raises(_templates().TemplateCollision):
+        _install_template("reviewed-change", "release", tmp_path)
+    assert partial == {
+        path.relative_to(tmp_path): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }

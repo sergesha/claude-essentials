@@ -43,8 +43,9 @@ def _project(tmp_path: Path):
 def _retain(journal: AuthoringJournal, payload: bytes) -> None: journal.journal_path.write_bytes(payload); journal.journal_path.chmod(0o600)
 
 def _guidance(call, project: Path, state: Path, journal: AuthoringJournal) -> None:
-    project_before, owner_before = tree_image(project), tree_image(state); raised = pytest.raises(Exception)
-    with raised: call()
+    project_before, owner_before = tree_image(project), tree_image(state)
+    with pytest.raises(Exception) as raised:
+        call()
     message = str(raised.value)
     assert "v4" in message and "pre-simplification" in message
     assert str(project.resolve()) in message and str(state) in message
