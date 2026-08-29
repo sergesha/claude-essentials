@@ -40,8 +40,8 @@ def _project(tmp_path: Path):
     project = tmp_path / "project"; project.mkdir(); state = (tmp_path / "owner-state").resolve()
     write_workflow(project, "release"); authoring.publish_project_compilation(project, "release", state_dir=state)
     namespace, identity = _locate_test_namespace(state, project)
-    digest = hashlib.sha256(json.dumps({"path": str(identity.resolved_path), "device": identity.device, "inode": identity.inode}, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
-    assert identity.resolved_path == project.resolve() and namespace == state / "authoring" / digest
+    digest = hashlib.sha256(json.dumps({"path": str(identity.path), "device": identity.device, "inode": identity.inode}, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+    assert identity.path == project.resolve() and namespace == state / "authoring" / digest
     return project, state, namespace
 def _retain(namespace: Path, payload: bytes) -> Path:
     transaction = namespace / "transaction.json"; transaction.write_bytes(payload); transaction.chmod(0o600); return transaction
@@ -73,7 +73,7 @@ def test_live_v4_blocks_all_planning_and_runtime_admission(tmp_path, monkeypatch
     project, state, namespace = _project(tmp_path); _retain(namespace, live_v4_bytes(project)); replace_marker(project / ".lockstep/workflows/release.workflow.yaml", "initial", "edited")
     reached = []
     def blocked(*_a, **_k): reached.append(True); pytest.fail("planning or admission ran")
-    for owner, name in ((authoring, "_plan_project_compilation"), (authoring, "plan_captured_workflow_installation"),
+    for owner, name in ((authoring, "compile_project"), (authoring, "plan_captured_workflow_installation"),
                         (templates, "plan_template_installation"), (RecipeCandidate, "authorize"), (AuthorizedStartService, "start")):
         monkeypatch.setattr(owner, name, blocked)
     service = LockstepCommandService(state, project / ".lockstep/recipes")

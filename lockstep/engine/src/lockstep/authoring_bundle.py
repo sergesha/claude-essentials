@@ -1,44 +1,33 @@
-"""Immutable values at the whole-DAG authoring boundary."""
+"""Immutable values and canonical layout at the authoring boundary."""
 
 from __future__ import annotations
 
-import hashlib
-import stat
-from collections.abc import Iterable
+import hashlib, stat
 from dataclasses import dataclass
-from os import stat_result
 from pathlib import Path
 from typing import Literal
 
 import yaml
 
-from lockstep.authoring_capture import (
-    capture_directory,
-    capture_optional_regular_file,
-    capture_regular_file,
-    validate_directory,
-)
-from lockstep.authoring_compilation import (
-    compile_captured_source,
-    validate_logical_name,
-    workflow_call_names,
-)
 from lockstep.errors import AuthoringError
-from lockstep.recipe.authority import RecipeLimits
-from lockstep.runtime.owner_state import StorageLimitExceeded
 from lockstep.workflow.canonical import canonical_yaml
 from lockstep.workflow.compiler import CompilationResult
-from lockstep.workflow.schema import load_workflow_bytes
 from lockstep.workflow.semantics import ResolvedCatalog, ValidatedWorkflow
 
-__all__ = [
-    "DestinationImage",
-    "ProjectCompilationBundle",
-    "SourceIdentity",
-    "plan_project_compilation",
-]
+__all__ = ["AuthoredRecipe", "AuthoringPlan", "DirectoryIdentity", "FileIdentity",
+           "PlannedTarget", "ProjectCompilation", "SourceSnapshot"]
 
 
+def _absolute(path: Path, label: str) -> Path:
+    if not isinstance(path, Path):
+        raise TypeError(f"{label} must be a Path")
+    if not path.is_absolute() or any(part in {".", ".."} for part in path.parts):
+        raise ValueError(f"{label} must be absolute and lexically canonical")
+    return path
+
+
+def _digest(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
 @dataclass(frozen=True, slots=True)
 class AuthoredRecipe:
     name: str
@@ -47,119 +36,20 @@ class AuthoredRecipe:
     recipe_path: Path
     dependency_path: Path | None
     source_map_path: Path | None
-
-
-_CompiledWorkflow = tuple[ValidatedWorkflow, CompilationResult]
-_ProjectedRole = tuple[str, dict[Path, bytes]]
-
-
-class _AuthoringBudget:
-    """Incrementally admit one bounded authoring record group."""
-
-    __slots__ = ("_bytes", "_count", "_label", "_limits")
-
-    def __init__(self, label: str) -> None:
-        self._label = label
-        self._limits = RecipeLimits()
-        self._count = 0
-        self._bytes = 0
-
-    @property
-    def max_bytes_for_next(self) -> int:
-        if self._count >= self._limits.max_files:
-            raise StorageLimitExceeded(
-                f"{self._label} exceeds {self._limits.max_files} admission limit"
-            )
-        return min(
-            self._limits.max_file_bytes,
-            self._limits.max_source_bytes - self._bytes,
-        )
-
-    def retain(self, content: bytes | None) -> None:
-        available = self.max_bytes_for_next
-        if content is not None and not isinstance(content, bytes):
-            raise TypeError("authoring budget contents must be bytes or absence")
-        size = len(content or b"")
-        if size > available:
-            if size > self._limits.max_file_bytes:
-                raise StorageLimitExceeded(
-                    f"{self._label} contains a file exceeding the admission limit"
-                )
-            raise StorageLimitExceeded(
-                f"{self._label} exceeds the aggregate byte admission limit"
-            )
-        self._count += 1
-        self._bytes += size
-
-
-def _validate_authoring_contents(
-    label: str, contents: Iterable[bytes | None]
-) -> None:
-    budget = _AuthoringBudget(label)
-    for content in contents:
-        budget.retain(content)
-
-
 @dataclass(frozen=True, slots=True)
-class PlannedProjectCompilation:
-    """One captured workflow closure and its same-pass root compilation."""
-
-    bundle: ProjectCompilationBundle
-    root_validated: ValidatedWorkflow
-    root_catalog: ResolvedCatalog
-    root_result: CompilationResult
-
-
-def _absolute(path: Path, label: str) -> Path:
-    if not isinstance(path, Path):
-        raise TypeError(f"{label} must be a Path")
-    value = path
-    if not value.is_absolute() or any(part in {".", ".."} for part in value.parts):
-        raise ValueError(f"{label} must be absolute and lexically canonical")
-    return value
-
-
-def _digest(content: bytes) -> str:
-    return hashlib.sha256(content).hexdigest()
-
-
-def canonical_recipe_bytes_for_children(
-    recipe_bytes: bytes, children: tuple[str, ...]
-) -> bytes:
-    """Return canonical compiled bytes with the supplied child ingress links."""
-
-    if not children:
-        return recipe_bytes
-    document = yaml.safe_load(recipe_bytes)
-    nodes = document.get("nodes") if isinstance(document, dict) else None
-    if not isinstance(nodes, dict):
-        raise AuthoringError("compiled template recipe has no node catalog")
-    for index, child in enumerate(children):
-        nodes[f"template-dependency-{index}"] = {
-            "type": "subgraph",
-            "graph": f"{child}.recipe.yaml",
-            "mode": "invoke",
-        }
-    return canonical_yaml(document)
-
-
-@dataclass(frozen=True, slots=True)
-class _PathIdentity:
-    resolved_path: Path
+class DirectoryIdentity:
+    path: Path
     device: int
     inode: int
 
     def __post_init__(self) -> None:
-        _absolute(self.resolved_path, "identity path")
+        _absolute(self.path, "directory identity path")
         if any(type(value) is not int for value in (self.device, self.inode)):
-            raise TypeError("path identity values must be integers")
+            raise TypeError("directory identity values must be integers")
         if min(self.device, self.inode) < 0:
-            raise ValueError("path identity values must be non-negative")
-
-
+            raise ValueError("directory identity values must be non-negative")
 @dataclass(frozen=True, slots=True)
-class _LeafIdentity:
-    resolved_path: Path
+class FileIdentity:
     device: int
     inode: int
     mode: int
@@ -168,569 +58,167 @@ class _LeafIdentity:
     ctime_ns: int
 
     def __post_init__(self) -> None:
-        _absolute(self.resolved_path, "leaf identity path")
-        if any(
-            type(value) is not int
-            for value in (
-                self.device,
-                self.inode,
-                self.mode,
-                self.size,
-                self.mtime_ns,
-                self.ctime_ns,
-            )
-        ):
-            raise TypeError("leaf identity values must be integers")
+        values = (self.device, self.inode, self.mode, self.size, self.mtime_ns, self.ctime_ns)
+        if any(type(value) is not int for value in values):
+            raise TypeError("file identity values must be integers")
         if min(self.device, self.inode, self.mode, self.size) < 0:
-            raise ValueError("leaf identity values must be non-negative")
+            raise ValueError("file identity values must be non-negative")
         if not stat.S_ISREG(self.mode):
-            raise ValueError("leaf identity must describe a regular file")
-
-
-# Narrow typed contracts shared by the authoring planner and publisher.  They
-# remain outside the public ``__all__`` surface.
-PathIdentity = _PathIdentity
-LeafIdentity = _LeafIdentity
-
-
+            raise ValueError("file identity must describe a regular file")
+def _parents(value: object, label: str) -> tuple[DirectoryIdentity, ...]:
+    if not isinstance(value, tuple):
+        raise TypeError(f"{label} parents must be a tuple")
+    if any(not isinstance(item, DirectoryIdentity) for item in value):
+        raise TypeError(f"{label} parent identity is invalid")
+    paths = tuple(item.path for item in value)
+    if len(paths) != len(set(paths)):
+        raise ValueError(f"{label} parent identities are invalid")
+    return value
 @dataclass(frozen=True, slots=True)
-class SourceIdentity:
+class SourceSnapshot:
     role: str
-    resolved_path: Path
+    path: Path
     content: bytes
     sha256: str
-    leaf: _LeafIdentity
-    ancestors: tuple[_PathIdentity, ...]
+    file: FileIdentity
+    parents: tuple[DirectoryIdentity, ...]
 
     def __post_init__(self) -> None:
-        path = _absolute(self.resolved_path, "source path")
+        _absolute(self.path, "source path")
         if not isinstance(self.role, str) or not self.role:
             raise ValueError("source role must be non-empty")
         if not isinstance(self.content, bytes) or self.sha256 != _digest(self.content):
             raise ValueError("source digest does not match its exact bytes")
-        if not isinstance(self.leaf, _LeafIdentity):
-            raise TypeError("source leaf identity is invalid")
-        if self.leaf.resolved_path != path or self.leaf.size != len(self.content):
-            raise ValueError("source leaf identity does not match its source")
-        if not isinstance(self.ancestors, tuple):
-            raise TypeError("source ancestor identities must be a tuple")
-        if any(not isinstance(item, _PathIdentity) for item in self.ancestors):
-            raise TypeError("source ancestor identity is invalid")
-        paths = tuple(item.resolved_path for item in self.ancestors)
-        if len(paths) != len(set(paths)) or path in paths:
-            raise ValueError("source ancestor identities are invalid")
-
-
+        if not isinstance(self.file, FileIdentity) or self.file.size != len(self.content):
+            raise ValueError("source file identity does not match its bytes")
+        _parents(self.parents, "source")
 @dataclass(frozen=True, slots=True)
-class DestinationImage:
+class PlannedTarget:
     role: str
-    resolved_path: Path
-    content: bytes | None
-    sha256: str | None
-    mode: int | None
-    leaf: _LeafIdentity | None
-    ancestors: tuple[_PathIdentity, ...]
+    path: Path
+    before: bytes | None
+    before_sha256: str | None
+    before_file: FileIdentity | None
+    after: bytes
+    after_sha256: str
+    mode: int
+    parents: tuple[DirectoryIdentity, ...]
 
     def __post_init__(self) -> None:
-        path = _absolute(self.resolved_path, "destination path")
+        _absolute(self.path, "target path")
         if not isinstance(self.role, str) or not self.role:
-            raise ValueError("destination role must be non-empty")
-        if not isinstance(self.ancestors, tuple):
-            raise TypeError("destination ancestor identities must be a tuple")
-        if any(not isinstance(item, _PathIdentity) for item in self.ancestors):
-            raise TypeError("destination ancestor identity is invalid")
-        ancestor_paths = tuple(item.resolved_path for item in self.ancestors)
-        if len(ancestor_paths) != len(set(ancestor_paths)) or path in ancestor_paths:
-            raise ValueError("destination ancestor identities are invalid")
-        if self.content is None:
-            if self.sha256 is not None or self.mode is not None or self.leaf is not None:
-                raise ValueError("an absent destination must have one exact absence image")
-            return
-        if not isinstance(self.content, bytes) or self.sha256 != _digest(self.content):
-            raise ValueError("destination digest does not match its exact bytes")
+            raise ValueError("target role must be non-empty")
+        if not isinstance(self.after, bytes) or self.after_sha256 != _digest(self.after):
+            raise ValueError("target after digest does not match its exact bytes")
         if type(self.mode) is not int or not 0 <= self.mode <= 0o7777:
-            raise ValueError("destination mode is invalid")
-        if self.leaf is not None:
-            if not isinstance(self.leaf, _LeafIdentity):
-                raise TypeError("destination leaf identity is invalid")
-            if (
-                self.leaf.resolved_path != path
-                or self.leaf.size != len(self.content)
-                or stat.S_IMODE(self.leaf.mode) != self.mode
-            ):
-                raise ValueError("destination leaf identity does not match its image")
-
-
+            raise ValueError("target mode is invalid")
+        _parents(self.parents, "target")
+        if self.before is None:
+            if self.before_sha256 is not None or self.before_file is not None:
+                raise ValueError("target absence must have one exact absence image")
+        elif (not isinstance(self.before, bytes)
+              or self.before_sha256 != _digest(self.before)
+              or not isinstance(self.before_file, FileIdentity)
+              or self.before_file.size != len(self.before)):
+            raise ValueError("target before image is inconsistent")
+def _topology(edges: tuple[tuple[str, tuple[str, ...]], ...]) -> tuple[str, ...]:
+    if not isinstance(edges, tuple):
+        raise TypeError("plan dependency edges must be a tuple")
+    roles: list[str] = []
+    for edge in edges:
+        if not isinstance(edge, tuple) or len(edge) != 2:
+            raise TypeError("plan dependency edge is invalid")
+        role, children = edge
+        if not isinstance(role, str) or not role or role in roles:
+            raise ValueError("plan dependency roles must be non-empty and unique")
+        if not isinstance(children, tuple) or len(children) != len(set(children)):
+            raise ValueError("plan dependencies must reference earlier child roles")
+        if any(not isinstance(child, str) or child not in roles for child in children):
+            raise ValueError("plan dependencies must reference earlier child roles")
+        roles.append(role)
+    if not roles:
+        raise ValueError("plan dependency roles must be non-empty and unique")
+    return tuple(roles)
+def _bound_chain(project: Path, parents: tuple[DirectoryIdentity, ...], path: Path) -> None:
+    if not parents or parents[0].path != project:
+        raise ValueError("plan path is not project-bound")
+    previous = project.parent
+    for parent in parents:
+        if parent.path.parent != previous:
+            raise ValueError("plan parent chain is incomplete")
+        previous = parent.path
+    try:
+        path.parent.relative_to(previous)
+    except ValueError as exc:
+        raise ValueError("plan parent chain is invalid") from exc
+def _project_identity_matches(project: Path, identity: object) -> bool:
+    return isinstance(identity, DirectoryIdentity) and identity.path == project
 @dataclass(frozen=True, slots=True)
-class ProjectCompilationBundle:
-    resolved_project: Path
-    project_identity: _PathIdentity
-    sources: tuple[SourceIdentity, ...]
+class AuthoringPlan:
+    project: Path
+    project_identity: DirectoryIdentity
+    sources: tuple[SourceSnapshot, ...]
     dependency_edges: tuple[tuple[str, tuple[str, ...]], ...]
-    before_images: tuple[DestinationImage, ...]
-    after_images: tuple[DestinationImage, ...]
+    targets: tuple[PlannedTarget, ...]
 
     def __post_init__(self) -> None:
-        _validate_bundle_project(self)
-        _validate_bundle_collections(self)
-        source_roles = _validate_bundle_sources(self.sources)
-        roles = _validate_dependency_topology(self.dependency_edges)
-        if source_roles not in ((), roles):
-            raise ValueError("bundle source roles must be complete or empty")
-        _validate_destination_pairs(self.before_images, self.after_images, roles)
+        project = _absolute(self.project, "project path")
+        if not _project_identity_matches(project, self.project_identity):
+            raise ValueError("project identity does not match its path")
+        if not isinstance(self.sources, tuple) or not isinstance(self.targets, tuple):
+            raise TypeError("plan sources and targets must be tuples")
+        roles = _topology(self.dependency_edges)
+        if any(not isinstance(item, SourceSnapshot) for item in self.sources):
+            raise TypeError("plan source snapshot is invalid")
+        if tuple(item.role for item in self.sources) not in ((), roles):
+            raise ValueError("plan source roles must be complete or empty")
+        source_paths = tuple(item.path for item in self.sources)
+        targets = tuple(item.path for item in self.targets)
+        if len(source_paths) != len(set(source_paths)):
+            raise ValueError("plan source paths must be unique")
+        if any(not isinstance(item, PlannedTarget) or item.role not in roles
+               for item in self.targets):
+            raise ValueError("plan target roles must match dependency roles")
+        if len(targets) != len(set(targets)):
+            raise ValueError("plan target paths must be unique")
+        if set(source_paths).intersection(targets) or any(
+            first in second.parents for first in targets for second in targets
+        ):
+            raise ValueError("plan source and target paths overlap")
+        identities: dict[Path, DirectoryIdentity] = {}
+        for item in (*self.sources, *self.targets):
+            _bound_chain(project, item.parents, item.path)
+            for identity in item.parents:
+                if identities.setdefault(identity.path, identity) != identity:
+                    raise ValueError("plan contains conflicting directory identities")
+@dataclass(frozen=True, slots=True)
+class ProjectCompilation:
+    plan: AuthoringPlan
+    root_validated: ValidatedWorkflow
+    root_catalog: ResolvedCatalog
+    root_result: CompilationResult
 
-
-def _validate_bundle_project(bundle: ProjectCompilationBundle) -> None:
-    project = _absolute(bundle.resolved_project, "project path")
-    if not isinstance(bundle.project_identity, _PathIdentity):
-        raise TypeError("project identity is invalid")
-    if bundle.project_identity.resolved_path != project:
-        raise ValueError("project identity does not match its resolved path")
-
-
-def _validate_bundle_collections(bundle: ProjectCompilationBundle) -> None:
-    for label, value in (
-        ("sources", bundle.sources),
-        ("dependency edges", bundle.dependency_edges),
-        ("before images", bundle.before_images),
-        ("after images", bundle.after_images),
-    ):
-        if not isinstance(value, tuple):
-            raise TypeError(f"bundle {label} must be a tuple")
-
-
-def _validate_bundle_sources(sources: tuple[SourceIdentity, ...]) -> tuple[str, ...]:
-    if any(not isinstance(item, SourceIdentity) for item in sources):
-        raise TypeError("bundle source identity is invalid")
-    source_paths = tuple(item.resolved_path for item in sources)
-    if len(source_paths) != len(set(source_paths)):
-        raise ValueError("bundle source paths must be unique")
-    return tuple(item.role for item in sources)
-
-
-def _validate_dependency_topology(
-    dependency_edges: tuple[tuple[str, tuple[str, ...]], ...],
-) -> tuple[str, ...]:
-    if any(not isinstance(edge, tuple) or len(edge) != 2 for edge in dependency_edges):
-        raise TypeError("bundle dependency edge is invalid")
-    roles = tuple(role for role, _children in dependency_edges)
-    if not roles or len(roles) != len(set(roles)):
-        raise ValueError("bundle dependency roles must be non-empty and unique")
-    seen: set[str] = set()
-    for role, children in dependency_edges:
-        _validate_dependency_edge(role, children, seen)
-        seen.add(role)
-    return roles
-
-
-def _validate_dependency_edge(
-    role: object,
-    children: object,
-    seen: set[str],
-) -> None:
-    if not isinstance(role, str) or not role:
-        raise ValueError("bundle dependency roles must be non-empty and unique")
-    if not isinstance(children, tuple):
-        raise ValueError("bundle dependencies must reference earlier child roles")
-    if any(not isinstance(child, str) for child in children):
-        raise ValueError("bundle dependencies must reference earlier child roles")
-    if len(children) != len(set(children)) or any(child not in seen for child in children):
-        raise ValueError("bundle dependencies must reference earlier child roles")
-
-
-def _validate_destination_pairs(
-    before_images: tuple[DestinationImage, ...],
-    after_images: tuple[DestinationImage, ...],
-    roles: tuple[str, ...],
-) -> None:
-    if any(not isinstance(item, DestinationImage) for item in before_images):
-        raise TypeError("bundle before-image is invalid")
-    if any(not isinstance(item, DestinationImage) for item in after_images):
-        raise TypeError("bundle after-image is invalid")
-    before_paths = tuple(item.resolved_path for item in before_images)
-    after_paths = tuple(item.resolved_path for item in after_images)
-    if before_paths != after_paths or len(after_paths) != len(set(after_paths)):
-        raise ValueError("bundle before and after destination maps must match exactly")
-    if any(item.content is None for item in after_images):
-        raise ValueError("bundle after-images must contain exact destination bytes")
-    for before, after in zip(before_images, after_images, strict=True):
-        _validate_destination_pair(before, after, roles)
-
-
-def _validate_destination_pair(
-    before: DestinationImage,
-    after: DestinationImage,
-    roles: tuple[str, ...],
-) -> None:
-    if before.role != after.role or before.role not in roles:
-        raise ValueError("bundle destination roles must match dependency roles")
-    if before.ancestors != after.ancestors:
-        raise ValueError("paired destination ancestors must match")
-    if before.content is not None and before.leaf is None:
-        raise ValueError("a present before-image requires its captured leaf identity")
-    if after.leaf is not None:
-        raise ValueError("a planned after-image cannot contain a captured leaf identity")
-
-
-def plan_project_compilation(recipe: AuthoredRecipe) -> ProjectCompilationBundle:
-    """Plan one immutable authored closure without publishing it."""
-
-    return _plan_project_compilation(recipe).bundle
-
-
-def _plan_destination_only_bundle(
-    project: Path,
-    dependency_edges: tuple[tuple[str, tuple[str, ...]], ...],
-    projected_roles: tuple[_ProjectedRole, ...],
-) -> ProjectCompilationBundle:
-    root = Path(project).resolve()
-    if tuple(role for role, _projected in projected_roles) != tuple(
-        role for role, _children in dependency_edges
-    ):
-        raise AuthoringError("destination-only projections must match dependency roles")
-    destination_budget = _AuthoringBudget("authoring after images")
-    destination_paths: set[Path] = set()
-    for _role, projected in projected_roles:
-        if any(path in destination_paths for path in projected):
-            raise AuthoringError("compilation destinations must be unique")
-        for content in projected.values():
-            destination_budget.retain(content)
-        destination_paths.update(projected)
-    directory_identities: dict[Path, _PathIdentity] = {}
-    project_identity = _cached_directory_identity(directory_identities, root)
-    before_images, after_images = _destination_images(
-        root, projected_roles, directory_identities
-    )
-    return ProjectCompilationBundle(
-        root,
-        project_identity,
-        (),
-        dependency_edges,
-        before_images,
-        after_images,
-    )
-
-
-def _plan_project_compilation(recipe: AuthoredRecipe) -> PlannedProjectCompilation:
-    """Retain the root result from the same pass that produced the bundle."""
-
-    if recipe.kind != "workflow" or recipe.workflow_path is None:
-        raise AuthoringError("only ordinary workflow sources can be planned")
-    project, source_path = _workflow_project_and_source(recipe)
-    directory_identities: dict[Path, _PathIdentity] = {}
-    project_identity = _cached_directory_identity(directory_identities, project)
-    (
-        sources,
-        dependency_edges,
-        compiled_roles,
-        root_validated,
-        root_catalog,
-        root_result,
-    ) = _compile_closure(
-        recipe, source_path, project, directory_identities
-    )
-    before_images, after_images = _destination_images(
-        project, compiled_roles, directory_identities
-    )
-    return PlannedProjectCompilation(
-        ProjectCompilationBundle(
-            project,
-            project_identity,
-            sources,
-            dependency_edges,
-            before_images,
-            after_images,
-        ),
-        root_validated,
-        root_catalog,
-        root_result,
-    )
-
-
-def _compile_closure(
-    recipe: AuthoredRecipe,
-    source_path: Path,
-    project: Path,
-    directory_identities: dict[Path, _PathIdentity],
-) -> tuple[
-    tuple[SourceIdentity, ...],
-    tuple[tuple[str, tuple[str, ...]], ...],
-    tuple[_ProjectedRole, ...],
-    ValidatedWorkflow,
-    ResolvedCatalog,
-    CompilationResult,
-]:
-    sources: list[SourceIdentity] = []
-    dependency_edges: list[tuple[str, tuple[str, ...]]] = []
-    projected_roles: list[_ProjectedRole] = []
-    completed: dict[str, _CompiledWorkflow] = {}
-    catalogs: dict[str, ResolvedCatalog] = {}
-    active: set[str] = set()
-    source_budget = _AuthoringBudget("authoring read set")
-    destination_budget = _AuthoringBudget("authoring after images")
-    destination_paths: set[Path] = set()
-
-    def visit(role_recipe: AuthoredRecipe, role_path: Path) -> None:
-        role = role_recipe.name
-        if role in completed:
-            return
-        if role in active:
-            raise AuthoringError("workflow source dependency graph is recursive")
-        active.add(role)
-        try:
-            source = _capture_source(
-                role,
-                role_path,
-                project,
-                directory_identities,
-                max_bytes=source_budget.max_bytes_for_next,
-            )
-            source_budget.retain(source.content)
-            document = load_workflow_bytes(source.resolved_path, source.content)
-            child_names = workflow_call_names(document)
-            for child_name in child_names:
-                child_recipe = _workflow_recipe(project, child_name)
-                child_path = child_recipe.workflow_path
-                if child_path is None:
-                    raise AuthoringError("workflow source is required")
-                visit(child_recipe, child_path)
-            children = {name: completed[name] for name in child_names}
-            validated, catalog, compiled = compile_captured_source(
-                document, children=children
-            )
-            projected = _workflow_destinations(role_recipe, compiled, child_names)
-            if any(path in destination_paths for path in projected):
-                raise AuthoringError("compilation destinations must be unique")
-            for content in projected.values():
-                destination_budget.retain(content)
-            destination_paths.update(projected)
-            completed[role] = (validated, compiled)
-            catalogs[role] = catalog
-            sources.append(source)
-            dependency_edges.append((role, child_names))
-            projected_roles.append((role, projected))
-        finally:
-            active.remove(role)
-
-    visit(recipe, source_path)
-    return (
-        tuple(sources),
-        tuple(dependency_edges),
-        tuple(projected_roles),
-        completed[recipe.name][0],
-        catalogs[recipe.name],
-        completed[recipe.name][1],
-    )
-
-
-def _destination_images(
-    project: Path,
-    projected_roles: tuple[_ProjectedRole, ...],
-    directory_identities: dict[Path, _PathIdentity],
-) -> tuple[tuple[DestinationImage, ...], tuple[DestinationImage, ...]]:
-    destinations: dict[Path, tuple[str, bytes]] = {}
-    for role, projected in projected_roles:
-        destinations.update(
-            (path, (role, content)) for path, content in projected.items()
-        )
-    ancestors_by_parent = {
-        parent: _destination_ancestors(project, parent, directory_identities)
-        for parent in dict.fromkeys(path.parent for path in destinations)
-    }
-    before_images_list: list[DestinationImage] = []
-    before_budget = _AuthoringBudget("authoring before images")
-    for path, (role, _content) in destinations.items():
-        image = _capture_destination(
-            role,
-            path,
-            ancestors_by_parent[path.parent],
-            max_bytes=before_budget.max_bytes_for_next,
-        )
-        before_images_list.append(image)
-        before_budget.retain(image.content)
-    before_images = tuple(before_images_list)
-    after_images = tuple(
-        DestinationImage(
-            role,
-            path,
-            content,
-            _digest(content),
-            0o644,
-            None,
-            ancestors_by_parent[path.parent],
-        )
-        for path, (role, content) in destinations.items()
-    )
-    return before_images, after_images
-
-
-def _workflow_recipe(project: Path, name: str) -> AuthoredRecipe:
-    validate_logical_name(name)
-    workflow = project / ".lockstep" / "workflows" / f"{name}.workflow.yaml"
-    recipe = project / ".lockstep" / "recipes" / f"{name}.recipe.yaml"
-    return AuthoredRecipe(
-        name,
-        "workflow",
-        workflow,
-        recipe,
-        recipe.with_name(f"{name}.dependencies.json"),
-        recipe.with_name(f"{name}.source-map.json"),
-    )
-
-
+    def __post_init__(self) -> None:
+        if not isinstance(self.plan, AuthoringPlan):
+            raise TypeError("project compilation plan is invalid")
+def canonical_recipe_bytes_for_children(recipe_bytes: bytes, children: tuple[str, ...]) -> bytes:
+    if not children:
+        return recipe_bytes
+    document = yaml.safe_load(recipe_bytes)
+    nodes = document.get("nodes") if isinstance(document, dict) else None
+    if not isinstance(nodes, dict):
+        raise AuthoringError("compiled template recipe has no node catalog")
+    for index, child in enumerate(children):
+        nodes[f"template-dependency-{index}"] = {"type": "subgraph", "graph": f"{child}.recipe.yaml", "mode": "invoke"}
+    return canonical_yaml(document)
 def _workflow_project_and_source(recipe: AuthoredRecipe) -> tuple[Path, Path]:
-    workflow_path = recipe.workflow_path
-    if workflow_path is None:
+    if recipe.workflow_path is None:
         raise AuthoringError("workflow source is required")
-    source_path = workflow_path.resolve()
-    project = source_path.parent.parent.parent
+    source = recipe.workflow_path.resolve()
+    project = source.parent.parent.parent
     expected = project / ".lockstep" / "workflows" / f"{recipe.name}.workflow.yaml"
-    if source_path != expected:
-        raise AuthoringError("workflow source is outside the canonical project layout")
-    expected_destinations = (
-        project / ".lockstep" / "recipes" / f"{recipe.name}.recipe.yaml",
-        project / ".lockstep" / "recipes" / f"{recipe.name}.dependencies.json",
-        project / ".lockstep" / "recipes" / f"{recipe.name}.source-map.json",
-    )
-    if (recipe.recipe_path, recipe.dependency_path, recipe.source_map_path) != expected_destinations:
-        raise AuthoringError("workflow destinations are outside the canonical project layout")
-    return project, source_path
-
-
-def _capture_source(
-    role: str,
-    path: Path,
-    project: Path,
-    directory_identities: dict[Path, _PathIdentity],
-    *,
-    max_bytes: int,
-) -> SourceIdentity:
-    ancestors = tuple(
-        _cached_directory_identity(directory_identities, ancestor)
-        for ancestor in (project, project / ".lockstep", path.parent)
-    )
-    _validate_ancestor_identities(ancestors)
-    content, info = capture_regular_file(
-        path, max_bytes=max_bytes, label="workflow source"
-    )
-    _validate_ancestor_identities(ancestors)
-    return SourceIdentity(
-        role,
-        path,
-        content,
-        _digest(content),
-        _leaf_identity(path, info),
-        ancestors,
-    )
-
-
-def _workflow_destinations(
-    recipe: AuthoredRecipe,
-    compiled: CompilationResult,
-    children: tuple[str, ...],
-) -> dict[Path, bytes]:
-    dependency_path = recipe.dependency_path
-    source_map_path = recipe.source_map_path
-    if dependency_path is None or source_map_path is None:
-        raise AuthoringError("workflow destinations are incomplete")
-    destinations = {
-        recipe.recipe_path: canonical_recipe_bytes_for_children(
-            compiled.recipe_bytes, children
-        ),
-        dependency_path: compiled.dependency_manifest_bytes,
-        source_map_path: compiled.source_map_bytes,
-    }
-    for item in compiled.generated_files:
-        path = recipe.recipe_path.parent / item.relative_path
-        if path in destinations:
-            raise AuthoringError("compiled workflow contains a duplicate destination")
-        destinations[path] = item.content
-    return destinations
-
-
-def _capture_destination(
-    role: str,
-    path: Path,
-    ancestors: tuple[_PathIdentity, ...],
-    *,
-    max_bytes: int,
-) -> DestinationImage:
-    _validate_ancestor_identities(ancestors)
-    captured = capture_optional_regular_file(
-        path,
-        max_bytes=max_bytes,
-        label="compilation destination",
-    )
-    if captured is None:
-        image = DestinationImage(role, path, None, None, None, None, ancestors)
-    else:
-        content, info = captured
-        image = DestinationImage(
-            role,
-            path,
-            content,
-            _digest(content),
-            stat.S_IMODE(info.st_mode),
-            _leaf_identity(path, info),
-            ancestors,
-        )
-    _validate_ancestor_identities(ancestors)
-    return image
-
-
-def _destination_ancestors(
-    project: Path,
-    parent: Path,
-    directory_identities: dict[Path, _PathIdentity],
-) -> tuple[_PathIdentity, ...]:
-    try:
-        relative_parent = parent.relative_to(project)
-    except ValueError as exc:
-        raise AuthoringError("workflow destination is outside the project") from exc
-    ancestors = [_cached_directory_identity(directory_identities, project)]
-    current = project
-    for part in relative_parent.parts:
-        current /= part
-        try:
-            ancestors.append(_cached_directory_identity(directory_identities, current))
-        except FileNotFoundError:
-            break
-    return tuple(ancestors)
-
-
-def _directory_identity(path: Path) -> _PathIdentity:
-    info = capture_directory(path, label="destination ancestor")
-    return _PathIdentity(path, info.st_dev, info.st_ino)
-
-
-def _cached_directory_identity(
-    directory_identities: dict[Path, _PathIdentity], path: Path
-) -> _PathIdentity:
-    canonical = _absolute(path, "directory path")
-    identity = directory_identities.get(canonical)
-    if identity is None:
-        identity = _directory_identity(canonical)
-        directory_identities[canonical] = identity
-    return identity
-
-
-def _validate_ancestor_identities(ancestors: tuple[_PathIdentity, ...]) -> None:
-    for expected in ancestors:
-        validate_directory(
-            expected.resolved_path,
-            device=expected.device,
-            inode=expected.inode,
-            label="destination ancestor",
-        )
-
-
-def _leaf_identity(path: Path, info: stat_result) -> _LeafIdentity:
-    return _LeafIdentity(
-        path,
-        info.st_dev,
-        info.st_ino,
-        info.st_mode,
-        info.st_size,
-        info.st_mtime_ns,
-        info.st_ctime_ns,
-    )
+    destinations = tuple(project / ".lockstep" / "recipes" / f"{recipe.name}{suffix}"
+                         for suffix in (".recipe.yaml", ".dependencies.json", ".source-map.json"))
+    if source != expected or (recipe.recipe_path, recipe.dependency_path, recipe.source_map_path) != destinations:
+        raise AuthoringError("workflow source or destinations are outside the canonical project layout")
+    return project, source

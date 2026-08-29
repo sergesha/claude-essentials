@@ -97,24 +97,24 @@ def _generated(compiled, files):
 
 
 def test_public_compile_rejects_cross_role_generated_collision_write_free(tmp_path, monkeypatch, capsys) -> None:
-    import lockstep.authoring_bundle as bundles
-    project = tmp_path / "project"; write_workflow(project, "child"); write_workflow(project, "parent", children=("child",)); original = bundles.compile_captured_source; injected = []
+    import lockstep.authoring_compilation as compilation
+    project = tmp_path / "project"; write_workflow(project, "child"); write_workflow(project, "parent", children=("child",)); original = compilation.compile_captured_source; injected = []
     def compile(document, *, children=None):
         validated, catalog, result = original(document, children=children)
         if validated.workflow.name == "parent": result = _generated(result, (GeneratedFile.build("child.recipe.yaml", result.recipe_bytes),)); injected.append(True)
         return validated, catalog, result
-    monkeypatch.setattr(bundles, "compile_captured_source", compile)
+    monkeypatch.setattr(compilation, "compile_captured_source", compile)
     _reject(project, "parent", tmp_path / "state", monkeypatch, capsys, "destinations must be unique"); assert injected == [True]
 
 
 def test_public_compile_rejects_amplified_real_generated_outputs(tmp_path, monkeypatch, capsys) -> None:
-    import lockstep.authoring_bundle as bundles
-    project = tmp_path / "project"; write_workflow(project, "leaf"); original = bundles.compile_captured_source; injected = []
+    import lockstep.authoring_compilation as compilation
+    project = tmp_path / "project"; write_workflow(project, "leaf"); original = compilation.compile_captured_source; injected = []
     def compile(document, *, children=None):
         validated, catalog, result = original(document, children=children); payload = result.recipe_bytes + b"#" + b"a" * 850_000
         files = tuple(GeneratedFile.build(f"generated-{index}.recipe.yaml", payload) for index in range(5)); injected.append(True)
         return validated, catalog, _generated(result, files)
-    monkeypatch.setattr(bundles, "compile_captured_source", compile)
+    monkeypatch.setattr(compilation, "compile_captured_source", compile)
     _reject(project, "leaf", tmp_path / "state", monkeypatch, capsys); assert injected == [True]
 
 

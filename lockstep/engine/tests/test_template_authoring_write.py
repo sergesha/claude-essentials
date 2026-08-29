@@ -45,17 +45,17 @@ def test_cli_template_init_routes_one_destination_only_plan_through_ready_publis
     original_plan, original_publish = templates.plan_template_installation, AuthoringPublisher.publish
     monkeypatch.setattr(AuthoringPublisher, "require_ready", lambda _s, root: events.append(("ready", root)), raising=False)
     def plan(*args, **kwargs):
-        value = original_plan(*args, **kwargs); events.append(("plan", value.bundle)); return value
+        value = original_plan(*args, **kwargs); events.append(("plan", value.plan)); return value
     def publish(self, value): events.append(("publish", value)); return original_publish(self, value)
     monkeypatch.setattr(templates, "plan_template_installation", plan)
     monkeypatch.setattr(AuthoringPublisher, "publish", publish)
 
     assert _cli(project, monkeypatch, capsys) == (0, "initialized change\n", "")
     assert [item[0] for item in events] == ["ready", "plan", "publish"]
-    bundle = events[1][1]
-    assert bundle.sources == () and bundle.dependency_edges == (("change-review", ()), ("change", ("change-review",)))
-    assert all(item.content is None for item in bundle.before_images)
-    assert {item.resolved_path for item in bundle.after_images} == {p.resolve() for p in project.rglob("*") if p.is_file()}
+    plan = events[1][1]
+    assert plan.sources == () and plan.dependency_edges == (("change-review", ()), ("change", ("change-review",)))
+    assert all(item.before is None for item in plan.targets)
+    assert {item.path for item in plan.targets} == {p.resolve() for p in project.rglob("*") if p.is_file()}
 
 
 def test_project_local_legacy_journal_is_inert_template_data(tmp_path: Path) -> None:
@@ -96,7 +96,7 @@ def test_partial_template_write_is_not_rolled_back_and_requires_regeneration(
     original_link = os.link
     def link_then_die(*args, **kwargs):
         result = original_link(*args, **kwargs); published.append(os.fsdecode(args[1])); raise BaseException("cut")
-    def publish(_self, bundle): return publisher_module._publish_per_file(bundle)
+    def publish(_self, plan): return publisher_module._publish_per_file(plan)
     monkeypatch.setattr(AuthoringPublisher, "publish", publish)
     monkeypatch.setattr(os, "link", link_then_die)
     with pytest.raises(BaseException, match="cut"):

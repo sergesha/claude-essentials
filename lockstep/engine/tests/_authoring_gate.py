@@ -27,11 +27,11 @@ def tree_image(root: Path) -> dict[str, TreeEntry]:
 
 
 def assert_source_identity(source, project: Path, source_path: Path) -> None:
-    info = source_path.lstat(); assert source.resolved_path == source_path.resolve()
+    info = source_path.lstat(); assert source.path == source_path.resolve()
     assert source.content == source_path.read_bytes(); assert source.sha256 == hashlib.sha256(source.content).hexdigest()
-    assert (source.leaf.device, source.leaf.inode, source.leaf.mode, source.leaf.size, source.leaf.mtime_ns) == (info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns)
+    assert (source.file.device, source.file.inode, source.file.mode, source.file.size, source.file.mtime_ns) == (info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns)
     paths = (project.resolve(), (project / ".lockstep").resolve(), source_path.parent.resolve())
-    assert tuple(item.resolved_path for item in source.ancestors) == paths
+    assert tuple(item.path for item in source.parents) == paths
 
 
 def write_workflow(project: Path, name: str, *, children: tuple[str, ...] = (), marker: str = "initial") -> Path:
@@ -64,11 +64,11 @@ def compile_closure(project: Path, *names: str) -> None:
 
 def expected_compilation_image(project: Path, names: tuple[str, ...]) -> dict[Path, bytes]:
     from lockstep.authoring import project_paths
-    from lockstep.authoring_bundle import plan_project_compilation
+    from lockstep.authoring_compilation import plan_project_compilation
     result: dict[Path, bytes] = {}
     for name in names:
-        for image in plan_project_compilation(project_paths(project, name)).after_images:
-            assert image.content is not None; assert result.setdefault(image.resolved_path, image.content) == image.content
+        for target in plan_project_compilation(project_paths(project, name)).targets:
+            assert result.setdefault(target.path, target.after) == target.after
     return result
 
 

@@ -6,7 +6,7 @@ import difflib
 from dataclasses import dataclass
 from pathlib import Path
 
-from lockstep.authoring_bundle import PlannedProjectCompilation
+from lockstep.authoring_bundle import ProjectCompilation
 from lockstep.errors import AuthoringError
 from lockstep.recipe._authority_models import RecipeCandidate
 from lockstep.recipe._recipe_ingress import inspect_recipe_bytes
@@ -22,17 +22,11 @@ class CanonicalObservation:
 
 
 def _captured_destination_maps(
-    plan: PlannedProjectCompilation,
+    compilation: ProjectCompilation,
 ) -> tuple[dict[Path, bytes | None], dict[Path, bytes]]:
-    before = {
-        image.resolved_path: image.content for image in plan.bundle.before_images
-    }
-    after = {
-        image.resolved_path: image.content for image in plan.bundle.after_images
-    }
-    if any(content is None for content in after.values()):
-        raise AuthoringError("planned canonical destination is missing exact bytes")
-    return before, {path: content for path, content in after.items() if content is not None}
+    before = {target.path: target.before for target in compilation.plan.targets}
+    after = {target.path: target.after for target in compilation.plan.targets}
+    return before, after
 
 
 def _require_canonical_destinations(
@@ -49,9 +43,9 @@ def _require_canonical_destinations(
 
 
 def _captured_recipe_sources(
-    plan: PlannedProjectCompilation, before: dict[Path, bytes | None]
+    compilation: ProjectCompilation, before: dict[Path, bytes | None]
 ) -> dict[str, bytes]:
-    recipes = plan.bundle.resolved_project / ".lockstep" / "recipes"
+    recipes = compilation.plan.project / ".lockstep" / "recipes"
     captured: dict[str, bytes] = {}
     for path, content in before.items():
         if path.suffixes[-2:] != [".recipe", ".yaml"] or content is None:
@@ -64,13 +58,13 @@ def _captured_recipe_sources(
     return captured
 
 
-def canonical_observation(plan: PlannedProjectCompilation) -> CanonicalObservation:
+def canonical_observation(compilation: ProjectCompilation) -> CanonicalObservation:
     """Prove canonical equality and close ingress without another filesystem pass."""
 
-    before, after = _captured_destination_maps(plan)
+    before, after = _captured_destination_maps(compilation)
     _require_canonical_destinations(before, after)
-    raw_recipes = _captured_recipe_sources(plan, before)
-    root = plan.root_result.root_relative_path
+    raw_recipes = _captured_recipe_sources(compilation, before)
+    root = compilation.root_result.root_relative_path
     try:
         raw_root = raw_recipes[root]
     except KeyError as exc:
@@ -93,10 +87,10 @@ def canonical_observation(plan: PlannedProjectCompilation) -> CanonicalObservati
     return CanonicalObservation(proof, candidate)
 
 
-def diff_planned_compilation(plan: PlannedProjectCompilation) -> str:
+def diff_planned_compilation(compilation: ProjectCompilation) -> str:
     """Render every captured destination delta against the same plan."""
 
-    before, after = _captured_destination_maps(plan)
+    before, after = _captured_destination_maps(compilation)
     chunks: list[str] = []
     for path, expected in after.items():
         observed = before[path] or b""

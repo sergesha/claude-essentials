@@ -6,11 +6,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from lockstep.authoring_bundle import (
-    ProjectCompilationBundle,
-    _plan_destination_only_bundle,
+    AuthoringPlan,
     canonical_recipe_bytes_for_children,
 )
 from lockstep.authoring_compilation import (
+    _plan_destination_only,
     compile_captured_source,
     workflow_call_names,
 )
@@ -34,7 +34,7 @@ class CapturedWorkflowSource:
 
 @dataclass(frozen=True, slots=True)
 class PlannedWorkflowInstallation:
-    bundle: ProjectCompilationBundle
+    plan: AuthoringPlan
     sources: tuple[Path, ...]
     recipes: tuple[Path, ...]
     compile_order: tuple[str, ...]
@@ -70,7 +70,7 @@ def plan_captured_workflow_installation(
     *,
     root_role: str,
 ) -> PlannedWorkflowInstallation:
-    """Compile a closed captured source set into one destination-only bundle."""
+    """Compile a closed captured source set into one destination-only plan."""
 
     root = Path(project).resolve()
     by_role = {item.role: item for item in role_sources}
@@ -118,11 +118,11 @@ def plan_captured_workflow_installation(
     visit(root_role)
     if len(completed) != len(by_role):
         raise AuthoringError("workflow role inventory contains unreachable roles")
-    bundle = _plan_destination_only_bundle(
+    plan = _plan_destination_only(
         root, tuple(dependency_edges), tuple(projected_roles)
     )
     return PlannedWorkflowInstallation(
-        bundle,
+        plan,
         tuple(source_paths),
         tuple(recipe_paths),
         tuple(role for role, _children in dependency_edges),

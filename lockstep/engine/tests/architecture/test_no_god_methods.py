@@ -32,10 +32,18 @@ CONFIRMED_GOD_METHODS = (
     ("runtime/status.py", "project_status"),
     ("runtime/service.py", "LockstepCommandService.start_authorized"),
     ("runtime/effects/coordinator.py", "EffectCoordinator.submit_manual"),
-    ("authoring_bundle.py", "ProjectCompilationBundle.__post_init__"),
-    ("authoring_identity.py", "classify_destination_ownership_at"),
-    ("authoring_project_tree.py", "AuthoringProjectTree.ensure_directory"),
 )
+
+AUTHORING_FILE_CAPS = {
+    "authoring.py": 290,
+    "authoring_bundle.py": 225,
+    "authoring_capture.py": 175,
+    "authoring_compilation.py": 325,
+    "authoring_installation.py": 150,
+    "authoring_project_tree.py": 225,
+    "authoring_publisher.py": 350,
+    "authoring_results.py": 200,
+}
 
 
 class ComplexityReviewWarning(UserWarning):
@@ -125,23 +133,43 @@ def _call_targets(node: ast.AST) -> set[str]:
     return targets
 
 
-@pytest.mark.parametrize(
-    ("relative_file", "qualified_name"),
-    CONFIRMED_GOD_METHODS,
-    ids=[qualified_name for _relative_file, qualified_name in CONFIRMED_GOD_METHODS],
-)
-def test_confirmed_god_method_is_reduced_to_a_thin_boundary(
-    relative_file: str,
-    qualified_name: str,
-) -> None:
-    node = _function_node(relative_file, qualified_name)
+def _authoring_functions() -> tuple[tuple[str, str, ast.AST], ...]:
+    found: list[tuple[str, str, ast.AST]] = []
+    for path in sorted(SOURCE_ROOT.glob("authoring*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+
+        class LexicalFunctions(ast.NodeVisitor):
+            def __init__(self) -> None:
+                self.prefix: list[str] = []
+
+            def visit_ClassDef(self, node: ast.ClassDef) -> None:
+                self.prefix.append(node.name)
+                self.generic_visit(node)
+                self.prefix.pop()
+
+            def _visit_function(
+                self, node: ast.FunctionDef | ast.AsyncFunctionDef
+            ) -> None:
+                qualified = ".".join((*self.prefix, node.name))
+                found.append((str(path.relative_to(SOURCE_ROOT)), qualified, node))
+                self.prefix.append(node.name)
+                self.generic_visit(node)
+                self.prefix.pop()
+
+            visit_FunctionDef = _visit_function
+            visit_AsyncFunctionDef = _visit_function
+
+        LexicalFunctions().visit(tree)
+    return tuple(found)
+
+
+def _assert_structural_limits(relative_file: str, qualified_name: str, node: ast.AST) -> None:
     line_count = node.end_lineno - node.lineno + 1
     cyclomatic, cognitive, max_nesting = _complexity(node)
     call_targets = _call_targets(node)
-
     if line_count >= 80:
         warnings.warn(
-            f"{qualified_name} is {line_count} lines and requires cohesion review",
+            f"{relative_file}:{qualified_name} is {line_count} lines and requires cohesion review",
             ComplexityReviewWarning,
             stacklevel=1,
         )
@@ -155,9 +183,47 @@ def test_confirmed_god_method_is_reduced_to_a_thin_boundary(
     if len(call_targets) >= 25:
         violations.append(f"fan_out={len(call_targets)} (limit 24)")
     assert not violations, (
-        f"{qualified_name} remains a structurally overloaded boundary: "
+        f"{relative_file}:{qualified_name} remains a structurally overloaded boundary: "
         + ", ".join(violations)
     )
+
+
+@pytest.mark.parametrize(
+    ("relative_file", "qualified_name"),
+    CONFIRMED_GOD_METHODS,
+    ids=[qualified_name for _relative_file, qualified_name in CONFIRMED_GOD_METHODS],
+)
+def test_confirmed_god_method_is_reduced_to_a_thin_boundary(
+    relative_file: str,
+    qualified_name: str,
+) -> None:
+    node = _function_node(relative_file, qualified_name)
+    _assert_structural_limits(relative_file, qualified_name, node)
+
+
+@pytest.mark.parametrize(
+    ("relative_file", "qualified_name", "node"),
+    _authoring_functions(),
+    ids=lambda value: value if isinstance(value, str) else None,
+)
+def test_every_authoring_function_has_bounded_structural_complexity(
+    relative_file: str, qualified_name: str, node: ast.AST
+) -> None:
+    _assert_structural_limits(relative_file, qualified_name, node)
+
+
+def test_authoring_module_population_and_physical_lines_are_bounded() -> None:
+    paths = tuple(sorted(SOURCE_ROOT.glob("authoring*.py")))
+    assert {path.name for path in paths} == set(AUTHORING_FILE_CAPS)
+    counts = {
+        path.name: len(path.read_text(encoding="utf-8").splitlines()) for path in paths
+    }
+    assert {
+        name: (count, AUTHORING_FILE_CAPS[name])
+        for name, count in counts.items()
+        if count > AUTHORING_FILE_CAPS[name]
+    } == {}
+    assert sum(counts.values()) <= 1_940
 
 
 def test_authoring_capture_is_the_single_descriptor_observation_owner() -> None:
@@ -208,12 +274,9 @@ def test_authoring_project_tree_has_no_retired_lifecycle_responsibility() -> Non
         for member in tree.body
         if isinstance(member, ast.ClassDef) and member.name == "AuthoringProjectTree"
     )
-    ensure_directory = next(
-        member
+    assert {
+        member.name
         for member in owner.body
-        if isinstance(member, ast.FunctionDef) and member.name == "ensure_directory"
-    )
-    assert [argument.arg for argument in ensure_directory.args.args] == [
-        "self",
-        "directory",
-    ]
+        if isinstance(member, ast.FunctionDef)
+        and (member.name == "__init__" or not member.name.startswith("_"))
+    } == {"__init__", "preflight", "ensure_parent", "open_parent"}

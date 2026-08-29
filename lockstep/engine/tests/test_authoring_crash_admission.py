@@ -9,7 +9,8 @@ import pytest
 
 import lockstep.authoring_publisher as publisher
 from lockstep import authoring
-from lockstep.authoring_bundle import ProjectCompilationBundle, plan_project_compilation
+from lockstep.authoring_bundle import AuthoringPlan
+from lockstep.authoring_compilation import plan_project_compilation
 from lockstep.authoring_installation import CapturedWorkflowSource, plan_captured_workflow_installation
 from lockstep.authoring_publisher import AuthoringPublisher
 from lockstep.runtime.service import LockstepCommandService
@@ -25,11 +26,11 @@ CUT_EXIT = 86
 
 @dataclass(frozen=True)
 class Scenario:
-    project: Path; state: Path; root: str; bundle: ProjectCompilationBundle
+    project: Path; state: Path; root: str; plan: AuthoringPlan
     source: Path | None = None; old_source: bytes | None = None
 
     @property
-    def targets(self): return tuple(item.resolved_path for item in self.bundle.after_images)
+    def targets(self): return tuple(item.path for item in self.plan.targets)
 
 
 def _scenario(root: Path, surface: str, present: bool) -> Scenario:
@@ -41,12 +42,12 @@ def _scenario(root: Path, surface: str, present: bool) -> Scenario:
     if surface == "minimal":
         source = authoring._minimal_workflow_source("release")
         plan = plan_captured_workflow_installation(project, (CapturedWorkflowSource("release", source),), root_role="release")
-        return Scenario(project, state, "release", plan.bundle)
+        return Scenario(project, state, "release", plan.plan)
     import lockstep.templates as templates
     manifest = templates._manifest("reviewed-change")
     sources = templates._captured_role_sources("reviewed-change", "change", manifest)
     plan = plan_template_installation(project, sources, root_role="change")
-    return Scenario(project, state, "change", plan.bundle)
+    return Scenario(project, state, "change", plan.plan)
 
 
 def _die() -> None: os._exit(CUT_EXIT)
@@ -64,7 +65,7 @@ def _nth(original, ordinal: int):
 def _install_cut(phase: str, ordinal: int) -> None:
     if phase == "after-temp-creation": publisher._create_temporary = _nth(publisher._create_temporary, ordinal); return
     if phase == "after-temp-fsync": publisher._write_temporary = _nth(publisher._write_temporary, ordinal); return
-    if phase == "after-final-validation": publisher.validate_destination_before_at = _nth(publisher.validate_destination_before_at, ordinal); return
+    if phase == "after-final-validation": publisher.validate_target_at = _nth(publisher.validate_target_at, ordinal); return
     if phase == "after-mutation": publisher._publish_owned_temporary = _nth(publisher._publish_owned_temporary, ordinal); return
     if phase == "after-target-fsync": publisher._fsync_regular_at = _nth(publisher._fsync_regular_at, ordinal); return
     if phase == "after-parent-fsync":
@@ -86,7 +87,7 @@ def _public_write(scenario: Scenario, surface: str) -> None:
 
 
 def _crash_child(scenario: Scenario, surface: str, phase: str, ordinal: int, force_route: bool) -> None:
-    if force_route: AuthoringPublisher.publish = lambda _self, bundle: publisher._publish_per_file(bundle)
+    if force_route: AuthoringPublisher.publish = lambda _self, plan: publisher._publish_per_file(plan)
     _install_cut(phase, ordinal)
     _public_write(scenario, surface)
     os._exit(0)
@@ -102,9 +103,9 @@ def _run_cut(scenario: Scenario, surface: str, phase: str, ordinal: int, *, forc
 
 def _semantics(scenario: Scenario) -> tuple[int, bool]:
     changed = 0
-    for target, after in zip(scenario.targets, scenario.bundle.after_images, strict=True):
-        if target.is_file() and not target.is_symlink() and target.read_bytes() == after.content and stat.S_IMODE(target.stat().st_mode) == after.mode: changed += 1
-    old_complete = all(item.content is not None for item in scenario.bundle.before_images) and changed == 0
+    for path, target in zip(scenario.targets, scenario.plan.targets, strict=True):
+        if path.is_file() and not path.is_symlink() and path.read_bytes() == target.after and stat.S_IMODE(path.stat().st_mode) == target.mode: changed += 1
+    old_complete = all(item.before is not None for item in scenario.plan.targets) and changed == 0
     return changed, old_complete
 
 
@@ -192,9 +193,9 @@ def test_complete_last_target_cut_admits_the_exact_surface_dag(tmp_path, monkeyp
 @pytest.mark.parametrize("surface", ("compile", "minimal", "template"))
 def test_public_writer_surfaces_route_to_the_bounded_per_file_writer(tmp_path, monkeypatch, surface) -> None:
     scenario = _scenario(tmp_path, surface, False); seen = []; original = publisher._publish_per_file
-    monkeypatch.setattr(publisher, "_publish_per_file", lambda bundle: seen.append(bundle) or original(bundle))
+    monkeypatch.setattr(publisher, "_publish_per_file", lambda plan: seen.append(plan) or original(plan))
     _public_write(scenario, surface)
-    assert seen == [scenario.bundle]
+    assert seen == [scenario.plan]
 
 
 def test_final_verification_rejects_foreign_earlier_target_without_rollback(tmp_path, monkeypatch) -> None:
@@ -202,8 +203,8 @@ def test_final_verification_rejects_foreign_earlier_target_without_rollback(tmp_
     original = publisher.capture_after_identity_at; tampered = b"foreign\n"
     def capture(parent, after):
         value = original(parent, after)
-        if after.resolved_path == last: first.write_bytes(tampered)
+        if after.path == last: first.write_bytes(tampered)
         return value
     monkeypatch.setattr(publisher, "capture_after_identity_at", capture)
-    with pytest.raises(Exception): publisher._publish_per_file(scenario.bundle)
+    with pytest.raises(Exception): publisher._publish_per_file(scenario.plan)
     assert first.read_bytes() == tampered

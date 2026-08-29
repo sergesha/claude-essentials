@@ -180,13 +180,13 @@ def install_template(
         root_role=outputs["parent"].replace("{name}", name),
     )
     occupied = tuple(
-        image.resolved_path.relative_to(root)
-        for image in planned.bundle.before_images
-        if image.content is not None
+        target.path.relative_to(root)
+        for target in planned.plan.targets
+        if target.before is not None
     )
     if occupied:
         raise TemplateCollision(f"template destination already exists: {occupied[0]}")
-    publisher.publish(planned.bundle)
+    publisher.publish(planned.plan)
     return InstalledTemplate(
         planned.sources,
         planned.recipes,

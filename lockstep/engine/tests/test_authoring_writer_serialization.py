@@ -8,7 +8,7 @@ import pytest
 
 import lockstep.authoring_publisher as publisher_module
 from lockstep import authoring
-from lockstep.authoring_bundle import plan_project_compilation
+from lockstep.authoring_compilation import plan_project_compilation
 from lockstep.authoring_publisher import AuthoringPublisher
 from lockstep.runtime.advisory_lock import advisory_file_lock
 from lockstep.template_installation import plan_template_installation
@@ -23,15 +23,15 @@ def _compilation(tmp_path: Path):
     project = tmp_path / "project"; project.mkdir(); state = (tmp_path / "state").resolve()
     source = write_workflow(project, "release"); authoring.publish_project_compilation(project, "release", state_dir=state)
     replace_marker(source, "initial", "changed")
-    bundle = plan_project_compilation(authoring.project_paths(project, "release"))
-    return project, state, source, bundle
+    plan = plan_project_compilation(authoring.project_paths(project, "release"))
+    return project, state, source, plan
 
 
 def _template(project: Path, template: str):
     import lockstep.templates as templates
     manifest = templates._manifest(template)
     sources = templates._captured_role_sources(template, "change", manifest)
-    return plan_template_installation(project, sources, root_role="change").bundle
+    return plan_template_installation(project, sources, root_role="change").plan
 
 
 def _run(*operations):
@@ -46,9 +46,9 @@ def _run(*operations):
     return results
 
 
-def _assert_exact(bundle) -> None:
-    for after in bundle.after_images:
-        assert after.resolved_path.read_bytes() == after.content
+def _assert_exact(plan) -> None:
+    for target in plan.targets:
+        assert target.path.read_bytes() == target.after
 
 
 def _one_lock(state: Path, project: Path) -> Path:
@@ -59,11 +59,11 @@ def _one_lock(state: Path, project: Path) -> Path:
 
 
 def test_overlapping_replacement_writers_leave_one_complete_namespace(tmp_path) -> None:
-    project, state, _source, bundle = _compilation(tmp_path); publisher = AuthoringPublisher(state)
-    results = _run(lambda: publisher.publish(bundle), lambda: AuthoringPublisher(state).publish(bundle))
+    project, state, _source, plan = _compilation(tmp_path); publisher = AuthoringPublisher(state)
+    results = _run(lambda: publisher.publish(plan), lambda: AuthoringPublisher(state).publish(plan))
     assert sum(value is None for value in results) == 1
     assert sum(isinstance(value, Exception) for value in results) == 1
-    _assert_exact(bundle); assert _one_lock(state, project).is_file()
+    _assert_exact(plan); assert _one_lock(state, project).is_file()
 
 
 def test_overlapping_distinguishable_templates_leave_one_complete_namespace(tmp_path) -> None:
@@ -72,7 +72,7 @@ def test_overlapping_distinguishable_templates_leave_one_complete_namespace(tmp_
     results = _run(lambda: AuthoringPublisher(state).publish(reviewed), lambda: AuthoringPublisher(state).publish(parallel))
     assert sum(value is None for value in results) == 1
     assert sum(isinstance(value, Exception) for value in results) == 1
-    winner = reviewed if all(path.resolved_path.exists() and path.resolved_path.read_bytes() == path.content for path in reviewed.after_images) else parallel
+    winner = reviewed if all(target.path.exists() and target.path.read_bytes() == target.after for target in reviewed.targets) else parallel
     _assert_exact(winner); assert _one_lock(state, project).is_file()
 
 
@@ -84,29 +84,29 @@ def test_disjoint_replacement_and_template_writers_serialize_under_one_lock(tmp_
 
 
 def test_queued_writer_revalidates_sources_after_lock_acquisition(tmp_path) -> None:
-    project, state, source, bundle = _compilation(tmp_path); namespace, _identity = _create_test_namespace(state, project)
+    project, state, source, plan = _compilation(tmp_path); namespace, _identity = _create_test_namespace(state, project)
     result = []; started = threading.Event()
     def queued():
         started.set()
-        try: AuthoringPublisher(state).publish(bundle); result.append(None)
+        try: AuthoringPublisher(state).publish(plan); result.append(None)
         except BaseException as exc: result.append(exc)
     with advisory_file_lock(namespace / "transaction.lock"):
         thread = threading.Thread(target=queued); thread.start(); assert started.wait(5)
         source.write_bytes(b"foreign source\n")
     thread.join(10)
     assert len(result) == 1 and isinstance(result[0], Exception)
-    for before in bundle.before_images:
-        assert before.resolved_path.read_bytes() == before.content
+    for target in plan.targets:
+        assert target.path.read_bytes() == target.before
 
 
 def test_process_death_releases_lock_for_next_writer(tmp_path, monkeypatch) -> None:
-    project, state, _source, bundle = _compilation(tmp_path); original = publisher_module._publish_per_file; calls = 0
+    project, state, _source, plan = _compilation(tmp_path); original = publisher_module._publish_per_file; calls = 0
     class Death(BaseException): pass
     def die_once(value):
         nonlocal calls; calls += 1
         if calls == 1: raise Death("cut")
         return original(value)
     monkeypatch.setattr(publisher_module, "_publish_per_file", die_once)
-    with pytest.raises(Death): AuthoringPublisher(state).publish(bundle)
-    AuthoringPublisher(state).publish(bundle)
-    _assert_exact(bundle); assert calls == 2 and _one_lock(state, project).is_file()
+    with pytest.raises(Death): AuthoringPublisher(state).publish(plan)
+    AuthoringPublisher(state).publish(plan)
+    _assert_exact(plan); assert calls == 2 and _one_lock(state, project).is_file()

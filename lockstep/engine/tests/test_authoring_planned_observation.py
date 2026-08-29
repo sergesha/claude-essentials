@@ -11,10 +11,10 @@ from tests._authoring_gate import compile_closure, expected_compilation_image, m
 
 
 def _boundary(monkeypatch, mutation):
-    original = authoring._plan_project_compilation; calls = []
+    original = authoring.compile_project; calls = []
     def plan(recipe):
         value = original(recipe); calls.append(value); mutation(); return value
-    monkeypatch.setattr(authoring, "_plan_project_compilation", plan); return calls
+    monkeypatch.setattr(authoring, "compile_project", plan); return calls
 
 
 def _parent(tmp_path):
@@ -58,7 +58,7 @@ def test_diff_uses_one_captured_transitive_plan(tmp_path, monkeypatch, capsys, a
     calls = []
     def after_plan():
         plan = calls[-1]
-        for image in plan.bundle.after_images: image.resolved_path.write_bytes(image.content)
+        for target in plan.plan.targets: target.path.write_bytes(target.after)
     calls = _boundary(monkeypatch, after_plan); monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(tmp_path / "state"))
     if adapter == "direct": output = diff_recipe(project, "leaf")
     elif adapter == "cli": monkeypatch.chdir(project); assert cli.main(["recipe", "diff", "leaf"]) == 0; output = capsys.readouterr().out
@@ -105,7 +105,7 @@ def test_generated_preflight_uses_candidate_from_same_plan(tmp_path, monkeypatch
 
 def test_manual_check_and_diff_do_not_require_workflow_plan(tmp_path, monkeypatch) -> None:
     project = tmp_path / "project"; recipes = project / ".lockstep/recipes"; recipes.mkdir(parents=True); (recipes / "manual.recipe.yaml").write_text("name: manual\nnodes: {}\nedges: []\n")
-    monkeypatch.setattr(authoring, "_plan_project_compilation", lambda _recipe: (_ for _ in ()).throw(AssertionError("planned")))
+    monkeypatch.setattr(authoring, "compile_project", lambda _recipe: (_ for _ in ()).throw(AssertionError("planned")))
     assert check_recipe(project, "manual")["ok"] is True and diff_recipe(project, "manual") == ""
 
 

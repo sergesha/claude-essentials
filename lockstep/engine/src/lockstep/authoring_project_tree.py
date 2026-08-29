@@ -7,8 +7,9 @@ import stat
 from pathlib import Path
 
 from lockstep.authoring_bundle import (
-    PathIdentity,
-    ProjectCompilationBundle,
+    AuthoringPlan,
+    DirectoryIdentity,
+    PlannedTarget,
 )
 from lockstep.errors import AuthoringError
 
@@ -22,39 +23,34 @@ class AuthoringProjectTree:
     """Open and mutate only identity-bound directories below one project root."""
 
     __slots__ = (
-        "created_directories",
+        "_created_directories",
         "_project",
         "_project_identity",
         "_recorded",
-        "_target_parents",
     )
 
-    def __init__(self, bundle: ProjectCompilationBundle) -> None:
-        self._project = bundle.resolved_project
-        self._project_identity = bundle.project_identity
-        self.created_directories: dict[Path, PathIdentity | None] = {}
-        recorded = {bundle.resolved_project: bundle.project_identity}
-        for source in bundle.sources:
-            for identity in source.ancestors:
+    def __init__(self, plan: AuthoringPlan) -> None:
+        self._project = plan.project
+        self._project_identity = plan.project_identity
+        self._created_directories: dict[Path, DirectoryIdentity | None] = {}
+        recorded = {plan.project: plan.project_identity}
+        for source in plan.sources:
+            for identity in source.parents:
                 self._record_identity(recorded, identity)
-        for image in bundle.before_images:
-            for identity in image.ancestors:
+        for target in plan.targets:
+            for identity in target.parents:
                 self._record_identity(recorded, identity)
         self._recorded = recorded
-        self._target_parents = tuple(
-            sorted(
-                {image.resolved_path.parent for image in bundle.after_images},
-                key=lambda path: (len(path.parts), str(path)),
-            )
-        )
 
-    def ensure_target_parents(self) -> None:
-        """Create every planned parent in stable shallow-first order."""
+    def preflight(self) -> None:
+        descriptor = self._open_root()
+        os.close(descriptor)
 
-        for parent in self._target_parents:
-            self.ensure_directory(parent)
+    def ensure_parent(self, target: PlannedTarget) -> tuple[int, str]:
+        self._ensure_directory(target.path.parent)
+        return self.open_parent(target)
 
-    def ensure_directory(
+    def _ensure_directory(
         self,
         directory: Path,
     ) -> None:
@@ -110,12 +106,12 @@ class AuthoringProjectTree:
     ) -> int:
         # Record ambiguity before mkdir; enroll an inode only after proving the
         # open and named directories are the same empty directory.
-        self.created_directories[child] = None
+        self._created_directories[child] = None
         os.mkdir(leaf, mode=0o755, dir_fd=parent_descriptor)
         descriptor = os.open(leaf, _DIRECTORY_FLAGS, dir_fd=parent_descriptor)
         try:
             info = self._verify_directory_descriptor(descriptor, expected=None)
-            identity = PathIdentity(child, info.st_dev, info.st_ino)
+            identity = DirectoryIdentity(child, info.st_dev, info.st_ino)
             proof = os.open(leaf, _DIRECTORY_FLAGS, dir_fd=parent_descriptor)
             try:
                 try:
@@ -130,18 +126,19 @@ class AuthoringProjectTree:
                     )
             finally:
                 os.close(proof)
-            self.created_directories[child] = identity
+            self._created_directories[child] = identity
             os.fsync(parent_descriptor)
             return descriptor
         except BaseException:
             os.close(descriptor)
             raise
 
-    def open_parent(self, destination: Path) -> tuple[int, str]:
+    def open_parent(self, target: PlannedTarget) -> tuple[int, str]:
+        destination = target.path
         parent = self._contained_parent(destination)
-        return self.open_directory(parent), destination.name
+        return self._open_directory(parent), destination.name
 
-    def open_directory(self, directory: Path) -> int:
+    def _open_directory(self, directory: Path) -> int:
         try:
             relative = directory.relative_to(self._project)
         except ValueError as exc:
@@ -187,9 +184,9 @@ class AuthoringProjectTree:
             os.close(descriptor)
             raise
 
-    def _expected(self, path: Path) -> PathIdentity | None:
-        if path in self.created_directories:
-            return self.created_directories[path]
+    def _expected(self, path: Path) -> DirectoryIdentity | None:
+        if path in self._created_directories:
+            return self._created_directories[path]
         return self._recorded.get(path)
 
     def _contained_parent(self, destination: Path) -> Path:
@@ -203,7 +200,7 @@ class AuthoringProjectTree:
 
     @staticmethod
     def _verify_directory_descriptor(
-        descriptor: int, *, expected: PathIdentity | None
+        descriptor: int, *, expected: DirectoryIdentity | None
     ) -> os.stat_result:
         info = os.fstat(descriptor)
         if not stat.S_ISDIR(info.st_mode):
@@ -217,8 +214,8 @@ class AuthoringProjectTree:
 
     @staticmethod
     def _record_identity(
-        recorded: dict[Path, PathIdentity], identity: PathIdentity
+        recorded: dict[Path, DirectoryIdentity], identity: DirectoryIdentity
     ) -> None:
-        existing = recorded.setdefault(identity.resolved_path, identity)
+        existing = recorded.setdefault(identity.path, identity)
         if existing != identity:
-            raise AuthoringError("authoring bundle contains conflicting identities")
+            raise AuthoringError("authoring plan contains conflicting identities")
