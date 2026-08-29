@@ -31,6 +31,7 @@ class AuthoringProjectTree:
         "_project",
         "_project_identity",
         "_recorded",
+        "_target_parents",
     )
 
     def __init__(self, bundle: ProjectCompilationBundle) -> None:
@@ -45,6 +46,12 @@ class AuthoringProjectTree:
             for identity in image.ancestors:
                 self._record_identity(recorded, identity)
         self._recorded = recorded
+        self._target_parents = tuple(
+            sorted(
+                {image.resolved_path.parent for image in bundle.after_images},
+                key=lambda path: (len(path.parts), str(path)),
+            )
+        )
 
     @classmethod
     def from_identities(
@@ -61,7 +68,14 @@ class AuthoringProjectTree:
             for identity in ancestors:
                 tree._record_identity(recorded, identity)
         tree._recorded = recorded
+        tree._target_parents = ()
         return tree
+
+    def ensure_target_parents(self) -> None:
+        """Create every planned parent in stable shallow-first order."""
+
+        for parent in self._target_parents:
+            self.ensure_directory(parent, _ignore_created_directory)
 
     def ensure_directory(
         self,
@@ -374,3 +388,7 @@ class AuthoringProjectTree:
         existing = recorded.setdefault(identity.resolved_path, identity)
         if existing != identity:
             raise AuthoringError("authoring bundle contains conflicting identities")
+
+
+def _ignore_created_directory(_identity: PathIdentity) -> None:
+    """The per-file writer retains live ownership in ``created_directories``."""

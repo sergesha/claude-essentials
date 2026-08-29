@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+import lockstep.authoring_publisher as publisher
 from lockstep import authoring, templates
 from lockstep.authoring import project_paths
 from lockstep.authoring_bundle import ProjectCompilationBundle, plan_project_compilation
@@ -19,6 +20,7 @@ from lockstep.errors import AuthoringError
 from tests._authoring_crash_gate import (
     NamespaceEntry,
     install_mutation_syscall_probe,
+    namespace_entry,
     namespace_image,
 )
 from tests._authoring_gate import replace_marker, write_workflow
@@ -31,6 +33,149 @@ from tests._authoring_writer_gate import (
     ThreadResults,
     wait,
 )
+
+
+def test_private_writer_preflights_every_before_image_before_any_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A late collision must reject before a parent, temp, or earlier target changes."""
+
+    scenario = _compilation_scenario(tmp_path)
+    late = scenario.destinations[-1]
+    late.write_bytes(b"foreign late collision\n")
+    late.chmod(0o600)
+    frozen = namespace_image(scenario.project)
+    calls = install_mutation_syscall_probe(monkeypatch)
+
+    with pytest.raises(AuthoringError):
+        publisher._publish_per_file(scenario.bundle)
+
+    assert calls == []
+    assert namespace_image(scenario.project) == frozen
+
+
+def test_private_writer_revalidates_the_complete_source_set_before_each_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dropping per-target source validation would publish a mixed stale bundle."""
+
+    scenario = _compilation_scenario(tmp_path)
+    source = scenario.bundle.sources[-1].resolved_path
+    original_replace = os.replace
+    replacements: list[Path] = []
+
+    def replace_then_change_source(source_leaf, destination_leaf, *args, **kwargs):
+        result = original_replace(source_leaf, destination_leaf, *args, **kwargs)
+        directory_fd = kwargs.get("dst_dir_fd")
+        if directory_fd is not None:
+            destination = os.fsdecode(destination_leaf)
+            for path in scenario.destinations:
+                parent = path.parent.stat()
+                observed_parent = os.fstat(directory_fd)
+                if destination == path.name and (parent.st_dev, parent.st_ino) == (
+                    observed_parent.st_dev,
+                    observed_parent.st_ino,
+                ):
+                    replacements.append(path)
+                    if len(replacements) == 1:
+                        source.write_bytes(b"changed after first target\n")
+                        source.chmod(0o640)
+                    break
+        return result
+
+    monkeypatch.setattr(os, "replace", replace_then_change_source)
+
+    with pytest.raises(AuthoringError):
+        publisher._publish_per_file(scenario.bundle)
+
+    assert replacements == [scenario.destinations[0]]
+    first = namespace_entry(scenario.destinations[0])
+    first_after = scenario.bundle.after_images[0]
+    assert (first.content, first.mode) == (first_after.content, first_after.mode)
+    for target, before in zip(
+        scenario.destinations[1:], scenario.bundle.before_images[1:], strict=True
+    ):
+        observed = namespace_entry(target)
+        assert (observed.content, observed.mode) == (before.content, before.mode)
+
+
+def test_private_writer_revalidates_sources_after_the_last_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Removing final source proof would accept a bundle stale at return time."""
+
+    scenario = _compilation_scenario(tmp_path)
+    source = scenario.bundle.sources[-1].resolved_path
+    last = scenario.destinations[-1]
+    original = publisher.capture_after_identity_at
+    changed = False
+
+    def capture_then_change_source(directory_descriptor: int, after):
+        nonlocal changed
+        observed = original(directory_descriptor, after)
+        if after.resolved_path == last and not changed:
+            source.write_bytes(b"changed after final target\n")
+            source.chmod(0o640)
+            changed = True
+        return observed
+
+    monkeypatch.setattr(
+        publisher, "capture_after_identity_at", capture_then_change_source
+    )
+
+    with pytest.raises(AuthoringError):
+        publisher._publish_per_file(scenario.bundle)
+
+    assert changed
+    for target, after in zip(
+        scenario.destinations, scenario.bundle.after_images, strict=True
+    ):
+        observed = namespace_entry(target)
+        assert (observed.content, observed.mode) == (after.content, after.mode)
+
+
+def test_private_writer_uses_same_verified_parent_for_present_replacements(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pathname-based or cross-directory replace would reopen the race surface."""
+
+    scenario = _compilation_scenario(tmp_path)
+    original = os.replace
+    calls: list[tuple[str, str, int, int, tuple[int, int]]] = []
+
+    def record(source, destination, *args, **kwargs):
+        source_fd = kwargs.get("src_dir_fd")
+        destination_fd = kwargs.get("dst_dir_fd")
+        if destination_fd is not None and os.fsdecode(destination) in {
+            path.name for path in scenario.destinations
+        }:
+            parent = os.fstat(destination_fd)
+            calls.append(
+                (
+                    os.fsdecode(source),
+                    os.fsdecode(destination),
+                    source_fd,
+                    destination_fd,
+                    (parent.st_dev, parent.st_ino),
+                )
+            )
+        return original(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(os, "replace", record)
+
+    publisher._publish_per_file(scenario.bundle)
+
+    assert len(calls) == len(scenario.destinations)
+    for call, target in zip(calls, scenario.destinations, strict=True):
+        source, destination, source_fd, destination_fd, parent = call
+        expected_parent = target.parent.stat()
+        assert source != destination
+        assert source_fd == destination_fd
+        assert parent == (expected_parent.st_dev, expected_parent.st_ino)
 
 
 @dataclass(frozen=True, slots=True)

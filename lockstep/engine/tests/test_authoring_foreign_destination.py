@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+import lockstep.authoring_publisher as publisher
 import lockstep.authoring_transaction as transaction
 from lockstep.authoring import project_paths
 from lockstep.authoring_bundle import ProjectCompilationBundle, plan_project_compilation
@@ -24,6 +25,165 @@ from tests._authoring_crash_gate import (
     opaque_lock_identities,
 )
 from tests._authoring_gate import replace_marker, write_workflow
+
+
+@pytest.mark.parametrize("absent", (True, False), ids=("link", "replace"))
+def test_private_writer_rejects_a_same_content_temporary_inode_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    absent: bool,
+) -> None:
+    """A foreign inode must not publish even when its bytes and mode are exact."""
+
+    scenario = _scenario(tmp_path, absent=absent)
+    target = scenario.destinations[0]
+    after = scenario.bundle.after_images[0]
+    assert after.content is not None and after.mode is not None
+    foreign_source = target.parent / "foreign-temporary-source"
+    foreign_source.write_bytes(after.content)
+    foreign_source.chmod(after.mode)
+    foreign_identity = namespace_entry(foreign_source)
+    original_open, original_fsync = os.open, os.fsync
+    original_replace = os.replace
+    temporary: list[Path] = []
+    owned: list[tuple[int, int]] = []
+    swapped = False
+
+    def record_open(path, flags, mode=0o777, *, dir_fd=None):
+        descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
+        if flags & os.O_CREAT and flags & os.O_EXCL and dir_fd is not None:
+            parent = os.fstat(dir_fd)
+            expected = target.parent.stat()
+            if (parent.st_dev, parent.st_ino) == (
+                expected.st_dev,
+                expected.st_ino,
+            ):
+                temporary.append(target.parent / os.fsdecode(path))
+                info = os.fstat(descriptor)
+                owned.append((info.st_dev, info.st_ino))
+        return descriptor
+
+    def swap_after_fsync(descriptor: int) -> None:
+        nonlocal swapped
+        original_fsync(descriptor)
+        info = os.fstat(descriptor)
+        if not swapped and owned and (info.st_dev, info.st_ino) == owned[0]:
+            assert temporary
+            original_replace(foreign_source, temporary[0])
+            swapped = True
+
+    monkeypatch.setattr(os, "open", record_open)
+    monkeypatch.setattr(os, "fsync", swap_after_fsync)
+
+    with pytest.raises(AuthoringError, match="temporary ownership changed"):
+        publisher._publish_per_file(scenario.bundle)
+
+    assert swapped and len(temporary) == len(owned) == 1
+    assert namespace_entry(temporary[0]) == foreign_identity
+    expected = scenario.before[0]
+    assert (namespace_entry(target) if target.exists() else None) == expected
+
+
+@pytest.mark.parametrize("absent", (True, False), ids=("link", "replace"))
+@pytest.mark.parametrize("tamper", ("content", "mode"))
+def test_private_writer_rejects_same_inode_temporary_tampering(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    absent: bool,
+    tamper: str,
+) -> None:
+    """Removing final byte or mode proof would publish a changed live temp."""
+
+    scenario = _scenario(tmp_path, absent=absent)
+    target = scenario.destinations[0]
+    original_open, original_fsync = os.open, os.fsync
+    temporary: list[Path] = []
+    owned: list[tuple[int, int]] = []
+    tampered = False
+
+    def record_open(path, flags, mode=0o777, *, dir_fd=None):
+        descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
+        if flags & os.O_CREAT and flags & os.O_EXCL and dir_fd is not None:
+            parent = os.fstat(dir_fd)
+            expected = target.parent.stat()
+            if (parent.st_dev, parent.st_ino) == (
+                expected.st_dev,
+                expected.st_ino,
+            ):
+                temporary.append(target.parent / os.fsdecode(path))
+                info = os.fstat(descriptor)
+                owned.append((info.st_dev, info.st_ino))
+        return descriptor
+
+    def tamper_after_fsync(descriptor: int) -> None:
+        nonlocal tampered
+        original_fsync(descriptor)
+        info = os.fstat(descriptor)
+        if not tampered and owned and (info.st_dev, info.st_ino) == owned[0]:
+            if tamper == "content":
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                os.ftruncate(descriptor, 0)
+                os.write(descriptor, b"changed temporary bytes\n")
+            else:
+                changed_mode = (
+                    0o600 if stat.S_IMODE(info.st_mode) != 0o600 else 0o640
+                )
+                os.fchmod(descriptor, changed_mode)
+            tampered = True
+
+    monkeypatch.setattr(os, "open", record_open)
+    monkeypatch.setattr(os, "fsync", tamper_after_fsync)
+
+    with pytest.raises(AuthoringError, match="temporary does not match"):
+        publisher._publish_per_file(scenario.bundle)
+
+    assert tampered and len(temporary) == len(owned) == 1
+    assert not temporary[0].exists()
+    expected = scenario.before[0]
+    assert (namespace_entry(target) if target.exists() else None) == expected
+
+
+def test_private_writer_absent_link_never_clobbers_a_foreign_destination(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Replacing the no-clobber link with rename would overwrite foreign bytes."""
+
+    scenario = _scenario(tmp_path, absent=True)
+    target = scenario.destinations[0]
+    foreign = b"foreign wins the no-clobber race\n"
+    original_open, original_link = os.open, os.link
+    temporary: list[Path] = []
+
+    def record_open(path, flags, mode=0o777, *, dir_fd=None):
+        descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
+        if flags & os.O_CREAT and flags & os.O_EXCL and dir_fd is not None:
+            parent = os.fstat(dir_fd)
+            expected = target.parent.stat()
+            if (parent.st_dev, parent.st_ino) == (
+                expected.st_dev,
+                expected.st_ino,
+            ):
+                temporary.append(target.parent / os.fsdecode(path))
+        return descriptor
+
+    def create_then_link(source, destination, *args, **kwargs):
+        if (
+            kwargs.get("dst_dir_fd") is not None
+            and os.fsdecode(destination) == target.name
+        ):
+            target.write_bytes(foreign)
+            target.chmod(0o600)
+        return original_link(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", record_open)
+    monkeypatch.setattr(os, "link", create_then_link)
+
+    with pytest.raises(AuthoringError, match="created before publication"):
+        publisher._publish_per_file(scenario.bundle)
+
+    assert namespace_entry(target).content == foreign
+    assert len(temporary) == 1 and not temporary[0].exists()
 
 
 @dataclass(frozen=True, slots=True)

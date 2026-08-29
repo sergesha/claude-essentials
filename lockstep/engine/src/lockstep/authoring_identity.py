@@ -43,6 +43,7 @@ def validate_bundle_preconditions(bundle: ProjectCompilationBundle) -> None:
 
     if not isinstance(bundle, ProjectCompilationBundle):
         raise TypeError("authoring publication requires a ProjectCompilationBundle")
+    _validate_bundle_structure(bundle)
     _validate_bundle_limits(bundle)
     _validate_directory_identity(bundle.project_identity)
     if bundle.project_identity.resolved_path != bundle.resolved_project:
@@ -56,6 +57,42 @@ def validate_bundle_preconditions(bundle: ProjectCompilationBundle) -> None:
             raise AuthoringError("authoring destination map changed after planning")
         _validate_destination_shape(bundle.resolved_project, before, after)
         validate_destination_before(before, created_directories={})
+
+
+def _validate_bundle_structure(bundle: ProjectCompilationBundle) -> None:
+    """Reject collisions even if an internal frozen DTO was unsafely mutated."""
+
+    if not all(
+        isinstance(items, tuple)
+        for items in (
+            bundle.sources,
+            bundle.dependency_edges,
+            bundle.before_images,
+            bundle.after_images,
+        )
+    ):
+        raise AuthoringError("authoring bundle collections changed after planning")
+    if len(bundle.before_images) != len(bundle.after_images):
+        raise AuthoringError("authoring destination map changed after planning")
+    targets = tuple(image.resolved_path for image in bundle.after_images)
+    before_targets = tuple(image.resolved_path for image in bundle.before_images)
+    if before_targets != targets or len(targets) != len(set(targets)):
+        raise AuthoringError("authoring destination paths collide")
+    if any(first in second.parents for first in targets for second in targets):
+        raise AuthoringError("authoring destination paths overlap")
+    sources = tuple(source.resolved_path for source in bundle.sources)
+    if set(sources).intersection(targets):
+        raise AuthoringError("authoring source and destination paths collide")
+    roles = tuple(role for role, _children in bundle.dependency_edges)
+    if len(roles) != len(set(roles)):
+        raise AuthoringError("authoring dependency roles collide")
+    for before, after in zip(
+        bundle.before_images, bundle.after_images, strict=True
+    ):
+        if before.role != after.role or after.role not in roles:
+            raise AuthoringError("authoring destination roles changed after planning")
+        if after.content is None or after.mode is None or after.leaf is not None:
+            raise AuthoringError("authoring after-image is incomplete")
 
 
 def validate_sources(sources: tuple[SourceIdentity, ...]) -> None:
@@ -174,6 +211,38 @@ def capture_after_identity_at(
         info.st_size,
         _sha256(content),
     )
+
+
+def validate_temporary_descriptor(
+    descriptor: int, image: DestinationImage
+) -> None:
+    """Prove one still-open temporary has exact bounded after-image bytes."""
+
+    content, mode = image.content, image.mode
+    if content is None or mode is None:
+        raise AuthoringError("authoring after-image is incomplete")
+    first = os.fstat(descriptor)
+    if not stat.S_ISREG(first.st_mode) or first.st_size != len(content):
+        raise AuthoringError("authoring temporary does not match its after-image")
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    remaining = len(content) + 1
+    while remaining:
+        chunk = os.read(descriptor, min(1024 * 1024, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    observed = b"".join(chunks)
+    last = os.fstat(descriptor)
+    if _leaf_facts(first) != _leaf_facts(last):
+        raise AuthoringError("authoring temporary changed while reading")
+    if (
+        observed != content
+        or _sha256(observed) != image.sha256
+        or stat.S_IMODE(first.st_mode) != mode
+    ):
+        raise AuthoringError("authoring temporary does not match its after-image")
 
 
 def validate_after_identity_at(
