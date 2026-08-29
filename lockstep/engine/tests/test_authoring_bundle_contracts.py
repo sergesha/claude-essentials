@@ -8,6 +8,7 @@ import pytest
 
 from lockstep.authoring import project_paths
 from lockstep.authoring_bundle import DestinationImage, ProjectCompilationBundle, SourceIdentity, plan_project_compilation
+from lockstep.authoring_identity import validate_bundle_preconditions
 from lockstep.authoring_publisher import AuthoringPublisher
 from tests._authoring_gate import write_workflow
 
@@ -70,7 +71,8 @@ def test_bundle_rejects_unowned_or_duplicate_targets(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="roles"):
         dataclasses.replace(bundle, before_images=(foreign_before, *bundle.before_images[1:]), after_images=(foreign_after, *bundle.after_images[1:]))
     with pytest.raises(ValueError, match="match exactly"):
-        dataclasses.replace(bundle, before_images=(bundle.before_images[0], bundle.before_images[0], *bundle.before_images[2:]))
+        dataclasses.replace(bundle, before_images=(bundle.before_images[0], bundle.before_images[0], *bundle.before_images[2:]),
+            after_images=(bundle.after_images[0], bundle.after_images[0], *bundle.after_images[2:]))
 
 
 def test_bundle_rejects_mismatched_paired_parent_identity(tmp_path: Path) -> None:
@@ -78,3 +80,13 @@ def test_bundle_rejects_mismatched_paired_parent_identity(tmp_path: Path) -> Non
     changed = dataclasses.replace(bundle.after_images[0], ancestors=bundle.after_images[0].ancestors[1:])
     with pytest.raises(ValueError, match="paired destination ancestors"):
         dataclasses.replace(bundle, after_images=(changed, *bundle.after_images[1:]))
+
+
+def test_matched_foreign_parent_chain_fails_at_live_precondition_boundary(tmp_path: Path) -> None:
+    bundle = _bundle(tmp_path); before, after = bundle.before_images[0], bundle.after_images[0]
+    assert before.ancestors == after.ancestors and before.ancestors[0] == bundle.project_identity
+    foreign = before.ancestors[1:]
+    changed = dataclasses.replace(bundle,
+        before_images=(dataclasses.replace(before, ancestors=foreign), *bundle.before_images[1:]),
+        after_images=(dataclasses.replace(after, ancestors=foreign), *bundle.after_images[1:]))
+    with pytest.raises(Exception, match="ancestor|project"): validate_bundle_preconditions(changed)

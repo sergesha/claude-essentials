@@ -616,7 +616,8 @@ def test_installed_mcp_refuses_legacy_authoring_evidence(
 ) -> None:
     from lockstep import authoring
     from lockstep.authoring_journal import AuthoringJournal
-    from tests._authoring_gate import write_workflow
+    from tests._authoring_gate import tree_image, write_workflow
+    from tests.test_authoring_legacy_v4_refusal import live_v4_bytes
 
     project = tmp_path / "project"
     project.mkdir()
@@ -624,11 +625,11 @@ def test_installed_mcp_refuses_legacy_authoring_evidence(
     write_workflow(project, "release")
     authoring.publish_project_compilation(project, "release", state_dir=state)
     journal, _identity = AuthoringJournal.create_for_project(state, project)
-    fixture = Path(__file__).parent / "fixtures/authoring-v4/transaction.json"
-    journal.journal_path.write_bytes(fixture.read_bytes())
+    journal.journal_path.write_bytes(live_v4_bytes(project))
     journal.journal_path.chmod(0o600)
     monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(state))
-    before = journal.journal_path.read_bytes()
+    before = journal.journal_path.read_bytes(); project_before, owner_before = tree_image(project), tree_image(state)
+    monkeypatch.setattr(AuthoringJournal, "read_recovery_model", lambda *_a, **_k: pytest.fail("MCP parsed retained transaction bytes"))
 
     with pytest.raises(Exception) as raised:
         operation(_ctx(project))
@@ -637,3 +638,4 @@ def test_installed_mcp_refuses_legacy_authoring_evidence(
     assert str(project.resolve()) in error and str(state) in error
     assert "Do not delete transaction.json manually" in error
     assert journal.journal_path.read_bytes() == before
+    assert tree_image(project) == project_before and tree_image(state) == owner_before

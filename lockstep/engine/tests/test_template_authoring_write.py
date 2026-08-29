@@ -12,6 +12,7 @@ from lockstep.authoring_journal import AuthoringJournal
 from lockstep.authoring_publisher import AuthoringPublisher
 from lockstep.templates import TemplateCollision, install_template
 from tests._authoring_gate import tree_image
+from tests.test_authoring_legacy_v4_refusal import live_v4_bytes
 
 
 def _state(project: Path) -> Path:
@@ -77,13 +78,14 @@ def test_owner_transaction_refusal_precedes_template_planning(tmp_path, monkeypa
     project = tmp_path / "project"; project.mkdir(); state = _state(project)
     journal, _identity = AuthoringJournal.create_for_project(state, project)
     with journal.locked(): pass
-    journal.journal_path.write_bytes((Path(__file__).parent / "fixtures/authoring-v4/transaction.json").read_bytes())
-    journal.journal_path.chmod(0o600)
+    journal.journal_path.write_bytes(live_v4_bytes(project)); journal.journal_path.chmod(0o600)
+    before_project, before_state = tree_image(project), tree_image(state)
     planned = []
     monkeypatch.setattr(templates, "plan_template_installation", lambda *_a, **_k: planned.append(True))
+    monkeypatch.setattr(AuthoringJournal, "read_recovery_model", lambda *_a, **_k: pytest.fail("legacy evidence was parsed"))
     with pytest.raises(Exception, match="pre-simplification"):
         install_template("reviewed-change", "change", project, state_dir=state)
-    assert planned == []
+    assert planned == [] and tree_image(project) == before_project and tree_image(state) == before_state
 
 
 def test_partial_template_write_is_not_rolled_back_and_requires_regeneration(

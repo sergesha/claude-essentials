@@ -1,12 +1,13 @@
 """Public minimal recipe writes through one ready, complete authoring plan."""
 from __future__ import annotations
 
-import inspect
+import inspect, stat
 from pathlib import Path
 
 import pytest
 
 from lockstep import authoring, cli
+from lockstep.authoring_bundle import plan_project_compilation
 from lockstep.authoring_journal import AuthoringJournal
 from lockstep.authoring_publisher import AuthoringPublisher
 from lockstep.mcp import server
@@ -14,6 +15,7 @@ from tests._authoring_gate import (
     expected_compilation_image, mcp_context, observed_compilation_image,
     replace_marker, tree_image, write_workflow,
 )
+from tests.test_authoring_legacy_v4_refusal import live_v4_bytes
 
 
 def _state(project: Path) -> Path:
@@ -87,14 +89,33 @@ def test_write_compilation_republishes_complete_changed_child_dag(tmp_path: Path
     assert (project / ".lockstep/recipes/child.recipe.yaml").read_bytes() != original
 
 
+def test_successful_public_compile_materializes_only_the_planned_namespace(tmp_path: Path) -> None:
+    project = tmp_path / "project"; project.mkdir(); source = write_workflow(project, "release")
+    sentinel = project / "owner-note.txt"; sentinel.write_bytes(b"owner sentinel\n"); sentinel.chmod(0o640)
+    plan = plan_project_compilation(authoring.project_paths(project, "release"))
+    before = tree_image(project); expected = {item.resolved_path: item for item in plan.after_images}
+
+    authoring.publish_project_compilation(project, "release", state_dir=_state(project))
+
+    after = tree_image(project); added = set(after) - set(before)
+    planned_files = {path.relative_to(project).as_posix() for path in expected}
+    planned_parents = {parent.relative_to(project).as_posix() for path in expected for parent in path.parents if project in parent.parents}
+    assert added == (planned_files | planned_parents) - set(before)
+    assert source.read_bytes() == before[source.relative_to(project).as_posix()].content
+    assert sentinel.read_bytes() == b"owner sentinel\n" and stat.S_IMODE(sentinel.stat().st_mode) == 0o640
+    for path, image in expected.items():
+        assert path.read_bytes() == image.content and stat.S_IMODE(path.stat().st_mode) == image.mode
+
+
 def test_recipe_init_refuses_legacy_before_planning(tmp_path, monkeypatch) -> None:
     project = tmp_path / "project"; project.mkdir(); state = _state(project)
     journal, _identity = AuthoringJournal.create_for_project(state, project)
     with journal.locked(): pass
-    journal.journal_path.write_bytes((Path(__file__).parent / "fixtures/authoring-v4/transaction.json").read_bytes())
-    journal.journal_path.chmod(0o600)
+    journal.journal_path.write_bytes(live_v4_bytes(project)); journal.journal_path.chmod(0o600)
+    before_project, before_state = tree_image(project), tree_image(state)
     planned = []
     monkeypatch.setattr(authoring, "plan_captured_workflow_installation", lambda *_a, **_k: planned.append(True))
+    monkeypatch.setattr(AuthoringJournal, "read_recovery_model", lambda *_a, **_k: pytest.fail("legacy evidence was parsed"))
     with pytest.raises(Exception, match="pre-simplification"):
         authoring.initialize_minimal(project, "release", state_dir=state)
-    assert planned == []
+    assert planned == [] and tree_image(project) == before_project and tree_image(state) == before_state

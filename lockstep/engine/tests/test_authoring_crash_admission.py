@@ -1,7 +1,7 @@
 """Canonical-iff runtime admission after every bounded-writer crash cut."""
 from __future__ import annotations
 
-import os, stat
+import json, multiprocessing, os, stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,7 +20,7 @@ from lockstep.templates import install_template
 from tests._authoring_gate import assert_no_durable_runtime_change, replace_marker, tree_image, write_workflow
 
 
-class ProcessDeath(BaseException): pass
+CUT_EXIT = 86
 
 
 @dataclass(frozen=True)
@@ -49,7 +49,7 @@ def _scenario(root: Path, surface: str, present: bool) -> Scenario:
     return Scenario(project, state, "change", plan.bundle)
 
 
-def _die() -> None: raise ProcessDeath("writer cut")
+def _die() -> None: os._exit(CUT_EXIT)
 
 
 def _nth(original, ordinal: int):
@@ -61,20 +61,12 @@ def _nth(original, ordinal: int):
     return wrapped
 
 
-def _install_cut(monkeypatch, phase: str, ordinal: int) -> None:
-    if phase == "after-temp-creation": monkeypatch.setattr(publisher, "_create_temporary", _nth(publisher._create_temporary, ordinal)); return
-    if phase == "after-temp-fsync": monkeypatch.setattr(publisher, "_write_temporary", _nth(publisher._write_temporary, ordinal)); return
-    if phase == "after-final-validation": monkeypatch.setattr(publisher, "validate_destination_before_at", _nth(publisher.validate_destination_before_at, ordinal)); return
-    if phase == "after-mutation":
-        calls = 0; original_link, original_replace = os.link, os.replace
-        def mutation(original):
-            def wrapped(*args, **kwargs):
-                nonlocal calls; result = original(*args, **kwargs); current = calls; calls += 1
-                if current == ordinal: _die()
-                return result
-            return wrapped
-        monkeypatch.setattr(os, "link", mutation(original_link)); monkeypatch.setattr(os, "replace", mutation(original_replace)); return
-    if phase == "after-target-fsync": monkeypatch.setattr(publisher, "_fsync_regular_at", _nth(publisher._fsync_regular_at, ordinal)); return
+def _install_cut(phase: str, ordinal: int) -> None:
+    if phase == "after-temp-creation": publisher._create_temporary = _nth(publisher._create_temporary, ordinal); return
+    if phase == "after-temp-fsync": publisher._write_temporary = _nth(publisher._write_temporary, ordinal); return
+    if phase == "after-final-validation": publisher.validate_destination_before_at = _nth(publisher.validate_destination_before_at, ordinal); return
+    if phase == "after-mutation": publisher._publish_owned_temporary = _nth(publisher._publish_owned_temporary, ordinal); return
+    if phase == "after-target-fsync": publisher._fsync_regular_at = _nth(publisher._fsync_regular_at, ordinal); return
     if phase == "after-parent-fsync":
         current = -1; original_target, original_fsync = publisher._fsync_regular_at, os.fsync
         def target(*args, **kwargs):
@@ -83,8 +75,29 @@ def _install_cut(monkeypatch, phase: str, ordinal: int) -> None:
             result = original_fsync(descriptor)
             if current == ordinal and stat.S_ISDIR(os.fstat(descriptor).st_mode): _die()
             return result
-        monkeypatch.setattr(publisher, "_fsync_regular_at", target); monkeypatch.setattr(os, "fsync", fsync); return
+        publisher._fsync_regular_at, os.fsync = target, fsync; return
     raise AssertionError(phase)
+
+
+def _public_write(scenario: Scenario, surface: str) -> None:
+    if surface == "compile": authoring.publish_project_compilation(scenario.project, "release", state_dir=scenario.state)
+    elif surface == "minimal": authoring.initialize_minimal(scenario.project, "release", state_dir=scenario.state)
+    else: install_template("reviewed-change", "change", scenario.project, state_dir=scenario.state)
+
+
+def _crash_child(scenario: Scenario, surface: str, phase: str, ordinal: int, force_route: bool) -> None:
+    if force_route: AuthoringPublisher.publish = lambda _self, bundle: publisher._publish_per_file(bundle)
+    _install_cut(phase, ordinal)
+    _public_write(scenario, surface)
+    os._exit(0)
+
+
+def _run_cut(scenario: Scenario, surface: str, phase: str, ordinal: int, *, force_route: bool = False) -> int:
+    process = multiprocessing.get_context("fork").Process(target=_crash_child, args=(scenario, surface, phase, ordinal, force_route))
+    process.start(); process.join(20)
+    if process.is_alive(): process.kill(); process.join(); pytest.fail("public writer child hung")
+    assert process.exitcode is not None
+    return process.exitcode
 
 
 def _semantics(scenario: Scenario) -> tuple[int, bool]:
@@ -95,7 +108,24 @@ def _semantics(scenario: Scenario) -> tuple[int, bool]:
     return changed, old_complete
 
 
-def _runtime_oracle(scenario: Scenario, monkeypatch, accept: bool) -> None:
+def _authorized_dag(surface: str, authorized) -> None:
+    root = "change.recipe.yaml" if surface == "template" else "release.recipe.yaml"
+    files = tuple(item.path for item in authorized.files)
+    assert authorized.root == root and authorized.dependency_dag.root == root
+    assert authorized.dependency_dag.files == files
+    edges = set()
+    for item in authorized.files:
+        document = json.loads(item.bytes)
+        for node in document["nodes"].values():
+            if node.get("type") == "subgraph": edges.add((item.path, node["graph"]))
+    if surface != "template": assert files == (root,) and edges == set()
+    else:
+        generated = next(path for path in files if path.startswith("generated/children/"))
+        assert files == ("change-review.recipe.yaml", "change.recipe.yaml", generated)
+        assert edges == {("change.recipe.yaml", "change-review.recipe.yaml"), ("change.recipe.yaml", generated)}
+
+
+def _runtime_oracle(scenario: Scenario, monkeypatch, accept: bool, surface: str) -> None:
     captured = []
     def stop(_self, recipe, plan, _values, *, canonical_input):
         captured.append((recipe, plan, canonical_input)); return {"status": "captured", "run_id": "probe"}
@@ -112,6 +142,7 @@ def _runtime_oracle(scenario: Scenario, monkeypatch, accept: bool) -> None:
     _recipe, plan, canonical_input = captured[0]; recipes = scenario.project / ".lockstep/recipes"
     expected = {path.relative_to(recipes).as_posix(): canonical_execution_bytes(path.read_bytes(), logical_path=path.relative_to(recipes).as_posix()) for path in recipes.rglob("*.recipe.yaml")}
     assert {item.path: item.bytes for item in plan.authorized.files} == expected
+    _authorized_dag(surface, plan.authorized)
     proof = plan.compiler_provenance; assert proof is not None and proof.context == "canonical-match"
     assert {item.relative_path: item.canonical_execution_bytes for item in proof.files} == expected
     assert proof.source_bundle_sha256 == plan.authorized.source_bundle_sha256 and canonical_input == b"{}"
@@ -130,22 +161,39 @@ def test_every_public_writer_cut_has_canonical_iff_runtime_admission(
     for ordinal in range(len(probe.targets)):
         cell = tmp_path / f"{surface}-{present}-{phase}-{ordinal}"; cell.mkdir()
         scenario = _scenario(cell, surface, present)
-        with monkeypatch.context() as cut:
-            _install_cut(cut, phase, ordinal)
-            with pytest.raises(ProcessDeath): publisher._publish_per_file(scenario.bundle)
+        assert _run_cut(scenario, surface, phase, ordinal) == CUT_EXIT
+        cut_project = tree_image(scenario.project)
         changed, old_complete = _semantics(scenario)
         new_complete = changed == len(scenario.targets)
-        if scenario.source is not None and old_complete and scenario.old_source is not None: scenario.source.write_bytes(scenario.old_source)
-        with monkeypatch.context() as runtime: _runtime_oracle(scenario, runtime, old_complete or new_complete)
+        assert not (old_complete and scenario.source is not None and scenario.source.read_bytes() == scenario.old_source)
+        with monkeypatch.context() as runtime: _runtime_oracle(scenario, runtime, new_complete, surface)
+        assert tree_image(scenario.project) == cut_project
+
+
+def test_subprocess_cut_skips_finally_cleanup_and_preserves_mixed_stale_tree(tmp_path, monkeypatch) -> None:
+    absent = _scenario(tmp_path / "absent", "minimal", False)
+    assert _run_cut(absent, "minimal", "after-temp-creation", 0, force_route=True) == CUT_EXIT
+    assert tuple(absent.project.rglob(".lockstep-authoring-*.tmp"))
+    stale = _scenario(tmp_path / "stale", "compile", True)
+    assert _run_cut(stale, "compile", "after-mutation", 0, force_route=True) == CUT_EXIT
+    snapshot = tree_image(stale.project); assert stale.source is not None and b"new" in stale.source.read_bytes()
+    changed, _old = _semantics(stale); assert 0 < changed < len(stale.targets)
+    _runtime_oracle(stale, monkeypatch, False, "compile"); assert tree_image(stale.project) == snapshot
+
+
+@pytest.mark.parametrize("surface", ("compile", "minimal", "template"))
+def test_complete_last_target_cut_admits_the_exact_surface_dag(tmp_path, monkeypatch, surface) -> None:
+    scenario = _scenario(tmp_path, surface, False); last = len(scenario.targets) - 1
+    assert _run_cut(scenario, surface, "after-parent-fsync", last, force_route=True) == CUT_EXIT
+    assert _semantics(scenario) == (len(scenario.targets), False)
+    _runtime_oracle(scenario, monkeypatch, True, surface)
 
 
 @pytest.mark.parametrize("surface", ("compile", "minimal", "template"))
 def test_public_writer_surfaces_route_to_the_bounded_per_file_writer(tmp_path, monkeypatch, surface) -> None:
     scenario = _scenario(tmp_path, surface, False); seen = []; original = publisher._publish_per_file
     monkeypatch.setattr(publisher, "_publish_per_file", lambda bundle: seen.append(bundle) or original(bundle))
-    if surface == "compile": authoring.publish_project_compilation(scenario.project, "release", state_dir=scenario.state)
-    elif surface == "minimal": authoring.initialize_minimal(scenario.project, "release", state_dir=scenario.state)
-    else: install_template("reviewed-change", "change", scenario.project, state_dir=scenario.state)
+    _public_write(scenario, surface)
     assert seen == [scenario.bundle]
 
 

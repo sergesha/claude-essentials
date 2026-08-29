@@ -121,6 +121,37 @@ def test_destination_parent_swap_cannot_escape_project(tmp_path) -> None:
     assert not tuple(outside.iterdir())
 
 
+@pytest.mark.parametrize("race", ("empty-replacement", "foreign-child"))
+def test_created_parent_race_refuses_foreign_replacement_or_child(tmp_path, monkeypatch, race) -> None:
+    scenario = _scenario(tmp_path, present=False); parent = scenario.targets[0].parent; original = os.mkdir; injected = []
+    def mkdir(path, *args, **kwargs):
+        result = original(path, *args, **kwargs)
+        if os.fsdecode(path) == parent.name and not injected:
+            injected.append(True)
+            if race == "empty-replacement":
+                os.rmdir(path, dir_fd=kwargs.get("dir_fd")); original(path, *args, **kwargs)
+            else: (parent / "foreign.txt").write_bytes(b"foreign\n")
+        return result
+    monkeypatch.setattr(os, "mkdir", mkdir)
+    with pytest.raises(AuthoringError, match="foreign|ownership|created"):
+        publisher._publish_per_file(scenario.bundle)
+    assert injected == [True] and all(not path.exists() for path in scenario.targets)
+    if race == "foreign-child": assert (parent / "foreign.txt").read_bytes() == b"foreign\n"
+
+
+def test_each_target_fsync_precedes_its_parent_directory_fsync(tmp_path, monkeypatch) -> None:
+    scenario = _scenario(tmp_path, present=False); events = []; original_target, original_fsync = publisher._fsync_regular_at, os.fsync
+    def target(parent, leaf): original_target(parent, leaf); events.append(("target", leaf))
+    def fsync(descriptor):
+        result = original_fsync(descriptor)
+        if stat.S_ISDIR(os.fstat(descriptor).st_mode): events.append(("parent", None))
+        return result
+    monkeypatch.setattr(publisher, "_fsync_regular_at", target); monkeypatch.setattr(os, "fsync", fsync)
+    publisher._publish_per_file(scenario.bundle)
+    relevant = events[-2 * len(scenario.targets):]
+    assert relevant == [item for target_path in scenario.targets for item in (("target", target_path.name), ("parent", None))]
+
+
 @pytest.mark.parametrize("when", ("before", "between", "terminal"))
 def test_source_currentness_rejects_without_rolling_back_completed_prefix(tmp_path, monkeypatch, when) -> None:
     scenario = _scenario(tmp_path, present=True); original = publisher._publish_target; calls = 0
