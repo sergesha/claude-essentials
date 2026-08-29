@@ -137,6 +137,56 @@ def test_private_writer_revalidates_sources_after_the_last_target(
         assert (observed.content, observed.mode) == (after.content, after.mode)
 
 
+@pytest.mark.parametrize("index", (0, 1, 2), ids=lambda index: f"replace[{index}]")
+def test_private_writer_revalidates_present_target_at_replacement_edge(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    index: int,
+) -> None:
+    """A post-temp-proof foreign replacement must survive without rollback."""
+
+    scenario = _compilation_scenario(tmp_path)
+    target = scenario.destinations[index]
+    foreign_source = target.with_name(f"foreign-replacement-{index}.bin")
+    foreign_source.write_bytes(b"foreign replacement at mutation edge\n")
+    foreign_source.chmod(0o600)
+    original = publisher._validate_temporary_descriptor
+    foreign_identity: list[NamespaceEntry] = []
+
+    def prove_then_replace(descriptor: int, after) -> None:
+        original(descriptor, after)
+        if after.resolved_path == target and not foreign_identity:
+            os.replace(foreign_source, target)
+            foreign_identity.append(namespace_entry(target))
+
+    monkeypatch.setattr(
+        publisher, "_validate_temporary_descriptor", prove_then_replace
+    )
+
+    with pytest.raises(AuthoringError):
+        publisher._publish_per_file(scenario.bundle)
+
+    assert len(foreign_identity) == 1
+    for ordinal, (path, before, after) in enumerate(
+        zip(
+            scenario.destinations,
+            scenario.bundle.before_images,
+            scenario.bundle.after_images,
+            strict=True,
+        )
+    ):
+        observed = namespace_entry(path)
+        if ordinal < index:
+            assert (observed.content, observed.mode) == (after.content, after.mode)
+        elif ordinal == index:
+            assert observed == foreign_identity[0]
+        else:
+            assert (observed.content, observed.mode) == (
+                before.content,
+                before.mode,
+            )
+
+
 def test_private_writer_uses_same_verified_parent_for_present_replacements(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -12,6 +13,7 @@ import lockstep.authoring_publisher as publisher
 from lockstep.authoring import project_paths
 from lockstep.authoring_bundle import ProjectCompilationBundle, plan_project_compilation
 from lockstep.authoring_project_tree import AuthoringProjectTree
+from lockstep.errors import AuthoringError
 from tests._authoring_crash_gate import NamespaceEntry, namespace_entry
 from tests._authoring_gate import replace_marker, write_workflow
 from tests._authoring_writer_gate import SimulatedProcessDeath
@@ -116,19 +118,32 @@ def _install_cut(
         )
         return
     if phase == "after-parent-fsync":
-        original = publisher.capture_after_identity_at
+        original_target_fsync = publisher._fsync_regular_at
+        original_fsync = os.fsync
+        target_synced = False
 
-        def capture_then_cut(directory_descriptor: int, after):
-            observed = original(directory_descriptor, after)
-            if after.resolved_path == target:
+        def observe_target_fsync(directory_descriptor: int, leaf: str) -> None:
+            nonlocal target_synced
+            original_target_fsync(directory_descriptor, leaf)
+            if leaf == target.name:
+                target_synced = True
+
+        def fsync_parent_then_cut(descriptor: int) -> None:
+            original_fsync(descriptor)
+            info = os.fstat(descriptor)
+            expected = target.parent.stat()
+            if target_synced and stat.S_ISDIR(info.st_mode) and (
+                info.st_dev,
+                info.st_ino,
+            ) == (expected.st_dev, expected.st_ino):
                 _raise_cut()
-            return observed
 
         monkeypatch.setattr(
             publisher,
-            "capture_after_identity_at",
-            capture_then_cut,
+            "_fsync_regular_at",
+            observe_target_fsync,
         )
+        monkeypatch.setattr(os, "fsync", fsync_parent_then_cut)
         return
     raise AssertionError(f"unknown cut: {phase}")
 
@@ -207,3 +222,43 @@ def test_private_writer_publishes_each_target_as_an_exact_regular_after_image(
             after.content,
             after.mode,
         )
+
+
+def test_private_writer_final_verification_rejects_an_earlier_target_tamper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Deleting final whole-bundle verification would accept stale earlier bytes."""
+
+    scenario = _scenario(tmp_path, absent=True)
+    first, last = scenario.targets[0], scenario.targets[-1]
+    original = publisher.capture_after_identity_at
+    foreign = b"changed after immediate target verification\n"
+    tampered = False
+
+    def capture_then_tamper(directory_descriptor: int, after):
+        nonlocal tampered
+        observed = original(directory_descriptor, after)
+        if after.resolved_path == last and not tampered:
+            first.write_bytes(foreign)
+            first.chmod(0o600)
+            tampered = True
+        return observed
+
+    monkeypatch.setattr(
+        publisher, "capture_after_identity_at", capture_then_tamper
+    )
+
+    with pytest.raises(AuthoringError):
+        publisher._publish_per_file(scenario.bundle)
+
+    assert tampered
+    assert (namespace_entry(first).content, namespace_entry(first).mode) == (
+        foreign,
+        0o600,
+    )
+    for target, after in zip(
+        scenario.targets[1:], scenario.bundle.after_images[1:], strict=True
+    ):
+        observed = namespace_entry(target)
+        assert (observed.content, observed.mode) == (after.content, after.mode)

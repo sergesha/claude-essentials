@@ -69,7 +69,11 @@ def _publish_target(
     temporary_leaf = f".lockstep-authoring-{secrets.token_hex(16)}.tmp"
     owned: tuple[int, int] | None = None
     try:
-        owned = _write_temporary(parent_descriptor, temporary_leaf, after)
+        descriptor, owned = _create_temporary(parent_descriptor, temporary_leaf)
+        try:
+            _write_temporary(descriptor, after)
+        finally:
+            os.close(descriptor)
         _prove_owned_temporary(parent_descriptor, temporary_leaf, owned, after)
         validate_destination_before_at(parent_descriptor, before)
         _publish_owned_temporary(
@@ -87,14 +91,10 @@ def _publish_target(
         os.close(parent_descriptor)
 
 
-def _write_temporary(
+def _create_temporary(
     parent_descriptor: int,
     temporary_leaf: str,
-    after: DestinationImage,
-) -> tuple[int, int]:
-    content, mode = after.content, after.mode
-    if content is None or mode is None:
-        raise AuthoringError("authoring after-image is incomplete")
+) -> tuple[int, tuple[int, int]]:
     try:
         descriptor = os.open(
             temporary_leaf,
@@ -108,17 +108,31 @@ def _write_temporary(
         )
     except FileExistsError as exc:
         raise AuthoringError("authoring temporary already exists") from exc
+    owned: tuple[int, int] | None = None
     try:
         info = os.fstat(descriptor)
+        owned = info.st_dev, info.st_ino
         if not stat.S_ISREG(info.st_mode):
             raise AuthoringError("authoring temporary is not a regular file")
-        owned = info.st_dev, info.st_ino
-        _write_all(descriptor, content)
-        os.fchmod(descriptor, mode)
-        os.fsync(descriptor)
-        return owned
-    finally:
-        os.close(descriptor)
+        return descriptor, owned
+    except Exception:
+        try:
+            os.close(descriptor)
+        finally:
+            if owned is not None:
+                _cleanup_owned_temporary(
+                    parent_descriptor, temporary_leaf, owned
+                )
+        raise
+
+
+def _write_temporary(descriptor: int, after: DestinationImage) -> None:
+    content, mode = after.content, after.mode
+    if content is None or mode is None:
+        raise AuthoringError("authoring after-image is incomplete")
+    _write_all(descriptor, content)
+    os.fchmod(descriptor, mode)
+    os.fsync(descriptor)
 
 
 def _prove_owned_temporary(

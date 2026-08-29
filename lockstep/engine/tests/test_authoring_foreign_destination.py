@@ -27,6 +27,52 @@ from tests._authoring_crash_gate import (
 from tests._authoring_gate import replace_marker, write_workflow
 
 
+@pytest.mark.parametrize("fault", ("write", "fchmod", "fsync"))
+def test_private_writer_cleans_its_live_temporary_after_initialization_fault(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fault: str,
+) -> None:
+    """Ownership must be known before write, chmod, or fsync can fail."""
+
+    scenario = _scenario(tmp_path, absent=True)
+    target = scenario.destinations[0]
+    original_open = os.open
+    original_operation = getattr(os, fault)
+    temporary: list[Path] = []
+    owned: list[tuple[int, int]] = []
+
+    def record_open(path, flags, mode=0o777, *, dir_fd=None):
+        descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
+        if flags & os.O_CREAT and flags & os.O_EXCL and dir_fd is not None:
+            parent = os.fstat(dir_fd)
+            expected = target.parent.stat()
+            if (parent.st_dev, parent.st_ino) == (
+                expected.st_dev,
+                expected.st_ino,
+            ):
+                temporary.append(target.parent / os.fsdecode(path))
+                info = os.fstat(descriptor)
+                owned.append((info.st_dev, info.st_ino))
+        return descriptor
+
+    def fail_owned_descriptor(descriptor: int, *args, **kwargs):
+        info = os.fstat(descriptor)
+        if owned and (info.st_dev, info.st_ino) == owned[0]:
+            raise OSError(EIO, f"injected temporary {fault} failure")
+        return original_operation(descriptor, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", record_open)
+    monkeypatch.setattr(os, fault, fail_owned_descriptor)
+
+    with pytest.raises(OSError, match=f"temporary {fault} failure"):
+        publisher._publish_per_file(scenario.bundle)
+
+    assert len(temporary) == len(owned) == 1
+    assert not temporary[0].exists()
+    assert namespace_image(scenario.project) == scenario.project_before
+
+
 @pytest.mark.parametrize("absent", (True, False), ids=("link", "replace"))
 def test_private_writer_rejects_a_same_content_temporary_inode_swap(
     tmp_path: Path,
