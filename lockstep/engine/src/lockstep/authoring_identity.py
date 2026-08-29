@@ -14,17 +14,17 @@ from lockstep.authoring_bundle import (
     PathIdentity,
     ProjectCompilationBundle,
     SourceIdentity,
+    _validate_authoring_contents,
 )
-from lockstep.authoring_file_observation import (
-    DescriptorChanged,
-    DescriptorNotRegular,
-    DescriptorObservationError,
-    DescriptorSizeMismatch,
-    DescriptorTooLarge,
-    RegularFileObservation,
-    observe_regular_descriptor,
+from lockstep.authoring_capture import (
+    _DescriptorChanged,
+    _DescriptorNotRegular,
+    _DescriptorObservationError,
+    _DescriptorSizeMismatch,
+    _DescriptorTooLarge,
+    _RegularFileObservation,
+    _observe_regular_descriptor,
 )
-from lockstep.authoring_limits import validate_authoring_contents
 from lockstep.errors import AuthoringError
 
 
@@ -187,64 +187,6 @@ def validate_destination_before_at(
         raise AuthoringError("authoring destination bytes changed after planning")
 
 
-def capture_after_identity_at(
-    directory_descriptor: int, image: DestinationImage
-) -> PublishedIdentity:
-    expected_size = len(image.content or b"")
-    content, info = _read_regular_at(
-        directory_descriptor,
-        image.resolved_path.name,
-        image.resolved_path,
-        expected_size=expected_size,
-    )
-    if (
-        content != image.content
-        or _sha256(content) != image.sha256
-        or stat.S_IMODE(info.st_mode) != image.mode
-    ):
-        raise AuthoringError("published destination does not match its after-image")
-    return PublishedIdentity(
-        image.resolved_path,
-        info.st_dev,
-        info.st_ino,
-        info.st_mode,
-        info.st_size,
-        _sha256(content),
-    )
-
-
-def validate_temporary_descriptor(
-    descriptor: int, image: DestinationImage
-) -> None:
-    """Prove one still-open temporary has exact bounded after-image bytes."""
-
-    content, mode = image.content, image.mode
-    if content is None or mode is None:
-        raise AuthoringError("authoring after-image is incomplete")
-    first = os.fstat(descriptor)
-    if not stat.S_ISREG(first.st_mode) or first.st_size != len(content):
-        raise AuthoringError("authoring temporary does not match its after-image")
-    os.lseek(descriptor, 0, os.SEEK_SET)
-    chunks: list[bytes] = []
-    remaining = len(content) + 1
-    while remaining:
-        chunk = os.read(descriptor, min(1024 * 1024, remaining))
-        if not chunk:
-            break
-        chunks.append(chunk)
-        remaining -= len(chunk)
-    observed = b"".join(chunks)
-    last = os.fstat(descriptor)
-    if _leaf_facts(first) != _leaf_facts(last):
-        raise AuthoringError("authoring temporary changed while reading")
-    if (
-        observed != content
-        or _sha256(observed) != image.sha256
-        or stat.S_IMODE(first.st_mode) != mode
-    ):
-        raise AuthoringError("authoring temporary does not match its after-image")
-
-
 def validate_after_identity_at(
     directory_descriptor: int, identity: PublishedIdentity
 ) -> None:
@@ -297,7 +239,7 @@ def _observe_destination_at(
     path: Path,
     *,
     max_bytes: int,
-) -> RegularFileObservation | None:
+) -> _RegularFileObservation | None:
     flags = (
         os.O_RDONLY
         | getattr(os, "O_CLOEXEC", 0)
@@ -311,15 +253,15 @@ def _observe_destination_at(
     except OSError as exc:
         raise AuthoringError(f"authoring destination is unavailable: {path}") from exc
     try:
-        return observe_regular_descriptor(descriptor, max_bytes=max_bytes)
-    except DescriptorObservationError as exc:
+        return _observe_regular_descriptor(descriptor, max_bytes=max_bytes)
+    except _DescriptorObservationError as exc:
         raise AuthoringError(
             "reserved authoring destination matches neither transaction image"
         ) from exc
 
 
 def _matches_before_image(
-    observed: RegularFileObservation | None,
+    observed: _RegularFileObservation | None,
     before: DestinationImage,
 ) -> bool:
     if before.content is None:
@@ -343,7 +285,7 @@ def _matches_before_image(
 
 
 def _matches_published_image(
-    observed: RegularFileObservation | None,
+    observed: _RegularFileObservation | None,
     after: PublishedIdentity,
 ) -> bool:
     if observed is None:
@@ -405,7 +347,7 @@ def _validate_bundle_limits(bundle: ProjectCompilationBundle) -> None:
         ),
     )
     for label, contents in groups:
-        validate_authoring_contents(label, contents)
+        _validate_authoring_contents(label, contents)
 
 
 def _validate_ancestor_chain(
@@ -481,18 +423,18 @@ def _read_descriptor(
     descriptor: int, path: Path, *, expected_size: int
 ) -> tuple[bytes, os.stat_result]:
     try:
-        observed = observe_regular_descriptor(
+        observed = _observe_regular_descriptor(
             descriptor,
             max_bytes=expected_size,
             expected_size=expected_size,
         )
-    except DescriptorNotRegular as exc:
+    except _DescriptorNotRegular as exc:
         raise AuthoringError(f"authoring path is not a regular file: {path}") from exc
-    except (DescriptorTooLarge, DescriptorSizeMismatch) as exc:
+    except (_DescriptorTooLarge, _DescriptorSizeMismatch) as exc:
         raise AuthoringError(
             f"authoring file size changed before reading: {path}"
         ) from exc
-    except DescriptorChanged as exc:
+    except _DescriptorChanged as exc:
         raise AuthoringError(f"authoring file changed while reading: {path}") from exc
     return observed.content, observed.info
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import stat
+from collections.abc import Iterable
 from dataclasses import dataclass
 from os import stat_result
 from pathlib import Path
@@ -22,8 +23,9 @@ from lockstep.authoring_compilation import (
     validate_logical_name,
     workflow_call_names,
 )
-from lockstep.authoring_limits import AuthoringBudget
 from lockstep.errors import AuthoringError
+from lockstep.recipe.authority import RecipeLimits
+from lockstep.runtime.owner_state import StorageLimitExceeded
 from lockstep.workflow.canonical import canonical_yaml
 from lockstep.workflow.compiler import CompilationResult
 from lockstep.workflow.schema import load_workflow_bytes
@@ -49,6 +51,53 @@ class AuthoredRecipe:
 
 _CompiledWorkflow = tuple[ValidatedWorkflow, CompilationResult]
 _ProjectedRole = tuple[str, dict[Path, bytes]]
+
+
+class _AuthoringBudget:
+    """Incrementally admit one bounded authoring record group."""
+
+    __slots__ = ("_bytes", "_count", "_label", "_limits")
+
+    def __init__(self, label: str) -> None:
+        self._label = label
+        self._limits = RecipeLimits()
+        self._count = 0
+        self._bytes = 0
+
+    @property
+    def max_bytes_for_next(self) -> int:
+        if self._count >= self._limits.max_files:
+            raise StorageLimitExceeded(
+                f"{self._label} exceeds {self._limits.max_files} admission limit"
+            )
+        return min(
+            self._limits.max_file_bytes,
+            self._limits.max_source_bytes - self._bytes,
+        )
+
+    def retain(self, content: bytes | None) -> None:
+        available = self.max_bytes_for_next
+        if content is not None and not isinstance(content, bytes):
+            raise TypeError("authoring budget contents must be bytes or absence")
+        size = len(content or b"")
+        if size > available:
+            if size > self._limits.max_file_bytes:
+                raise StorageLimitExceeded(
+                    f"{self._label} contains a file exceeding the admission limit"
+                )
+            raise StorageLimitExceeded(
+                f"{self._label} exceeds the aggregate byte admission limit"
+            )
+        self._count += 1
+        self._bytes += size
+
+
+def _validate_authoring_contents(
+    label: str, contents: Iterable[bytes | None]
+) -> None:
+    budget = _AuthoringBudget(label)
+    for content in contents:
+        budget.retain(content)
 
 
 @dataclass(frozen=True, slots=True)
@@ -339,7 +388,7 @@ def _plan_destination_only_bundle(
         role for role, _children in dependency_edges
     ):
         raise AuthoringError("destination-only projections must match dependency roles")
-    destination_budget = AuthoringBudget("authoring after images")
+    destination_budget = _AuthoringBudget("authoring after images")
     destination_paths: set[Path] = set()
     for _role, projected in projected_roles:
         if any(path in destination_paths for path in projected):
@@ -417,8 +466,8 @@ def _compile_closure(
     completed: dict[str, _CompiledWorkflow] = {}
     catalogs: dict[str, ResolvedCatalog] = {}
     active: set[str] = set()
-    source_budget = AuthoringBudget("authoring read set")
-    destination_budget = AuthoringBudget("authoring after images")
+    source_budget = _AuthoringBudget("authoring read set")
+    destination_budget = _AuthoringBudget("authoring after images")
     destination_paths: set[Path] = set()
 
     def visit(role_recipe: AuthoredRecipe, role_path: Path) -> None:
@@ -489,7 +538,7 @@ def _destination_images(
         for parent in dict.fromkeys(path.parent for path in destinations)
     }
     before_images_list: list[DestinationImage] = []
-    before_budget = AuthoringBudget("authoring before images")
+    before_budget = _AuthoringBudget("authoring before images")
     for path, (role, _content) in destinations.items():
         image = _capture_destination(
             role,

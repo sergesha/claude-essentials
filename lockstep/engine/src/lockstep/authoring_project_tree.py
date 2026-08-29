@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import stat
 from pathlib import Path
-from typing import Callable
 
 from lockstep.authoring_bundle import (
     PathIdentity,
@@ -53,12 +52,11 @@ class AuthoringProjectTree:
         """Create every planned parent in stable shallow-first order."""
 
         for parent in self._target_parents:
-            self.ensure_directory(parent, _ignore_created_directory)
+            self.ensure_directory(parent)
 
     def ensure_directory(
         self,
         directory: Path,
-        persist_created_directory_identity: Callable[[PathIdentity], None],
     ) -> None:
         relative = self._relative_directory(directory)
         descriptor = self._open_root()
@@ -70,7 +68,6 @@ class AuthoringProjectTree:
                     descriptor,
                     child,
                     part,
-                    persist_created_directory_identity,
                 )
                 os.close(descriptor)
                 descriptor = next_descriptor
@@ -83,7 +80,6 @@ class AuthoringProjectTree:
         parent_descriptor: int,
         child: Path,
         leaf: str,
-        persist_created_directory_identity: Callable[[PathIdentity], None],
     ) -> int:
         expected = self._expected(child)
         try:
@@ -95,7 +91,6 @@ class AuthoringProjectTree:
                 parent_descriptor,
                 child,
                 leaf,
-                persist_created_directory_identity,
             )
         if expected is None:
             os.close(descriptor)
@@ -112,7 +107,6 @@ class AuthoringProjectTree:
         parent_descriptor: int,
         child: Path,
         leaf: str,
-        persist_created_directory_identity: Callable[[PathIdentity], None],
     ) -> int:
         # Record ambiguity before mkdir; enroll an inode only after proving the
         # open and named directories are the same empty directory.
@@ -137,7 +131,6 @@ class AuthoringProjectTree:
             finally:
                 os.close(proof)
             self.created_directories[child] = identity
-            persist_created_directory_identity(identity)
             os.fsync(parent_descriptor)
             return descriptor
         except BaseException:
@@ -229,7 +222,3 @@ class AuthoringProjectTree:
         existing = recorded.setdefault(identity.resolved_path, identity)
         if existing != identity:
             raise AuthoringError("authoring bundle contains conflicting identities")
-
-
-def _ignore_created_directory(_identity: PathIdentity) -> None:
-    """The per-file writer retains live ownership in ``created_directories``."""

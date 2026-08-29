@@ -17,12 +17,14 @@ from lockstep.authoring_bundle import (
     PathIdentity,
     ProjectCompilationBundle,
 )
+from lockstep.authoring_capture import (
+    _DescriptorObservationError,
+    _observe_regular_descriptor,
+)
 from lockstep.authoring_identity import (
-    capture_after_identity_at,
     validate_bundle_preconditions,
     validate_destination_before_at,
     validate_sources,
-    validate_temporary_descriptor as _validate_temporary_descriptor,
 )
 from lockstep.authoring_project_tree import AuthoringProjectTree
 from lockstep.errors import AuthoringError
@@ -147,6 +149,32 @@ def _write_temporary(descriptor: int, after: DestinationImage) -> None:
     os.fsync(descriptor)
 
 
+def _validate_temporary_descriptor(
+    descriptor: int, after: DestinationImage
+) -> None:
+    """Prove the still-open temporary has the exact bounded after-image."""
+
+    content, mode = after.content, after.mode
+    if content is None or mode is None:
+        raise AuthoringError("authoring after-image is incomplete")
+    try:
+        observed = _observe_regular_descriptor(
+            os.dup(descriptor),
+            max_bytes=len(content),
+            expected_size=len(content),
+        )
+    except _DescriptorObservationError as exc:
+        raise AuthoringError(
+            "authoring temporary does not match its after-image"
+        ) from exc
+    if (
+        observed.content != content
+        or hashlib.sha256(observed.content).hexdigest() != after.sha256
+        or stat.S_IMODE(observed.info.st_mode) != mode
+    ):
+        raise AuthoringError("authoring temporary does not match its after-image")
+
+
 def _prove_owned_temporary(
     parent_descriptor: int,
     temporary_leaf: str,
@@ -235,6 +263,46 @@ def _validate_all_after_images(
             capture_after_identity_at(parent_descriptor, after)
         finally:
             os.close(parent_descriptor)
+
+
+def capture_after_identity_at(
+    directory_descriptor: int, image: DestinationImage
+) -> None:
+    """Validate one published leaf through its verified parent descriptor."""
+
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(
+            image.resolved_path.name,
+            flags,
+            dir_fd=directory_descriptor,
+        )
+    except OSError as exc:
+        raise AuthoringError(
+            f"authoring file is unavailable: {image.resolved_path}"
+        ) from exc
+    expected_size = len(image.content or b"")
+    try:
+        observed = _observe_regular_descriptor(
+            descriptor,
+            max_bytes=expected_size,
+            expected_size=expected_size,
+        )
+    except _DescriptorObservationError as exc:
+        raise AuthoringError(
+            "published destination does not match its after-image"
+        ) from exc
+    if (
+        observed.content != image.content
+        or hashlib.sha256(observed.content).hexdigest() != image.sha256
+        or stat.S_IMODE(observed.info.st_mode) != image.mode
+    ):
+        raise AuthoringError("published destination does not match its after-image")
 
 
 def _write_all(descriptor: int, content: bytes) -> None:

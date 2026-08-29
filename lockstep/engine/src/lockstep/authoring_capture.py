@@ -4,14 +4,73 @@ from __future__ import annotations
 
 import os
 import stat
+from dataclasses import dataclass
 from pathlib import Path
 
-from lockstep.authoring_file_observation import (
-    DescriptorObservationError,
-    observe_regular_descriptor,
-)
 from lockstep.errors import AuthoringError
 from lockstep.runtime.owner_state import StorageLimitExceeded
+
+
+class _DescriptorObservationError(Exception):
+    """A regular descriptor could not be observed exactly."""
+
+
+class _DescriptorNotRegular(_DescriptorObservationError):
+    pass
+
+
+class _DescriptorTooLarge(_DescriptorObservationError):
+    pass
+
+
+class _DescriptorSizeMismatch(_DescriptorObservationError):
+    pass
+
+
+class _DescriptorChanged(_DescriptorObservationError):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class _RegularFileObservation:
+    content: bytes
+    info: os.stat_result
+
+
+def _observe_regular_descriptor(
+    descriptor: int,
+    *,
+    max_bytes: int,
+    expected_size: int | None = None,
+) -> _RegularFileObservation:
+    """Consume one descriptor and return one stable bounded regular-file image."""
+
+    if max_bytes < 0:
+        os.close(descriptor)
+        raise ValueError("descriptor observation byte ceiling must be non-negative")
+    try:
+        first = os.fstat(descriptor)
+        if not stat.S_ISREG(first.st_mode):
+            raise _DescriptorNotRegular
+        if first.st_size > max_bytes:
+            raise _DescriptorTooLarge
+        if expected_size is not None and first.st_size != expected_size:
+            raise _DescriptorSizeMismatch
+        chunks: list[bytes] = []
+        remaining = first.st_size + 1
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        last = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    content = b"".join(chunks)
+    if _leaf_facts(first) != _leaf_facts(last) or len(content) != first.st_size:
+        raise _DescriptorChanged
+    return _RegularFileObservation(content, first)
 
 
 def capture_regular_file(
@@ -42,12 +101,12 @@ def capture_regular_file(
     except OSError as exc:
         raise AuthoringError(f"{label} changed while it was captured") from exc
     try:
-        observed = observe_regular_descriptor(
+        observed = _observe_regular_descriptor(
             descriptor,
             max_bytes=max_bytes,
             expected_size=first.st_size,
         )
-    except DescriptorObservationError as exc:
+    except _DescriptorObservationError as exc:
         raise AuthoringError(f"{label} changed while it was captured") from exc
     if _leaf_facts(observed.info) != _leaf_facts(first):
         raise AuthoringError(f"{label} changed while it was captured")

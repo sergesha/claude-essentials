@@ -158,3 +158,62 @@ def test_confirmed_god_method_is_reduced_to_a_thin_boundary(
         f"{qualified_name} remains a structurally overloaded boundary: "
         + ", ".join(violations)
     )
+
+
+def test_authoring_capture_is_the_single_descriptor_observation_owner() -> None:
+    """The policy-free descriptor kernel must not retain satellite modules."""
+
+    assert not (SOURCE_ROOT / "authoring_file_observation.py").exists()
+    assert not (SOURCE_ROOT / "authoring_limits.py").exists()
+    capture = ast.parse(
+        (SOURCE_ROOT / "authoring_capture.py").read_text(encoding="utf-8")
+    )
+    owned_names = {
+        member.name
+        for member in capture.body
+        if isinstance(member, (ast.ClassDef, ast.FunctionDef))
+    }
+    assert {
+        "_DescriptorObservationError",
+        "_RegularFileObservation",
+        "_observe_regular_descriptor",
+    } <= owned_names
+
+
+def test_authoring_project_tree_has_no_retired_lifecycle_responsibility() -> None:
+    """Task 5's lifecycle deletion remains an explicit structural contract."""
+
+    tree = ast.parse(
+        (SOURCE_ROOT / "authoring_project_tree.py").read_text(encoding="utf-8")
+    )
+    methods = {
+        member.name
+        for owner in tree.body
+        if isinstance(owner, ast.ClassDef) and owner.name == "AuthoringProjectTree"
+        for member in owner.body
+        if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    assert methods.isdisjoint(
+        {
+            "reserve_path",
+            "recover",
+            "remove_directory",
+            "remove_created_directories",
+            "restore",
+            "rollback",
+        }
+    )
+    owner = next(
+        member
+        for member in tree.body
+        if isinstance(member, ast.ClassDef) and member.name == "AuthoringProjectTree"
+    )
+    ensure_directory = next(
+        member
+        for member in owner.body
+        if isinstance(member, ast.FunctionDef) and member.name == "ensure_directory"
+    )
+    assert [argument.arg for argument in ensure_directory.args.args] == [
+        "self",
+        "directory",
+    ]
