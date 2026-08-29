@@ -7,7 +7,7 @@ import re
 import tempfile
 import threading
 from collections import deque
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import replace
 from pathlib import Path
@@ -43,6 +43,7 @@ from lockstep.runtime.effects.descriptors import (
     parse_effect_descriptor,
 )
 from lockstep.runtime.effects.ledger import EffectLedger
+from lockstep.runtime.read_resources import RuntimeReadResources
 from lockstep.runtime.effects.models import EffectDescriptor
 from lockstep.runtime.effects.models import AcceptDescriptor
 from lockstep.runtime.errors import LockstepError
@@ -522,6 +523,12 @@ class LockstepCommandService:
             self._active_effect_runs.discard(run_id)
             self._queued_effect_runs.discard(run_id)
 
+    def _release_failed_start_reservation(self, run_id: str) -> None:
+        with self._active_effect_lock:
+            if run_id in self._queued_effect_runs:
+                return
+            self._active_effect_runs.discard(run_id)
+
     def _finish_owned_effect_binding(self, run_id: str, owned: bool) -> None:
         if not owned:
             return
@@ -561,17 +568,19 @@ class LockstepCommandService:
         """Adopt terminal runner observations through the same coordinator."""
 
         while not self._pump_stop.is_set():
-            self._pump_wakeup.wait(0.25)
+            explicitly_woken = self._pump_wakeup.wait(0.25)
             self._pump_wakeup.clear()
             if self._pump_stop.is_set():
                 return
             try:
                 with self._admission_recovery_lock:
-                    for run_id in self._take_active_effect_runs():
+                    active_run_ids = self._take_active_effect_runs()
+                    for run_id in active_run_ids:
                         binding = self.catalog.get(run_id)
                         self.runtime.bind(binding)
                         self._drive_engine_owned(run_id, binding=binding)
-                self._recover_engine_effects()
+                if active_run_ids or not explicitly_woken:
+                    self._recover_engine_effects()
             except Exception as exc:  # noqa: BLE001 - retain cross-provider failure
                 self._pump_failure = exc
                 return
@@ -593,20 +602,65 @@ class LockstepCommandService:
     def recipe_path(self, name: str) -> Path:
         return self._recipe_path(name)
 
-    def _bind_existing(self, run_id: str, project: str) -> RunBinding:
+    def _existing_run(self, run_id: str, project: str) -> RunBinding:
         try:
             binding = self.catalog.get(run_id)
         except KeyError as exc:
             raise LockstepError(f"unknown run {run_id!r}") from exc
         if Path(binding.project_identity).resolve() != Path(project).resolve():
             raise LockstepError(f"unknown run {run_id!r}")
-        try:
-            self.runtime.bind(binding)
-        except Exception as exc:  # immutable binding cannot be reconstructed
-            raise LockstepError(
-                f"run {run_id}: native binding integrity failure"
-            ) from exc
         return binding
+
+    def _preflight_session_readonly(
+        self, run_id: str, session_id: str | None, project: str
+    ) -> None:
+        project_identity = str(Path(project).resolve())
+        resources = RuntimeReadResources(self.state_dir)
+        try:
+            binding = resources.binding_for(
+                run_id, project_identity
+            )
+        except Exception as exc:
+            raise LockstepError(
+                "trusted native state failed read-only verification"
+            ) from exc
+        if binding is None:
+            raise LockstepError(f"unknown run {run_id!r}")
+        try:
+            session_binding = resources.session_binding(run_id)
+        except Exception as exc:
+            raise LockstepError(
+                "trusted native state failed read-only verification"
+            ) from exc
+        if (
+            session_binding is None
+            or not isinstance(session_id, str)
+            or not session_id
+            or session_binding["session_id"] != session_id
+            or not sessions.is_live(
+                session_binding, config.session_stale_minutes()
+            )
+        ):
+            raise LockstepError(
+                "worker session binding missing, stale, or mismatched"
+            )
+
+    @contextmanager
+    def _bind_existing(
+        self, run_id: str, project: str
+    ) -> Iterator[RunBinding]:
+        with self._admission_recovery_lock:
+            binding = self._existing_run(run_id, project)
+            try:
+                owns_binding = self.runtime.bind(binding)
+            except Exception as exc:  # immutable binding cannot be reconstructed
+                raise LockstepError(
+                    f"run {run_id}: native binding integrity failure"
+                ) from exc
+            try:
+                yield binding
+            finally:
+                self._finish_owned_effect_binding(run_id, owns_binding)
 
     def start(
         self,
@@ -759,7 +813,8 @@ class LockstepCommandService:
             leases=self.leases,
             admission_lock=self._admission_recovery_lock,
             reserve_effect_run=self._reserve_effect_run,
-            deactivate_effect_run=self._deactivate_effect_run,
+            release_failed_start_reservation=self._release_failed_start_reservation,
+            finish_owned_binding=self._finish_owned_effect_binding,
             drive_engine_owned=self._drive_engine_owned,
         )
 
@@ -826,7 +881,7 @@ class LockstepCommandService:
         self, run_id: str, project: str
     ) -> tuple[RunBinding, ScenarioStatus]:
         self._check_completion_pump()
-        binding = self._bind_existing(run_id, project)
+        binding = self.runtime.binding(run_id)
         snapshot = self.runtime.snapshot(run_id, subgraphs=True)
         status = project_status(binding, snapshot, self.leases, self.effects)
         if status.status == "awaiting" and status.owner == "worker":
@@ -923,8 +978,16 @@ class LockstepCommandService:
         self, run_id: str, session_id: str | None, project: str
     ) -> None:
         """Fail closed at an external mutation edge; resume rechecks it too."""
+        if not self._writable_core_active:
+            self._preflight_session_readonly(run_id, session_id, project)
         self._activate_writable_core()
-        self._bind_existing(run_id, project)
+        with self._admission_recovery_lock:
+            self._existing_run(run_id, project)
+            self._require_session_owner(run_id, session_id)
+
+    def _require_session_owner(
+        self, run_id: str, session_id: str | None
+    ) -> None:
         try:
             with sessions.locked_owner(
                 self.state_dir,
@@ -952,6 +1015,7 @@ class LockstepCommandService:
             runtime=self.runtime,
             manual_effect_resources=lambda: (self.leases, self.coordinator),
             admission_lock=self._admission_recovery_lock,
+            validate_existing=self._existing_run,
             bind_existing=self._bind_existing,
             select_interrupt=self._worker_interrupt,
             protected_descriptor=self._protected_descriptor,
@@ -997,7 +1061,7 @@ class LockstepCommandService:
     ):
         if not isinstance(step, str) or not step:
             raise LockstepError("acceptance step must be non-empty text")
-        binding = self._bind_existing(run_id, project)
+        binding = self.runtime.binding(run_id)
         snapshot = self.runtime.snapshot(run_id, subgraphs=True)
         matches = []
         for interrupt in snapshot.pending:
@@ -1021,12 +1085,13 @@ class LockstepCommandService:
         self, run_id: str, step: str, *, project: str
     ) -> dict[str, Any]:
         self._activate_writable_core()
-        _binding, interrupt = self._pending_acceptance(
-            run_id, step, project=project
-        )
-        return self.coordinator.preview_acceptance(
-            run_id, interrupt.coordinate
-        ).to_dict()
+        with self._bind_existing(run_id, project):
+            _binding, interrupt = self._pending_acceptance(
+                run_id, step, project=project
+            )
+            return self.coordinator.preview_acceptance(
+                run_id, interrupt.coordinate
+            ).to_dict()
 
     def issue_publication_consent(
         self,
@@ -1037,7 +1102,7 @@ class LockstepCommandService:
         project: str,
     ) -> IssuedPublicationConsent:
         self._activate_writable_core()
-        with self._admission_recovery_lock:
+        with self._admission_recovery_lock, self._bind_existing(run_id, project):
             _binding, interrupt = self._pending_acceptance(
                 run_id, step, project=project
             )
@@ -1061,11 +1126,10 @@ class LockstepCommandService:
         commitment = stored.commitment
         if commitment.project_identity != project_identity:
             raise LockstepError("invalid or stale publication consent")
-        with self._admission_recovery_lock:
+        with self._admission_recovery_lock, self._bind_existing(
+            commitment.public_run_id, project_identity
+        ) as binding:
             try:
-                binding = self._bind_existing(
-                    commitment.public_run_id, project_identity
-                )
                 if (
                     binding.public_run_id != commitment.public_run_id
                     or binding.project_identity != commitment.project_identity

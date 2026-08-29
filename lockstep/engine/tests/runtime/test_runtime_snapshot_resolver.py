@@ -132,6 +132,7 @@ def test_decision_descriptor_executes_without_a_runner_from_exact_snapshots(
             str(project),
             compiler_provenance=compiled.compiler_provenance,
         )
+        service.runtime.bind(service.catalog.get(result["run_id"]))
         snapshot = service.runtime.snapshot(result["run_id"], subgraphs=True)
     finally:
         service.close()

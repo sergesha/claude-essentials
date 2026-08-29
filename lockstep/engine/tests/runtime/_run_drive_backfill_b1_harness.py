@@ -80,6 +80,11 @@ def _install_decision_recipe(tmp_path: Path):
     return compiled
 
 
+def _snapshot_existing(command, run_id: str):
+    command.runtime.bind(command.catalog.get(run_id))
+    return command.runtime.snapshot(run_id, subgraphs=True)
+
+
 def _complete_terminal(command, project: Path) -> RunBinding:
     started = command.start("native-parent-direct", {}, str(project))
     run_id = started["run_id"]
@@ -92,7 +97,7 @@ def _complete_terminal(command, project: Path) -> RunBinding:
         session_id=session_id,
         project=str(project),
     )
-    snapshot = command.runtime.snapshot(run_id, subgraphs=True)
+    snapshot = _snapshot_existing(command, run_id)
     assert snapshot.checkpoint_id and snapshot.pending == snapshot.next == ()
     return command.catalog.get(run_id)
 
@@ -129,7 +134,7 @@ def _park_decision(command, compiled, project: Path) -> RunBinding:
         compiler_provenance=compiled.compiler_provenance,
     )
     run_id = started["run_id"]
-    manual = command.runtime.snapshot(run_id, subgraphs=True)
+    manual = _snapshot_existing(command, run_id)
     assert len(manual.pending) == 1
     descriptor = parse_effect_descriptor(
         manual.pending[0].value["lockstep_effect"]
@@ -140,7 +145,7 @@ def _park_decision(command, compiled, project: Path) -> RunBinding:
         manual.pending[0].coordinate,
         ManualSubmission.build("PASS", evidence={}),
     )
-    decision = command.runtime.snapshot(run_id, subgraphs=True)
+    decision = _snapshot_existing(command, run_id)
     assert len(decision.pending) == 1
     decision_descriptor = parse_effect_descriptor(
         decision.pending[0].value["lockstep_effect"]

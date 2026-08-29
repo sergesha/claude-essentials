@@ -256,7 +256,8 @@ class AuthorizedStartService:
         leases: object,
         admission_lock: object,
         reserve_effect_run: Callable[[str], bool],
-        deactivate_effect_run: Callable[[str], None],
+        release_failed_start_reservation: Callable[[str], None],
+        finish_owned_binding: Callable[[str, bool], None],
         drive_engine_owned: Callable[..., object],
     ) -> None:
         self._blobs = blobs
@@ -269,7 +270,8 @@ class AuthorizedStartService:
         self._leases = leases
         self._admission_lock = admission_lock
         self._reserve_effect_run = reserve_effect_run
-        self._deactivate_effect_run = deactivate_effect_run
+        self._release_failed_start_reservation = release_failed_start_reservation
+        self._finish_owned_binding = finish_owned_binding
         self._drive_engine_owned = drive_engine_owned
 
     @staticmethod
@@ -296,6 +298,7 @@ class AuthorizedStartService:
         start_snapshot_ref: object,
     ) -> dict[str, Any]:
         run_id = binding.public_run_id
+        owns_binding = False
         with self._admission_lock:
             try:
                 binding, _admission = self._effects.admit_start(
@@ -308,21 +311,21 @@ class AuthorizedStartService:
                         )
                     ),
                 )
-                self._runtime.bind(binding)
+                owns_binding = self._runtime.bind(binding)
                 if not self._reserve_effect_run(run_id):
                     snapshot = self._runtime.snapshot(run_id, subgraphs=True)
-                    self._runtime.unbind(run_id)
                     return project_status(
                         binding, snapshot, self._leases, self._effects
                     ).to_dict()
                 snapshot = self._runtime.ensure_started(run_id, values)
+                return self._drive_engine_owned(
+                    binding.public_run_id, binding=binding, snapshot=snapshot
+                ).to_dict()
             except BaseException:
-                self._deactivate_effect_run(run_id)
-                self._runtime.unbind(run_id)
+                self._release_failed_start_reservation(run_id)
                 raise
-            return self._drive_engine_owned(
-                binding.public_run_id, binding=binding, snapshot=snapshot
-            ).to_dict()
+            finally:
+                self._finish_owned_binding(run_id, owns_binding)
 
     def _admit_and_park(
         self,

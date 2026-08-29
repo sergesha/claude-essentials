@@ -28,6 +28,11 @@ class _PreDeleteCrash(RuntimeError):
     pass
 
 
+def _snapshot_existing(command, run_id: str):
+    command.runtime.bind(command.catalog.get(run_id))
+    return command.runtime.snapshot(run_id, subgraphs=True)
+
+
 def _replace_with_null_watch(command, run_id: str):
     command.effects.acknowledge_run_drive_watch(run_id)
     RuntimeSchemaMigrator(command.store).apply_run_drive_watch_page(
@@ -101,7 +106,7 @@ def _terminal_residue(command, run_id: str, project: Path, effect_id: str):
     finally:
         command.effects.mark_delivered = mark_delivered
 
-    terminal = command.runtime.snapshot(run_id, subgraphs=True)
+    terminal = _snapshot_existing(command, run_id)
     assert terminal.checkpoint_id
     assert terminal.pending == terminal.next == ()
     assert mark_calls == [effect_id]
@@ -202,7 +207,7 @@ def _retry_terminal_watch(command, watch, effect_id: str):
 def test_start_watch_replays_only_before_first_checkpoint(tmp_path: Path) -> None:
     with active_native_manual_park(tmp_path) as (command, run_id, _project):
         binding = command.catalog.get(run_id)
-        native_before = command.runtime.snapshot(run_id, subgraphs=True)
+        native_before = _snapshot_existing(command, run_id)
         assert native_before.checkpoint_id
         effects_before = command.effects.list_for_thread(binding.thread_id)
 
@@ -388,7 +393,7 @@ def test_terminal_removal_crash_cuts(tmp_path: Path) -> None:
             busy_watches = command.effects.list_run_drive_watches(
                 after_admission_seq=0, high_water=high_water, limit=1
             )
-            busy_native = command.runtime.snapshot(run_id, subgraphs=True)
+            busy_native = _snapshot_existing(command, run_id)
         finally:
             assert command.leases.release(held)
         assert [(item.effect_id, item.action, item.phase) for item in busy] == [
@@ -398,7 +403,7 @@ def test_terminal_removal_crash_cuts(tmp_path: Path) -> None:
         assert command.effects.list_run_drive_watches(
             after_admission_seq=0, high_water=high_water, limit=1
         ) == watches_before
-        assert command.runtime.snapshot(run_id, subgraphs=True) == terminal
+        assert _snapshot_existing(command, run_id) == terminal
 
         first = _drive_to_predelete_cut(command, watch, effect.effect_id)
         effect_after_cut = command.effects.get(effect.effect_id).phase

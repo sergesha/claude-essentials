@@ -84,6 +84,12 @@ class EngineDriveService:
     def _accepted_attempt(actions: set[str]) -> bool:
         return bool(actions & _ACCEPTED_ATTEMPT_ACTIONS)
 
+    @staticmethod
+    def _requires_followup(actions: set[str]) -> bool:
+        return (bool(actions) and actions <= _CONTINUATION_ACTIONS) or bool(
+            actions & {"running", "quiescence_pending", "busy"}
+        )
+
     def _settle(
         self,
         run_id: str,
@@ -141,11 +147,12 @@ class EngineDriveService:
             return status, snapshot, False
         reports = self._coordinator.reconcile_pending(run_id)
         actions = {report.action for report in reports}
+        if self._requires_followup(actions):
+            self._activate_effect_run(run_id)
         accepted = self._accepted_attempt(actions)
         snapshot, delivery_blocked = self._deliver(run_id, protected, actions)
         status = project_status(binding, snapshot, self._leases, self._effects)
         if delivery_blocked:
-            self._activate_effect_run(run_id)
             return status, snapshot, accepted
         if status.status == "awaiting" and status.owner == "worker":
             return self._settle(

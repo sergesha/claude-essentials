@@ -27,6 +27,7 @@ class WorkerSubmissionService:
         runtime: object,
         manual_effect_resources: Callable[[], tuple[object, object]],
         admission_lock: object,
+        validate_existing: Callable[[str, str], object],
         bind_existing: Callable[[str, str], object],
         select_interrupt: Callable[[str, str | None, str], tuple[object, object]],
         protected_descriptor: Callable[[object], EffectDescriptor | None],
@@ -36,6 +37,7 @@ class WorkerSubmissionService:
         self._runtime = runtime
         self._manual_effect_resources = manual_effect_resources
         self._admission_lock = admission_lock
+        self._validate_existing = validate_existing
         self._bind_existing = bind_existing
         self._select_interrupt = select_interrupt
         self._protected_descriptor = protected_descriptor
@@ -82,14 +84,14 @@ class WorkerSubmissionService:
         project: str,
     ) -> dict[str, Any]:
         with self._admission_lock:
-            self._bind_existing(run_id, project)
+            self._validate_existing(run_id, project)
             try:
                 with sessions.locked_owner(
                     self._state_dir,
                     run_id,
                     session_id,
                     config.session_stale_minutes(),
-                ):
+                ), self._bind_existing(run_id, project):
                     binding, interrupt = self._select_interrupt(run_id, step, project)
                     descriptor = self._protected_descriptor(interrupt)
                     if descriptor is not None:

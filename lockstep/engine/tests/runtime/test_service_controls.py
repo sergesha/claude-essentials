@@ -412,6 +412,51 @@ def test_active_pump_drive_and_release_serialize_with_foreground() -> None:
     assert recovery_lock_state == [True]
 
 
+def test_cancelled_pump_wakeup_does_not_run_recovery() -> None:
+    service = _service_double()
+    service._admission_recovery_lock = threading.RLock()
+    service._pump_stop = threading.Event()
+    service._pump_wakeup.set()
+
+    def take_cancelled_queue() -> tuple[str, ...]:
+        service._pump_stop.set()
+        return ()
+
+    service._take_active_effect_runs = take_cancelled_queue
+    service._recover_engine_effects = lambda: pytest.fail(
+        "an empty, cancelled pump wakeup must not run recovery"
+    )
+
+    service._completion_pump()
+
+
+def test_timed_empty_pump_cycle_still_runs_recovery() -> None:
+    service = _service_double()
+    service._admission_recovery_lock = threading.RLock()
+    service._pump_stop = threading.Event()
+    recovered = []
+
+    class TimedOutWake:
+        def wait(self, timeout: float) -> bool:
+            assert timeout == 0.25
+            return False
+
+        def clear(self) -> None:
+            pass
+
+    def take_empty_queue() -> tuple[str, ...]:
+        service._pump_stop.set()
+        return ()
+
+    service._pump_wakeup = TimedOutWake()
+    service._take_active_effect_runs = take_empty_queue
+    service._recover_engine_effects = lambda: recovered.append("recovered")
+
+    service._completion_pump()
+
+    assert recovered == ["recovered"]
+
+
 def test_runtime_reconstruction_tracks_the_bounded_recovery_page() -> None:
     service = _service_double()
     service._runtime_execution_context = None
@@ -488,7 +533,8 @@ def test_worker_resume_blocks_recovery_unbind_for_the_whole_composite(
     release = threading.Event()
     recovery_unbound = threading.Event()
     failures: list[BaseException] = []
-    service._bind_existing = lambda *_args: binding
+    service.catalog = SimpleNamespace(get=lambda _run_id: binding)
+    service._bind_existing = lambda *_args: nullcontext(binding)
     service._worker_interrupt = lambda *_args: (binding, interrupt)
 
     def resume(*_args, **_kwargs):
@@ -527,6 +573,90 @@ def test_worker_resume_blocks_recovery_unbind_for_the_whole_composite(
     assert recovery_unbound.is_set()
 
 
+def test_existing_binding_scope_serializes_owner_and_borrower() -> None:
+    service = _service_double()
+    borrower_lock_attempted = threading.Event()
+
+    class InstrumentedRLock:
+        def __init__(self) -> None:
+            self._lock = threading.RLock()
+
+        def __enter__(self):
+            if threading.current_thread().name == "binding-borrower":
+                borrower_lock_attempted.set()
+            self._lock.acquire()
+            return self
+
+        def __exit__(self, *_args):
+            self._lock.release()
+
+    service._admission_recovery_lock = InstrumentedRLock()
+    binding = RunBinding("run-1", "thread-1", "a" * 64, "bundle", "/project")
+    service.catalog = SimpleNamespace(get=lambda _run_id: binding)
+    calls = []
+    runtime_lock = threading.Lock()
+
+    class Runtime:
+        bound = False
+
+        def bind(self, _binding):
+            with runtime_lock:
+                owned = not self.bound
+                self.bound = True
+                calls.append(("bind", owned))
+                return owned
+
+        def unbind(self, _run_id):
+            with runtime_lock:
+                assert self.bound
+                self.bound = False
+                calls.append(("unbind", True))
+
+    service.runtime = Runtime()
+    owner_entered = threading.Event()
+    release_owner = threading.Event()
+    borrower_entered = threading.Event()
+    failures = []
+
+    def owner() -> None:
+        try:
+            with service._bind_existing("run-1", "/project"):  # noqa: SLF001
+                owner_entered.set()
+                assert release_owner.wait(1)
+        except BaseException as exc:  # pragma: no cover - asserted below
+            failures.append(exc)
+
+    def borrower() -> None:
+        try:
+            with service._bind_existing("run-1", "/project"):  # noqa: SLF001
+                borrower_entered.set()
+        except BaseException as exc:  # pragma: no cover - asserted below
+            failures.append(exc)
+
+    owner_thread = threading.Thread(target=owner)
+    borrower_thread = threading.Thread(target=borrower, name="binding-borrower")
+    owner_thread.start()
+    assert owner_entered.wait(1)
+    borrower_thread.start()
+    attempted = borrower_lock_attempted.wait(1)
+    overlapped = borrower_entered.wait(0.05)
+    release_owner.set()
+    owner_thread.join(1)
+    borrower_thread.join(1)
+
+    assert attempted is True
+    assert overlapped is False
+    assert not owner_thread.is_alive()
+    assert not borrower_thread.is_alive()
+    assert failures == []
+    assert calls == [
+        ("bind", True),
+        ("unbind", True),
+        ("bind", True),
+        ("unbind", True),
+    ]
+
+
 def test_artifact_acceptance_blocks_recovery_unbind_through_drive(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -538,7 +668,7 @@ def test_artifact_acceptance_blocks_recovery_unbind_through_drive(
     release = threading.Event()
     recovery_unbound = threading.Event()
     failures: list[BaseException] = []
-    service._bind_existing = lambda *_args: binding
+    service._bind_existing = lambda *_args: nullcontext(binding)
     stored = SimpleNamespace(
         commitment=SimpleNamespace(
             public_run_id="run-1",
@@ -630,6 +760,7 @@ def test_publication_consent_preview_is_read_only_and_issue_rechecks_digest() ->
 
     service.coordinator = Coordinator()
     service._admission_recovery_lock = threading.RLock()
+    service._bind_existing = lambda *_args: nullcontext(binding)
 
     preview = service.preview_publication_consent(
         "run-1", "accept-review", project="/project"
@@ -666,6 +797,7 @@ def test_consent_activates_before_waiting_for_recovery_admission() -> None:
         issue_acceptance_consent=lambda *_args: "issued"
     )
     service._admission_recovery_lock = threading.RLock()
+    service._bind_existing = lambda *_args: nullcontext(None)
 
     def issue() -> None:
         try:
@@ -1281,7 +1413,8 @@ def test_protected_manual_done_uses_coordinator_not_direct_native_resume(
     service.runtime = Runtime()
     service.coordinator = Coordinator()
     service.leases = Leases()
-    service._bind_existing = lambda *_args: binding
+    service.catalog = SimpleNamespace(get=lambda _run_id: binding)
+    service._bind_existing = lambda *_args: nullcontext(binding)
     service._worker_interrupt = lambda *_args: (binding, interrupt)
     service._drive_engine_owned = lambda *_args, **_kwargs: ScenarioStatus(
         "completed", "run-1", "engine", None

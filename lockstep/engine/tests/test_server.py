@@ -238,6 +238,7 @@ def test_cross_project_status_and_resume_are_indistinguishable_and_read_only(
     sessions.touch(state, run_id, "owner", 30)
     foreign = tmp_path / "foreign-project"
     foreign.mkdir()
+    server._reset_engine()
     before = {
         path.relative_to(state): path.read_bytes()
         for path in state.rglob("*")
@@ -255,6 +256,98 @@ def test_cross_project_status_and_resume_are_indistinguishable_and_read_only(
     ):
         with pytest.raises(LockstepError, match=f"unknown run {run_id!r}"):
             operation()
+        assert {
+            path.relative_to(state): path.read_bytes()
+            for path in state.rglob("*")
+            if path.is_file()
+        } == before
+    after = {
+        path.relative_to(state): path.read_bytes()
+        for path in state.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+
+
+def test_cold_unknown_run_never_traverses_session_sidecar_namespace(
+    tmp_path, monkeypatch
+):
+    project, _recipes = _configure(monkeypatch, tmp_path)
+    run_id = server.scenario_start("native-parent-direct", {}, ctx=_ctx(project))["run_id"]
+    state = tmp_path / "state"
+    sessions.touch(state, run_id, "owner", 30)
+    sessions.binding_path(state, run_id).write_text("{malformed")
+    foreign = tmp_path / "foreign-project"
+    foreign.mkdir()
+    server._reset_engine()
+    before = {
+        path.relative_to(state): path.read_bytes()
+        for path in state.rglob("*")
+        if path.is_file()
+    }
+
+    for requested_run_id, requested_project in (
+        (run_id, foreign),
+        ("../runtime.sqlite", project),
+    ):
+        with pytest.raises(
+            LockstepError, match=f"unknown run {requested_run_id!r}"
+        ):
+            server.scenario_done(
+                requested_run_id,
+                "answer",
+                {"answer": "yes"},
+                ctx=_ctx(requested_project, "owner"),
+            )
+
+    after = {
+        path.relative_to(state): path.read_bytes()
+        for path in state.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+
+
+def test_cold_mcp_resume_preflights_read_only_then_activates(tmp_path, monkeypatch):
+    project, _recipes = _configure(monkeypatch, tmp_path)
+    run_id = server.scenario_start("native-parent-direct", {}, ctx=_ctx(project))["run_id"]
+    sessions.touch(tmp_path / "state", run_id, "owner", 30)
+    server._reset_engine()
+
+    result = server.scenario_done(
+        run_id,
+        "answer",
+        {"answer": "yes"},
+        ctx=_ctx(project, "owner"),
+    )
+
+    assert result["run_id"] == run_id
+
+
+@pytest.mark.parametrize("bound_session", [None, "owner"])
+def test_cold_mcp_session_rejection_is_read_only(
+    tmp_path, monkeypatch, bound_session
+):
+    project, _recipes = _configure(monkeypatch, tmp_path)
+    run_id = server.scenario_start("native-parent-direct", {}, ctx=_ctx(project))["run_id"]
+    state = tmp_path / "state"
+    if bound_session is not None:
+        sessions.touch(state, run_id, bound_session, 30)
+    server._reset_engine()
+    before = {
+        path.relative_to(state): path.read_bytes()
+        for path in state.rglob("*")
+        if path.is_file()
+    }
+
+    with pytest.raises(LockstepError, match="missing, stale, or mismatched"):
+        server.scenario_done(
+            run_id,
+            "answer",
+            {"answer": "yes"},
+            ctx=_ctx(project, "intruder"),
+        )
+
     after = {
         path.relative_to(state): path.read_bytes()
         for path in state.rglob("*")

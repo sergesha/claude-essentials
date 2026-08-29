@@ -7,12 +7,15 @@ from datetime import UTC, datetime, timedelta, timezone
 from inspect import Parameter, signature
 from pathlib import Path
 import resource
+import threading
 from types import NoneType
 from typing import get_type_hints
 
 import pytest
 from sqlalchemy import Integer, inspect as sa_inspect
 
+from lockstep.runtime import sessions
+from lockstep.runtime import engine_drive_service as engine_drive_module
 from lockstep.runtime.effects.descriptors import (
     parse_effect_descriptor,
     parse_effect_result,
@@ -44,8 +47,12 @@ class _DecisionCrash:
 
 
 def _bound_snapshot(service: LockstepCommandService, crash: _DecisionCrash):
-    service.runtime.bind(service.catalog.get(crash.run_id))
-    return service.runtime.snapshot(crash.run_id, subgraphs=True)
+    return _snapshot_existing(service, crash.run_id)
+
+
+def _snapshot_existing(service: LockstepCommandService, run_id: str):
+    service.runtime.bind(service.catalog.get(run_id))
+    return service.runtime.snapshot(run_id, subgraphs=True)
 
 
 def _run_drive_watches(service: LockstepCommandService):
@@ -95,7 +102,7 @@ def _create_manual_to_decision_park(
     )
     run_id = started["run_id"]
     binding = service.catalog.get(run_id)
-    manual = service.runtime.snapshot(run_id, subgraphs=True)
+    manual = _snapshot_existing(service, run_id)
     assert len(manual.pending) == 1
     manual_descriptor = parse_effect_descriptor(
         manual.pending[0].value["lockstep_effect"]
@@ -109,7 +116,7 @@ def _create_manual_to_decision_park(
         manual.pending[0].coordinate,
         ManualSubmission.build("PASS", evidence={}),
     )
-    decision = service.runtime.snapshot(run_id, subgraphs=True)
+    decision = _snapshot_existing(service, run_id)
     assert len(decision.pending) == 1
     decision_descriptor = parse_effect_descriptor(
         decision.pending[0].value["lockstep_effect"]
@@ -278,7 +285,7 @@ def test_drive_watch_survives_every_nonterminal_park(
         run_id = started["run_id"]
     try:
         _stop_pump(service)
-        assert service.runtime.snapshot(run_id, subgraphs=True).pending
+        assert _snapshot_existing(service, run_id).pending
         assert tuple(
             watch.public_run_id
             for watch in _run_drive_watches(service)
@@ -307,7 +314,7 @@ def test_watch_is_not_removed_at_nonterminal_manual_park(
     )
     try:
         run_id = started["run_id"]
-        snapshot = service.runtime.snapshot(run_id, subgraphs=True)
+        snapshot = _snapshot_existing(service, run_id)
         assert snapshot.pending and snapshot.next
         assert tuple(
             watch.public_run_id
@@ -371,8 +378,8 @@ def _blocked_then_decision_population(tmp_path: Path, *, revoke: bool = True):
         "worker-only", {}, str(project),
         compiler_provenance=worker_compiled.compiler_provenance,
     )["run_id"]
-    assert service.runtime.snapshot(foreign_park, subgraphs=True).pending
-    assert service.runtime.snapshot(local_park, subgraphs=True).pending
+    assert _snapshot_existing(service, foreign_park).pending
+    assert _snapshot_existing(service, local_park).pending
     managed = service.start(
         "blocked-managed", {}, str(project),
         compiler_provenance=managed_compiled.compiler_provenance,
@@ -390,12 +397,12 @@ def _blocked_then_decision_population(tmp_path: Path, *, revoke: bool = True):
         compiler_provenance=decision_compiled.compiler_provenance,
     )
     later_id = later["run_id"]
-    manual = service.runtime.snapshot(later_id, subgraphs=True)
+    manual = _snapshot_existing(service, later_id)
     service.coordinator.submit_manual(
         later_id, manual.pending[0].coordinate,
         ManualSubmission.build("PASS", evidence={}),
     )
-    assert service.runtime.snapshot(later_id, subgraphs=True).pending
+    assert _snapshot_existing(service, later_id).pending
     service._active_effect_runs.clear()  # noqa: SLF001 - fake capacity port
     service._queued_effect_runs.clear()  # noqa: SLF001
     service._active_effect_queue.clear()  # noqa: SLF001
@@ -440,7 +447,7 @@ def test_watch_does_not_authorize_blocked_runner(
         except BaseException as exc:  # captured into the final trace oracle
             escaped = type(exc).__name__
         service.runtime.bind(service.catalog.get(later_id))
-        target = service.runtime.snapshot(later_id, subgraphs=True)
+        target = _snapshot_existing(service, later_id)
         protected_after = _protected_action_trace(service, managed_id, runner)
         assert {
             "escaped": escaped,
@@ -496,7 +503,7 @@ def test_capacity_deferral_advances_current_sweep_and_preserves_next_eligibility
         else:
             service._recover_engine_effects()  # noqa: SLF001
         service.runtime.bind(service.catalog.get(later_id))
-        current = service.runtime.snapshot(later_id, subgraphs=True)
+        current = _snapshot_existing(service, later_id)
         after = tuple(
             (item.effect_id, item.phase, item.revision)
             for binding in service.catalog.list(str(project.resolve()), limit=128)
@@ -568,7 +575,7 @@ def test_explicit_and_automatic_recovery_fairness(
         except BaseException as exc:  # final trace records per-run isolation
             escaped = type(exc).__name__
         service.runtime.bind(service.catalog.get(later_id))
-        later = service.runtime.snapshot(later_id, subgraphs=True)
+        later = _snapshot_existing(service, later_id)
         protected_after = _protected_action_trace(service, managed_id, runner)
         assert {
             "escaped": escaped,
@@ -689,7 +696,10 @@ def test_fresh_driver_reaches_decision_after_128_worker_parks(
         "worker-park",
         "  - step: edit\n"
         "    task: Edit the project\n"
-        "    exit: Editing is complete\n",
+        "    exit: Editing is complete\n"
+        "  - step: review\n"
+        "    task: Review the project\n"
+        "    exit: Review is complete\n",
     )
     _recipes, decision_compiled = _compile(
         tmp_path,
@@ -724,12 +734,26 @@ def test_fresh_driver_reaches_decision_after_128_worker_parks(
     reduced_limit = (reduced_soft_limit, original_limit[1])
     try:
         resource.setrlimit(resource.RLIMIT_NOFILE, reduced_limit)
+        parked_run_ids = []
         for _index in range(128):
             parked = service.start(
                 "worker-park", {}, str(project),
                 compiler_provenance=parked_compiled.compiler_provenance,
             )
             parked_id = parked["run_id"]
+            parked_run_ids.append(parked_id)
+            with pytest.raises(KeyError):
+                service.runtime.binding(parked_id)
+        for parked_id in parked_run_ids:
+            sessions.touch(state, parked_id, "worker-session", 30)
+            resumed = service.done(
+                parked_id,
+                "edit",
+                {},
+                session_id="worker-session",
+                project=str(project),
+            )
+            assert (resumed["status"], resumed["owner"]) == ("awaiting", "worker")
             with pytest.raises(KeyError):
                 service.runtime.binding(parked_id)
         late = service.start(
@@ -760,6 +784,154 @@ def test_fresh_driver_reaches_decision_after_128_worker_parks(
         assert snapshot.pending == ()
     finally:
         fresh.close()
+
+
+def test_start_drive_failure_releases_capacity_and_native_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recipes, compiled = _compile(
+        tmp_path,
+        "drive-failure",
+        "  - step: edit\n"
+        "    task: Edit the project\n"
+        "    exit: Editing is complete\n",
+    )
+    project = tmp_path / "project"
+    project.mkdir()
+    service = _legacy_service(tmp_path / "state", recipes)
+    _stop_pump(service)
+    driven = []
+
+    def fail_drive(run_id: str, **_kwargs):
+        driven.append(run_id)
+        raise RuntimeError("drive failed")
+
+    monkeypatch.setattr(service, "_drive_engine_owned", fail_drive)
+    try:
+        with pytest.raises(RuntimeError, match="drive failed"):
+            service.start(
+                "drive-failure", {}, str(project),
+                compiler_provenance=compiled.compiler_provenance,
+            )
+        assert len(driven) == 1
+        run_id = driven[0]
+        assert run_id not in service._active_effect_runs  # noqa: SLF001
+        assert run_id not in service._owned_effect_bindings  # noqa: SLF001
+        with pytest.raises(KeyError):
+            service.runtime.binding(run_id)
+    finally:
+        service.close()
+
+
+def test_start_drive_failure_after_durable_launch_preserves_pump_handoff(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recipes, compiled = _compile(
+        tmp_path,
+        "drive-handoff-failure",
+        "  - verify:\n"
+        "      id: tests\n"
+        "      command: pytest -q\n"
+        "      timeout: 60\n",
+    )
+    project = tmp_path / "project"
+    project.mkdir()
+    runner = FakeRunner()
+    service = _legacy_command_service(
+        tmp_path / "state",
+        recipes,
+        runners={"pinned": runner},
+        effect_authority=_AutoGrantAuthority(),
+    )
+    _stop_pump(service)
+    real_project_status = engine_drive_module.project_status
+    observed_bindings = []
+    injected_faults = []
+
+    def fail_after_durable_handoff(binding, *args, **kwargs):
+        observed_bindings.append(binding)
+        records = service.effects.list_for_thread(binding.thread_id)
+        running = len(records) == 1 and records[0].phase == "running"
+        queued = binding.public_run_id in service._queued_effect_runs  # noqa: SLF001
+        if running and queued and not injected_faults:
+            injected_faults.append(binding.public_run_id)
+            raise RuntimeError("post-handoff status failed")
+        return real_project_status(binding, *args, **kwargs)
+
+    monkeypatch.setattr(
+        engine_drive_module,
+        "project_status",
+        fail_after_durable_handoff,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="post-handoff status failed"):
+            service.start(
+                "drive-handoff-failure", {}, str(project),
+                compiler_provenance=compiled.compiler_provenance,
+            )
+        assert injected_faults == [observed_bindings[0].public_run_id]
+        binding = observed_bindings[0]
+        run_id = binding.public_run_id
+        records = service.effects.list_for_thread(binding.thread_id)
+        assert len(records) == 1
+        assert records[0].phase == "running"
+        assert len(runner.ensure_started_calls) == 1
+        assert run_id in service._active_effect_runs  # noqa: SLF001
+        assert run_id in service._queued_effect_runs  # noqa: SLF001
+        assert run_id in service._owned_effect_bindings  # noqa: SLF001
+        assert service.runtime.binding(run_id) == binding
+    finally:
+        service.close()
+
+
+def test_periodic_pump_adopts_watch_after_pre_handoff_drive_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recipes, compiled = _compile(
+        tmp_path,
+        "periodic-pre-handoff-recovery",
+        "  - step: edit\n"
+        "    task: Edit the project\n"
+        "    exit: Editing is complete\n",
+    )
+    project = tmp_path / "project"
+    project.mkdir()
+    service = _legacy_service(tmp_path / "state", recipes)
+    drives = []
+    recoveries = []
+    adopted = threading.Event()
+    real_recovered_drive = service._recovery_driver._drive_recovered_run  # noqa: SLF001
+
+    def fail_foreground_drive(run_id: str, **_kwargs):
+        drives.append(run_id)
+        raise RuntimeError("drive failed before handoff")
+
+    def observe_recovered_drive(run_id: str) -> bool:
+        result = real_recovered_drive(run_id)
+        recoveries.append(run_id)
+        adopted.set()
+        return result
+
+    monkeypatch.setattr(service, "_drive_engine_owned", fail_foreground_drive)
+    monkeypatch.setattr(
+        service._recovery_driver,  # noqa: SLF001
+        "_drive_recovered_run",
+        observe_recovered_drive,
+    )
+    try:
+        with pytest.raises(RuntimeError, match="drive failed before handoff"):
+            service.start(
+                "periodic-pre-handoff-recovery", {}, str(project),
+                compiler_provenance=compiled.compiler_provenance,
+            )
+        assert adopted.wait(2)
+        assert recoveries == drives
+        assert drives[0] not in service._active_effect_runs  # noqa: SLF001
+    finally:
+        service.close()
 
 
 def test_b794_acknowledged_state_backfills_null_input_watch(tmp_path: Path) -> None:
