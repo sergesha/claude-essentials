@@ -232,7 +232,7 @@ def check_recovered_recipe(
 ) -> dict[str, object]:
     validate_logical_name(name)
     root = Path(project).resolve()
-    from lockstep.authoring_observation import observe_authoring_project
+    from lockstep.authoring_publisher import observe_authoring_project
 
     return observe_authoring_project(state_dir, root, lambda: check_recipe(root, name))
 
@@ -241,7 +241,7 @@ def check_all_recovered_recipes(
     project: Path, *, state_dir: Path
 ) -> tuple[tuple[str, dict[str, object]], ...]:
     root = Path(project).resolve()
-    from lockstep.authoring_observation import observe_authoring_project
+    from lockstep.authoring_publisher import observe_authoring_project
 
     def observe() -> tuple[tuple[str, dict[str, object]], ...]:
         names = tuple(
@@ -269,7 +269,7 @@ def diff_recipe(project: Path, name: str) -> str:
 def diff_recovered_recipe(project: Path, name: str, *, state_dir: Path) -> str:
     validate_logical_name(name)
     root = Path(project).resolve()
-    from lockstep.authoring_observation import observe_authoring_project
+    from lockstep.authoring_publisher import observe_authoring_project
 
     return observe_authoring_project(state_dir, root, lambda: diff_recipe(root, name))
 

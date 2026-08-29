@@ -10,8 +10,12 @@ from pathlib import Path
 
 import pytest
 
-from lockstep.authoring_publisher import AuthoringPublisher
+from lockstep.authoring_publisher import (
+    AuthoringPublisher,
+    observe_authoring_project,
+)
 from lockstep.errors import AuthoringError
+from lockstep.runtime.engine import LockstepError
 
 from tests._authoring_crash_gate import (
     install_mutation_syscall_probe,
@@ -425,3 +429,45 @@ def test_read_command_holds_authoring_lock_through_complete_observation(
     assert probe.unexpected_writer_errors == []
     assert probe.mutated_destination.is_set()
     assert not probe.mutation_before_observation_complete.is_set()
+
+
+def test_publisher_observe_holds_existing_authoring_lock_through_callback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = _prepare_existing_bundle_scenario(tmp_path)
+    probe = _install_cooperating_writer_probe(scenario, monkeypatch)
+
+    def observe() -> str:
+        _require_same_lock_contention(probe)
+        _require_lock_through_observation(probe)
+        return "observed"
+
+    try:
+        assert AuthoringPublisher(scenario.owner_state).observe(
+            scenario.project, observe
+        ) == "observed"
+    finally:
+        if probe.thread is not None:
+            probe.thread.join(5)
+            assert not probe.thread.is_alive()
+    assert probe.finished.is_set()
+    assert probe.unexpected_writer_errors == []
+    assert probe.mutated_destination.is_set()
+    assert not probe.mutation_before_observation_complete.is_set()
+
+
+def test_observe_authoring_project_reraises_optimistic_error_without_boundary(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    state_dir = (tmp_path / "state").resolve()
+
+    def fail() -> None:
+        raise LockstepError("optimistic planning failed")
+
+    with pytest.raises(LockstepError, match="optimistic planning failed"):
+        observe_authoring_project(state_dir, project, fail)
+
+    assert not state_dir.exists()

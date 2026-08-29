@@ -11,7 +11,7 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, TypeAlias
+from typing import Any
 
 from lockstep.recipe import profile
 from lockstep.recipe.authority import (
@@ -27,8 +27,7 @@ from lockstep.authoring import (
     CanonicalObservation,
     classify_generated_recipe_observation,
 )
-from lockstep.authoring_bundle import PathIdentity
-from lockstep.authoring_journal import AuthoringJournal
+from lockstep.authoring_publisher import observe_authoring_project
 from lockstep.runtime import config, sessions
 from lockstep.runtime.blobs import BlobStore
 from lockstep.runtime.artifacts import ArtifactRegistry
@@ -97,7 +96,6 @@ from lockstep.runtime.start_input import (
 )
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-_StartAuthoringBoundary: TypeAlias = tuple[AuthoringJournal | None, PathIdentity]
 
 
 class _UnavailableEffectAuthority:
@@ -694,61 +692,20 @@ class LockstepCommandService:
             require_runtime_policy=self._require_owner_runtime_policy,
         )
 
-    def _locate_start_boundary(self, project: str) -> _StartAuthoringBoundary:
-        try:
-            return AuthoringJournal.locate_ready_for_project(
-                self.state_dir, Path(project)
-            )
-        except (AuthoringError, OSError, ValueError) as exc:
-            raise LockstepError(str(exc)) from exc
-
-    def _locked_start_plan(
-        self,
-        boundary: _StartAuthoringBoundary,
-        recipe: str,
-        project: str,
-        compiler_provenance: profile.CompilerProvenance | None,
-    ) -> AuthorizedStartPlan:
-        from lockstep.authoring_observation import observe_existing_authoring_project
-
-        journal, project_identity = boundary
-        if journal is None:
-            raise RuntimeError("locked start plan requires a ready authoring boundary")
-        try:
-            return observe_existing_authoring_project(
-                journal,
-                project_identity,
-                lambda: self._plan_start(recipe, project, compiler_provenance),
-            )
-        except (AuthoringError, OSError, ValueError) as exc:
-            raise LockstepError(str(exc)) from exc
-
     def _canonical_start_plan(
         self,
         recipe: str,
         project: str,
         compiler_provenance: profile.CompilerProvenance | None,
     ) -> AuthorizedStartPlan:
-        boundary = self._locate_start_boundary(project)
-        if boundary[0] is not None:
-            return self._locked_start_plan(
-                boundary, recipe, project, compiler_provenance
-            )
         try:
-            optimistic = self._plan_start(recipe, project, compiler_provenance)
-        except LockstepError:
-            boundary = self._locate_start_boundary(project)
-            if boundary[0] is None:
-                raise
-            return self._locked_start_plan(
-                boundary, recipe, project, compiler_provenance
+            return observe_authoring_project(
+                self.state_dir,
+                Path(project),
+                lambda: self._plan_start(recipe, project, compiler_provenance),
             )
-        boundary = self._locate_start_boundary(project)
-        if boundary[0] is None:
-            return optimistic
-        return self._locked_start_plan(
-            boundary, recipe, project, compiler_provenance
-        )
+        except (AuthoringError, OSError, ValueError) as exc:
+            raise LockstepError(str(exc)) from exc
 
     def start_authorized(
         self,
