@@ -7041,6 +7041,172 @@ def test_manifest_rejects_malformed_or_stale_claims_without_trusting_stored_data
     assert verdict.accepted_exceptions == ()
 
 
+def _member_closure_sha256(items: tuple[tuple[str, str], ...]) -> str:
+    value = bytearray(b"lockstep.architecture-members/v1\0")
+    for identity, digest in items:
+        value.extend(identity.encode("utf-8"))
+        value.append(0)
+        value.extend(digest.encode("ascii"))
+        value.append(0)
+    return hashlib.sha256(value).hexdigest()
+
+
+def test_manifest_reads_review_and_historical_inputs_from_exact_git_tree_blob(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "history"
+    inner = repo / "lockstep"
+    architecture = inner / "engine" / "tests" / "architecture"
+    source_path = inner / "engine" / "src" / "lockstep" / "sample.py"
+    review_path = inner / ".superpowers" / "reviews" / "candidate.md"
+    gate_path = architecture / "test_gate.py"
+    for path in (architecture, source_path.parent, review_path.parent):
+        path.mkdir(parents=True, exist_ok=True)
+    source = ("def god(value):\n" + "".join(
+        f"    if value == {number}: pass\n" for number in range(16)
+    )).encode()
+    source_path.write_bytes(source)
+    gate_path.write_text("def test_focus(): pass\n", encoding="utf-8")
+    stable_path = "src/lockstep/sample.py"
+    index = build_source_index(inner / "engine", (stable_path,), {stable_path: source})
+    allowlist = {"schema_version": 1, "targets": []}
+    primitives = _primitive_table(index, ())
+    lifecycle = json.loads(
+        (ARCHITECTURE_TEST_ROOT / "architecture_lifecycle.json").read_bytes()
+    )
+    schema = json.loads(
+        (ARCHITECTURE_TEST_ROOT / "architecture_metrics.schema.json").read_bytes()
+    )
+    thresholds = json.loads(
+        (ARCHITECTURE_TEST_ROOT / "architecture_thresholds.json").read_bytes()
+    )
+    resolutions = resolve_calls(index, (), primitives)
+    semantics = propagate_semantics(
+        index, resolutions, primitives, lifecycle,
+        digest_inputs=domain_lifecycle.SemanticDigestInputs(
+            _canonical_sha256(allowlist), _canonical_sha256(schema),
+            _canonical_sha256(thresholds), "task-12c-test", "v1"),
+    )
+    report = evaluate_candidates(
+        index, measure_legacy_metrics(index), semantics, resolutions)
+    identity = f"{stable_path}::god"
+    metric = report.functions[identity]
+    semantic_digest = semantics.entities[identity].semantic_dependency_sha256
+    review_bytes = (
+        "# Independent Architecture Review\n\n"
+        f"Entity: `{identity}`\n\n"
+        f"Semantic dependency SHA-256: `{semantic_digest}`\n\n"
+        "Finding counts: C0 / I0 / M0\n\nVerdict: PASS\n"
+    ).encode()
+    review_path.write_bytes(review_bytes)
+    rule_values = {
+        "architecture_effect_free_allowlist.json": allowlist,
+        "architecture_effect_primitives.json": primitives,
+        "architecture_lifecycle.json": lifecycle,
+        "architecture_metrics.schema.json": schema,
+        "architecture_thresholds.json": thresholds,
+    }
+    for filename, value in rule_values.items():
+        (architecture / filename).write_bytes(json.dumps(
+            value, ensure_ascii=False, allow_nan=False, sort_keys=True,
+            separators=(",", ":")).encode())
+    analyzer_names = (
+        "architecture_source_index.py", "architecture_legacy_metrics.py",
+        "architecture_call_resolver.py", "architecture_domain_lifecycle.py",
+        "architecture_candidate_policy.py", "architecture_manifest_verifier.py",
+        "architecture_diagnostics.py",
+    )
+    for filename in analyzer_names:
+        (architecture / filename).write_bytes(
+            (ARCHITECTURE_TEST_ROOT / filename).read_bytes())
+
+    subprocess.run(("git", "init", "-q"), cwd=repo, check=True)
+    subprocess.run(("git", "add", "."), cwd=repo, check=True)
+    subprocess.run(("git", "-c", "user.name=Test", "-c",
+                    "user.email=test@example.invalid", "commit", "-qm", "review"),
+                   cwd=repo, check=True)
+    review_commit = subprocess.run(
+        ("git", "rev-parse", "HEAD"), cwd=repo, check=True,
+        capture_output=True, text=True).stdout.strip()
+    (repo / "marker").write_text("current\n", encoding="utf-8")
+    subprocess.run(("git", "add", "marker"), cwd=repo, check=True)
+    subprocess.run(("git", "-c", "user.name=Test", "-c",
+                    "user.email=test@example.invalid", "commit", "-qm", "current"),
+                   cwd=repo, check=True)
+    current_commit = subprocess.run(
+        ("git", "rev-parse", "HEAD"), cwd=repo, check=True,
+        capture_output=True, text=True).stdout.strip()
+
+    evidence_without_digest = {
+        "project_relative_artifact_path": ".superpowers/reviews/candidate.md",
+        "git_tree_artifact_path": "lockstep/.superpowers/reviews/candidate.md",
+        "review_commit": review_commit,
+        "artifact_blob_sha256": hashlib.sha256(review_bytes).hexdigest(),
+        "reviewer_role": "architecture", "verdict": "PASS",
+        "finding_counts": {"critical": 0, "important": 0, "minor": 0},
+        "reviewed_semantic_dependency_sha256": semantic_digest,
+    }
+    evidence = {**evidence_without_digest,
+        "review_evidence_sha256": _canonical_sha256(evidence_without_digest)}
+    baseline = {
+        field.name: getattr(metric, field.name) for field in fields(metric)
+    }
+    baseline["signals"] = dict(metric.signals)
+    baseline = json.loads(json.dumps(baseline))
+    exception = {
+        "entity": identity, "kind": "function",
+        "trigger_reasons": ["hard:cyclomatic_gt_15"],
+        "responsibility": "Validate one closed sample branch matrix",
+        "invariant": "All branches preserve one exact validation decision",
+        "focused_gate": ["lockstep/engine/tests/architecture/test_gate.py::test_focus"],
+        "baseline_metrics": baseline,
+        "source_sha256": index.entities[identity].span.sha256,
+        "semantic_dependency_sha256": semantic_digest,
+        "member_closure_sha256": _member_closure_sha256(((identity, semantic_digest),)),
+        "review_evidence": evidence,
+        "next_review_gate": "task-12-final-source-review",
+        "expires_on": {name: True for name in (
+            "source_changed", "semantic_dependency_changed", "member_closure_changed",
+            "any_metric_increased", "any_component_increased",
+            "composite_score_increased", "new_domain", "new_lifecycle_cluster",
+            "focused_gate_missing_or_renamed", "review_evidence_unverifiable",
+            "analyzer_or_rule_version_changed")},
+    }
+    analyzer_digest = _canonical_sha256([
+        {"path": filename, "sha256": hashlib.sha256(
+            (architecture / filename).read_bytes()).hexdigest()}
+        for filename in analyzer_names
+    ])
+    manifest = {
+        "schema_version": 1, "ratchet_version": "v1",
+        "reference_commit": review_commit, "scan_root": "src/lockstep",
+        "population": [{"path": stable_path,
+                        "source_sha256": index.file_sha256[stable_path]}],
+        "analyzer_digest": analyzer_digest,
+        "primitive_digest": semantics.primitive_digest,
+        "allowlist_digest": semantics.digest_inputs.allowlist_digest,
+        "lifecycle_digest": semantics.lifecycle_digest,
+        "schema_digest": semantics.digest_inputs.schema_digest,
+        "threshold_digest": semantics.digest_inputs.threshold_digest,
+        "exceptions": [exception],
+    }
+
+    verdict = verify_manifest(
+        report, manifest, repo_root=repo, current_commit=current_commit)
+    assert verdict.valid is True
+    assert verdict.errors == ()
+    assert verdict.accepted_exceptions == (identity,)
+
+    review_path.write_text("checkout substitution\n", encoding="utf-8")
+    assert verify_manifest(
+        report, manifest, repo_root=repo, current_commit=current_commit).valid is True
+    bad = json.loads(json.dumps(manifest))
+    bad["exceptions"][0]["review_evidence"]["artifact_blob_sha256"] = "0" * 64
+    rejected = verify_manifest(report, bad, repo_root=repo, current_commit=current_commit)
+    assert rejected.valid is False
+    assert any("artifact blob" in error for error in rejected.errors)
+
+
 def test_diagnostics_is_pure_canonical_rendering_of_computed_results(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
