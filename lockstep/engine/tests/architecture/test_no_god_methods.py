@@ -7430,6 +7430,51 @@ def test_candidate_policy_file_nested_scope_shadowing_is_not_module_reference(
     assert metric.definition_dependency_components == 3
 
 
+@pytest.mark.parametrize(("source", "components"), (
+    ("""
+     def helper(): pass
+     def outer():
+         def helper(): pass
+         return helper
+     def isolated(): pass
+     """, 3),
+    ("""
+     import json
+     def outer():
+         import decimal as json
+         return json
+     def module_json(): return json
+     def isolated(): pass
+     """, 3),
+    ("""
+     def leaf(): pass
+     def outer():
+         [leaf for leaf in ()]
+         return leaf
+     def isolated(): pass
+     """, 2),
+    ("""
+     import json
+     class Outer:
+         json = 1
+         class Nested:
+             observed = json
+     def module_json(): return json
+     def isolated(): pass
+     """, 2),
+))
+def test_candidate_policy_file_uses_python_lexical_binding_semantics(
+    tmp_path: Path, source: str, components: int
+) -> None:
+    path = "src/lockstep/python_scope_components.py"
+    index, resolutions, semantics = _propagate_fixture(
+        tmp_path, source, path=path)
+    metric = evaluate_candidates(
+        index, measure_legacy_metrics(index), semantics, resolutions
+    ).files[f"{path}::@file"]
+    assert metric.definition_dependency_components == components
+
+
 def test_candidate_policy_file_subsystems_formula_and_hard_boundary(
     tmp_path: Path,
 ) -> None:

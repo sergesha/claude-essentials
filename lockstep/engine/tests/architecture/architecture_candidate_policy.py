@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import re
+import symtable
 from types import MappingProxyType
 
 from architecture_call_resolver import ResolvedCall, ResolvedDependency, ResolutionIndex, UnresolvedCall
@@ -504,81 +505,47 @@ def _module_reference_bindings(path, index, nodes, vertices, resolutions):
     return bindings
 
 
-def _local_names(node):
-    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
-        return set()
-    names = {argument.arg for argument in (
-        *node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs)}
-    if node.args.vararg is not None:
-        names.add(node.args.vararg.arg)
-    if node.args.kwarg is not None:
-        names.add(node.args.kwarg.arg)
-    globals_ = set()
-    def direct(member):
-        yield member
-        for child in ast.iter_child_nodes(member):
-            if child is not node and isinstance(
-                    child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
-                continue
-            yield from direct(child)
-    for member in direct(node):
-        if isinstance(member, ast.Name) and isinstance(member.ctx, ast.Store):
-            names.add(member.id)
-        elif isinstance(member, ast.Global):
-            globals_.update(member.names)
-    return names - globals_
+def _scope_name(node):
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return node.name
+    return {ast.Lambda: "lambda", ast.ListComp: "listcomp",
+            ast.SetComp: "setcomp", ast.DictComp: "dictcomp",
+            ast.GeneratorExp: "genexpr"}.get(type(node))
 
 
-def _class_local_names(node):
-    names = set()
-    for statement in node.body:
-        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            names.add(statement.name)
-            continue
-        for member in ast.walk(statement):
-            if isinstance(member, ast.Name) and isinstance(member.ctx, ast.Store):
-                names.add(member.id)
-    return names
+def _child_table(table, node):
+    name = _scope_name(node)
+    matches = tuple(child for child in table.get_children()
+                    if child.get_name() == name and child.get_lineno() == node.lineno)
+    return matches[0] if matches else table
 
 
-def _module_loads(root, bindings):
+def _module_loads(root, bindings, module_table):
     found = set()
-    def visit(node, scopes, is_root=False):
+    scope_nodes = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda,
+                   ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+    def visit(node, table):
         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
-            if not any(node.id in names for _kind, names in scopes) and node.id in bindings:
+            try:
+                symbol = table.lookup(node.id)
+            except KeyError:
+                symbol = None
+            if (table.get_type() == "module" or symbol is None or symbol.is_global()) and node.id in bindings:
                 found.add(bindings[node.id])
             return
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            for child in (*node.decorator_list, *node.args.defaults,
-                          *(item for item in node.args.kw_defaults if item is not None)):
-                visit(child, scopes)
-            lexical = tuple(scope for scope in scopes if scope[0] != "class")
-            body_scopes = (*lexical, ("function", _local_names(node)))
-            for child in node.body:
-                visit(child, body_scopes)
-            return
-        if isinstance(node, ast.Lambda):
-            lexical = tuple(scope for scope in scopes if scope[0] != "class")
-            visit(node.body, (*lexical, ("function", _local_names(node))))
-            return
-        if isinstance(node, ast.ClassDef):
-            for child in (*node.decorator_list, *node.bases, *node.keywords):
-                visit(child.value if isinstance(child, ast.keyword) else child, scopes)
-            body_scopes = (*scopes, ("class", _class_local_names(node)))
-            for child in node.body:
-                visit(child, body_scopes)
-            return
+        child_table = _child_table(table, node) if isinstance(node, scope_nodes) else table
         for child in ast.iter_child_nodes(node):
-            visit(child, scopes)
-    visit(root, (), True)
+            visit(child, child_table)
+    visit(root, module_table)
     return found
 
 
 def _reference_edges(path, index, nodes, vertices, resolutions):
     bindings = _module_reference_bindings(path, index, nodes, vertices, resolutions)
+    module_table = symtable.symtable(index.files[path].decode("utf-8"), path, "exec")
     edges, external = defaultdict(set), defaultdict(set)
     for owner in vertices:
-        for target in _module_loads(nodes[owner], bindings):
+        for target in _module_loads(nodes[owner], bindings, module_table):
             if target in vertices and target != owner:
                 edges[owner].add(target)
             elif isinstance(target, str) and target.startswith("@import:"):
