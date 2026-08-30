@@ -871,6 +871,6 @@ def test_legacy_metrics_characterize_current_complexity_length_and_pruned_fanout
         metric_fields
     )
     assert all(type(metric).__name__ == "LegacyMetrics" for metric in metrics.values())
-    _assert_frozen_record(next(iter(metrics.values())))
+    _assert_deeply_immutable(next(iter(metrics.values())))
     with pytest.raises(TypeError):
         metrics[f"{path}::parent"] = next(iter(metrics.values()))
