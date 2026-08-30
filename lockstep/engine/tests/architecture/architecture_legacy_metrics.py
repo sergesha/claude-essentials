@@ -107,7 +107,7 @@ def measure_legacy_metrics(index: SourceIndex) -> Mapping[str, LegacyMetrics]:
     groups: dict[tuple[str, bytes], set[str]] = {}
     for entity in index.entities.values():
         stable_identity = entity.identity
-        path = stable_identity.partition("::")[0]
+        path = stable_identity.rpartition("::")[0]
         groups.setdefault((path, entity.source), set()).add(stable_identity)
     available: dict[str, LegacyMetrics] = {}
     for (path, source), identities in groups.items():
