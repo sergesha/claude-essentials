@@ -6953,6 +6953,22 @@ def test_candidate_policy_one_hop_composite_formula_without_hard_trigger(
     assert metric.candidate is True
 
 
+def test_candidate_policy_one_hop_excludes_helper_called_by_file_lambda(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/lambda_caller.py"
+    index, resolutions, semantics = _propagate_fixture(
+        tmp_path,
+        "def root(): _helper()\ndef _helper(): pass\nexternal = lambda: _helper()",
+        path=path,
+    )
+    root = f"{path}::root"
+    metric = evaluate_candidates(
+        index, measure_legacy_metrics(index), semantics, resolutions
+    ).one_hops[root + "::@one_hop"]
+    assert metric.members == (root,)
+
+
 def test_candidate_policy_class_cohesion_fields_and_file_components(
     tmp_path: Path,
 ) -> None:
@@ -7039,6 +7055,46 @@ def test_candidate_policy_lambda_is_real_cohesion_vertex_and_inheritance_is_excl
     assert metric.mutable_fields == ()
     assert metric.cohesion_components == 2
     assert metric.bases == (f"{path}::Base",)
+
+
+def test_candidate_policy_class_nested_definitions_do_not_donate_field_evidence(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/nested_field_evidence.py"
+    index, resolutions, semantics = _propagate_fixture(
+        tmp_path,
+        """
+        class Aggregate:
+            def outer(self):
+                def nested(): self.items = []
+                return nested
+            def reader(self): return self.items
+            def isolated(self): pass
+        """, path=path)
+    metric = evaluate_candidates(
+        index, measure_legacy_metrics(index), semantics, resolutions
+    ).classes[f"{path}::Aggregate"]
+    assert metric.mutable_fields == ()
+    assert metric.cohesion_components == 3
+
+
+def test_candidate_policy_class_lambda_resolved_call_is_cohesion_edge(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/lambda_call_cohesion.py"
+    index, resolutions, semantics = _propagate_fixture(
+        tmp_path,
+        """
+        class Aggregate:
+            projection = lambda self: self.direct()
+            def direct(self): pass
+            def isolated(self): pass
+        """, path=path)
+    metric = evaluate_candidates(
+        index, measure_legacy_metrics(index), semantics, resolutions
+    ).classes[f"{path}::Aggregate"]
+    assert metric.mutable_fields == ()
+    assert metric.cohesion_components == 2
 
 
 def test_candidate_policy_cls_fields_normalize_to_closed_mutable_field_identity(
@@ -7287,6 +7343,27 @@ def test_candidate_policy_file_attributes_nested_function_and_class_dependencies
     ).files[f"{path}::@file"]
     assert metric.definition_count == 7
     assert metric.definition_dependency_components == 2
+
+
+def test_candidate_policy_file_plain_alias_and_import_references_form_edges(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/reference_components.py"
+    index, resolutions, semantics = _propagate_fixture(
+        tmp_path,
+        """
+        import json
+        def leaf(): pass
+        alias = leaf
+        def use_alias(): return alias
+        def import_a(): return json
+        def import_b(): return json
+        def isolated(): pass
+        """, path=path)
+    metric = evaluate_candidates(
+        index, measure_legacy_metrics(index), semantics, resolutions
+    ).files[f"{path}::@file"]
+    assert metric.definition_dependency_components == 3
 
 
 def test_candidate_policy_file_subsystems_formula_and_hard_boundary(
