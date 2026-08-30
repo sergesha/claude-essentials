@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import ast
 import builtins
-from collections import defaultdict
-from dataclasses import dataclass
+from collections import defaultdict, namedtuple
+from dataclasses import dataclass, field
+import hashlib
+import json
 from types import MappingProxyType
 from typing import Mapping, Sequence
 
@@ -41,45 +43,31 @@ class _Binding:
     conditional: bool = False
 
 
-class _Scope:
-    def __init__(self, kind: str, parent: _Scope | None, identity: str, node: ast.AST):
-        self.kind = kind
-        self.parent = parent
-        self.identity = identity
-        self.node = node
-        self.bindings: dict[str, list[_Binding]] = defaultdict(list)
-        self.params: set[str] = set()
-        self.globals: dict[str, list[ast.Global]] = defaultdict(list)
-        self.nonlocals: dict[str, list[ast.Nonlocal]] = defaultdict(list)
-        self.loads: dict[str, list[ast.Name]] = defaultdict(list)
-        self.children: list[_Scope] = []
-        if parent is not None:
-            parent.children.append(self)
-
-
 @dataclass(slots=True)
-class _ClassInfo:
-    scope: _Scope
-    methods: dict[str, str]
-    bases: list[ast.expr]
+class _Scope:
+    kind: str
+    parent: _Scope | None
+    identity: str
+    node: ast.AST
+    bindings: dict[str, list[_Binding]] = field(default_factory=lambda: defaultdict(list))
+    params: set[str] = field(default_factory=set)
+    globals: dict[str, list[ast.Global]] = field(default_factory=lambda: defaultdict(list))
+    nonlocals: dict[str, list[ast.Nonlocal]] = field(default_factory=lambda: defaultdict(list))
+    loads: dict[str, list[ast.Name]] = field(default_factory=lambda: defaultdict(list))
+
+
+_ClassInfo = namedtuple("_ClassInfo", "scope methods bases")
 
 
 _NAMED = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-_CONDITIONAL = (
-    ast.If,
-    ast.For,
-    ast.AsyncFor,
-    ast.While,
-    ast.Try,
-    ast.TryStar,
-    ast.With,
-    ast.AsyncWith,
-    ast.Match,
-    ast.comprehension,
-    ast.IfExp,
-    ast.BoolOp,
-    ast.Lambda,
-)
+
+_CONDITIONAL = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try, ast.TryStar, ast.With,
+                ast.AsyncWith, ast.Match, ast.comprehension, ast.IfExp, ast.BoolOp, ast.Lambda)
+
+_EFFECT_DOMAINS = ("decode/validate", "planning/transformation", "filesystem-read",
+                   "filesystem-write", "durable-state", "synchronization",
+                   "external-process/provider", "authority/commitment", "lifecycle-control",
+                   "projection/output")
 
 
 def _arg_nodes(arguments: ast.arguments) -> tuple[ast.arg, ...]:
@@ -97,6 +85,10 @@ def _assigned_names(node: ast.AST) -> tuple[str, ...]:
     for item in ast.walk(node):
         if isinstance(item, ast.Name) and isinstance(item.ctx, (ast.Store, ast.Del)):
             found.append(item.id)
+        elif isinstance(item, (ast.MatchAs, ast.MatchStar)) and item.name is not None:
+            found.append(item.name)
+        elif isinstance(item, ast.MatchMapping) and item.rest is not None:
+            found.append(item.rest)
     return tuple(found)
 
 
@@ -105,7 +97,6 @@ class _Model:
 
     def __init__(self, index: SourceIndex):
         self.index = index
-        self.trees: dict[str, ast.Module] = {}
         self.scopes: list[_Scope] = []
         self.node_scope: dict[int, _Scope] = {}
         self.parents: dict[int, ast.AST] = {}
@@ -113,14 +104,13 @@ class _Model:
         self.calls: dict[str, list[ast.Call]] = defaultdict(list)
         self.classes: dict[str, _ClassInfo] = {}
         self.named_scopes: dict[str, _Scope] = {}
-        self.modules: dict[str, _Scope] = {}
+        self.import_modules: set[str] = set()
         for path in sorted(index.files):
             tree = ast.parse(index.files[path], filename=path)
-            self.trees[path] = tree
             module = _Scope("module", None, f"{path}::@file", tree)
             self.scopes.append(module)
-            self.modules[path] = module
-            self._visit_sequence(tree.body, module, module.identity, False)
+            for node in tree.body:
+                self._visit(node, module, module.identity, False)
         for scope in self.scopes:
             self._collect_scope_facts(scope)
 
@@ -128,12 +118,6 @@ class _Model:
         self.node_scope[id(node)] = scope
         if conditional:
             self.conditional.add(id(node))
-
-    def _visit_sequence(
-        self, nodes: Sequence[ast.AST], scope: _Scope, owner: str, conditional: bool
-    ) -> None:
-        for node in nodes:
-            self._visit(node, scope, owner, conditional)
 
     def _visit(self, node: ast.AST, scope: _Scope, owner: str, conditional: bool) -> None:
         self._mark(node, scope, conditional)
@@ -143,14 +127,35 @@ class _Model:
         if isinstance(node, ast.Lambda):
             child = _Scope("lambda", scope, owner, node)
             self.scopes.append(child)
-            self._mark(node.args, child, True)
+            self._mark(node.args, scope, conditional)
             for arg in _arg_nodes(node.args):
                 child.params.add(arg.arg)
-            for field, value in ast.iter_fields(node):
-                if field == "body":
-                    self._child(value, child, owner, True, node)
-                elif field != "args":
-                    self._child(value, scope, owner, conditional, node)
+                if arg.annotation is not None:
+                    self._child(arg.annotation, scope, owner, conditional, arg)
+            for default in (*node.args.defaults, *node.args.kw_defaults):
+                if default is not None:
+                    self._child(default, scope, owner, conditional, node.args)
+            self._child(node.body, child, owner, True, node)
+            return
+        if isinstance(
+            node,
+            (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp),
+        ):
+            child = _Scope("comprehension", scope, owner, node)
+            self.scopes.append(child)
+            generators = node.generators
+            element_nodes = (
+                (node.key, node.value) if isinstance(node, ast.DictComp) else (node.elt,)
+            )
+            for element in element_nodes:
+                self._child(element, child, owner, True, node)
+            for position, generator in enumerate(generators):
+                self._mark(generator, child, True)
+                iter_scope = scope if position == 0 else child
+                self._child(generator.target, child, owner, True, generator)
+                self._child(generator.iter, iter_scope, owner, conditional, generator)
+                for condition in generator.ifs:
+                    self._child(condition, child, owner, True, generator)
             return
         if isinstance(node, ast.Call):
             self.calls[owner].append(node)
@@ -177,7 +182,9 @@ class _Model:
 
     def _register_named(self, node: ast.AST, parent: _Scope, conditional: bool) -> None:
         assert isinstance(node, _NAMED)
-        identity = f"{parent.identity.rsplit('::', 1)[0]}::{self._qualname(parent, node.name)}"
+        path, _separator, suffix = parent.identity.rpartition("::")
+        qualified = node.name if suffix == "@file" else f"{suffix}.{node.name}"
+        identity = f"{path}::{qualified}"
         kind = "class" if isinstance(node, ast.ClassDef) else "function"
         child = _Scope(kind, parent, identity, node)
         self.scopes.append(child)
@@ -191,7 +198,8 @@ class _Model:
                 self._child(base, parent, identity, conditional, node)
             for keyword in node.keywords:
                 self._child(keyword, parent, identity, conditional, node)
-            self._visit_sequence(node.body, child, identity, conditional)
+            for statement in node.body:
+                self._visit(statement, child, identity, conditional)
             for statement in node.body:
                 if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     method = f"{identity}.{statement.name}"
@@ -206,53 +214,72 @@ class _Model:
             self._child(node.returns, parent, identity, conditional, node)
         for arg in _arg_nodes(node.args):
             child.params.add(arg.arg)
-        self._visit_sequence(node.body, child, identity, conditional)
-
-    def _qualname(self, parent: _Scope, name: str) -> str:
-        suffix = parent.identity.split("::", 1)[1]
-        return name if suffix == "@file" else f"{suffix}.{name}"
+        for statement in node.body:
+            self._visit(statement, child, identity, conditional)
 
     def _collect_scope_facts(self, scope: _Scope) -> None:
-        root = scope.node
-        for node in ast.walk(root):
+        for node in ast.walk(scope.node):
             if self.node_scope.get(id(node)) is not scope:
                 continue
             conditional = id(node) in self.conditional
             if isinstance(node, ast.Name):
-                if isinstance(node.ctx, ast.Load):
-                    scope.loads[node.id].append(node)
-                elif isinstance(node.ctx, ast.Store):
-                    kind = "aug" if isinstance(self.parents.get(id(node)), ast.AugAssign) else "store"
-                    scope.bindings[node.id].append(_Binding(kind, None, node, conditional))
-                elif isinstance(node.ctx, ast.Del):
-                    scope.bindings[node.id].append(_Binding("del", None, node, conditional))
-            elif isinstance(node, ast.Import):
-                for alias in node.names:
-                    name = alias.asname or alias.name.split(".")[0]
-                    value = alias.name if alias.asname else alias.name.split(".")[0]
-                    scope.bindings[name].append(_Binding("import", value, node, conditional))
-            elif isinstance(node, ast.ImportFrom):
-                if any(alias.name == "*" for alias in node.names):
-                    continue
-                module = "." * node.level + (node.module or "")
-                for alias in node.names:
-                    name = alias.asname or alias.name
-                    scope.bindings[name].append(
-                        _Binding("import", f"{module}.{alias.name}".strip("."), node, conditional)
-                    )
-            elif isinstance(node, ast.Global):
-                for name in node.names:
-                    scope.globals[name].append(node)
-            elif isinstance(node, ast.Nonlocal):
-                for name in node.names:
-                    scope.nonlocals[name].append(node)
-            elif isinstance(node, ast.ExceptHandler) and isinstance(node.name, str):
-                scope.bindings[node.name].append(_Binding("store", None, node, True))
-                scope.bindings[node.name].append(_Binding("del", None, node, True))
-            elif isinstance(node, ast.Match):
-                for case in node.cases:
-                    for name in _assigned_names(case.pattern):
-                        scope.bindings[name].append(_Binding("store", None, case.pattern, True))
+                self._collect_name_fact(scope, node, conditional)
+            else:
+                self._collect_statement_fact(scope, node, conditional)
+
+    def _collect_name_fact(
+        self, scope: _Scope, node: ast.Name, conditional: bool
+    ) -> None:
+        if isinstance(node.ctx, ast.Load):
+            scope.loads[node.id].append(node)
+            return
+        kind = "del" if isinstance(node.ctx, ast.Del) else "store"
+        if isinstance(node.ctx, ast.Store) and isinstance(
+            self.parents.get(id(node)), ast.AugAssign
+        ):
+            kind = "aug"
+        if isinstance(node.ctx, (ast.Store, ast.Del)):
+            scope.bindings[node.id].append(_Binding(kind, None, node, conditional))
+
+    def _collect_statement_fact(
+        self, scope: _Scope, node: ast.AST, conditional: bool
+    ) -> None:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                self.import_modules.add(alias.name)
+                name = alias.asname or alias.name.split(".")[0]
+                value = alias.name if alias.asname else alias.name.split(".")[0]
+                scope.bindings[name].append(_Binding("import", value, node, conditional))
+            return
+        if isinstance(node, ast.ImportFrom):
+            if any(alias.name == "*" for alias in node.names):
+                return
+            path = scope.identity.rpartition("::")[0]
+            package = path.removeprefix("src/").removesuffix(".py").split("/")[:-1]
+            keep = len(package) - max(0, node.level - 1)
+            parts = package[: max(0, keep)] if node.level else []
+            parts.extend(node.module.split(".") if node.module else ())
+            for alias in node.names:
+                name = alias.asname or alias.name
+                imported = ".".join((*parts, alias.name))
+                scope.bindings[name].append(_Binding("import", imported, node, conditional))
+            return
+        destination = scope.globals if isinstance(node, ast.Global) else scope.nonlocals
+        if isinstance(node, (ast.Global, ast.Nonlocal)):
+            for name in node.names:
+                destination[name].append(node)
+        elif isinstance(node, ast.ExceptHandler) and isinstance(node.name, str):
+            scope.bindings[node.name].extend(
+                (_Binding("store", None, node, True), _Binding("del", None, node, True))
+            )
+        elif isinstance(node, ast.Match):
+            captured = (
+                (name, case.pattern)
+                for case in node.cases
+                for name in _assigned_names(case.pattern)
+            )
+            for name, pattern in captured:
+                scope.bindings[name].append(_Binding("store", None, pattern, True))
 
     def enclosing_class(self, scope: _Scope) -> _ClassInfo | None:
         current = scope.parent
@@ -261,27 +288,167 @@ class _Model:
                 return self.classes[current.identity]
             current = current.parent
         return None
-
-    def module_scope(self, scope: _Scope) -> _Scope:
-        while scope.parent is not None:
-            scope = scope.parent
-        return scope
-
-    def path_for(self, scope: _Scope) -> str:
-        return scope.identity.split("::", 1)[0]
+_Target = namedtuple("_Target", "label kind")
 
 
-@dataclass(frozen=True, slots=True)
-class _Target:
-    label: str
-    kind: str
+def _require(condition: bool, message: str) -> None:
+    if not condition:
+        raise ValueError(message)
+
+
+def _read_allowlist(value: object) -> frozenset[str]:
+    if isinstance(value, Mapping):
+        _require(set(value) == {"schema_version", "targets"}, "invalid effect-free allowlist")
+        _require(type(value["schema_version"]) is int and value["schema_version"] == 1,
+                 "invalid effect-free allowlist schema_version")
+        _require(isinstance(value["targets"], list), "effect-free allowlist targets must be an array")
+        value = value["targets"]
+    _require(not isinstance(value, (str, bytes)) and isinstance(value, (set, frozenset, tuple, list)),
+             "invalid effect-free allowlist")
+    if not all(isinstance(item, str) and item for item in value):
+        if any(isinstance(item, str) and not item for item in value):
+            raise ValueError("effect-free allowlist target must be non-empty")
+        raise ValueError("invalid effect-free target")
+    seen: set[str] = set()
+    for target in value:
+        if target in seen:
+            raise ValueError(f"duplicate effect-free allowlist target: {target}")
+        seen.add(target)
+    return frozenset(value)
+
+
+def _read_primitives(model: _Model, value: object) -> tuple[Mapping[str, object], ...]:
+    envelope: Mapping[str, object] | None = value if isinstance(value, Mapping) else None
+    if envelope is not None:
+        expected_keys = {"schema_version", "reference_source_sha256", "callsite_evidence", "rows"}
+        _require(set(envelope) == expected_keys, "invalid effect primitive table")
+        _require(type(envelope["schema_version"]) is int and envelope["schema_version"] == 1,
+                 "invalid effect primitive schema_version")
+        value = envelope["rows"]
+        _require(isinstance(value, list), "effect primitive rows must be an array")
+    _require(not isinstance(value, (str, bytes)) and isinstance(value, (tuple, list)),
+             "invalid effect primitive table")
+    rows = tuple(_primitive_row(row) for row in value)
+    bindings = [(row["selector_kind"], row["selector"]) for row in rows]
+    duplicate = next((item for item in bindings if bindings.count(item) > 1), None)
+    if duplicate is not None:
+        raise ValueError(f"duplicate primitive binding: {duplicate[1]}")
+    callsites = {row["selector"] for row in rows if row["selector_kind"] == "callsite"}
+    entities = {row["selector"] for row in rows if row["selector_kind"] == "entity"}
+    _require(not callsites & entities, "primitive selector spaces overlap")
+    if envelope is not None:
+        _validate_primitive_evidence(model, envelope, rows)
+    return rows
+
+
+def _primitive_row(row: object) -> Mapping[str, object]:
+    keys = {"selector_kind", "selector", "semantic_target", "domains"}
+    _require(isinstance(row, Mapping) and set(row) == keys, "invalid effect primitive row")
+    _require(row["selector_kind"] in {"callsite", "entity"}, "invalid primitive selector kind")
+    for key in ("selector", "semantic_target"):
+        if not isinstance(row[key], str):
+            raise ValueError("invalid effect primitive selector")
+        if not row[key]:
+            suffix = "selector" if key == "selector" else "semantic_target"
+            raise ValueError(f"effect primitive {suffix} must be non-empty")
+    domains = row["domains"]
+    _require(not isinstance(domains, (str, bytes)) and isinstance(domains, list),
+             "invalid primitive domains: string_not_array")
+    _require(bool(domains), "invalid primitive domains: empty")
+    _require(all(isinstance(domain, str) and domain in _EFFECT_DOMAINS for domain in domains),
+             "invalid primitive domains: unknown")
+    _require(len(set(domains)) == len(domains), "invalid primitive domains: duplicate")
+    _require(domains == sorted(domains, key=_EFFECT_DOMAINS.index),
+             "invalid primitive domains: noncanonical_order")
+    return dict(row)
+
+
+def _validate_primitive_evidence(model: _Model, envelope: Mapping[str, object],
+                                 rows: tuple[Mapping[str, object], ...]) -> None:
+    population = [{"path": path, "source_sha256": model.index.file_sha256[path]}
+                  for path in sorted(model.index.files)]
+    encoded = json.dumps(population, ensure_ascii=False, allow_nan=False,
+                         sort_keys=True, separators=(",", ":")).encode("utf-8")
+    _require(envelope["reference_source_sha256"] == hashlib.sha256(encoded).hexdigest(),
+             "reference source evidence mismatch")
+    evidence = envelope["callsite_evidence"]
+    records_valid = isinstance(evidence, list) and all(
+        isinstance(record, Mapping)
+        and set(record) == {"selector", "owner_source_sha256", "call_ast_sha256"}
+        and all(isinstance(item, str) for item in record.values()) for record in evidence)
+    _require(records_valid, "invalid callsite evidence: malformed_record")
+    expected = [str(row["selector"]) for row in rows if row["selector_kind"] == "callsite"]
+    actual = [str(record["selector"]) for record in evidence]
+    _require(len(set(actual)) == len(actual), "invalid callsite evidence: duplicate")
+    _require(all(selector in actual for selector in expected), "invalid callsite evidence: missing")
+    _require(all(selector in expected for selector in actual), "invalid callsite evidence: orphan")
+    _require(actual == expected, "noncanonical callsite evidence order")
+    for record in evidence:
+        _validate_callsite_evidence(model, record)
+
+
+def _validate_callsite_evidence(model: _Model, record: Mapping[str, object]) -> None:
+    selector = str(record["selector"])
+    owner, ordinal_text = selector.rsplit("::call:", 1)
+    calls = model.calls.get(owner, ())
+    ordinal = int(ordinal_text)
+    _require(1 <= ordinal <= len(calls), f"callsite AST evidence mismatch: {selector}")
+    call = calls[ordinal - 1]
+    path, _separator, qualified = owner.rpartition("::")
+    owner_sha256 = (model.index.file_sha256[path] if qualified == "@file"
+                    else model.index.entities[owner].span.sha256)
+    _require(record["owner_source_sha256"] == owner_sha256,
+             "invalid callsite evidence: owner_source_mismatch")
+    call_sha256 = hashlib.sha256(ast.dump(call, include_attributes=False).encode("utf-8")).hexdigest()
+    if record["call_ast_sha256"] == call_sha256:
+        return
+    if record["call_ast_sha256"] == "0" * 64:
+        raise ValueError("invalid callsite evidence: call_ast_mismatch")
+    raise ValueError(f"callsite AST evidence mismatch: {selector}")
+
+
+def _symbol_use_is_safe(model: _Model, node: ast.Name) -> bool:
+    parent = model.parents.get(id(node))
+    if isinstance(parent, ast.Call) and parent.func is node:
+        return True
+    if isinstance(parent, ast.Attribute) and parent.value is node:
+        grand = model.parents.get(id(parent))
+        return isinstance(grand, ast.Call) and grand.func is parent
+    if isinstance(parent, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+        return True
+    return isinstance(parent, (ast.keyword, ast.Subscript))
+
+
+def _receiver_use_is_safe(model: _Model, node: ast.Name) -> bool:
+    parent = model.parents.get(id(node))
+    if not isinstance(parent, ast.Attribute) or parent.value is not node:
+        return False
+    grand = model.parents.get(id(parent))
+    return isinstance(grand, ast.Call) and grand.func is parent
+
+
+def _self_attribute(node: ast.AST) -> tuple[str, str] | None:
+    if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+        if node.value.id in {"self", "cls"}:
+            return node.value.id, node.attr
+    return None
+
+
+def _is_descendant(scope: _Scope, parent: _Scope) -> bool:
+    current = scope.parent
+    while current is not None:
+        if current is parent:
+            return True
+        current = current.parent
+    return False
 
 
 class _Resolver:
+
     def __init__(self, index: SourceIndex, allowlist: object, primitives: object):
         self.model = _Model(index)
-        self.allowlist = self._read_allowlist(allowlist)
-        self.primitives = self._read_primitives(primitives)
+        self.allowlist = _read_allowlist(allowlist)
+        self.primitives = _read_primitives(self.model, primitives)
         overlap = self.allowlist & {
             row["selector"] for row in self.primitives if row["selector_kind"] == "entity"
         }
@@ -291,62 +458,24 @@ class _Resolver:
         self.receivers: dict[tuple[int, str], str] = {}
         self.field_receivers: dict[tuple[str, str], str] = {}
         self.bases: dict[str, tuple[str, ...] | None] = {}
-        self._prepare_aliases()
-        self._prepare_receivers()
-        self._prepare_bases()
-        self._prepare_fields()
+        for prepare in (
+            self._prepare_symbols,
+            self._prepare_bases,
+            self._prepare_fields,
+        ):
+            prepare()
 
-    @staticmethod
-    def _read_allowlist(value: object) -> frozenset[str]:
-        if isinstance(value, Mapping):
-            if set(value) != {"schema_version", "targets"} or value["schema_version"] != 1:
-                raise ValueError("invalid effect-free allowlist")
-            value = value["targets"]
-        if isinstance(value, (str, bytes)) or not isinstance(value, (set, frozenset, tuple, list)):
-            raise ValueError("invalid effect-free allowlist")
-        if not all(isinstance(item, str) for item in value):
-            raise ValueError("invalid effect-free target")
-        return frozenset(value)
-
-    @staticmethod
-    def _read_primitives(value: object) -> tuple[Mapping[str, object], ...]:
-        if isinstance(value, Mapping):
-            if set(value) != {"schema_version", "rows"} or value["schema_version"] != 1:
-                raise ValueError("invalid effect primitive table")
-            value = value["rows"]
-        if isinstance(value, (str, bytes)) or not isinstance(value, (tuple, list)):
-            raise ValueError("invalid effect primitive table")
-        rows: list[Mapping[str, object]] = []
-        for row in value:
-            if not isinstance(row, Mapping) or set(row) != {
-                "selector_kind", "selector", "semantic_target", "domains"
-            }:
-                raise ValueError("invalid effect primitive row")
-            if row["selector_kind"] not in {"callsite", "entity"}:
-                raise ValueError("invalid primitive selector kind")
-            if not isinstance(row["selector"], str) or not isinstance(row["semantic_target"], str):
-                raise ValueError("invalid effect primitive selector")
-            rows.append(dict(row))
-        callsites = {r["selector"] for r in rows if r["selector_kind"] == "callsite"}
-        entities = {r["selector"] for r in rows if r["selector_kind"] == "entity"}
-        if callsites & entities:
-            raise ValueError("primitive selector spaces overlap")
-        return tuple(rows)
-
-    def _module_entity(self, symbol: str) -> str | None:
-        parts = symbol.split(".")
+    def _normalize_target(self, label: str, kind: str) -> _Target:
+        entity = None
+        parts = label.split(".")
         for cut in range(len(parts), 0, -1):
             module = "/".join(parts[:cut])
             candidates = (f"src/{module}.py", f"{module}.py", f"src/{module}/__init__.py")
-            for path in candidates:
-                if path not in self.model.trees:
-                    continue
+            path = next((item for item in candidates if item in self.model.index.files), None)
+            if path is not None:
                 rest = ".".join(parts[cut:])
-                return f"{path}::{rest or '@file'}"
-        return None
-
-    def _normalize_target(self, label: str, kind: str) -> _Target:
-        entity = self._module_entity(label)
+                entity = f"{path}::{rest or '@file'}"
+                break
         if entity is not None and not entity.endswith("::@file"):
             scope = self.model.named_scopes.get(entity)
             return _Target(entity, scope.kind if scope else kind)
@@ -355,29 +484,29 @@ class _Resolver:
     def _declaration_valid(self, scope: _Scope, name: str, load: ast.Name) -> tuple[str, _Scope] | None:
         globals_ = scope.globals.get(name, ())
         nonlocals = scope.nonlocals.get(name, ())
-        if globals_ and nonlocals or len(globals_) > 1 or len(nonlocals) > 1:
-            return None
-        declarations = globals_ or nonlocals
+        declarations = (*globals_, *nonlocals)
         if not declarations:
             return ("local", scope)
+        if len(declarations) != 1:
+            return None
         declaration = declarations[0]
         if (load.lineno, load.col_offset) < (declaration.lineno, declaration.col_offset):
             return None
         if any(binding.kind in {"store", "del", "aug"} for binding in scope.bindings.get(name, ())):
             return None
         if globals_:
-            target = self.model.module_scope(scope)
-            return ("redirect", target) if self._scope_defines(target, name) else None
+            target = scope
+            while target.parent is not None:
+                target = target.parent
+            defined = name in target.params or bool(target.bindings.get(name))
+            return ("redirect", target) if defined else None
         target = scope.parent
         while target is not None:
-            if target.kind != "class" and self._scope_defines(target, name):
+            defined = name in target.params or bool(target.bindings.get(name))
+            if target.kind != "class" and defined:
                 return "redirect", target
             target = target.parent
         return None
-
-    @staticmethod
-    def _scope_defines(scope: _Scope, name: str) -> bool:
-        return name in scope.params or bool(scope.bindings.get(name))
 
     def _resolve_name(self, scope: _Scope, name: str, load: ast.AST) -> _Target | None:
         original = scope
@@ -395,32 +524,7 @@ class _Resolver:
                 return None
             bindings = current.bindings.get(name, ())
             if bindings:
-                alias = self.aliases.get((id(current), name))
-                if alias is not None:
-                    binding = bindings[0]
-                    if current is not original or (binding.node.lineno, binding.node.col_offset) < (
-                        getattr(load, "lineno", 0), getattr(load, "col_offset", 0)
-                    ):
-                        return alias
-                    return None
-                if len(bindings) != 1:
-                    return None
-                binding = bindings[0]
-                if binding.conditional:
-                    return None
-                if binding.kind in {"function", "class"}:
-                    if current is not original or (binding.node.lineno, binding.node.col_offset) < (
-                        getattr(load, "lineno", 0), getattr(load, "col_offset", 0)
-                    ):
-                        return _Target(str(binding.value), binding.kind)
-                    return None
-                if binding.kind == "import":
-                    if current is not original or (binding.node.lineno, binding.node.col_offset) < (
-                        getattr(load, "lineno", 0), getattr(load, "col_offset", 0)
-                    ):
-                        return self._normalize_target(str(binding.value), "import")
-                    return None
-                return None
+                return self._binding_target(current, original, name, load, bindings)
             parent = current.parent
             if parent is not None and parent.kind == "class" and original.kind in {"function", "lambda"}:
                 parent = parent.parent
@@ -428,6 +532,39 @@ class _Resolver:
         builtin_target = f"builtins.{name}"
         if name in dir(builtins) and builtin_target in self.allowlist:
             return _Target(builtin_target, "builtin")
+        return None
+
+    def _binding_target(
+        self,
+        current: _Scope,
+        original: _Scope,
+        name: str,
+        load: ast.AST,
+        bindings: Sequence[_Binding],
+    ) -> _Target | None:
+        binding = bindings[0]
+        load_position = getattr(load, "lineno", 0), getattr(load, "col_offset", 0)
+        available = current is not original or (
+            binding.node.lineno,
+            binding.node.col_offset,
+        ) < load_position
+        alias = self.aliases.get((id(current), name))
+        if alias is not None:
+            return alias if available else None
+        if len(bindings) != 1 or binding.conditional:
+            return None
+        if binding.kind in {"function", "class"} and current is original:
+            ancestor = self.model.parents.get(id(load))
+            while ancestor is not None and ancestor is not binding.node:
+                ancestor = self.model.parents.get(id(ancestor))
+            if ancestor is binding.node:
+                return None
+        if not available:
+            return None
+        if binding.kind in {"function", "class"}:
+            return _Target(str(binding.value), binding.kind)
+        if binding.kind == "import":
+            return self._normalize_target(str(binding.value), "import")
         return None
 
     def _resolve_expr(self, scope: _Scope, expression: ast.AST) -> _Target | None:
@@ -440,116 +577,127 @@ class _Resolver:
             if base.label in self.model.classes:
                 method = self._lookup_method(base.label, expression.attr)
                 return _Target(method, "function") if method else None
-            return self._normalize_target(f"{base.label}.{expression.attr}", "import")
+            target = self._normalize_target(f"{base.label}.{expression.attr}", "import")
+            parent = self.model.parents.get(id(expression))
+            if (
+                isinstance(parent, ast.Attribute)
+                and parent.value is expression
+                and target.label not in self.model.import_modules
+            ):
+                return None
+            return target
         return None
 
-    def _assignment(self, binding: _Binding) -> tuple[ast.AST, ast.AST | None]:
-        node: ast.AST = binding.node
-        parent = self.model.parents.get(id(node))
-        if isinstance(parent, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
-            value = parent.value
-            return parent, value
-        return node, None
-
-    def _symbol_use_is_safe(self, name: str, node: ast.Name) -> bool:
-        parent = self.model.parents.get(id(node))
-        if isinstance(parent, ast.Call) and parent.func is node:
-            return True
-        if isinstance(parent, ast.Attribute) and parent.value is node:
-            grand = self.model.parents.get(id(parent))
-            return isinstance(grand, ast.Call) and grand.func is parent
-        if isinstance(parent, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
-            return True
-        # Decorator/base nodes have no distinguishing parent field; all direct uses are safe.
-        return isinstance(parent, (ast.keyword, ast.Subscript))
-
-    def _prepare_aliases(self) -> None:
-        changed = True
-        while changed:
-            changed = False
-            for scope in self.model.scopes:
-                for name, bindings in scope.bindings.items():
-                    key = (id(scope), name)
-                    if key in self.aliases or len(bindings) != 1:
-                        continue
-                    binding = bindings[0]
-                    if binding.kind != "store" or binding.conditional:
-                        continue
-                    assignment, value = self._assignment(binding)
-                    if value is None or not isinstance(value, (ast.Name, ast.Attribute)):
-                        continue
-                    target = self._resolve_expr(scope, value)
-                    if target is None or target.kind not in {"function", "class", "import"}:
-                        continue
-                    loads = [n for n in scope.loads.get(name, ()) if n is not value]
-                    if any(not self._symbol_use_is_safe(name, node) for node in loads):
-                        continue
-                    # Closure reads/writes make an alias non-immutable.
-                    if any(self._descendant_writes(child, name) for child in scope.children):
-                        continue
-                    self.aliases[key] = target
-                    changed = True
-
-    def _descendant_mentions(self, scope: _Scope, name: str) -> bool:
-        if name in scope.loads or name in scope.bindings or name in scope.globals or name in scope.nonlocals:
-            return True
-        return any(self._descendant_mentions(child, name) for child in scope.children)
-
-    def _descendant_writes(self, scope: _Scope, name: str) -> bool:
-        if name in scope.bindings or name in scope.globals or name in scope.nonlocals:
-            return True
-        return any(self._descendant_writes(child, name) for child in scope.children)
-
-    def _constructor_target(self, scope: _Scope, value: ast.AST) -> str | None:
-        if not isinstance(value, ast.Call):
-            return None
-        target = self._resolve_expr(scope, value.func)
-        if target is None or target.kind != "class" or target.label not in self.model.classes:
-            return None
-        return target.label
-
-    def _receiver_use_is_safe(self, node: ast.Name) -> bool:
-        parent = self.model.parents.get(id(node))
-        if not isinstance(parent, ast.Attribute) or parent.value is not node:
-            return False
-        grand = self.model.parents.get(id(parent))
-        return isinstance(grand, ast.Call) and grand.func is parent
-
-    def _prepare_receivers(self) -> None:
-        for scope in self.model.scopes:
-            for name, bindings in scope.bindings.items():
-                if len(bindings) != 1 or bindings[0].kind != "store" or bindings[0].conditional:
-                    continue
-                binding = bindings[0]
-                assignment, value = self._assignment(binding)
-                receiver: str | None = None
-                if isinstance(assignment, ast.AnnAssign) and assignment.value is None:
-                    annotation = self._resolve_expr(scope, assignment.annotation)
-                    if annotation and annotation.kind == "class" and annotation.label in self.model.classes:
-                        receiver = annotation.label
-                elif value is not None:
-                    receiver = self._constructor_target(scope, value)
-                if receiver is None:
-                    continue
-                if any(not self._receiver_use_is_safe(node) for node in scope.loads.get(name, ())):
-                    continue
-                if any(self._descendant_mentions(child, name) for child in scope.children):
-                    continue
+    def _prepare_symbols(self) -> None:
+        entries = tuple(
+            (scope, name, bindings)
+            for scope in self.model.scopes
+            for name, bindings in scope.bindings.items()
+        )
+        while True:
+            updates = tuple(
+                (key, target)
+                for scope, name, bindings in entries
+                if (target := self._alias_candidate(scope, name, bindings)) is not None
+                for key in ((id(scope), name),)
+            )
+            if not updates:
+                break
+            self.aliases.update(updates)
+        for scope, name, bindings in entries:
+            receiver = self._receiver_candidate(scope, name, bindings)
+            if receiver is not None:
                 self.receivers[(id(scope), name)] = receiver
+
+    def _alias_candidate(
+        self, scope: _Scope, name: str, bindings: Sequence[_Binding]
+    ) -> _Target | None:
+        key = id(scope), name
+        if key in self.aliases or len(bindings) != 1:
+            return None
+        binding = bindings[0]
+        if binding.kind != "store" or binding.conditional:
+            return None
+        assignment = self.model.parents.get(id(binding.node))
+        value = assignment.value if isinstance(
+            assignment, (ast.Assign, ast.AnnAssign, ast.NamedExpr)
+        ) else None
+        if not isinstance(value, (ast.Name, ast.Attribute)):
+            return None
+        target = self._resolve_expr(scope, value)
+        if target is None or target.kind not in {"function", "class", "import"}:
+            return None
+        loads = [node for node in scope.loads.get(name, ()) if node is not value]
+        if any(not _symbol_use_is_safe(self.model, node) for node in loads):
+            return None
+        if any(
+            _is_descendant(child, scope)
+            and (
+                name in child.bindings
+                or name in child.globals
+                or name in child.nonlocals
+            )
+            for child in self.model.scopes
+        ):
+            return None
+        return target
+
+    def _receiver_candidate(
+        self, scope: _Scope, name: str, bindings: Sequence[_Binding]
+    ) -> str | None:
+        if not all(
+            (
+                len(bindings) == 1,
+                bindings[0].kind == "store" if bindings else False,
+                not bindings[0].conditional if bindings else False,
+            )
+        ):
+            return None
+        assignment = self.model.parents.get(id(bindings[0].node))
+        value = assignment.value if isinstance(
+            assignment, (ast.Assign, ast.AnnAssign, ast.NamedExpr)
+        ) else None
+        receiver = None
+        if isinstance(assignment, ast.AnnAssign) and assignment.value is None:
+            annotation = self._resolve_expr(scope, assignment.annotation)
+            if getattr(annotation, "kind", None) == "class":
+                receiver = annotation.label
+        elif isinstance(value, ast.Call):
+            target = self._resolve_expr(scope, value.func)
+            if getattr(target, "kind", None) == "class":
+                receiver = target.label
+        if receiver not in self.model.classes:
+            return None
+        if any(
+            not _receiver_use_is_safe(self.model, node)
+            for node in scope.loads.get(name, ())
+        ):
+            return None
+        descendants = (
+            child for child in self.model.scopes if _is_descendant(child, scope)
+        )
+        if any(
+            name
+            in set(child.loads)
+            | set(child.bindings)
+            | set(child.globals)
+            | set(child.nonlocals)
+            for child in descendants
+        ):
+            return None
+        return receiver
 
     def _prepare_bases(self) -> None:
         for identity, info in self.model.classes.items():
-            resolved: list[str] = []
             parent = info.scope.parent
             assert parent is not None
-            for expression in info.bases:
-                target = self._resolve_expr(parent, expression)
-                if target is None or target.kind != "class" or target.label not in self.model.classes:
-                    self.bases[identity] = None
-                    break
-                resolved.append(target.label)
-            else:
-                self.bases[identity] = tuple(resolved)
+            targets = tuple(self._resolve_expr(parent, expression) for expression in info.bases)
+            complete = all(
+                getattr(target, "kind", None) == "class"
+                and target.label in self.model.classes
+                for target in targets
+            )
+            self.bases[identity] = tuple(target.label for target in targets) if complete else None
 
     def _lookup_method(self, class_identity: str, name: str, *, parents_only: bool = False) -> str | None:
         info = self.model.classes[class_identity]
@@ -565,13 +713,6 @@ class _Resolver:
         }
         return next(iter(candidates)) if len(candidates) == 1 else None
 
-    @staticmethod
-    def _self_attribute(node: ast.AST) -> tuple[str, str] | None:
-        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
-            if node.value.id in {"self", "cls"}:
-                return node.value.id, node.attr
-        return None
-
     def _class_attributes(self, identity: str, field: str | None = None) -> list[ast.Attribute]:
         root = self.model.classes[identity].scope.node
         attributes: list[ast.Attribute] = []
@@ -581,7 +722,7 @@ class _Resolver:
             owner_scope = self.model.node_scope.get(id(node))
             if owner_scope is None or self.model.enclosing_class(owner_scope) is not self.model.classes[identity]:
                 continue
-            pair = self._self_attribute(node)
+            pair = _self_attribute(node)
             if pair and (field is None or pair[1] == field):
                 attributes.append(node)
         return attributes
@@ -613,47 +754,70 @@ class _Resolver:
         annotation = self._resolve_expr(parent_scope, argument.annotation)
         if annotation is None or annotation.kind != "class" or annotation.label not in self.model.classes:
             return None
-        # Parameter may occur only as the exact assignment RHS.
-        for scope in self.model.scopes:
-            if scope is init_scope or self._is_descendant(scope, init_scope):
-                for load in scope.loads.get(parameter, ()):
-                    if load is assignment.value:
-                        continue
-                    return None
-                if scope is init_scope:
-                    parameter_bindings = scope.bindings.get(parameter, ())
-                    if parameter_bindings:
-                        return None
-                elif parameter in scope.globals or parameter in scope.nonlocals or parameter in scope.bindings:
-                    return None
-        # Field reads are terminal method receivers only; every mutation is forbidden.
-        for attribute in self._class_attributes(identity, field):
-            if attribute is store:
-                continue
-            if not isinstance(attribute.ctx, ast.Load):
-                return None
-            parent = self.model.parents.get(id(attribute))
-            if not isinstance(parent, ast.Attribute) or parent.value is not attribute:
-                return None
-            grand = self.model.parents.get(id(parent))
-            if not isinstance(grand, ast.Call) or grand.func is not parent:
-                return None
-        # A resolved subclass may not mutate the injected field.
-        for child in self.model.classes:
-            if child == identity or not self._inherits(child, identity):
-                continue
-            if any(not isinstance(attribute.ctx, ast.Load) for attribute in self._class_attributes(child, field)):
-                return None
-        return annotation.label
+        escapes = self._injection_escapes(
+            identity, field, init_scope, assignment, parameter, store
+        )
+        return None if escapes else annotation.label
 
-    @staticmethod
-    def _is_descendant(scope: _Scope, parent: _Scope) -> bool:
-        current = scope.parent
-        while current is not None:
-            if current is parent:
-                return True
-            current = current.parent
-        return False
+    def _injection_escapes(
+        self,
+        identity: str,
+        field: str,
+        init_scope: _Scope,
+        assignment: ast.Assign,
+        parameter: str,
+        store: ast.Attribute,
+    ) -> bool:
+        scopes = tuple(
+            scope
+            for scope in self.model.scopes
+            if scope is init_scope or _is_descendant(scope, init_scope)
+        )
+        parameter_escapes = any(
+            any(load is not assignment.value for load in scope.loads.get(parameter, ()))
+            or (
+                bool(scope.bindings.get(parameter))
+                if scope is init_scope
+                else parameter
+                in set(scope.globals) | set(scope.nonlocals) | set(scope.bindings)
+            )
+            for scope in scopes
+        )
+        attributes = (
+            attribute
+            for attribute in self._class_attributes(identity, field)
+            if attribute is not store
+        )
+        field_escapes = any(
+            not all(
+                (
+                    isinstance(attribute.ctx, ast.Load),
+                    isinstance(
+                        parent := self.model.parents.get(id(attribute)), ast.Attribute
+                    ),
+                    getattr(parent, "value", None) is attribute,
+                    isinstance(
+                        grand := self.model.parents.get(id(parent)), ast.Call
+                    ),
+                    getattr(grand, "func", None) is parent,
+                )
+            )
+            for attribute in attributes
+        )
+        subclass_mutates = any(
+            all(
+                (
+                    child != identity,
+                    self._inherits(child, identity),
+                    any(
+                        not isinstance(attribute.ctx, ast.Load)
+                        for attribute in self._class_attributes(child, field)
+                    ),
+                )
+            )
+            for child in self.model.classes
+        )
+        return any((parameter_escapes, field_escapes, subclass_mutates))
 
     def _inherits(self, child: str, parent: str) -> bool:
         bases = self.bases.get(child)
@@ -664,30 +828,32 @@ class _Resolver:
     def _prepare_fields(self) -> None:
         for identity in self.model.classes:
             attributes = self._class_attributes(identity)
-            fields = {pair[1] for node in attributes if (pair := self._self_attribute(node))}
+            fields = {
+                pair[1] for node in attributes if (pair := _self_attribute(node))
+            }
             for field in fields:
-                matching = [node for node in attributes if self._self_attribute(node)[1] == field]
+                matching = [
+                    node for node in attributes if _self_attribute(node)[1] == field
+                ]
                 stores = [node for node in matching if isinstance(node.ctx, ast.Store)]
-                deletes = [node for node in matching if isinstance(node.ctx, ast.Del)]
-                if deletes or not stores:
+                if any(isinstance(node.ctx, ast.Del) for node in matching) or not stores:
                     continue
-                constructors: list[str] = []
-                valid = True
-                for store in stores:
-                    if id(store) in self.model.conditional:
-                        valid = False
-                        break
-                    parent = self.model.parents.get(id(store))
-                    if not isinstance(parent, (ast.Assign, ast.AnnAssign)):
-                        valid = False
-                        break
-                    value = parent.value
-                    constructor = self._constructor_target(self.model.node_scope[id(store)], value) if value else None
-                    if constructor is None:
-                        valid = False
-                        break
-                    constructors.append(constructor)
-                if valid and len(set(constructors)) == 1:
+                constructors = [
+                    target.label
+                    for store in stores
+                    if id(store) not in self.model.conditional
+                    if isinstance(
+                        parent := self.model.parents.get(id(store)),
+                        (ast.Assign, ast.AnnAssign),
+                    )
+                    if isinstance(parent.value, ast.Call)
+                    if (target := self._resolve_expr(
+                        self.model.node_scope[id(store)], parent.value.func
+                    ))
+                    and target.kind == "class"
+                    and target.label in self.model.classes
+                ]
+                if len(constructors) == len(stores) and len(set(constructors)) == 1:
                     self.field_receivers[(identity, field)] = constructors[0]
                     continue
                 injected = self._injection(identity, field, stores)
@@ -696,78 +862,84 @@ class _Resolver:
 
     def _resolve_attribute_call(self, scope: _Scope, expression: ast.Attribute) -> _Target | None:
         class_info = self.model.enclosing_class(scope)
+        class_identity = getattr(getattr(class_info, "scope", None), "identity", "")
         value = expression.value
-        if isinstance(value, ast.Name):
-            if class_info and value.id in {"self", "cls"} and self._lexical_parameter(scope, value.id):
-                method = self._lookup_method(class_info.scope.identity, expression.attr)
-                return _Target(method, "function") if method else None
-            receiver = self.receivers.get((id(scope), value.id))
-            if receiver is not None:
-                method = self._lookup_method(receiver, expression.attr)
-                return _Target(method, "function") if method else None
-        if isinstance(value, ast.Call):
-            if isinstance(value.func, ast.Name) and value.func.id == "super" and class_info:
-                method = self._lookup_method(class_info.scope.identity, expression.attr, parents_only=True)
-                return _Target(method, "function") if method else None
-            receiver = self._constructor_target(scope, value)
-            if receiver is not None:
-                method = self._lookup_method(receiver, expression.attr)
-                return _Target(method, "function") if method else None
         if isinstance(value, ast.Attribute):
-            pair = self._self_attribute(value)
-            if pair and class_info and pair[0] == "self":
-                receiver = self.field_receivers.get((class_info.scope.identity, pair[1]))
-                if receiver is not None:
-                    method = self._lookup_method(receiver, expression.attr)
-                    return _Target(method, "function") if method else None
-            return None
-        return self._resolve_expr(scope, expression)
+            pair = _self_attribute(value)
+            field = dict((pair,) if pair else ()).get("self")
+            receiver = self.field_receivers.get((class_identity, field))
+            if receiver is None:
+                return self._resolve_expr(scope, expression)
+            method = self._lookup_method(receiver, expression.attr)
+            return _Target(method, "function") if method else None
+        receiver = None
+        parents_only = False
+        if isinstance(value, ast.Name):
+            class_receiver = bool(class_identity) and value.id in {"self", "cls"}
+            if class_receiver and self._lexical_parameter(
+                scope, value.id, class_info.scope
+            ):
+                receiver = class_identity
+            else:
+                receiver = self.receivers.get((id(scope), value.id))
+        elif isinstance(value, ast.Call):
+            is_super = all(
+                (
+                    isinstance(value.func, ast.Name),
+                    getattr(value.func, "id", None) == "super",
+                    class_info is not None,
+                    not value.args,
+                    not value.keywords,
+                )
+            )
+            if is_super:
+                target = self._resolve_name(scope, "super", value.func)
+                if getattr(target, "label", None) == "builtins.super":
+                    receiver = class_identity
+                    parents_only = True
+            else:
+                target = self._resolve_expr(scope, value.func)
+                if all(
+                    (
+                        getattr(target, "kind", None) == "class",
+                        getattr(target, "label", None) in self.model.classes,
+                    )
+                ):
+                    receiver = target.label
+        if receiver is None:
+            return self._resolve_expr(scope, expression)
+        method = self._lookup_method(
+            receiver, expression.attr, parents_only=parents_only
+        )
+        return _Target(method, "function") if method else None
 
     @staticmethod
-    def _lexical_parameter(scope: _Scope, name: str) -> bool:
+    def _lexical_parameter(scope: _Scope, name: str, class_scope: _Scope) -> bool:
         current: _Scope | None = scope
         while current is not None and current.kind != "class":
-            if name in current.params:
-                return True
+            if name in current.params or current.bindings.get(name):
+                return name in current.params and current.parent is class_scope
             current = current.parent
         return False
 
-    def _resolve_call(self, scope: _Scope, call: ast.Call) -> _Target | None:
-        if isinstance(call.func, ast.Attribute):
-            return self._resolve_attribute_call(scope, call.func)
-        if isinstance(call.func, ast.Name):
-            return self._resolve_name(scope, call.func.id, call.func)
-        return None
-
     def result(self) -> ResolutionIndex:
         records: dict[str, object] = {}
+        callsite_primitives = {str(row["selector"]): row for row in self.primitives
+                               if row["selector_kind"] == "callsite"}
+        entity_primitives = {str(row["selector"]): row for row in self.primitives
+                             if row["selector_kind"] == "entity"}
+        used_rows: set[tuple[str, str]] = set()
         for owner, calls in self.model.calls.items():
             if len(calls) > 9_999:
                 raise ValueError(f"owner exceeds 9,999 callsites: {owner}")
             for ordinal, call in enumerate(calls, 1):
                 callsite = f"{owner}::call:{ordinal:04d}"
-                scope = self.model.node_scope[id(call)]
-                target = self._resolve_call(scope, call)
-                if target is None:
-                    primitive = next(
-                        (
-                            row
-                            for row in self.primitives
-                            if row["selector_kind"] == "callsite" and row["selector"] == callsite
-                        ),
-                        None,
-                    )
-                    if primitive is not None:
-                        target = _Target(str(primitive["semantic_target"]), "primitive")
-                if target is None:
-                    records[callsite] = UnresolvedCall(
-                        callsite,
-                        call.lineno,
-                        call.col_offset,
-                        ast.dump(call, include_attributes=False),
-                    )
-                else:
-                    records[callsite] = ResolvedCall(callsite, target.label)
+                records[callsite] = self._resolve_record(
+                    callsite, call, callsite_primitives, entity_primitives, used_rows)
+        for row in self.primitives:
+            binding = str(row["selector_kind"]), str(row["selector"])
+            if binding not in used_rows:
+                raise ValueError(f"unused primitive row: {row['selector']}")
         alias_evidence = {
             f"{scope.identity}::{name}": target.label
             for scope in self.model.scopes
@@ -783,11 +955,40 @@ class _Resolver:
         receiver_evidence.update(
             {f"{identity}::self.{field}": target for (identity, field), target in self.field_receivers.items()}
         )
-        return ResolutionIndex(
-            MappingProxyType(records),
-            MappingProxyType(alias_evidence),
-            MappingProxyType(receiver_evidence),
-        )
+        return ResolutionIndex(MappingProxyType(records), MappingProxyType(alias_evidence),
+                               MappingProxyType(receiver_evidence))
+
+    def _resolve_record(self, callsite: str, call: ast.Call,
+                        callsite_primitives: Mapping[str, Mapping[str, object]],
+                        entity_primitives: Mapping[str, Mapping[str, object]],
+                        used_rows: set[tuple[str, str]]) -> object:
+        scope = self.model.node_scope[id(call)]
+        target = None
+        if isinstance(call.func, ast.Attribute):
+            target = self._resolve_attribute_call(scope, call.func)
+        elif isinstance(call.func, ast.Name):
+            target = self._resolve_name(scope, call.func.id, call.func)
+        primitive = callsite_primitives.get(callsite)
+        if target is None and primitive is not None:
+            used_rows.add(("callsite", callsite))
+            target = _Target(str(primitive["semantic_target"]), "primitive")
+        elif primitive is not None:
+            external = not target.label.startswith(("src/", "builtins."))
+            if not all((external, primitive["semantic_target"] == target.label)):
+                raise ValueError(f"stale callsite primitive row: {callsite}")
+            used_rows.add(("callsite", callsite))
+        if target is None:
+            return UnresolvedCall(callsite, call.lineno, call.col_offset,
+                                  ast.dump(call, include_attributes=False))
+        external = all((target.kind != "primitive",
+                        not target.label.startswith(("src/", "builtins."))))
+        if external and target.label in entity_primitives:
+            used_rows.add(("entity", target.label))
+        covered = any((not external, target.label in self.allowlist,
+                       target.label in entity_primitives, ("callsite", callsite) in used_rows))
+        if not covered:
+            raise ValueError(f"external target lacks exact effect coverage: {target.label}")
+        return ResolvedCall(callsite, target.label)
 
 
 def resolve_calls(index, allowlist, primitives):
