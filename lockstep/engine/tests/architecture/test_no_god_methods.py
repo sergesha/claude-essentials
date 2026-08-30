@@ -19,7 +19,9 @@ from jsonschema import Draft202012Validator
 
 import architecture_call_resolver as call_resolver
 import architecture_candidate_policy as candidate_policy
+import architecture_diagnostics as diagnostics
 import architecture_domain_lifecycle as domain_lifecycle
+import architecture_manifest_verifier as manifest_verifier
 from architecture_candidate_policy import evaluate_candidates
 from architecture_call_resolver import resolve_calls
 from architecture_diagnostics import render_report
@@ -5454,6 +5456,7 @@ def _propagate_fixture(
     primitive_rows: tuple[Mapping[str, object], ...] = (),
     lifecycle_rows: tuple[Mapping[str, object], ...] = (),
     extra_files: Mapping[str, str] | None = None,
+    allowlist: tuple[str, ...] = (),
 ):
     files = {path: _resolver_source(source)}
     files.update(
@@ -5464,7 +5467,7 @@ def _propagate_fixture(
     )
     index = _fixture_index(files, tmp_path)
     primitives = _primitive_table(index, primitive_rows)
-    resolutions = resolve_calls(index, (), primitives)
+    resolutions = resolve_calls(index, allowlist, primitives)
     semantics = propagate_semantics(
         index,
         resolutions,
@@ -6412,6 +6415,29 @@ _CANDIDATE_FIELD_ORDER = {
         "hard_triggers", "candidate",
     ),
 }
+_CANDIDATE_SIGNAL_ORDER = {
+    "function": ("cyclomatic", "cognitive", "nesting",
+                 "legacy_syntactic_fanout", "domain_mixing", "lifecycle_mixing"),
+    "one_hop": ("summed_cyclomatic", "summed_cognitive", "nesting",
+                "legacy_syntactic_fanout_union", "domain_mixing", "lifecycle_mixing"),
+    "class": ("method_count", "public_method_count", "mutable_field_count",
+              "cohesion_components", "domain_mixing", "lifecycle_mixing"),
+    "file": ("definition_count", "class_count", "subsystem_import_count",
+             "definition_dependency_components", "domain_mixing", "lifecycle_mixing"),
+}
+_CANDIDATE_HARD_TRIGGER_ORDER = {
+    "function": ("cyclomatic_gt_15", "cognitive_gt_25", "nesting_gt_4",
+                 "legacy_syntactic_fanout_gt_24"),
+    "one_hop": ("helper_count_gt_12",),
+    "class": ("method_count_gt_24", "mutable_field_count_gt_24"),
+    "file": ("definition_count_gt_50",),
+}
+_CANDIDATE_RULE = {
+    "function": "hard_triggers or (composite_score>=3 and (domain_mixing or lifecycle_mixing))",
+    "one_hop": "hard_triggers or (composite_score>=3 and (domain_mixing or lifecycle_mixing))",
+    "class": "hard_triggers or (composite_score>=3 and (domain_mixing or lifecycle_mixing or cohesion_components))",
+    "file": "hard_triggers or (composite_score>=3 and (domain_mixing or lifecycle_mixing or definition_dependency_components))",
+}
 
 
 def test_candidate_policy_records_are_exact_frozen_slotted() -> None:
@@ -6427,6 +6453,9 @@ def test_candidate_policy_records_are_exact_frozen_slotted() -> None:
         "allowlist_digest", "primitive_digest", "lifecycle_digest",
         "schema_digest", "threshold_digest", "analyzer_version", "rule_version",
     )
+    report_type = candidate_policy.ArchitectureReport
+    assert report_type.__slots__ == tuple(field.name for field in fields(report_type))
+    assert report_type.__dataclass_params__.frozen
 
 
 def test_candidate_policy_checked_in_schema_and_thresholds_are_canonical() -> None:
@@ -6446,12 +6475,77 @@ def test_candidate_policy_checked_in_schema_and_thresholds_are_canonical() -> No
     assert tuple(schema["$defs"]) == ("class", "file", "function", "one_hop")
     assert all(definition["additionalProperties"] is False
                for definition in schema["$defs"].values())
+    for kind, record_name in (("function", "FunctionMetrics"),
+                              ("one_hop", "OneHopMetrics"),
+                              ("class", "ClassMetrics"), ("file", "FileMetrics")):
+        definition = schema["$defs"][kind]
+        assert tuple(definition["required"]) == _CANDIDATE_FIELD_ORDER[record_name]
+        assert set(definition["properties"]) == set(definition["required"])
+        assert tuple(definition["x-lockstep-signal-order"]) == _CANDIDATE_SIGNAL_ORDER[kind]
+        assert tuple(definition["x-lockstep-hard-trigger-order"]) == (
+            _CANDIDATE_HARD_TRIGGER_ORDER[kind]
+        )
+        assert definition["x-lockstep-candidate-rule"] == _CANDIDATE_RULE[kind]
+        signals = definition["properties"]["signals"]
+        assert signals["additionalProperties"] is False
+        assert tuple(signals["required"]) == _CANDIDATE_SIGNAL_ORDER[kind]
+        assert all(value == {"type": "boolean"}
+                   for value in signals["properties"].values())
+        assert definition["properties"]["composite_score"] == {
+            "maximum": 6, "minimum": 0, "type": "integer"
+        }
+        assert definition["properties"]["candidate"] == {"type": "boolean"}
+        assert definition["properties"]["hard_triggers"]["items"]["enum"] == list(
+            _CANDIDATE_HARD_TRIGGER_ORDER[kind]
+        )
+        assert definition["properties"]["hard_triggers"]["uniqueItems"] is True
+        for field_name in ("direct_domains", "propagated_domains"):
+            if field_name in definition["properties"]:
+                value = definition["properties"][field_name]
+                assert value["type"] == "array" and value["uniqueItems"] is True
+                assert value["items"]["enum"] == list(_EFFECT_DOMAINS)
+        for field_name in ("direct_transitions", "propagated_transitions"):
+            if field_name in definition["properties"]:
+                value = definition["properties"][field_name]
+                assert value["type"] == "array" and value["uniqueItems"] is True
+                assert value["items"]["enum"] == [
+                    transition for _cluster, transition, _source, _target
+                    in _LIFECYCLE_TRANSITIONS
+                ]
+        clusters = definition["properties"].get("propagated_lifecycle_clusters")
+        if clusters is not None:
+            assert clusters["type"] == "array" and clusters["uniqueItems"] is True
+            assert clusters["items"]["enum"] == list(dict.fromkeys(
+                cluster for cluster, _transition, _source, _target
+                in _LIFECYCLE_TRANSITIONS
+            ))
 
     thresholds = json.loads(threshold_path.read_bytes())
     assert set(thresholds) == {"schema", "rule_version", "kinds"}
     assert thresholds["schema"] == "lockstep.architecture-thresholds/v1"
     assert thresholds["rule_version"] == "v1"
     assert set(thresholds["kinds"]) == {"function", "one_hop", "class", "file"}
+    assert thresholds["kinds"] == {
+        "function": {"signals": {"cyclomatic": 10, "cognitive": 15,
+            "nesting": 4, "legacy_syntactic_fanout": 16,
+            "domain_mixing": 2, "lifecycle_mixing": 2},
+            "hard": {"cyclomatic_gt_15": 15, "cognitive_gt_25": 25,
+                     "nesting_gt_4": 4, "legacy_syntactic_fanout_gt_24": 24},
+            "minimum_signals": 3},
+        "one_hop": {"signals": {"summed_cyclomatic": 24, "summed_cognitive": 40,
+            "nesting": 4, "legacy_syntactic_fanout_union": 32,
+            "domain_mixing": 3, "lifecycle_mixing": 2},
+            "hard": {"helper_count_gt_12": 12}, "minimum_signals": 3},
+        "class": {"signals": {"method_count": 15, "public_method_count": 8,
+            "mutable_field_count": 8, "cohesion_components": 3,
+            "domain_mixing": 3, "lifecycle_mixing": 2},
+            "hard": {"method_count_gt_24": 24, "mutable_field_count_gt_24": 24},
+            "minimum_signals": 3},
+        "file": {"signals": {"definition_count": 25, "class_count": 6,
+            "subsystem_import_count": 4, "definition_dependency_components": 4,
+            "domain_mixing": 4, "lifecycle_mixing": 3},
+            "hard": {"definition_count_gt_50": 50}, "minimum_signals": 3},
+    }
 
 
 def test_candidate_policy_recomputes_function_formula_and_ignores_no_stored_claim(
@@ -6483,6 +6577,9 @@ def test_candidate_policy_recomputes_function_formula_and_ignores_no_stored_clai
     report = evaluate_candidates(index, MappingProxyType(legacy), semantics, resolutions)
     metric = report.functions[f"{path}::root"]
 
+    _assert_deeply_immutable(report)
+    with pytest.raises(TypeError):
+        report.functions["replacement"] = metric
     assert tuple(metric.signals) == (
         "cyclomatic", "cognitive", "nesting", "legacy_syntactic_fanout",
         "domain_mixing", "lifecycle_mixing",
@@ -6519,6 +6616,28 @@ def test_candidate_policy_function_hard_triggers_are_exact(
     assert metric.candidate is True
 
 
+def test_candidate_policy_function_boundaries_order_and_mixing_prerequisite(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/function_boundaries.py"
+    index, resolutions, semantics = _propagate_fixture(tmp_path, "def root(): pass", path=path)
+    identity = f"{path}::root"
+    base = next(iter(measure_legacy_metrics(index).values()))
+    legacy = MappingProxyType({identity: type(base)(15, 25, 4, 24)})
+
+    metric = evaluate_candidates(index, legacy, semantics, resolutions).functions[identity]
+
+    assert tuple(metric.signals.values()) == (True, True, True, True, False, False)
+    assert metric.composite_score == 4
+    assert metric.hard_triggers == ()
+    assert metric.candidate is False
+
+    hard = MappingProxyType({identity: type(base)(16, 26, 5, 25)})
+    metric = evaluate_candidates(index, hard, semantics, resolutions).functions[identity]
+    assert metric.hard_triggers == _CANDIDATE_HARD_TRIGGER_ORDER["function"]
+    assert metric.candidate is True
+
+
 def test_candidate_policy_one_hop_closure_is_private_scc_and_excludes_shared(
     tmp_path: Path,
 ) -> None:
@@ -6540,6 +6659,96 @@ def test_candidate_policy_one_hop_closure_is_private_scc_and_excludes_shared(
     assert metric.members == (f"{path}::root", f"{path}::_a", f"{path}::_b")
     assert metric.helper_count == 2
     assert f"{path}::_shared" not in metric.members
+
+
+def test_candidate_policy_one_hop_fixed_point_names_order_overlap_and_metrics(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/one_hop_policy.py"
+    root = f"{path}::root"
+    second = f"{path}::second"
+    index, resolutions, semantics = _propagate_fixture(
+        tmp_path,
+        """
+        def root(): _a(); __private(); __str__()
+        def second(): _a()
+        def _a(): _b()
+        def _b(): _leaf()
+        def _leaf(): pass
+        def __private(): pass
+        def __str__(): pass
+        """,
+        path=path,
+        primitive_rows=(
+            _primitive_entity_row(f"{path}::__private", ("filesystem-read",)),
+            _primitive_entity_row(f"{path}::_leaf", ("filesystem-write", "durable-state")),
+        ),
+        lifecycle_rows=({"binding_kind": "entity", "binding": f"{path}::__private",
+            "target": f"{path}::__private", "discriminant": {"kind": "none"},
+            "transition_id": "delivery.deliver"},
+            {"binding_kind": "entity", "binding": f"{path}::_leaf",
+            "target": f"{path}::_leaf", "discriminant": {"kind": "none"},
+            "transition_id": "publication.apply"}),
+    )
+    legacy = dict(measure_legacy_metrics(index))
+    metric_type = type(legacy[root])
+    legacy[root] = metric_type(8, 15, 4, 10)
+    legacy[f"{path}::__private"] = metric_type(8, 15, 1, 10)
+
+    report = evaluate_candidates(index, MappingProxyType(legacy), semantics, resolutions)
+    first = report.one_hops[root + "::@one_hop"]
+    overlapping = report.one_hops[second + "::@one_hop"]
+
+    assert first.members == (root, f"{path}::__private")
+    assert f"{path}::__str__" not in first.members
+    assert overlapping.members == (second, f"{path}::_a", f"{path}::_b", f"{path}::_leaf")
+    assert first.summed_cyclomatic == 16
+    assert first.summed_cognitive == 30
+    assert first.max_nesting == 4
+    assert first.legacy_syntactic_fanout_union >= 10
+    assert first.propagated_domains == ("filesystem-read",)
+    assert first.propagated_lifecycle_clusters == ("delivery",)
+
+
+def test_candidate_policy_one_hop_formula_and_helper_hard_boundary(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/helper_threshold.py"
+    helpers = "\n".join(f"def _h{i}(): pass" for i in range(13))
+    calls = "; ".join(f"_h{i}()" for i in range(13))
+    index, resolutions, semantics = _propagate_fixture(
+        tmp_path, f"def root(): {calls}\n{helpers}\n", path=path)
+    report = evaluate_candidates(index, measure_legacy_metrics(index), semantics, resolutions)
+    metric = report.one_hops[f"{path}::root::@one_hop"]
+
+    assert metric.helper_count == 13
+    assert metric.hard_triggers == ("helper_count_gt_12",)
+    assert metric.candidate is True
+
+
+def test_candidate_policy_one_hop_composite_formula_without_hard_trigger(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/helper_composite.py"
+    root, helper = f"{path}::root", f"{path}::_helper"
+    index, resolutions, semantics = _propagate_fixture(
+        tmp_path, "def root(): _helper()\ndef _helper(): pass", path=path,
+        primitive_rows=(_primitive_entity_row(
+            helper, ("filesystem-read", "filesystem-write", "durable-state")
+        ),),
+    )
+    legacy = dict(measure_legacy_metrics(index))
+    metric_type = type(legacy[root])
+    legacy[root] = metric_type(12, 20, 4, 10)
+    legacy[helper] = metric_type(12, 20, 1, 10)
+    metric = evaluate_candidates(
+        index, MappingProxyType(legacy), semantics, resolutions
+    ).one_hops[root + "::@one_hop"]
+
+    assert tuple(metric.signals.values()) == (True, True, True, False, True, False)
+    assert metric.composite_score == 4
+    assert metric.hard_triggers == ()
+    assert metric.candidate is True
 
 
 def test_candidate_policy_class_cohesion_fields_and_file_components(
@@ -6573,6 +6782,291 @@ def test_candidate_policy_class_cohesion_fields_and_file_components(
     assert file_metric.subsystem_imports == ("runtime", "workflow")
     assert file_metric.subsystem_import_count == 2
     assert file_metric.definition_dependency_components >= 1
+
+
+def test_candidate_policy_class_store_forms_calls_lambdas_bases_and_formula(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/class_policy.py"
+    index, resolutions, semantics = _propagate_fixture(
+        tmp_path,
+        """
+        class Base: pass
+        class Aggregate(Base):
+            projection = lambda self: self.items
+            def initialize(self): self.items: list = []; self.count = 0
+            def mutate(self): self.count += 1; self.items = self.items + [1]
+            def remove(self): del self.count
+            def delegate(self): return self.initialize()
+            def isolated(self): self.flag = True
+        """,
+        path=path,
+    )
+    report = evaluate_candidates(index, measure_legacy_metrics(index), semantics, resolutions)
+    metric = report.classes[f"{path}::Aggregate"]
+
+    assert metric.method_count == 5
+    assert metric.public_method_count == 5
+    assert metric.mutable_fields == ("self.count", "self.flag", "self.items")
+    assert metric.mutable_field_count == 3
+    assert metric.cohesion_components == 2
+    assert metric.bases == (f"{path}::Base",)
+
+
+def test_candidate_policy_class_exact_mutators_and_immutable_local_aliases(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/class_mutators.py"
+    index, resolutions, semantics = _propagate_fixture(
+        tmp_path,
+        """
+        class Box:
+            def append(self, *args): pass
+            def extend(self, *args): pass
+            def insert(self, *args): pass
+            def remove(self, *args): pass
+            def pop(self, *args): pass
+            def clear(self, *args): pass
+            def sort(self, *args): pass
+            def reverse(self, *args): pass
+            def update(self, *args): pass
+            def setdefault(self, *args): pass
+            def add(self, *args): pass
+            def discard(self, *args): pass
+            def difference_update(self, *args): pass
+            def intersection_update(self, *args): pass
+            def symmetric_difference_update(self, *args): pass
+        class Mutable:
+            def initialize(self):
+                self.items = Box(); self.mapping = Box(); self.values = Box()
+            def mutate(self):
+                alias = self.items
+                alias.append(1); self.items.extend([]); self.items.insert(0, 1)
+                self.items.remove(1); self.items.pop(); self.items.clear()
+                self.items.sort(); self.items.reverse()
+                self.mapping.update({}); self.mapping.setdefault("key", 1)
+                self.values.add(2); self.values.discard(1)
+                self.values.difference_update([])
+                self.values.intersection_update([])
+                self.values.symmetric_difference_update([])
+        """,
+        path=path,
+        primitive_rows=(_primitive_callsite_row(
+            f"{path}::Mutable.mutate::call:0001", f"{path}::Box.append"
+        ),),
+    )
+    metric = evaluate_candidates(
+        index, measure_legacy_metrics(index), semantics, resolutions
+    ).classes[f"{path}::Mutable"]
+
+    assert metric.mutable_fields == ("self.items", "self.mapping", "self.values")
+
+
+def test_candidate_policy_class_hard_trigger_order_and_nontrigger_boundaries(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/class_hard.py"
+    methods = "\n".join(
+        f"    def m{i}(self): self.f{i} = {i}" for i in range(25)
+    )
+    index, resolutions, semantics = _propagate_fixture(
+        tmp_path, f"class Aggregate:\n{methods}\n", path=path)
+    metric = evaluate_candidates(
+        index, measure_legacy_metrics(index), semantics, resolutions
+    ).classes[f"{path}::Aggregate"]
+
+    assert metric.method_count == 25
+    assert metric.mutable_field_count == 25
+    assert metric.hard_triggers == _CANDIDATE_HARD_TRIGGER_ORDER["class"]
+    assert metric.candidate is True
+
+
+def test_candidate_policy_class_composite_rule_without_hard_trigger(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/class_composite.py"
+    public = [f"    def m{i}(self): self.f{i} = {i}" for i in range(8)]
+    private = [f"    def _m{i}(self): pass" for i in range(7)]
+    index, resolutions, semantics = _propagate_fixture(
+        tmp_path, "class Aggregate:\n" + "\n".join((*public, *private)) + "\n",
+        path=path)
+    metric = evaluate_candidates(
+        index, measure_legacy_metrics(index), semantics, resolutions
+    ).classes[f"{path}::Aggregate"]
+
+    assert tuple(metric.signals.values()) == (True, True, True, True, False, False)
+    assert metric.composite_score == 4
+    assert metric.hard_triggers == ()
+    assert metric.candidate is True
+
+
+def test_candidate_policy_file_dependency_components_are_exact_and_containment_is_not_edge(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/file_components.py"
+    index, resolutions, semantics = _propagate_fixture(
+        tmp_path,
+        """
+        import json
+        def decorator(value): return value
+        class Base: pass
+        def leaf(): pass
+        alias = leaf
+        @decorator
+        class Connected(Base):
+            def method(self): alias()
+        class ContainedOnly:
+            def method(self): pass
+        def isolated(): pass
+        def encode_a(): return json.dumps({})
+        def encode_b(): return json.dumps({})
+        """,
+        path=path,
+        allowlist=("json.dumps",),
+    )
+    metric = evaluate_candidates(
+        index, measure_legacy_metrics(index), semantics, resolutions
+    ).files[f"{path}::@file"]
+
+    assert metric.definition_count == 10
+    assert metric.class_count == 3
+    assert metric.definition_dependency_components == 4
+
+
+def test_candidate_policy_file_subsystems_formula_and_hard_boundary(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/file_threshold.py"
+    imports = "\n".join((
+        "import lockstep.runtime.effects", "import lockstep.workflow.lowering",
+        "import lockstep.authoring", "import json",
+    ))
+    definitions = "\n".join(f"def f{i}(): pass" for i in range(51))
+    index, resolutions, semantics = _propagate_fixture(
+        tmp_path, f"{imports}\n{definitions}\n", path=path)
+    metric = evaluate_candidates(
+        index, measure_legacy_metrics(index), semantics, resolutions
+    ).files[f"{path}::@file"]
+
+    assert metric.definition_count == 51
+    assert metric.subsystem_imports == ("authoring", "json", "runtime", "workflow")
+    assert metric.subsystem_import_count == 4
+    assert metric.hard_triggers == ("definition_count_gt_50",)
+    assert metric.candidate is True
+
+
+def test_candidate_policy_file_composite_rule_without_hard_trigger(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/file_composite.py"
+    imports = "\n".join(("import lockstep.runtime", "import lockstep.workflow",
+                          "import lockstep.authoring", "import json"))
+    classes = "\n".join(f"class C{i}: pass" for i in range(6))
+    functions = "\n".join(f"def f{i}(): pass" for i in range(19))
+    index, resolutions, semantics = _propagate_fixture(
+        tmp_path, f"{imports}\n{classes}\n{functions}\n", path=path)
+    metric = evaluate_candidates(
+        index, measure_legacy_metrics(index), semantics, resolutions
+    ).files[f"{path}::@file"]
+
+    assert tuple(metric.signals.values()) == (True, True, True, True, False, False)
+    assert metric.composite_score == 4
+    assert metric.hard_triggers == ()
+    assert metric.candidate is True
+
+
+def _empty_architecture_report():
+    return candidate_policy.ArchitectureReport(
+        MappingProxyType({}), MappingProxyType({}), MappingProxyType({}),
+        MappingProxyType({}), (), "a" * 64, "b" * 64, "c" * 64,
+        "d" * 64, "e" * 64, "task-12c-test", "v1",
+    )
+
+
+def test_manifest_verdict_record_is_exact_frozen_slotted() -> None:
+    record_type = manifest_verifier.ManifestVerdict
+    expected = ("valid", "errors", "accepted_exceptions")
+    assert tuple(field.name for field in fields(record_type)) == expected
+    assert record_type.__slots__ == expected
+    assert record_type.__dataclass_params__.frozen
+
+
+def test_manifest_checked_in_empty_ratchet_is_closed_canonical_json() -> None:
+    path = ARCHITECTURE_TEST_ROOT / "architecture_exceptions.json"
+    raw = path.read_bytes()
+    manifest = json.loads(raw)
+    assert raw == json.dumps(manifest, ensure_ascii=False, allow_nan=False,
+                             sort_keys=True, separators=(",", ":")).encode()
+    assert not raw.endswith(b"\n")
+    assert set(manifest) == {
+        "schema_version", "ratchet_version", "reference_commit", "scan_root",
+        "population", "analyzer_digest", "primitive_digest", "allowlist_digest",
+        "lifecycle_digest", "schema_digest", "threshold_digest", "exceptions",
+    }
+    assert manifest["schema_version"] == 1
+    assert manifest["ratchet_version"] == "v1"
+    assert manifest["scan_root"] == "src/lockstep"
+    assert manifest["exceptions"] == []
+
+
+@pytest.mark.parametrize(
+    ("mutation", "reason"),
+    (
+        ({"unknown": True}, "manifest keys"),
+        ({"schema_version": "1"}, "schema_version"),
+        ({"scan_root": "./src/lockstep"}, "scan_root"),
+        ({"exceptions": [{"entity": "missing"}]}, "exception"),
+    ),
+)
+def test_manifest_rejects_malformed_or_stale_claims_without_trusting_stored_data(
+    tmp_path: Path, mutation: Mapping[str, object], reason: str
+) -> None:
+    manifest = {
+        "schema_version": 1, "ratchet_version": "v1",
+        "reference_commit": "0" * 40, "scan_root": "src/lockstep",
+        "population": [], "analyzer_digest": "a" * 64,
+        "primitive_digest": "b" * 64, "allowlist_digest": "a" * 64,
+        "lifecycle_digest": "c" * 64, "schema_digest": "d" * 64,
+        "threshold_digest": "e" * 64, "exceptions": [],
+    }
+    manifest.update(mutation)
+
+    verdict = verify_manifest(
+        _empty_architecture_report(), manifest,
+        repo_root=tmp_path, current_commit="f" * 40,
+    )
+
+    assert verdict.valid is False
+    assert any(reason in error for error in verdict.errors)
+    assert verdict.accepted_exceptions == ()
+
+
+def test_diagnostics_is_pure_canonical_rendering_of_computed_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = _empty_architecture_report()
+    verdict = manifest_verifier.ManifestVerdict(False, ("candidate remains",), ())
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("diagnostics attempted filesystem or subprocess analysis")
+
+    monkeypatch.setattr(Path, "read_bytes", forbidden)
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    rendered = render_report(report, verdict)
+
+    assert rendered.endswith("\n")
+    assert json.loads(rendered) == {
+        "candidates": [],
+        "digests": {
+            "allowlist": "a" * 64, "analyzer": "task-12c-test",
+            "lifecycle": "c" * 64, "primitive": "b" * 64,
+            "rule_version": "v1", "schema": "d" * 64,
+            "threshold": "e" * 64,
+        },
+        "manifest": {"accepted_exceptions": [], "errors": ["candidate remains"],
+                     "valid": False},
+        "unresolved_callsites": [],
+    }
 
 
 def test_domain_lifecycle_entity_digest_binds_all_exact_owner_evidence(
