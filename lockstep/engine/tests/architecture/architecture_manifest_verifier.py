@@ -12,10 +12,7 @@ import subprocess
 import sys
 
 from jsonschema import Draft202012Validator
-from architecture_call_resolver import resolve_calls
-from architecture_candidate_policy import evaluate_candidates
-from architecture_domain_lifecycle import SemanticDigestInputs, propagate_semantics
-from architecture_legacy_metrics import measure_legacy_metrics
+from architecture_candidate_policy import _recompute_historical
 from architecture_source_index import build_source_index
 
 
@@ -35,6 +32,8 @@ _RULES = {"allowlist": "architecture_effect_free_allowlist.json", "primitives": 
 _SHA = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _KINDS = ("function", "one_hop", "class", "file")
+_REVIEW_GATES = frozenset(("task-12-final-source-review",
+                           "post-task-12-roadmap-reevaluation"))
 _ARCH = "lockstep/engine/tests/architecture/"
 
 
@@ -120,6 +119,12 @@ def _basic(manifest, errors):
 
 def _historical(repo, commit, manifest, analyzer_version):
     paths = tuple(row["path"] for row in manifest["population"])
+    tree_paths = tuple(sorted(path.removeprefix("lockstep/engine/") for path in
+        _git(repo, "ls-tree", "-r", "--name-only", commit, "--",
+             "lockstep/engine/src/lockstep", text=True).splitlines()
+        if path.endswith(".py")))
+    if tree_paths != paths:
+        raise ValueError("population does not match exact production Git tree")
     files = {path: _show(repo, commit, "lockstep/engine/" + path) for path in paths}
     if any(hashlib.sha256(files[row["path"]]).hexdigest() != row["source_sha256"] for row in manifest["population"]):
         raise ValueError("population source digest mismatch")
@@ -133,15 +138,24 @@ def _historical(repo, commit, manifest, analyzer_version):
     for name, manifest_name in names.items():
         if digests[name] != manifest[manifest_name]:
             raise ValueError(manifest_name.removesuffix("_digest") + " digest mismatch")
-    resolutions = resolve_calls(index, tuple(rules["allowlist"]["targets"]), rules["primitives"])
-    semantics = propagate_semantics(index, resolutions, rules["primitives"], rules["lifecycle"], digest_inputs=SemanticDigestInputs(digests["allowlist"], digests["schema"], digests["thresholds"], analyzer_version, manifest["ratchet_version"]))
-    computed = evaluate_candidates(index, measure_legacy_metrics(index), semantics, resolutions)
+    semantics, computed = _recompute_historical(
+        index, tuple(rules["allowlist"]["targets"]), rules["primitives"],
+        rules["lifecycle"], thresholds=rules["thresholds"],
+        allowlist_digest=digests["allowlist"],
+        schema_digest=digests["schema"], threshold_digest=digests["thresholds"],
+        analyzer_version=analyzer_version,
+        rule_version=manifest["ratchet_version"])
     return index, semantics, computed, rules["schema"]
 
 
 @lru_cache(maxsize=32)
 def _historical_cached(repo, commit, manifest_bytes, analyzer_version):
     return _historical(Path(repo), commit, json.loads(manifest_bytes), analyzer_version)
+
+
+def _at_commit(repo, commit, manifest, analyzer_version):
+    frozen = {key: value for key, value in manifest.items() if key != "exceptions"}
+    return _historical_cached(str(repo), commit, _canonical(frozen), analyzer_version)
 
 
 def _entities(report):
@@ -219,8 +233,11 @@ def _artifact_evidence(repo, exception, evidence, semantic, path, errors):
     except ValueError as error: errors.append(str(error)); return
     if hashlib.sha256(blob).hexdigest() != evidence.get("artifact_blob_sha256"): errors.append("review artifact blob digest mismatch")
     text = blob.decode("utf-8", errors="replace")
-    if exception["entity"] not in text: errors.append("review artifact entity mismatch")
-    if semantic not in text: errors.append("review artifact semantic digest mismatch")
+    entities = re.findall(r"(?m)^Entity: `([^`]+)`\s*$", text)
+    digests = re.findall(
+        r"(?m)^Semantic dependency SHA-256: `([0-9a-f]{64})`\s*$", text)
+    if entities != [exception["entity"]]: errors.append("review artifact entity mismatch")
+    if digests != [semantic]: errors.append("review artifact semantic digest mismatch")
 
 
 def _evidence(repo, current_commit, exception, semantic, errors):
@@ -240,6 +257,8 @@ def _shape(exception, errors):
         errors.append("exception kind is invalid"); valid = False
     for name in ("responsibility", "invariant", "next_review_gate"):
         if not isinstance(exception.get(name), str) or not exception[name].strip(): errors.append("exception " + name + " must be non-empty")
+    if exception.get("next_review_gate") not in _REVIEW_GATES:
+        errors.append("next_review_gate is not an allowed review boundary")
     expiry = exception.get("expires_on")
     if not isinstance(expiry, dict) or set(expiry) != _EXPIRY: errors.append("expires_on keys must be exact")
     elif any(value is not True for value in expiry.values()): errors.append("expires_on values must all be true")
@@ -265,22 +284,71 @@ def _digest_claims(exception, identity, kind, metric, index, semantics, errors):
     if exception.get("member_closure_sha256") != closure: errors.append("member closure digest changed")
 
 
-def _validate_exception(repo, current_commit, exception, current, historical, index, semantics, schema, errors):
+def _validate_exception(repo, current_commit, exception, current, reviewed,
+                        current_index, current_semantics, reviewed_semantics,
+                        schema, errors):
     if not _shape(exception, errors): return
     identity, kind = exception["entity"], exception["kind"]
     if identity not in current: errors.append("stale exception for disappeared entity"); return
     current_kind, current_metric = current[identity]
     if current_kind != kind: errors.append("exception kind does not match entity")
     if not current_metric.candidate: errors.append("stale exception for noncandidate entity")
-    if identity not in historical: errors.append("historical recomputation is missing exception entity"); return
-    historical_kind, metric = historical[identity]
-    if historical_kind != kind or _plain(current_metric) != _plain(metric): errors.append("historical recomputation does not match current report")
+    if identity not in reviewed: errors.append("historical recomputation is missing exception entity"); return
+    historical_kind, metric = reviewed[identity]
+    if historical_kind != kind: errors.append("reviewed exception kind mismatch")
     _metric_claims(exception, kind, metric, schema, errors)
-    _digest_claims(exception, identity, kind, metric, index, semantics, errors)
-    semantic = _semantic(identity, kind, metric, semantics)
+    _digest_claims(exception, identity, kind, current_metric,
+                   current_index, current_semantics, errors)
+    reviewed_semantic = _semantic(
+        identity, kind, metric, reviewed_semantics)
     gates = exception.get("focused_gate")
     if not isinstance(gates, list) or not gates or any(not isinstance(node, str) or not _focused(repo, node) for node in gates): errors.append("focused gate missing or failed collection")
-    _evidence(repo, current_commit, exception, semantic, errors)
+    _evidence(repo, current_commit, exception, reviewed_semantic, errors)
+
+
+def _current_context(repo, current_commit, report, manifest, errors):
+    if not _ancestor(repo, manifest["reference_commit"], current_commit): errors.append("reference commit must be an ancestor")
+    if report.unresolved_callsites: errors.append("unresolved callsites remain")
+    for name, value in (("allowlist_digest", report.allowlist_digest), ("primitive_digest", report.primitive_digest), ("lifecycle_digest", report.lifecycle_digest), ("schema_digest", report.schema_digest), ("threshold_digest", report.threshold_digest)):
+        if manifest[name] != value: errors.append(name.removesuffix("_digest") + " digest mismatch")
+    try:
+        _reference = _at_commit(
+            repo, manifest["reference_commit"], manifest, report.analyzer_version)
+        current_index, current_semantics, computed, _current_schema = _at_commit(
+            repo, current_commit, manifest, report.analyzer_version)
+    except Exception as error:
+        errors.append("historical recomputation failed: " + str(error)); return None
+    if computed != report:
+        errors.append("historical recomputation of current commit does not match supplied report")
+    return current_index, current_semantics, computed
+
+
+def _review_rows(repo, current_commit, report, manifest, context, errors):
+    current_index, current_semantics, computed = context
+    current, supplied = _entities(computed), _entities(report)
+    identities = [item.get("entity") for item in manifest["exceptions"] if isinstance(item, dict)]
+    if len(identities) != len(set(identities)): errors.append("duplicate exception entity")
+    accepted = []
+    for exception in manifest["exceptions"]:
+        before = len(errors)
+        claimed = supplied.get(exception["entity"])
+        if claimed is not None and not claimed[1].candidate:
+            errors.append("stale exception for supplied noncandidate entity")
+        review_commit = exception["review_evidence"].get("review_commit")
+        if not _ancestor(repo, review_commit, current_commit):
+            errors.append("review commit ancestor validation failed")
+            continue
+        try:
+            reviewed_index, reviewed_semantics, reviewed_report, schema = _at_commit(
+                repo, review_commit, manifest, report.analyzer_version)
+        except Exception as error:
+            errors.append("review historical recomputation failed: " + str(error))
+            continue
+        _validate_exception(
+            repo, current_commit, exception, current, _entities(reviewed_report),
+            current_index, current_semantics, reviewed_semantics, schema, errors)
+        if len(errors) == before: accepted.append(exception["entity"])
+    return current, accepted
 
 
 def verify_manifest(report, manifest, *, repo_root, current_commit):
@@ -291,24 +359,11 @@ def verify_manifest(report, manifest, *, repo_root, current_commit):
         errors.append("exception keys must be exact")
         return ManifestVerdict(False, tuple(errors), ())
     repo = Path(repo_root)
-    if not _ancestor(repo, manifest["reference_commit"], current_commit): errors.append("reference commit must be an ancestor")
-    if report.unresolved_callsites: errors.append("unresolved callsites remain")
-    for name, value in (("allowlist_digest", report.allowlist_digest), ("primitive_digest", report.primitive_digest), ("lifecycle_digest", report.lifecycle_digest), ("schema_digest", report.schema_digest), ("threshold_digest", report.threshold_digest)):
-        if manifest[name] != value: errors.append(name.removesuffix("_digest") + " digest mismatch")
-    try: index, semantics, computed, schema = _historical_cached(
-        str(repo), manifest["reference_commit"], _canonical({
-            key: value for key, value in manifest.items() if key != "exceptions"}),
-        report.analyzer_version)
-    except Exception as error:
-        errors.append("historical recomputation failed: " + str(error)); return ManifestVerdict(False, tuple(errors), ())
-    current, historical = _entities(report), _entities(computed)
-    identities = [item.get("entity") for item in manifest["exceptions"] if isinstance(item, dict)]
-    if len(identities) != len(set(identities)): errors.append("duplicate exception entity")
-    accepted = []
-    for exception in manifest["exceptions"]:
-        before = len(errors)
-        _validate_exception(repo, current_commit, exception, current, historical, index, semantics, schema, errors)
-        if len(errors) == before: accepted.append(exception["entity"])
+    context = _current_context(repo, current_commit, report, manifest, errors)
+    if context is None:
+        return ManifestVerdict(False, tuple(errors), ())
+    current, accepted = _review_rows(
+        repo, current_commit, report, manifest, context, errors)
     missing = sorted(identity for identity, (_kind, metric) in current.items() if metric.candidate and identity not in accepted)
     if missing: errors.append("candidate remains without valid exception: " + ", ".join(missing))
     return ManifestVerdict(not errors, tuple(errors), tuple(accepted))

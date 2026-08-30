@@ -15,6 +15,7 @@ from architecture_call_resolver import (
     ResolutionIndex,
     UnresolvedCall,
     UnresolvedDependency,
+    resolve_calls,
 )
 from architecture_source_index import ImportRecord, SourceIndex
 
@@ -168,6 +169,13 @@ class SemanticIndex:
         }
         return OneHopSemantics(identity, root, checked, domains, transitions,
                                clusters, _digest(payload))
+
+
+def _resolve_and_propagate(index, allowlist, primitives, lifecycle, digest_inputs):
+    resolutions = resolve_calls(index, allowlist, primitives)
+    semantics = propagate_semantics(
+        index, resolutions, primitives, lifecycle, digest_inputs=digest_inputs)
+    return resolutions, semantics
 
 
 def _ordered_union(order: Sequence[str], *values: Sequence[str]) -> tuple[str, ...]:

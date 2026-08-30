@@ -170,17 +170,8 @@ class _Scanner(ast.NodeVisitor):
         self.generic_visit(node)
 
 
-def build_source_index(
-    repo_root: Path,
-    tracked_paths: Sequence[str],
-    files: Mapping[str, bytes] | None = None,
-) -> SourceIndex:
-    """Build the deterministic index from an exact tracked-path snapshot."""
-
-    paths = tuple(sorted(_path(path) for path in tracked_paths))
-    if len(paths) != len(set(paths)):
-        raise ValueError("duplicate normalized tracked path")
-    supplied: dict[str, bytes] | None = None
+def _supplied_snapshot(paths, files):
+    supplied = None
     if files is not None:
         supplied = {}
         for raw_path, source in files.items():
@@ -201,6 +192,29 @@ def build_source_index(
             raise ValueError(f"supplied files missing tracked paths: {', '.join(missing)}")
         if extra:
             raise ValueError(f"supplied files contain untracked paths: {', '.join(extra)}")
+    return supplied
+
+
+def _scan_source(path, source):
+    if not isinstance(source, bytes):
+        raise TypeError(f"source bytes required for {path}")
+    scanner = _Scanner(path, source)
+    scanner.visit(ast.parse(source.decode("utf-8"), filename=path))
+    evidence = {owner: tuple(rows) for owner, rows in scanner.class_evidence.items()}
+    return scanner, evidence
+
+
+def build_source_index(
+    repo_root: Path,
+    tracked_paths: Sequence[str],
+    files: Mapping[str, bytes] | None = None,
+) -> SourceIndex:
+    """Build the deterministic index from an exact tracked-path snapshot."""
+
+    paths = tuple(sorted(_path(path) for path in tracked_paths))
+    if len(paths) != len(set(paths)):
+        raise ValueError("duplicate normalized tracked path")
+    supplied = _supplied_snapshot(paths, files)
     captured: dict[str, bytes] = {}
     digests: dict[str, str] = {}
     entities: dict[str, Entity] = {}
@@ -209,19 +223,13 @@ def build_source_index(
     class_evidence: dict[str, tuple[str, ...]] = {}
     for path in paths:
         source = (Path(repo_root) / path).read_bytes() if supplied is None else supplied[path]
-        if not isinstance(source, bytes):
-            raise TypeError(f"source bytes required for {path}")
         captured[path] = source
         digests[path] = hashlib.sha256(source).hexdigest()
-        scanner = _Scanner(path, source)
-        scanner.visit(ast.parse(source.decode("utf-8"), filename=path))
+        scanner, evidence = _scan_source(path, source)
         entities.update(scanner.entities)
         imports.update(scanner.imports)
         lambda_owners.update(scanner.lambda_owners)
-        class_evidence.update(
-            (owner, tuple(evidence))
-            for owner, evidence in scanner.class_evidence.items()
-        )
+        class_evidence.update(evidence)
     return SourceIndex(
         _frozen(captured),
         _frozen(digests),

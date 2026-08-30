@@ -7475,6 +7475,34 @@ def test_candidate_policy_file_uses_python_lexical_binding_semantics(
     assert metric.definition_dependency_components == components
 
 
+@pytest.mark.parametrize("source", (
+    """
+    def leaf(): pass
+    def outer():
+        first = lambda leaf: leaf; second = lambda: leaf
+        return first, second
+    def isolated(): pass
+    """,
+    """
+    def leaf(): pass
+    def outer(value=leaf):
+        leaf = 1
+        return value
+    def isolated(): pass
+    """,
+))
+def test_candidate_policy_file_attributes_same_line_scopes_and_defaults_exactly(
+    tmp_path: Path, source: str
+) -> None:
+    path = "src/lockstep/scope_defaults.py"
+    index, resolutions, semantics = _propagate_fixture(
+        tmp_path, source, path=path)
+    metric = evaluate_candidates(
+        index, measure_legacy_metrics(index), semantics, resolutions
+    ).files[f"{path}::@file"]
+    assert metric.definition_dependency_components == 2
+
+
 def test_candidate_policy_file_subsystems_formula_and_hard_boundary(
     tmp_path: Path,
 ) -> None:

@@ -11,9 +11,11 @@ import re
 import symtable
 from types import MappingProxyType
 
-from architecture_call_resolver import ResolvedCall, ResolvedDependency, ResolutionIndex, UnresolvedCall
-from architecture_domain_lifecycle import SemanticIndex
-from architecture_legacy_metrics import LegacyMetrics
+from architecture_domain_lifecycle import (
+    ResolvedCall, ResolvedDependency, ResolutionIndex, SemanticDigestInputs,
+    SemanticIndex, UnresolvedCall, _resolve_and_propagate,
+)
+from architecture_legacy_metrics import LegacyMetrics, measure_legacy_metrics
 from architecture_source_index import SourceIndex
 
 
@@ -114,10 +116,15 @@ def _rules():
     return json.loads((_ROOT / "architecture_thresholds.json").read_bytes())
 
 
-def _vocabulary():
-    rows = json.loads((_ROOT / "architecture_lifecycle.json").read_bytes())["transitions"]
+def _vocabulary_from(value):
+    rows = value["transitions"]
     return (tuple(row["transition_id"] for row in rows),
             tuple(dict.fromkeys(row["cluster"] for row in rows)))
+
+
+def _vocabulary():
+    return _vocabulary_from(json.loads(
+        (_ROOT / "architecture_lifecycle.json").read_bytes()))
 
 
 def _nodes(index: SourceIndex):
@@ -415,9 +422,9 @@ def _cohesion(identity, vertices, calls, resolutions, labels, lambdas):
     return len(_components(vertices, edges))
 
 
-def _class_semantics(identity, methods, semantics):
+def _class_semantics(identity, methods, semantics, vocabulary):
     members = (identity, *methods)
-    transitions_order, clusters_order = _vocabulary()
+    transitions_order, clusters_order = vocabulary
     domains = _ordered(_DOMAINS, *(semantics.entities[item].propagated_domains
                                     for item in members))
     transitions = _ordered(transitions_order,
@@ -427,7 +434,8 @@ def _class_semantics(identity, methods, semantics):
     return domains, transitions, clusters
 
 
-def _class(identity, node, index, legacy, semantics, resolutions, calls, nodes, rules):
+def _class(identity, node, index, legacy, semantics, resolutions, calls, nodes,
+           rules, vocabulary):
     methods = tuple(item for item in index.entities if index.entities[item].parent == identity and item in legacy)
     vertices, mutable = {}, set()
     for method in methods:
@@ -442,7 +450,8 @@ def _class(identity, node, index, legacy, semantics, resolutions, calls, nodes, 
     bases = tuple(dict.fromkeys(record.target for record in resolutions.dependencies.values()
         if isinstance(record, ResolvedDependency) and record.owner == identity
         and record.kind == "base" and record.target in index.entities))
-    domains, transitions, clusters = _class_semantics(identity, methods, semantics)
+    domains, transitions, clusters = _class_semantics(
+        identity, methods, semantics, vocabulary)
     policy = rules["kinds"]["class"]
     threshold = policy["signals"]
     public = sum(not item.rsplit(".", 1)[-1].startswith("_") for item in methods)
@@ -513,31 +522,79 @@ def _scope_name(node):
             ast.GeneratorExp: "genexpr"}.get(type(node))
 
 
-def _child_table(table, node):
+def _child_table(table, node, used):
     name = _scope_name(node)
     matches = tuple(child for child in table.get_children()
                     if child.get_name() == name and child.get_lineno() == node.lineno)
-    return matches[0] if matches else table
+    key = (id(table), name, node.lineno)
+    position = used.get(key, 0)
+    used[key] = position + 1
+    return matches[position] if position < len(matches) else table
 
 
-def _module_loads(root, bindings, module_table):
-    found = set()
-    scope_nodes = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda,
-                   ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
-    def visit(node, table):
+class _ReferenceVisitor:
+    def __init__(self, bindings):
+        self.bindings = bindings
+        self.found = set()
+        self.used = {}
+
+    def visit(self, node, table):
         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
             try:
                 symbol = table.lookup(node.id)
             except KeyError:
                 symbol = None
-            if (table.get_type() == "module" or symbol is None or symbol.is_global()) and node.id in bindings:
-                found.add(bindings[node.id])
+            if (table.get_type() == "module" or symbol is None or symbol.is_global()) and node.id in self.bindings:
+                self.found.add(self.bindings[node.id])
             return
-        child_table = _child_table(table, node) if isinstance(node, scope_nodes) else table
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return self._named(node, table)
+        if isinstance(node, ast.Lambda):
+            return self._lambda(node, table)
+        if isinstance(node, ast.ClassDef):
+            return self._class(node, table)
+        if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+            return self._comprehension(node, table)
         for child in ast.iter_child_nodes(node):
-            visit(child, child_table)
-    visit(root, module_table)
-    return found
+            self.visit(child, table)
+
+    def _named(self, node, table):
+        outer = (*node.decorator_list, *node.args.defaults,
+                 *(item for item in node.args.kw_defaults if item is not None))
+        for child in outer:
+            self.visit(child, table)
+        body_table = _child_table(table, node, self.used)
+        for child in node.body:
+            self.visit(child, body_table)
+
+    def _lambda(self, node, table):
+        for child in (*node.args.defaults,
+                      *(item for item in node.args.kw_defaults if item is not None)):
+            self.visit(child, table)
+        self.visit(node.body, _child_table(table, node, self.used))
+
+    def _class(self, node, table):
+        outer = (*node.decorator_list, *node.bases,
+                 *(item.value for item in node.keywords))
+        for child in outer:
+            self.visit(child, table)
+        body_table = _child_table(table, node, self.used)
+        for child in node.body:
+            self.visit(child, body_table)
+
+    def _comprehension(self, node, table):
+        outer = node.generators[0].iter
+        self.visit(outer, table)
+        body_table = _child_table(table, node, self.used)
+        for child in ast.iter_child_nodes(node):
+            if child is not outer:
+                self.visit(child, body_table)
+
+
+def _module_loads(root, bindings, module_table):
+    visitor = _ReferenceVisitor(bindings)
+    visitor.visit(root, module_table)
+    return visitor.found
 
 
 def _reference_edges(path, index, nodes, vertices, resolutions):
@@ -594,11 +651,11 @@ def _file(path, index, nodes, semantics, resolutions, calls, rules):
         semantic.propagated_lifecycle_clusters, signals, score, hard, candidate)
 
 
-def evaluate_candidates(index, legacy, semantics, resolutions):
+def _evaluate(index, legacy, semantics, resolutions, rules, vocabulary):
     if (not isinstance(index, SourceIndex) or not isinstance(legacy, Mapping)
             or not isinstance(semantics, SemanticIndex) or not isinstance(resolutions, ResolutionIndex)):
         raise TypeError("invalid candidate policy inputs")
-    rules, nodes, calls = _rules(), _nodes(index), _calls(resolutions)
+    nodes, calls = _nodes(index), _calls(resolutions)
     functions = MappingProxyType({identity: _function(identity, metric,
         semantics.entities[identity], calls, rules) for identity, metric in legacy.items()})
     function_ids = set(legacy)
@@ -606,7 +663,8 @@ def evaluate_candidates(index, legacy, semantics, resolutions):
         _closure(root, function_ids, index, nodes, calls), legacy, semantics, calls,
         nodes, rules) for root in legacy})
     classes = MappingProxyType({identity: _class(identity, node, index, legacy,
-        semantics, resolutions, calls, nodes, rules) for identity, node in nodes.items()
+        semantics, resolutions, calls, nodes, rules, vocabulary)
+        for identity, node in nodes.items()
         if isinstance(node, ast.ClassDef)})
     files = MappingProxyType({f"{path}::@file": _file(path, index, nodes, semantics,
         resolutions, calls, rules) for path in index.files})
@@ -616,3 +674,21 @@ def evaluate_candidates(index, legacy, semantics, resolutions):
     return ArchitectureReport(functions, one_hops, classes, files, unresolved,
         inputs.allowlist_digest, semantics.primitive_digest, semantics.lifecycle_digest,
         inputs.schema_digest, inputs.threshold_digest, inputs.analyzer_version, inputs.rule_version)
+
+
+def evaluate_candidates(index, legacy, semantics, resolutions):
+    return _evaluate(
+        index, legacy, semantics, resolutions, _rules(), _vocabulary())
+
+
+def _recompute_historical(index, allowlist, primitives, lifecycle, *,
+                          thresholds, allowlist_digest, schema_digest, threshold_digest,
+                          analyzer_version, rule_version):
+    inputs = SemanticDigestInputs(
+        allowlist_digest, schema_digest, threshold_digest,
+        analyzer_version, rule_version)
+    resolutions, semantics = _resolve_and_propagate(
+        index, allowlist, primitives, lifecycle, inputs)
+    return semantics, _evaluate(
+        index, measure_legacy_metrics(index), semantics, resolutions,
+        thresholds, _vocabulary_from(lifecycle))
