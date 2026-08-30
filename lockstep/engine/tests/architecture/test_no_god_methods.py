@@ -1702,6 +1702,32 @@ def test_resolver_binding_normalizes_relative_import_from_package_and_level(
     assert _resolver_target(result, f"{path}::owner::call:0001") == expected, case
 
 
+def test_resolver_binding_requires_an_actual_indexed_imported_member(
+    tmp_path: Path,
+) -> None:
+    """Catches synthesizing an internal entity merely from an imported name."""
+
+    path = "src/lockstep/imported_member.py"
+    result = _resolver_fixture(
+        tmp_path,
+        """
+        from lockstep.peer import missing, actual
+        def owner():
+            missing()
+            actual()
+        """,
+        path=path,
+        extra_files={
+            "src/lockstep/peer.py": "def actual():\n    pass\n",
+        },
+    )
+
+    assert _resolver_target(result, f"{path}::owner::call:0002") == (
+        "src/lockstep/peer.py::actual"
+    )
+    _assert_unresolved_call(result, f"{path}::owner::call:0001")
+
+
 def test_resolver_binding_evaluates_lambda_defaults_in_the_enclosing_frame(
     tmp_path: Path,
 ) -> None:
@@ -1724,6 +1750,50 @@ def test_resolver_binding_evaluates_lambda_defaults_in_the_enclosing_frame(
         for ordinal in (1, 2)
     ] == [f"{path}::target", f"{path}::target"]
     _assert_unresolved_call(result, f"{path}::owner::call:0003")
+
+
+def test_resolver_lambda_callsite_preorder_matches_owner_preorder_at_the_limit(
+    tmp_path: Path,
+) -> None:
+    """Catches positional-default-first lambda traversal and ordinal drift."""
+
+    path = "src/lockstep/lambda_owner_preorder.py"
+    prefix = _resolver_source(
+        """
+        def keyword_default():
+            pass
+        def positional_default():
+            pass
+        def lambda_body():
+            pass
+        def owner():
+            callback = lambda value=positional_default(), *, named=keyword_default(): lambda_body()
+        """
+    ).decode("utf-8")
+    accepted_source = prefix + "    unknown()\n" * 9_996
+    accepted = _resolver_fixture(tmp_path, accepted_source, path=path)
+    calls = _resolver_calls(accepted)
+
+    assert tuple(calls)[:3] == (
+        f"{path}::owner::call:0001",
+        f"{path}::owner::call:0002",
+        f"{path}::owner::call:0003",
+    )
+    assert tuple(calls)[-1] == f"{path}::owner::call:9999"
+    with pytest.raises(ValueError, match=r"^owner exceeds 9,999 callsites: "):
+        _resolver_fixture(
+            tmp_path,
+            accepted_source + "    unknown()\n",
+            path=path,
+        )
+    assert [
+        _resolver_target(accepted, f"{path}::owner::call:{ordinal:04d}")
+        for ordinal in (1, 2, 3)
+    ] == [
+        f"{path}::keyword_default",
+        f"{path}::positional_default",
+        f"{path}::lambda_body",
+    ]
 
 
 def test_resolver_binding_treats_match_pattern_capture_as_conditional_local(
@@ -1842,6 +1912,94 @@ def test_resolver_binding_evaluates_comprehension_outer_iterable_in_enclosing_fr
 
     _assert_unresolved_call(result, f"{path}::owner::call:0001")
     assert _resolver_target(result, f"{path}::owner::call:0002") == f"{path}::target"
+
+
+_CLASS_COMPREHENSION_CASES = (
+    (
+        "without_outer_binding",
+        "",
+        None,
+    ),
+    (
+        "with_outer_module_binding",
+        "def target():\n    pass\n",
+        "src/lockstep/class_comprehension_with_outer_module_binding.py::target",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("case", "module_prefix", "expected"),
+    _CLASS_COMPREHENSION_CASES,
+    ids=[case for case, *_rest in _CLASS_COMPREHENSION_CASES],
+)
+def test_resolver_binding_class_comprehension_skips_containing_class_namespace(
+    tmp_path: Path,
+    case: str,
+    module_prefix: str,
+    expected: str | None,
+) -> None:
+    """Catches resolving a comprehension body through its containing class."""
+
+    path = f"src/lockstep/class_comprehension_{case}.py"
+    result = _resolver_fixture(
+        tmp_path,
+        module_prefix
+        + "class Box:\n"
+        + "    def target(self):\n"
+        + "        pass\n"
+        + "    values = [target() for item in ()]\n",
+        path=path,
+    )
+    callsite = f"{path}::Box::call:0001"
+
+    if expected is None:
+        _assert_unresolved_call(result, callsite)
+    else:
+        assert _resolver_target(result, callsite) == expected
+
+
+def test_resolver_binding_class_body_cannot_see_its_own_pending_binding(
+    tmp_path: Path,
+) -> None:
+    """Catches publishing a class name before its body has completed."""
+
+    path = "src/lockstep/class_pending_binding.py"
+    result = _resolver_fixture(
+        tmp_path,
+        """
+        def outer():
+            pass
+        class C:
+            inherited = outer()
+            recursive = C()
+        """,
+        path=path,
+    )
+
+    assert _resolver_target(result, f"{path}::C::call:0001") == f"{path}::outer"
+    _assert_unresolved_call(result, f"{path}::C::call:0002")
+
+
+def test_resolver_binding_comprehension_walrus_is_conditional_in_containing_function(
+    tmp_path: Path,
+) -> None:
+    """Catches a conditional walrus target falling through to a module binding."""
+
+    path = "src/lockstep/comprehension_walrus.py"
+    result = _resolver_fixture(
+        tmp_path,
+        """
+        def alias():
+            pass
+        def owner(values):
+            [(alias := value) for value in values]
+            alias()
+        """,
+        path=path,
+    )
+
+    _assert_unresolved_call(result, f"{path}::owner::call:0001")
 
 
 def test_resolver_binding_function_default_cannot_see_new_function_binding(
@@ -3473,6 +3631,64 @@ def test_resolver_rule_table_checked_in_bytes_are_exact_canonical_json(
     assert set(parsed) == expected_keys, case
 
 
+def test_resolver_checked_in_advisory_lock_open_row_matches_read_write_source(
+    tmp_path: Path,
+) -> None:
+    """Catches dropping read capability from the O_RDWR advisory-lock open."""
+
+    path = "src/lockstep/runtime/advisory_lock.py"
+    owner = f"{path}::advisory_file_lock"
+    selector = f"{owner}::call:0002"
+    index = _fixture_index({path: (ENGINE_ROOT / path).read_bytes()}, tmp_path)
+    owner_node = _resolver_owner_node(index, owner)
+    call = _resolver_owner_calls(index, owner)[1]
+    assert isinstance(call.args[1], ast.Name) and call.args[1].id == "flags"
+    assert any(
+        isinstance(statement, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == call.args[1].id
+            for target in statement.targets
+        )
+        and any(
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "os"
+            and node.attr == "O_RDWR"
+            for node in ast.walk(statement.value)
+        )
+        for statement in owner_node.body
+    )
+    table = json.loads(
+        (ARCHITECTURE_TEST_ROOT / "architecture_effect_primitives.json").read_bytes()
+    )
+
+    assert [row for row in table["rows"] if row["selector"] == selector] == [
+        {
+            "selector_kind": "callsite",
+            "selector": selector,
+            "semantic_target": "os.open",
+            "domains": [
+                "filesystem-read",
+                "filesystem-write",
+                "lifecycle-control",
+            ],
+        }
+    ]
+    assert [
+        record
+        for record in table["callsite_evidence"]
+        if record["selector"] == selector
+    ] == [
+        {
+            "selector": selector,
+            "owner_source_sha256": index.entities[owner].span.sha256,
+            "call_ast_sha256": hashlib.sha256(
+                ast.dump(call, include_attributes=False).encode("utf-8")
+            ).hexdigest(),
+        }
+    ]
+
+
 def test_resolver_rule_table_rejects_duplicate_allowlist_targets(
     tmp_path: Path,
 ) -> None:
@@ -4097,6 +4313,95 @@ def test_resolver_callsite_effect_free_allowlist_matches_exact_builtin_target(
             allowlist=inexact,
         )
         _assert_unresolved_call(unresolved, f"{path}::owner::call:0001")
+
+
+_IMPORTED_BUILTIN_EFFECT_CASES = (
+    (
+        "module_attribute_open",
+        "import builtins",
+        "builtins.open('item', 'rb')",
+        "builtins.open",
+        "callsite",
+        ("filesystem-read", "lifecycle-control"),
+    ),
+    (
+        "from_import_input",
+        "from builtins import input",
+        "input()",
+        "builtins.input",
+        "entity",
+        ("decode/validate",),
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("case", "statement", "expression", "target", "coverage_kind", "domains"),
+    _IMPORTED_BUILTIN_EFFECT_CASES,
+    ids=[case for case, *_rest in _IMPORTED_BUILTIN_EFFECT_CASES],
+)
+def test_resolver_imported_builtin_effect_requires_exact_coverage(
+    tmp_path: Path,
+    case: str,
+    statement: str,
+    expression: str,
+    target: str,
+    coverage_kind: str,
+    domains: tuple[str, ...],
+) -> None:
+    """Catches treating imported effectful builtins as intrinsically pure."""
+
+    path = f"src/lockstep/imported_builtin_{case}.py"
+    source = f"{statement}\ndef owner():\n    {expression}\n"
+    callsite = f"{path}::owner::call:0001"
+    with pytest.raises(
+        ValueError,
+        match=rf"^external target lacks exact effect coverage: {re.escape(target)}$",
+    ):
+        _resolver_fixture_with_primitive_rows(
+            tmp_path,
+            source,
+            (),
+            path=path,
+            allowlist={"schema_version": 1, "targets": []},
+        )
+
+
+@pytest.mark.parametrize(
+    ("case", "statement", "expression", "target", "coverage_kind", "domains"),
+    _IMPORTED_BUILTIN_EFFECT_CASES,
+    ids=[case for case, *_rest in _IMPORTED_BUILTIN_EFFECT_CASES],
+)
+def test_resolver_imported_builtin_effect_accepts_exact_coverage(
+    tmp_path: Path,
+    case: str,
+    statement: str,
+    expression: str,
+    target: str,
+    coverage_kind: str,
+    domains: tuple[str, ...],
+) -> None:
+    """Catches blacklisting imported builtin spelling instead of requiring coverage."""
+
+    path = f"src/lockstep/imported_builtin_{case}.py"
+    source = f"{statement}\ndef owner():\n    {expression}\n"
+    callsite = f"{path}::owner::call:0001"
+    row = (
+        _primitive_entity_row(target, domains)
+        if coverage_kind == "entity"
+        else {
+            **_primitive_callsite_row(callsite, target),
+            "domains": list(domains),
+        }
+    )
+    covered = _resolver_fixture_with_primitive_rows(
+        tmp_path,
+        source,
+        (row,),
+        path=path,
+        allowlist={"schema_version": 1, "targets": []},
+    )
+    assert _resolver_target(covered, callsite) == target
 
 
 def test_resolver_callsite_primitive_is_an_exact_terminal_override(
