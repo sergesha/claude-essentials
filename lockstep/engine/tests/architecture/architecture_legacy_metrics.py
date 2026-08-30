@@ -73,20 +73,48 @@ def _fanout(node: ast.AST) -> int:
     return len(targets)
 
 
+def _source_metrics(
+    path: str, source: bytes, wanted: set[str]
+) -> dict[str, LegacyMetrics]:
+    measured: dict[str, LegacyMetrics] = {}
+
+    def visit(node: ast.AST, parents: tuple[str, ...]) -> None:
+        nested = parents
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            nested = (*parents, node.name)
+            identity = f"{path}::{'.'.join(nested)}"
+            if identity in wanted and isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef)
+            ):
+                cyclomatic, cognitive, nesting = _complexity(node)
+                measured[identity] = LegacyMetrics(
+                    node.end_lineno - node.lineno + 1,
+                    cyclomatic,
+                    cognitive,
+                    nesting,
+                    _fanout(node),
+                )
+        for child in ast.iter_child_nodes(node):
+            visit(child, nested)
+
+    visit(ast.parse(source.decode("utf-8"), filename=path), ())
+    return measured
+
+
 def measure_legacy_metrics(index: SourceIndex) -> Mapping[str, LegacyMetrics]:
     """Measure only indexed functions, pruning every nested lexical scope."""
 
-    measured: dict[str, LegacyMetrics] = {}
-    for identity, entity in index.entities.items():
-        node = entity.node
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            continue
-        cyclomatic, cognitive, nesting = _complexity(node)
-        measured[identity] = LegacyMetrics(
-            node.end_lineno - node.lineno + 1,
-            cyclomatic,
-            cognitive,
-            nesting,
-            _fanout(node),
-        )
+    groups: dict[tuple[str, bytes], set[str]] = {}
+    for entity in index.entities.values():
+        stable_identity = entity.identity
+        path = stable_identity.partition("::")[0]
+        groups.setdefault((path, entity.source), set()).add(stable_identity)
+    available: dict[str, LegacyMetrics] = {}
+    for (path, source), identities in groups.items():
+        available.update(_source_metrics(path, source, identities))
+    measured = {
+        identity: available[entity.identity]
+        for identity, entity in index.entities.items()
+        if entity.identity in available
+    }
     return MappingProxyType(measured)

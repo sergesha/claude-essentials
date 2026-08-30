@@ -22,7 +22,6 @@ class SourceSpan:
 class Entity:
     identity: str
     parent: str
-    node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef
     source: bytes
     span: SourceSpan
 
@@ -46,7 +45,7 @@ class SourceIndex:
     file_sha256: Mapping[str, str]
     entities: Mapping[str, Entity]
     imports: Mapping[str, ImportRecord]
-    lambda_owners: Mapping[ast.Lambda, str]
+    lambda_owners: Mapping[tuple[str, int, int, int, int], str]
     class_lambda_evidence: Mapping[str, tuple[str, ...]]
 
 
@@ -55,6 +54,8 @@ def _frozen(values: Mapping) -> Mapping:
 
 
 def _path(value: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError("tracked path must be a string")
     path = PurePosixPath(value.replace("\\", "/"))
     normalized = path.as_posix()
     if path.is_absolute() or ".." in path.parts:
@@ -87,7 +88,7 @@ class _Scanner(ast.NodeVisitor):
         self.stack: list[tuple[str, ast.AST]] = []
         self.entities: dict[str, Entity] = {}
         self.imports: dict[str, ImportRecord] = {}
-        self.lambda_owners: dict[ast.Lambda, str] = {}
+        self.lambda_owners: dict[tuple[str, int, int, int, int], str] = {}
         self.class_evidence: dict[str, list[str]] = {}
         self.import_ordinal = 0
 
@@ -97,9 +98,7 @@ class _Scanner(ast.NodeVisitor):
         if identity in self.entities:
             raise ValueError(f"duplicate stable identity: {identity}")
         parent = self.stack[-1][0] if self.stack else self.file_owner
-        self.entities[identity] = Entity(
-            identity, parent, node, self.source, _span(node, self.source)
-        )
+        self.entities[identity] = Entity(identity, parent, self.source, _span(node, self.source))
         self.stack.append((identity, node))
         self.generic_visit(node)
         self.stack.pop()
@@ -155,7 +154,14 @@ class _Scanner(ast.NodeVisitor):
 
     def visit_Lambda(self, node: ast.Lambda) -> None:
         owner = self.stack[-1][0] if self.stack else self.file_owner
-        self.lambda_owners[node] = owner
+        evidence = (
+            self.path,
+            node.lineno,
+            node.col_offset,
+            node.end_lineno,
+            node.end_col_offset,
+        )
+        self.lambda_owners[evidence] = owner
         if self.stack and isinstance(self.stack[-1][1], ast.ClassDef):
             evidence = self.class_evidence.setdefault(owner, [])
             if len(evidence) >= 9_999:
@@ -174,12 +180,32 @@ def build_source_index(
     paths = tuple(sorted(_path(path) for path in tracked_paths))
     if len(paths) != len(set(paths)):
         raise ValueError("duplicate normalized tracked path")
-    supplied = None if files is None else {_path(path): data for path, data in files.items()}
+    supplied: dict[str, bytes] | None = None
+    if files is not None:
+        supplied = {}
+        for raw_path, source in files.items():
+            path = _path(raw_path)
+            if not isinstance(source, bytes):
+                raise TypeError(f"source bytes required for {path}")
+            if path in supplied:
+                raise ValueError(f"duplicate normalized supplied path: {path}")
+            supplied[path] = source
+        missing = tuple(sorted(set(paths) - set(supplied)))
+        extra = tuple(sorted(set(supplied) - set(paths)))
+        if missing and extra:
+            raise ValueError(
+                f"supplied files mismatch: missing {', '.join(missing)}; "
+                f"extra {', '.join(extra)}"
+            )
+        if missing:
+            raise ValueError(f"supplied files missing tracked paths: {', '.join(missing)}")
+        if extra:
+            raise ValueError(f"supplied files contain untracked paths: {', '.join(extra)}")
     captured: dict[str, bytes] = {}
     digests: dict[str, str] = {}
     entities: dict[str, Entity] = {}
     imports: dict[str, ImportRecord] = {}
-    lambda_owners: dict[ast.Lambda, str] = {}
+    lambda_owners: dict[tuple[str, int, int, int, int], str] = {}
     class_evidence: dict[str, tuple[str, ...]] = {}
     for path in paths:
         source = (Path(repo_root) / path).read_bytes() if supplied is None else supplied[path]
