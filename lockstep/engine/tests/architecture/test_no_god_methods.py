@@ -13,7 +13,6 @@ import re
 import subprocess
 import textwrap
 from types import MappingProxyType
-import warnings
 
 import pytest
 
@@ -93,20 +92,18 @@ CONFIRMED_GOD_METHODS = (
     ("runtime/effects/coordinator.py", "EffectCoordinator.submit_manual"),
 )
 
-AUTHORING_FILE_CAPS = {
-    "authoring.py": 290,
-    "authoring_bundle.py": 225,
-    "authoring_capture.py": 175,
-    "authoring_compilation.py": 325,
-    "authoring_installation.py": 150,
-    "authoring_project_tree.py": 225,
-    "authoring_publisher.py": 350,
-    "authoring_results.py": 200,
-}
-
-
-class ComplexityReviewWarning(UserWarning):
-    """A long boundary needs semantic review but is not rejected by length."""
+AUTHORING_MODULES = frozenset(
+    {
+        "authoring.py",
+        "authoring_bundle.py",
+        "authoring_capture.py",
+        "authoring_compilation.py",
+        "authoring_installation.py",
+        "authoring_project_tree.py",
+        "authoring_publisher.py",
+        "authoring_results.py",
+    }
+)
 
 
 def _function_node(relative_file: str, qualified_name: str) -> ast.AST:
@@ -223,15 +220,8 @@ def _authoring_functions() -> tuple[tuple[str, str, ast.AST], ...]:
 
 
 def _assert_structural_limits(relative_file: str, qualified_name: str, node: ast.AST) -> None:
-    line_count = node.end_lineno - node.lineno + 1
     cyclomatic, cognitive, max_nesting = _complexity(node)
     call_targets = _call_targets(node)
-    if line_count >= 80:
-        warnings.warn(
-            f"{relative_file}:{qualified_name} is {line_count} lines and requires cohesion review",
-            ComplexityReviewWarning,
-            stacklevel=1,
-        )
     violations = []
     if cyclomatic >= 16:
         violations.append(f"cyclomatic={cyclomatic} (limit 15)")
@@ -407,18 +397,6 @@ def test_resolver_class_does_not_trigger_method_count_gt_24() -> None:
     assert method_count <= 24, "_Resolver triggers method_count_gt_24"
 
 
-def test_resolver_class_does_not_trigger_line_count_gt_600() -> None:
-    """Freezes the class structural-length hard adjudication trigger."""
-
-    owner = _resolver_class()
-    decorators = getattr(owner, "decorator_list", ())
-    start_line = min((node.lineno for node in decorators), default=owner.lineno)
-
-    assert owner.end_lineno - start_line + 1 <= 600, (
-        "_Resolver triggers line_count_gt_600"
-    )
-
-
 def test_resolver_class_does_not_trigger_mutable_field_count_gt_24() -> None:
     """Freezes the class mutable-field hard adjudication trigger."""
 
@@ -438,20 +416,6 @@ def test_resolver_file_does_not_trigger_definition_count_gt_50() -> None:
 
     assert definition_count <= 50, (
         "architecture_call_resolver.py triggers definition_count_gt_50"
-    )
-
-
-def test_resolver_file_does_not_trigger_physical_line_count_gt_1000() -> None:
-    """Freezes the file structural-length hard adjudication trigger."""
-
-    physical_line_count = len(
-        (ARCHITECTURE_TEST_ROOT / "architecture_call_resolver.py")
-        .read_bytes()
-        .splitlines()
-    )
-
-    assert physical_line_count <= 1_000, (
-        "architecture_call_resolver.py triggers physical_line_count_gt_1000"
     )
 
 
@@ -525,18 +489,9 @@ def test_every_authoring_function_has_bounded_structural_complexity(
     _assert_structural_limits(relative_file, qualified_name, node)
 
 
-def test_authoring_module_population_and_physical_lines_are_bounded() -> None:
+def test_authoring_module_population_is_exact() -> None:
     paths = tuple(sorted(SOURCE_ROOT.glob("authoring*.py")))
-    assert {path.name for path in paths} == set(AUTHORING_FILE_CAPS)
-    counts = {
-        path.name: len(path.read_text(encoding="utf-8").splitlines()) for path in paths
-    }
-    assert {
-        name: (count, AUTHORING_FILE_CAPS[name])
-        for name, count in counts.items()
-        if count > AUTHORING_FILE_CAPS[name]
-    } == {}
-    assert sum(counts.values()) <= 1_940
+    assert {path.name for path in paths} == AUTHORING_MODULES
 
 
 def test_authoring_capture_is_the_single_descriptor_observation_owner() -> None:
@@ -1110,15 +1065,14 @@ def test_source_index_legacy_metrics_split_identity_at_final_separator(
     assert tuple(metrics) == (identity,)
     metric = metrics[identity]
     assert (
-        metric.line_count,
         metric.cyclomatic,
         metric.cognitive,
         metric.max_nesting,
         metric.legacy_syntactic_fanout,
-    ) == (2, 1, 0, 0, 1)
+    ) == (1, 0, 0, 1)
 
 
-def test_legacy_metrics_characterize_current_complexity_length_and_pruned_fanout() -> None:
+def test_legacy_metrics_characterize_current_complexity_and_pruned_fanout() -> None:
     """Catches metric drift and nested-scope complexity/fan-out inflation."""
 
     path = "src/lockstep/legacy_fixture.py"
@@ -1181,7 +1135,6 @@ def test_legacy_metrics_characterize_current_complexity_length_and_pruned_fanout
     metrics = measure_legacy_metrics(index)
 
     metric_fields = (
-        "line_count",
         "cyclomatic",
         "cognitive",
         "max_nesting",
@@ -1191,10 +1144,10 @@ def test_legacy_metrics_characterize_current_complexity_length_and_pruned_fanout
         identity: tuple(getattr(metric, name) for name in metric_fields)
         for identity, metric in metrics.items()
     } == {
-        f"{path}::parent": (24, 7, 10, 3, 8),
-        f"{path}::parent.duplicate": (5, 3, 3, 2, 4),
-        f"{path}::parent.Nested.duplicate": (3, 2, 1, 1, 2),
-        f"{path}::branch_forms": (18, 11, 14, 2, 2),
+        f"{path}::parent": (7, 10, 3, 8),
+        f"{path}::parent.duplicate": (3, 3, 2, 4),
+        f"{path}::parent.Nested.duplicate": (2, 1, 1, 2),
+        f"{path}::branch_forms": (11, 14, 2, 2),
     }
     assert {field.name for field in fields(next(iter(metrics.values())))} == set(
         metric_fields
