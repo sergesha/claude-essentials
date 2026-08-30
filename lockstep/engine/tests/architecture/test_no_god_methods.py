@@ -762,7 +762,13 @@ def test_lambda_attribution_is_function_then_class_then_file_and_class_evidence(
     assert index.class_lambda_evidence == {
         f"{path}::Box": ("@lambda:0001", "@lambda:0002")
     }
-    assert all("lambda" not in entity.identity for entity in _records_named(index, "Entity"))
+    assert tuple(
+        entity.identity for entity in _records_named(index, "Entity")
+    ) == (
+        f"{path}::function_owner",
+        f"{path}::Box",
+        f"{path}::Box.method",
+    )
     _assert_deeply_immutable(index)
 
 
