@@ -9,7 +9,6 @@ import json
 import re
 from types import MappingProxyType
 
-import architecture_call_resolver as call_resolver
 from architecture_call_resolver import (
     ResolvedCall,
     ResolvedDependency,
@@ -193,7 +192,7 @@ def _validate_primitives(index: SourceIndex, resolutions: ResolutionIndex,
     _require(set(value) == {"schema_version", "reference_source_sha256",
                             "callsite_evidence", "rows"},
              "invalid primitive envelope keys")
-    rows = call_resolver._read_primitives(call_resolver._Model(index), value)
+    rows = resolutions.validate_primitives(index, value)
     expected = tuple(sorted(rows, key=lambda row:
                             (str(row["selector_kind"]), str(row["selector"]))))
     _require(rows == expected, "noncanonical primitive row order")

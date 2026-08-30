@@ -79,6 +79,16 @@ class ResolutionIndex:
     reference_source_sha256: str
     call_evidence: Mapping[str, CallsiteEvidence]
 
+    def validate_primitives(
+        self, index: SourceIndex, value: object
+    ) -> tuple[Mapping[str, object], ...]:
+        model = _Model(index)
+        _require(
+            self.reference_source_sha256 == model.reference_source_sha256,
+            "resolution source population mismatch",
+        )
+        return _read_primitives(model, value)
+
 
 @dataclass(slots=True)
 class _Binding:
@@ -460,34 +470,24 @@ def _validate_callsite_evidence(model: _Model, record: Mapping[str, object]) -> 
     raise ValueError(f"callsite AST evidence mismatch: {selector}")
 
 
-def _direct_literal(node: ast.AST) -> tuple[str, None | bool | int | str] | None:
-    if not isinstance(node, ast.Constant):
-        return None
-    value = node.value
-    if value is None:
-        return "null", None
-    if type(value) is bool:
-        return "bool", value
-    if type(value) is int:
-        return "int", value
-    if type(value) is str:
-        return "str", value
-    return None
+_LITERAL_KINDS = {type(None): "null", bool: "bool", int: "int", str: "str"}
 
 
 def _callsite_evidence(
     callsite: str, owner: str, call: ast.Call
 ) -> CallsiteEvidence:
     positional = tuple(
-        PositionalLiteralEvidence(index, literal[0], literal[1])
+        PositionalLiteralEvidence(index, kind, argument.value)
         for index, argument in enumerate(call.args)
-        if (literal := _direct_literal(argument)) is not None
+        if isinstance(argument, ast.Constant)
+        and (kind := _LITERAL_KINDS.get(type(argument.value))) is not None
     )
     keywords = tuple(
-        KeywordLiteralEvidence(keyword.arg, literal[0], literal[1])
+        KeywordLiteralEvidence(keyword.arg, kind, keyword.value.value)
         for keyword in call.keywords
         if keyword.arg is not None
-        and (literal := _direct_literal(keyword.value)) is not None
+        and isinstance(keyword.value, ast.Constant)
+        and (kind := _LITERAL_KINDS.get(type(keyword.value.value))) is not None
     )
     return CallsiteEvidence(
         callsite, owner, call.lineno, call.col_offset, positional, keywords
