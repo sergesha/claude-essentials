@@ -1067,6 +1067,89 @@ def test_resolver_callsite_owners_follow_preorder_pruning_and_lambda_attribution
         ) == expected_dumps
 
 
+def test_resolver_async_and_class_owner_preorder_covers_every_indexed_root(
+    tmp_path: Path,
+) -> None:
+    """Freezes decorators/signatures/bases/body order and named-owner pruning."""
+
+    path = "src/lockstep/indexed_owner_roots.py"
+    result = _resolver_fixture(
+        tmp_path,
+        """
+        @async_decorator(async_decorator_argument())
+        async def async_owner(
+            positional: positional_annotation() = positional_default(),
+            /,
+            regular: regular_annotation() = regular_default(),
+            *values: vararg_annotation(),
+            keyword: keyword_annotation() = keyword_default(),
+            **options: kwarg_annotation(),
+        ) -> return_annotation():
+            async_body()
+            def nested_function():
+                nested_function_body()
+            class NestedClass:
+                nested_class_body()
+
+        @class_decorator(class_decorator_argument())
+        class ClassOwner(
+            base_factory(base_argument()),
+            metaclass=metaclass_factory(metaclass_argument()),
+        ):
+            class_body()
+            def nested_method(self):
+                nested_method_body()
+        """,
+        path=path,
+    )
+
+    calls = _resolver_calls(result)
+    expected_by_owner = {
+        f"{path}::async_owner": (
+            "Call(func=Name(id='async_decorator', ctx=Load()), args=[Call(func=Name(id='async_decorator_argument', ctx=Load()), args=[], keywords=[])], keywords=[])",
+            "Call(func=Name(id='async_decorator_argument', ctx=Load()), args=[], keywords=[])",
+            "Call(func=Name(id='positional_annotation', ctx=Load()), args=[], keywords=[])",
+            "Call(func=Name(id='regular_annotation', ctx=Load()), args=[], keywords=[])",
+            "Call(func=Name(id='vararg_annotation', ctx=Load()), args=[], keywords=[])",
+            "Call(func=Name(id='keyword_annotation', ctx=Load()), args=[], keywords=[])",
+            "Call(func=Name(id='keyword_default', ctx=Load()), args=[], keywords=[])",
+            "Call(func=Name(id='kwarg_annotation', ctx=Load()), args=[], keywords=[])",
+            "Call(func=Name(id='positional_default', ctx=Load()), args=[], keywords=[])",
+            "Call(func=Name(id='regular_default', ctx=Load()), args=[], keywords=[])",
+            "Call(func=Name(id='return_annotation', ctx=Load()), args=[], keywords=[])",
+            "Call(func=Name(id='async_body', ctx=Load()), args=[], keywords=[])",
+        ),
+        f"{path}::async_owner.nested_function": (
+            "Call(func=Name(id='nested_function_body', ctx=Load()), args=[], keywords=[])",
+        ),
+        f"{path}::async_owner.NestedClass": (
+            "Call(func=Name(id='nested_class_body', ctx=Load()), args=[], keywords=[])",
+        ),
+        f"{path}::ClassOwner": (
+            "Call(func=Name(id='class_decorator', ctx=Load()), args=[Call(func=Name(id='class_decorator_argument', ctx=Load()), args=[], keywords=[])], keywords=[])",
+            "Call(func=Name(id='class_decorator_argument', ctx=Load()), args=[], keywords=[])",
+            "Call(func=Name(id='base_factory', ctx=Load()), args=[Call(func=Name(id='base_argument', ctx=Load()), args=[], keywords=[])], keywords=[])",
+            "Call(func=Name(id='base_argument', ctx=Load()), args=[], keywords=[])",
+            "Call(func=Name(id='metaclass_factory', ctx=Load()), args=[Call(func=Name(id='metaclass_argument', ctx=Load()), args=[], keywords=[])], keywords=[])",
+            "Call(func=Name(id='metaclass_argument', ctx=Load()), args=[], keywords=[])",
+            "Call(func=Name(id='class_body', ctx=Load()), args=[], keywords=[])",
+        ),
+        f"{path}::ClassOwner.nested_method": (
+            "Call(func=Name(id='nested_method_body', ctx=Load()), args=[], keywords=[])",
+        ),
+    }
+    assert set(calls) == {
+        f"{owner}::call:{ordinal:04d}"
+        for owner, dumps in expected_by_owner.items()
+        for ordinal in range(1, len(dumps) + 1)
+    }
+    for owner, expected_dumps in expected_by_owner.items():
+        assert tuple(
+            calls[f"{owner}::call:{ordinal:04d}"].ast_dump
+            for ordinal in range(1, len(expected_dumps) + 1)
+        ) == expected_dumps
+
+
 def test_resolver_accepts_9999_calls_and_rejects_call_10000_per_owner(
     tmp_path: Path,
 ) -> None:
@@ -1157,9 +1240,7 @@ def test_resolver_exact_name_import_module_class_decorator_and_base_binding(
     ) == f"{path}::Base.inherited"
 
 
-@pytest.mark.parametrize(
-    ("case", "source", "owner", "target"),
-    (
+_LEXICAL_BINDING_CASES = (
         (
             "parameter_is_local",
             """
@@ -1269,8 +1350,13 @@ def test_resolver_exact_name_import_module_class_decorator_and_base_binding(
             "owner",
             None,
         ),
-    ),
-    ids=lambda value: value if isinstance(value, str) and "\n" not in value else None,
+)
+
+
+@pytest.mark.parametrize(
+    ("case", "source", "owner", "target"),
+    _LEXICAL_BINDING_CASES,
+    ids=[case for case, *_rest in _LEXICAL_BINDING_CASES],
 )
 def test_resolver_lexical_binding_never_falls_through_a_local_scope(
     tmp_path: Path,
@@ -1280,6 +1366,111 @@ def test_resolver_lexical_binding_never_falls_through_a_local_scope(
     target: str | None,
 ) -> None:
     path = f"src/lockstep/{case}.py"
+    result = _resolver_fixture(tmp_path, source, path=path)
+    callsite = f"{path}::{owner}::call:0001"
+
+    if target is None:
+        _assert_unresolved_call(result, callsite)
+    else:
+        assert _resolver_target(result, callsite) == f"{path}::{target}"
+
+
+_LEXICAL_FRAME_CASES = (
+    (
+        "positional_only_parameter",
+        """
+        def target():
+            pass
+        def owner(target, /):
+            target()
+        """,
+        "owner",
+        None,
+    ),
+    (
+        "keyword_only_parameter",
+        """
+        def target():
+            pass
+        def owner(*, target):
+            target()
+        """,
+        "owner",
+        None,
+    ),
+    (
+        "vararg_parameter",
+        """
+        def target():
+            pass
+        def owner(*target):
+            target()
+        """,
+        "owner",
+        None,
+    ),
+    (
+        "kwarg_parameter",
+        """
+        def target():
+            pass
+        def owner(**target):
+            target()
+        """,
+        "owner",
+        None,
+    ),
+    (
+        "lambda_parameter",
+        """
+        def target():
+            pass
+        def owner():
+            callback = lambda target: target()
+        """,
+        "owner",
+        None,
+    ),
+    (
+        "ordinary_nested_closure",
+        """
+        def outer():
+            def target():
+                pass
+            def owner():
+                target()
+        """,
+        "outer.owner",
+        "outer.target",
+    ),
+    (
+        "method_bare_name_skips_class_namespace",
+        """
+        class Container:
+            def target(self):
+                pass
+            def owner(self):
+                target()
+        """,
+        "Container.owner",
+        None,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("case", "source", "owner", "target"),
+    _LEXICAL_FRAME_CASES,
+    ids=[case for case, *_rest in _LEXICAL_FRAME_CASES],
+)
+def test_resolver_lexical_frames_cover_every_parameter_and_class_skip_rule(
+    tmp_path: Path,
+    case: str,
+    source: str,
+    owner: str,
+    target: str | None,
+) -> None:
+    path = f"src/lockstep/frame_{case}.py"
     result = _resolver_fixture(tmp_path, source, path=path)
     callsite = f"{path}::{owner}::call:0001"
 
@@ -1358,9 +1549,7 @@ def test_resolver_binding_applies_symbol_rules_to_decorators_and_bases(
     ) == f"{path}::Base.inherited"
 
 
-@pytest.mark.parametrize(
-    ("case", "source", "owner"),
-    (
+_INVALID_REDIRECT_CASES = (
         (
             "duplicate_global",
             """
@@ -1507,8 +1696,13 @@ def test_resolver_binding_applies_symbol_rules_to_decorators_and_bases(
             """,
             "outer.owner",
         ),
-    ),
-    ids=lambda value: value if isinstance(value, str) and "\n" not in value else None,
+)
+
+
+@pytest.mark.parametrize(
+    ("case", "source", "owner"),
+    _INVALID_REDIRECT_CASES,
+    ids=[case for case, *_rest in _INVALID_REDIRECT_CASES],
 )
 def test_resolver_binding_rejects_invalid_global_and_nonlocal_declarations(
     tmp_path: Path,
@@ -1521,44 +1715,117 @@ def test_resolver_binding_rejects_invalid_global_and_nonlocal_declarations(
     _assert_unresolved_call(result, f"{path}::{owner}::call:0001")
 
 
-_CONDITIONAL_RECEIVER_ASSIGNMENTS = (
-    ("if", "if flag:\n    receiver = Worker()"),
-    ("for", "for _ in items:\n    receiver = Worker()"),
-    ("comprehension", "values = [(receiver := Worker()) for _ in items]"),
-    ("while", "while flag:\n    receiver = Worker()\n    break"),
-    ("try", "try:\n    receiver = Worker()\nexcept Exception:\n    pass"),
-    ("except", "try:\n    pass\nexcept Exception:\n    receiver = Worker()"),
-    ("finally", "try:\n    pass\nfinally:\n    receiver = Worker()"),
-    ("with", "with manager as receiver:\n    pass"),
-    ("match", "match subject:\n    case receiver:\n        pass"),
-    ("conditional_expression", "receiver = Worker() if flag else Worker()"),
-    ("short_circuit", "receiver = flag and Worker()"),
+_CONDITIONAL_BINDING_CASES = (
+    (
+        "if",
+        "if flag:\n    receiver = Worker()",
+        "if flag:\n    alias = target",
+        "if flag:\n    self.dependency = dependency",
+    ),
+    (
+        "for",
+        "for _ in items:\n    receiver = Worker()",
+        "for _ in items:\n    alias = target",
+        "for _ in items:\n    self.dependency = dependency",
+    ),
+    (
+        "comprehension",
+        "values = [(receiver := Worker()) for _ in items]",
+        "values = [(alias := target) for _ in items]",
+        "values = [value for self.dependency in (dependency,)]",
+    ),
+    (
+        "while",
+        "while flag:\n    receiver = Worker()\n    break",
+        "while flag:\n    alias = target\n    break",
+        "while flag:\n    self.dependency = dependency\n    break",
+    ),
+    (
+        "try",
+        "try:\n    receiver = Worker()\nexcept Exception:\n    pass",
+        "try:\n    alias = target\nexcept Exception:\n    pass",
+        "try:\n    self.dependency = dependency\nexcept Exception:\n    pass",
+    ),
+    (
+        "except",
+        "try:\n    pass\nexcept Exception:\n    receiver = Worker()",
+        "try:\n    pass\nexcept Exception:\n    alias = target",
+        "try:\n    pass\nexcept Exception:\n    self.dependency = dependency",
+    ),
+    (
+        "finally",
+        "try:\n    pass\nfinally:\n    receiver = Worker()",
+        "try:\n    pass\nfinally:\n    alias = target",
+        "try:\n    pass\nfinally:\n    self.dependency = dependency",
+    ),
+    (
+        "with",
+        "with manager as receiver:\n    pass",
+        "with manager as alias:\n    pass",
+        "with manager as self.dependency:\n    pass",
+    ),
+    (
+        "match",
+        "match subject:\n    case receiver:\n        pass",
+        "match subject:\n    case alias:\n        pass",
+        "match subject:\n    case 0:\n        self.dependency = dependency",
+    ),
+    (
+        "conditional_expression",
+        "receiver = Worker() if flag else Worker()",
+        "alias = target if flag else target",
+        "self.dependency = dependency if flag else dependency",
+    ),
+    (
+        "short_circuit",
+        "receiver = flag and Worker()",
+        "alias = flag and target",
+        "self.dependency = flag and dependency",
+    ),
     (
         "lambda",
         "builder = lambda: (receiver := Worker())\nbuilder()",
+        "builder = lambda: (alias := target)\nbuilder()",
+        "builder = lambda: dependency\nself.dependency = builder()",
     ),
-    ("assignment_expression", "if (receiver := Worker()):\n    pass"),
+    (
+        "assignment_expression",
+        "if (receiver := Worker()):\n    pass",
+        "if (alias := target):\n    pass",
+        "if (bound := dependency):\n    self.dependency = bound",
+    ),
     (
         "mutually_exclusive_branches",
         "if flag:\n    receiver = Worker()\nelse:\n    receiver = Worker()",
+        "if flag:\n    alias = target\nelse:\n    alias = target",
+        "if flag:\n    self.dependency = dependency\nelse:\n    self.dependency = dependency",
     ),
     (
         "exception_target_cleanup",
         "try:\n    pass\nexcept Exception as receiver:\n    pass",
+        "try:\n    pass\nexcept Exception as alias:\n    pass",
+        "try:\n    pass\nexcept Exception as ignored:\n    self.dependency = dependency",
     ),
-    ("loop_target", "for receiver in items:\n    pass"),
+    (
+        "loop_target",
+        "for receiver in items:\n    pass",
+        "for alias in items:\n    pass",
+        "for _ in items:\n    self.dependency = dependency",
+    ),
 )
 
 
 @pytest.mark.parametrize(
-    ("case", "assignment"),
-    _CONDITIONAL_RECEIVER_ASSIGNMENTS,
-    ids=[case for case, _assignment in _CONDITIONAL_RECEIVER_ASSIGNMENTS],
+    ("case", "assignment", "_alias_assignment", "_injection_assignment"),
+    _CONDITIONAL_BINDING_CASES,
+    ids=[case for case, *_rest in _CONDITIONAL_BINDING_CASES],
 )
 def test_resolver_receiver_assignment_is_unconditional_across_every_control_form(
     tmp_path: Path,
     case: str,
     assignment: str,
+    _alias_assignment: str,
+    _injection_assignment: str,
 ) -> None:
     path = f"src/lockstep/conditional_{case}.py"
     source = (
@@ -1577,6 +1844,104 @@ def test_resolver_receiver_assignment_is_unconditional_across_every_control_form
         and "attr='run'" in record.ast_dump
     ]
     assert len(receiver_calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("case", "_receiver_assignment", "assignment", "_injection_assignment"),
+    _CONDITIONAL_BINDING_CASES,
+    ids=[case for case, *_rest in _CONDITIONAL_BINDING_CASES],
+)
+def test_resolver_binding_rejects_symbol_aliases_in_every_conditional_form(
+    tmp_path: Path,
+    case: str,
+    _receiver_assignment: str,
+    assignment: str,
+    _injection_assignment: str,
+) -> None:
+    path = f"src/lockstep/conditional_alias_{case}.py"
+    source = (
+        "def target():\n"
+        "    pass\n"
+        "def owner(flag=False, items=(), manager=None, subject=None):\n"
+        f"{textwrap.indent(assignment, '    ')}\n"
+        "    alias()\n"
+    )
+    result = _resolver_fixture(tmp_path, source, path=path)
+    alias_calls = [
+        record
+        for record in _records_named(result, "UnresolvedCall")
+        if record.ast_dump == "Call(func=Name(id='alias', ctx=Load()), args=[], keywords=[])"
+    ]
+    assert len(alias_calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("case", "_receiver_assignment", "assignment", "_injection_assignment"),
+    _CONDITIONAL_BINDING_CASES,
+    ids=[case for case, *_rest in _CONDITIONAL_BINDING_CASES],
+)
+def test_resolver_binding_rejects_conditional_module_aliases_in_decorator_and_base(
+    tmp_path: Path,
+    case: str,
+    _receiver_assignment: str,
+    assignment: str,
+    _injection_assignment: str,
+) -> None:
+    path = f"src/lockstep/conditional_module_alias_{case}.py"
+    decorator_assignment = (
+        assignment.replace("alias", "decorator_alias")
+        .replace("target", "imported_decorator")
+        .replace("builder", "decorator_builder")
+    )
+    base_assignment = (
+        assignment.replace("alias", "base_alias")
+        .replace("target", "Base")
+        .replace("builder", "base_builder")
+    )
+    source = (
+        "from package import decorate as imported_decorator\n"
+        "class Base:\n"
+        "    def inherited(self):\n"
+        "        pass\n"
+        f"{decorator_assignment}\n"
+        f"{base_assignment}\n"
+        "@decorator_alias()\n"
+        "class Child(base_alias):\n"
+        "    def owner(self):\n"
+        "        self.inherited()\n"
+    )
+    result = _resolver_fixture(tmp_path, source, path=path)
+
+    _assert_unresolved_call(result, f"{path}::Child::call:0001")
+    _assert_unresolved_call(result, f"{path}::Child.owner::call:0001")
+
+
+@pytest.mark.parametrize(
+    ("case", "_receiver_assignment", "_alias_assignment", "assignment"),
+    _CONDITIONAL_BINDING_CASES,
+    ids=[case for case, *_rest in _CONDITIONAL_BINDING_CASES],
+)
+def test_resolver_receiver_rejects_annotated_injection_in_every_conditional_form(
+    tmp_path: Path,
+    case: str,
+    _receiver_assignment: str,
+    _alias_assignment: str,
+    assignment: str,
+) -> None:
+    path = f"src/lockstep/conditional_injection_{case}.py"
+    source = (
+        "class Dependency:\n"
+        "    def work(self):\n"
+        "        pass\n"
+        "class Service:\n"
+        "    def __init__(self, dependency: Dependency, flag=False, "
+        "items=(), manager=None, subject=None):\n"
+        f"{textwrap.indent(assignment, '        ')}\n"
+        "    def run(self):\n"
+        "        self.dependency.work()\n"
+    )
+    result = _resolver_fixture(tmp_path, source, path=path)
+    _assert_unresolved_call(result, f"{path}::Service.run::call:0001")
 
 
 def test_resolver_self_cls_and_super_use_unique_declared_inheritance(
@@ -1622,17 +1987,61 @@ def test_resolver_self_cls_and_super_use_unique_declared_inheritance(
     ) == "builtins.super"
 
 
+def test_resolver_self_cls_and_super_choose_same_named_method_by_receiver(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/inheritance_same_name.py"
+    result = _resolver_fixture(
+        tmp_path,
+        """
+        class Base:
+            def shared(self):
+                pass
+
+        class Child(Base):
+            def shared(self):
+                pass
+            def instance(self):
+                self.shared()
+            @classmethod
+            def class_side(cls):
+                cls.shared()
+            def parent(self):
+                super().shared()
+        """,
+        path=path,
+        allowlist=frozenset({"builtins.super"}),
+    )
+
+    assert _resolver_target(
+        result, f"{path}::Child.instance::call:0001"
+    ) == f"{path}::Child.shared"
+    assert _resolver_target(
+        result, f"{path}::Child.class_side::call:0001"
+    ) == f"{path}::Child.shared"
+    assert _resolver_target(
+        result, f"{path}::Child.parent::call:0001"
+    ) == f"{path}::Base.shared"
+    assert _resolver_target(
+        result, f"{path}::Child.parent::call:0002"
+    ) == "builtins.super"
+
+
+_AMBIGUOUS_INHERITANCE_CASES = (
+    ("self", "self", "", "self"),
+    ("cls", "cls", "@classmethod\n    ", "cls"),
+    ("super", "super()", "", "self"),
+)
+
+
 @pytest.mark.parametrize(
-    ("receiver", "decorator", "parameter"),
-    (
-        ("self", "", "self"),
-        ("cls", "@classmethod\n    ", "cls"),
-        ("super()", "", "self"),
-    ),
-    ids=("self", "cls", "super"),
+    ("case", "receiver", "decorator", "parameter"),
+    _AMBIGUOUS_INHERITANCE_CASES,
+    ids=[case for case, *_rest in _AMBIGUOUS_INHERITANCE_CASES],
 )
 def test_resolver_receiver_rejects_ambiguous_inheritance(
     tmp_path: Path,
+    case: str,
     receiver: str,
     decorator: str,
     parameter: str,
@@ -1793,9 +2202,7 @@ def test_resolver_receiver_accepts_one_class_wide_constructor_field(
     ) == f"{path}::Worker.run"
 
 
-@pytest.mark.parametrize(
-    ("case", "extra"),
-    (
+_CLASS_FIELD_INVALIDATIONS = (
         (
             "different_constructor",
             "def replace(self):\n    self.worker = Other()",
@@ -1810,7 +2217,13 @@ def test_resolver_receiver_accepts_one_class_wide_constructor_field(
             "conditional_assignment",
             "def replace(self, flag):\n    if flag:\n        self.worker = Worker()",
         ),
-    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("case", "extra"),
+    _CLASS_FIELD_INVALIDATIONS,
+    ids=[case for case, *_rest in _CLASS_FIELD_INVALIDATIONS],
 )
 def test_resolver_receiver_rejects_nonuniform_class_wide_field_bindings(
     tmp_path: Path,
@@ -1836,12 +2249,16 @@ def test_resolver_receiver_rejects_nonuniform_class_wide_field_bindings(
     _assert_unresolved_call(result, f"{path}::Service.run::call:0001")
 
 
+_ANNOTATED_INJECTION_CASES = (
+    ("name", "from lockstep.dependency import Dependency", "Dependency"),
+    ("attribute", "import lockstep.dependency as dep", "dep.Dependency"),
+)
+
+
 @pytest.mark.parametrize(
     ("case", "import_line", "annotation"),
-    (
-        ("name", "from lockstep.dependency import Dependency", "Dependency"),
-        ("attribute", "import lockstep.dependency as dep", "dep.Dependency"),
-    ),
+    _ANNOTATED_INJECTION_CASES,
+    ids=[case for case, *_rest in _ANNOTATED_INJECTION_CASES],
 )
 def test_resolver_receiver_accepts_exact_annotated_parameter_injection(
     tmp_path: Path,
@@ -2152,16 +2569,20 @@ def test_resolver_binding_rejects_rebound_conditional_and_indirect_symbol_aliase
     _assert_unresolved_call(result, f"{path}::owner::call:0001")
 
 
+_DYNAMIC_CALL_CASES = (
+    ("unknown_name", "unknown()"),
+    ("parameter_receiver", "value.method()"),
+    ("nested_dynamic_attribute", "module.dynamic.method()"),
+    ("reflective_getattr", "getattr(value, 'method')()"),
+    ("dunder_reflection", "value.__getattribute__('method')()"),
+    ("subscript_callable", "registry['handler']()"),
+)
+
+
 @pytest.mark.parametrize(
     ("case", "expression"),
-    (
-        ("unknown_name", "unknown()"),
-        ("parameter_receiver", "value.method()"),
-        ("nested_dynamic_attribute", "module.dynamic.method()"),
-        ("reflective_getattr", "getattr(value, 'method')()"),
-        ("dunder_reflection", "value.__getattribute__('method')()"),
-        ("subscript_callable", "registry['handler']()"),
-    ),
+    _DYNAMIC_CALL_CASES,
+    ids=[case for case, *_rest in _DYNAMIC_CALL_CASES],
 )
 def test_resolver_callsite_dynamic_and_reflective_forms_remain_unresolved(
     tmp_path: Path,
