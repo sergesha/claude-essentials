@@ -4958,6 +4958,37 @@ def test_resolver_dependency_reexport_target_changes_without_reference_drift(
     ) == "src/lockstep/second.py::Decorator"
 
 
+def test_resolver_dependency_resolves_covered_external_factory_decorator(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/external_factory_decorator.py"
+    result = _resolver_fixture(
+        tmp_path,
+        "from dataclasses import dataclass\n@dataclass(frozen=True)\nclass Owner:\n    pass\n",
+        path=path,
+        allowlist=("dataclasses.dataclass",),
+    )
+
+    assert _resolver_dependency_target(
+        result, f"{path}::Owner::dependency:0001"
+    ) == "dataclasses.dataclass"
+
+
+def test_resolver_dependency_normalizes_parameterized_base_to_origin(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/parameterized_base.py"
+    result = _resolver_fixture(
+        tmp_path,
+        "from collections.abc import Mapping\nclass Owner(Mapping[str, object]):\n    pass\n",
+        path=path,
+    )
+
+    assert _resolver_dependency_target(
+        result, f"{path}::Owner::dependency:0001"
+    ) == "collections.abc.Mapping"
+
+
 def test_resolver_dependency_owner_preorder_prunes_nested_owners_and_path_delimiters(
     tmp_path: Path,
 ) -> None:

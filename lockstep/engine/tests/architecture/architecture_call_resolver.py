@@ -669,7 +669,22 @@ class _Resolver:
             return self._normalize_target(str(binding.value), "import")
         return None
 
-    def _resolve_expr(self, scope: _Scope, expression: ast.AST) -> _Target | None:
+    def _resolve_expr(
+        self,
+        scope: _Scope,
+        expression: ast.AST,
+        dependency_kind: str | None = None,
+        call_records: Mapping[int, object] | None = None,
+    ) -> _Target | None:
+        if isinstance(expression, ast.Call):
+            record = (call_records or {}).get(id(expression))
+            return (_Target(record.target, "covered-external-decorator")
+                    if isinstance(record, ResolvedCall)
+                    and not record.target.startswith("src/") else None)
+        if dependency_kind == "base" and isinstance(expression, ast.Subscript):
+            origin = self._resolve_expr(scope, expression.value)
+            return (origin if origin is not None
+                    and not origin.label.startswith("src/") else None)
         if isinstance(expression, ast.Name):
             return self._resolve_name(scope, expression.id, expression)
         if isinstance(expression, ast.Attribute):
@@ -1023,6 +1038,7 @@ class _Resolver:
 
     def result(self) -> ResolutionIndex:
         records: dict[str, object] = {}
+        call_records: dict[int, object] = {}
         call_evidence: dict[str, CallsiteEvidence] = {}
         callsite_primitives = {str(row["selector"]): row for row in self.primitives
                                if row["selector_kind"] == "callsite"}
@@ -1038,8 +1054,10 @@ class _Resolver:
                 raise ValueError(f"owner exceeds 9,999 callsites: {owner}")
             for ordinal, call in enumerate(calls, 1):
                 callsite = f"{owner}::call:{ordinal:04d}"
-                records[callsite] = self._resolve_record(
+                record = self._resolve_record(
                     callsite, call, callsite_primitives, entity_primitives, used_rows)
+                records[callsite] = record
+                call_records[id(call)] = record
                 call_evidence[callsite] = _callsite_evidence(callsite, owner, call)
         for row in self.primitives:
             binding = str(row["selector_kind"]), str(row["selector"])
@@ -1083,7 +1101,9 @@ class _Resolver:
             assert parent is not None
             for ordinal, (kind, expression) in enumerate(expressions, 1):
                 reference = f"{scope.identity}::dependency:{ordinal:04d}"
-                target = self._resolve_expr(parent, expression)
+                target = self._resolve_expr(
+                    parent, expression, kind,
+                    {"decorator": call_records}.get(kind))
                 if target is None:
                     dependency_evidence[reference] = UnresolvedDependency(
                         reference,
