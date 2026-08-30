@@ -529,17 +529,21 @@ def test_source_index_covers_every_tracked_python_file() -> None:
     _assert_deeply_immutable(index)
 
 
-def test_source_index_accepts_an_exact_supplied_snapshot(tmp_path: Path) -> None:
+@pytest.mark.parametrize("first_key", ("src/lockstep/one.py", r"src\lockstep\one.py"))
+def test_source_index_accepts_an_exact_supplied_snapshot(
+    tmp_path: Path, first_key: str
+) -> None:
     paths = ("src/lockstep/one.py", "src/lockstep/two.py")
-    files = {paths[0]: b"one = 1\n", paths[1]: b"two = 2\n"}
+    files = {first_key: b"one = 1\n", paths[1]: b"two = 2\n"}
 
     index = build_source_index(tmp_path, paths, files)
 
-    assert dict(index.files) == files
+    assert dict(index.files) == {paths[0]: b"one = 1\n", paths[1]: b"two = 2\n"}
 
 
 @pytest.mark.parametrize(
-    "kind", ("normalized_collision", "missing", "extra", "extra_non_bytes")
+    "kind",
+    ("normalized_collision", "missing", "extra", "extra_non_bytes", "substitution"),
 )
 def test_source_index_rejects_an_inexact_supplied_snapshot(
     tmp_path: Path, kind: str
@@ -549,9 +553,17 @@ def test_source_index_rejects_an_inexact_supplied_snapshot(
     if kind == "normalized_collision":
         files[r"src\lockstep\one.py"] = b"one = 2\n"
         error, message = ValueError, "duplicate normalized supplied path: src/lockstep/one.py"
-    elif kind == "missing":
+    elif kind in {"missing", "substitution"}:
         del files[paths[1]]
-        error, message = ValueError, "supplied files missing tracked paths: src/lockstep/two.py"
+        if kind == "substitution":
+            files["src/lockstep/extra.py"] = b"extra = 3\n"
+            message = (
+                "supplied files mismatch: missing src/lockstep/two.py; "
+                "extra src/lockstep/extra.py"
+            )
+        else:
+            message = "supplied files missing tracked paths: src/lockstep/two.py"
+        error = ValueError
     else:
         files["src/lockstep/extra.py"] = (
             b"extra = 3\n" if kind == "extra" else "not bytes"
@@ -846,13 +858,13 @@ def test_legacy_metrics_characterize_current_complexity_length_and_pruned_fanout
         b"        work()\n"
         b"    except ValueError:\n"
         b"        recover()\n"
-        b"    def nested():\n"
+        b"    def duplicate():\n"
         b"        while condition():\n"
         b"            one()\n"
         b"            if deeper():\n"
         b"                two()\n"
         b"    class Nested:\n"
-        b"        def method(self):\n"
+        b"        def duplicate(self):\n"
         b"            if gate():\n"
         b"                inside()\n"
         b"    hidden = lambda: (lambda_call(), lambda_other())\n"
@@ -877,10 +889,10 @@ def test_legacy_metrics_characterize_current_complexity_length_and_pruned_fanout
         b"        pass\n"
     )
     identities = (
-        f"{path}::parent",
-        f"{path}::parent.nested",
-        f"{path}::parent.Nested.method",
         f"{path}::branch_forms",
+        f"{path}::parent.Nested.duplicate",
+        f"{path}::parent",
+        f"{path}::parent.duplicate",
     )
     index = _LegacyIndexFixture(
         entities=MappingProxyType({
@@ -902,8 +914,8 @@ def test_legacy_metrics_characterize_current_complexity_length_and_pruned_fanout
         for identity, metric in metrics.items()
     } == {
         f"{path}::parent": (24, 7, 10, 3, 8),
-        f"{path}::parent.nested": (5, 3, 3, 2, 4),
-        f"{path}::parent.Nested.method": (3, 2, 1, 1, 2),
+        f"{path}::parent.duplicate": (5, 3, 3, 2, 4),
+        f"{path}::parent.Nested.duplicate": (3, 2, 1, 1, 2),
         f"{path}::branch_forms": (18, 11, 14, 2, 2),
     }
     assert {field.name for field in fields(next(iter(metrics.values())))} == set(
