@@ -1443,8 +1443,6 @@ def test_resolver_callsite_owners_follow_preorder_pruning_and_lambda_attribution
             calls[f"{owner}::call:{ordinal:04d}"].ast_dump
             for ordinal in range(1, len(expected_dumps) + 1)
         ) == expected_dumps
-
-
 def test_resolver_async_and_class_owner_preorder_covers_every_indexed_root(
     tmp_path: Path,
 ) -> None:
@@ -4540,12 +4538,17 @@ def test_resolver_dependency_result_records_and_mappings_are_deeply_immutable(
         path=path,
     )
 
-    assert {field.name for field in fields(result)} == {
+    assert tuple(field.name for field in fields(result)) == (
         "calls",
         "aliases",
         "receivers",
         "dependencies",
-    }
+        "reference_source_sha256",
+        "call_evidence",
+    )
+    assert type(result).__slots__ == tuple(
+        field.name for field in fields(result)
+    )
     dependencies = _resolver_dependencies(result)
     resolved_dependencies = _records_named(result, "ResolvedDependency")
     unresolved_dependencies = _records_named(result, "UnresolvedDependency")
@@ -4568,6 +4571,170 @@ def test_resolver_dependency_result_records_and_mappings_are_deeply_immutable(
         "ast_dump",
     }
     _assert_deeply_immutable(result)
+
+
+def test_resolver_call_evidence_records_are_public_frozen_and_slotted() -> None:
+    positional_type = call_resolver.PositionalLiteralEvidence
+    keyword_type = call_resolver.KeywordLiteralEvidence
+    callsite_type = call_resolver.CallsiteEvidence
+    positional = positional_type(0, "int", 7)
+    keyword = keyword_type("flag", "bool", True)
+    callsite = callsite_type(
+        "src/lockstep/sample.py::owner::call:0001",
+        "src/lockstep/sample.py::owner",
+        3,
+        4,
+        (positional,),
+        (keyword,),
+    )
+
+    assert tuple(field.name for field in fields(positional)) == (
+        "index", "type", "value"
+    )
+    assert tuple(field.name for field in fields(keyword)) == (
+        "name", "type", "value"
+    )
+    assert tuple(field.name for field in fields(callsite)) == (
+        "callsite", "owner", "line", "column", "positional", "keywords"
+    )
+    for record in (positional, keyword, callsite):
+        assert type(record).__slots__ == tuple(
+            field.name for field in fields(record)
+        )
+        _assert_deeply_immutable(record)
+
+
+def test_resolver_call_evidence_preserves_all_owner_keys_and_iteration_order(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/evidence_owners.py"
+    result = _resolver_fixture(
+        tmp_path,
+        """
+        def owner():
+            body()
+            local_lambda = lambda: function_lambda()
+            class Nested:
+                class_owned = lambda: nested_class_lambda()
+
+        class Box:
+            class_owned = lambda: class_lambda()
+
+        file_owned = lambda: file_lambda()
+        file_call()
+        """,
+        path=path,
+    )
+
+    assert tuple(result.call_evidence) == tuple(result.calls)
+    owners = {
+        evidence.owner for evidence in result.call_evidence.values()
+    }
+    assert owners == {
+        f"{path}::owner",
+        f"{path}::owner.Nested",
+        f"{path}::Box",
+        f"{path}::@file",
+    }
+    assert all(
+        evidence.callsite == callsite
+        and evidence.owner == callsite.rsplit("::call:", 1)[0]
+        for callsite, evidence in result.call_evidence.items()
+    )
+
+
+def test_resolver_emits_exact_ordered_literal_evidence_for_every_callsite(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/literal_evidence.py"
+    source = _resolver_source(
+        """
+        def owner(callback, dynamic):
+            callback(None, dynamic, True, 1.5, 7, "text", *(),
+                     named="ok", flag=False, count=3, bad=dynamic, **{})
+        """
+    )
+    index = _fixture_index({path: source}, tmp_path)
+    result = resolve_calls(index, (), ())
+    callsite = f"{path}::owner::call:0001"
+
+    assert tuple(result.call_evidence) == tuple(result.calls) == (callsite,)
+    evidence = result.call_evidence[callsite]
+    assert evidence.callsite == callsite
+    assert evidence.owner == f"{path}::owner"
+    assert evidence.line > 0
+    assert evidence.column >= 0
+    assert tuple(
+        (item.index, item.type, item.value) for item in evidence.positional
+    ) == (
+        (0, "null", None),
+        (2, "bool", True),
+        (4, "int", 7),
+        (5, "str", "text"),
+    )
+    assert tuple(
+        (item.name, item.type, item.value) for item in evidence.keywords
+    ) == (
+        ("named", "str", "ok"),
+        ("flag", "bool", False),
+        ("count", "int", 3),
+    )
+    assert tuple(type(item.value) for item in evidence.positional) == (
+        type(None),
+        bool,
+        int,
+        str,
+    )
+    assert tuple(type(item.value) for item in evidence.keywords) == (
+        str,
+        bool,
+        int,
+    )
+    _assert_deeply_immutable(result)
+
+
+def test_resolver_binds_resolution_index_to_exact_source_population(
+    tmp_path: Path,
+) -> None:
+    files = {
+        "src/lockstep/zeta.py": b"def zeta():\n    pass\n",
+        "src/lockstep/alpha.py": b"def alpha():\n    pass\n",
+    }
+    index = _fixture_index(files, tmp_path)
+    result = resolve_calls(index, (), ())
+    population = [
+        {"path": path, "source_sha256": index.file_sha256[path]}
+        for path in sorted(index.files)
+    ]
+
+    assert result.reference_source_sha256 == _canonical_sha256(population)
+    assert isinstance(result.call_evidence, MappingProxyType)
+
+
+def test_resolver_accepts_only_exact_internal_entity_primitive_binding(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/internal_entity_primitive.py"
+    target = f"{path}::target"
+    source = """
+        def target():
+            pass
+        def owner():
+            target()
+    """
+    accepted = _resolver_fixture_with_primitive_rows(
+        tmp_path, source, (_primitive_entity_row(target),), path=path
+    )
+    assert _resolver_target(accepted, f"{path}::owner::call:0001") == target
+
+    mismatched = {
+        **_primitive_entity_row(target),
+        "semantic_target": f"{path}::other",
+    }
+    with pytest.raises(ValueError, match="internal entity primitive"):
+        _resolver_fixture_with_primitive_rows(
+            tmp_path, source, (mismatched,), path=path
+        )
 
 
 def test_resolver_dependency_records_are_public_frozen_and_slotted() -> None:
