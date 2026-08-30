@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ast
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass, replace
 import hashlib
 import json
 import operator
@@ -17,6 +17,7 @@ from types import MappingProxyType
 import pytest
 
 import architecture_call_resolver as call_resolver
+import architecture_domain_lifecycle as domain_lifecycle
 from architecture_candidate_policy import evaluate_candidates
 from architecture_call_resolver import resolve_calls
 from architecture_diagnostics import render_report
@@ -5317,4 +5318,1179 @@ def test_resolver_dependency_unresolved_evidence_keeps_expression_calls_once(
         f"{path}::factory",
         f"{path}::factory",
         f"{path}::metaclass_factory",
+    )
+
+
+_LIFECYCLE_TRANSITIONS = (
+    ("owner/provisioning", "owner.capture", ("absent",), "captured"),
+    ("owner/provisioning", "owner.replace", ("captured",), "captured"),
+    ("owner/provisioning", "owner.revoke", ("captured",), "revoked"),
+    ("admission/commitment", "admission.admit", ("planned",), "admitted"),
+    ("admission/commitment", "admission.park", ("admitted",), "parked"),
+    ("admission/commitment", "commitment.hold", ("admitted",), "held"),
+    ("admission/commitment", "commitment.commit", ("held",), "committed"),
+    ("process-execution", "process.prepare", ("absent",), "prepared"),
+    ("process-execution", "process.launch", ("prepared",), "launching"),
+    ("process-execution", "process.running", ("launching",), "running"),
+    ("process-execution", "process.terminal", ("running",), "terminal"),
+    (
+        "process-execution",
+        "process.indeterminate",
+        ("launching", "running"),
+        "indeterminate",
+    ),
+    (
+        "process-execution",
+        "process.cancel",
+        ("prepared", "launching", "running"),
+        "cancelled",
+    ),
+    ("artifact/acceptance", "artifact.register", ("declared",), "registered"),
+    (
+        "artifact/acceptance",
+        "artifact.materialize",
+        ("registered",),
+        "materialized",
+    ),
+    ("artifact/acceptance", "consent.issue", ("pending",), "issued"),
+    ("artifact/acceptance", "consent.redeem", ("issued",), "redeemed"),
+    ("publication", "publication.prepare", ("absent",), "prepared"),
+    ("publication", "publication.apply", ("prepared",), "applied"),
+    ("publication", "publication.rollback", ("prepared",), "rolled-back"),
+    ("delivery", "delivery.pending", ("absent",), "pending"),
+    ("delivery", "delivery.deliver", ("pending",), "delivered"),
+    ("recovery/watch", "recovery.claim", ("eligible",), "claimed"),
+    ("recovery/watch", "recovery.defer", ("claimed",), "eligible"),
+    (
+        "recovery/watch",
+        "recovery.acknowledge",
+        ("claimed",),
+        "acknowledged",
+    ),
+    ("authoring-publication", "authoring.plan", ("absent",), "planned"),
+    (
+        "authoring-publication",
+        "authoring.replace",
+        ("planned",),
+        "replaced",
+    ),
+    (
+        "authoring-publication",
+        "authoring.directory-durable",
+        ("replaced",),
+        "directory-durable",
+    ),
+)
+
+
+def _lifecycle_table(
+    rows: tuple[Mapping[str, object], ...] = (),
+) -> Mapping[str, object]:
+    return {
+        "schema": "lockstep.architecture-lifecycle/v1",
+        "transitions": [
+            {
+                "cluster": cluster,
+                "transition_id": transition_id,
+                "from": list(from_states),
+                "to": to_state,
+            }
+            for cluster, transition_id, from_states, to_state in _LIFECYCLE_TRANSITIONS
+        ],
+        "rows": [dict(row) for row in rows],
+    }
+
+
+def _semantic_digest_inputs():
+    return domain_lifecycle.SemanticDigestInputs(
+        allowlist_digest="a" * 64,
+        schema_digest="b" * 64,
+        threshold_digest="c" * 64,
+        analyzer_version="task-12c-test",
+        rule_version="v1",
+    )
+
+
+def _propagate_fixture(
+    tmp_path: Path,
+    source: str,
+    *,
+    path: str = "src/lockstep/semantic_fixture.py",
+    primitive_rows: tuple[Mapping[str, object], ...] = (),
+    lifecycle_rows: tuple[Mapping[str, object], ...] = (),
+    extra_files: Mapping[str, str] | None = None,
+):
+    files = {path: _resolver_source(source)}
+    files.update(
+        {
+            extra_path: _resolver_source(extra_source)
+            for extra_path, extra_source in (extra_files or {}).items()
+        }
+    )
+    index = _fixture_index(files, tmp_path)
+    primitives = _primitive_table(index, primitive_rows)
+    resolutions = resolve_calls(index, (), primitives)
+    semantics = propagate_semantics(
+        index,
+        resolutions,
+        primitives,
+        _lifecycle_table(lifecycle_rows),
+        digest_inputs=_semantic_digest_inputs(),
+    )
+    return index, resolutions, semantics
+
+
+def test_domain_lifecycle_records_are_exact_frozen_slotted_and_deeply_immutable() -> None:
+    exact_fields = {
+        "SemanticDigestInputs": (
+            "allowlist_digest",
+            "schema_digest",
+            "threshold_digest",
+            "analyzer_version",
+            "rule_version",
+        ),
+        "EntitySemantics": (
+            "identity",
+            "direct_domains",
+            "propagated_domains",
+            "direct_transitions",
+            "propagated_transitions",
+            "propagated_lifecycle_clusters",
+            "semantic_dependency_sha256",
+        ),
+        "FileSemantics": (
+            "identity",
+            "propagated_domains",
+            "propagated_transitions",
+            "propagated_lifecycle_clusters",
+            "semantic_dependency_sha256",
+        ),
+        "OneHopSemantics": (
+            "identity",
+            "root",
+            "members",
+            "propagated_domains",
+            "propagated_transitions",
+            "propagated_lifecycle_clusters",
+            "semantic_dependency_sha256",
+        ),
+        "SemanticIndex": (
+            "entities",
+            "files",
+            "primitive_digest",
+            "lifecycle_digest",
+            "digest_inputs",
+        ),
+    }
+
+    for name, expected in exact_fields.items():
+        record_type = getattr(domain_lifecycle, name)
+        assert tuple(field.name for field in fields(record_type)) == expected
+        assert record_type.__slots__ == expected
+        assert record_type.__dataclass_params__.frozen
+
+
+def test_domain_lifecycle_semantics_propagate_ordered_sets_through_scc(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/scc_semantics.py"
+    leaf = f"{path}::leaf"
+    secondary = f"{path}::secondary"
+    lifecycle_rows = ({
+        "binding_kind": "entity",
+        "binding": leaf,
+        "target": leaf,
+        "discriminant": {"kind": "none"},
+        "transition_id": "artifact.materialize",
+    }, {
+        "binding_kind": "entity",
+        "binding": secondary,
+        "target": secondary,
+        "discriminant": {"kind": "none"},
+        "transition_id": "process.prepare",
+    })
+    _index, _resolutions, semantics = _propagate_fixture(
+        tmp_path,
+        """
+        def leaf():
+            pass
+        def secondary():
+            pass
+        def recursive_a():
+            recursive_b()
+        def recursive_b():
+            recursive_a()
+            leaf()
+            secondary()
+        def caller():
+            recursive_a()
+        """,
+        path=path,
+        primitive_rows=(
+            _primitive_entity_row(leaf, ("filesystem-read",)),
+            _primitive_entity_row(secondary, ("authority/commitment",)),
+        ),
+        lifecycle_rows=lifecycle_rows,
+    )
+
+    assert tuple(semantics.entities) == (
+        leaf,
+        secondary,
+        f"{path}::recursive_a",
+        f"{path}::recursive_b",
+        f"{path}::caller",
+    )
+    assert semantics.entities[leaf].direct_domains == ("filesystem-read",)
+    assert semantics.entities[leaf].direct_transitions == ("artifact.materialize",)
+    assert semantics.entities[secondary].direct_domains == ("authority/commitment",)
+    assert semantics.entities[secondary].direct_transitions == ("process.prepare",)
+    for identity in (
+        f"{path}::recursive_a",
+        f"{path}::recursive_b",
+        f"{path}::caller",
+    ):
+        assert semantics.entities[identity].propagated_domains == (
+            "filesystem-read",
+            "authority/commitment",
+        )
+        assert semantics.entities[identity].propagated_transitions == (
+            "process.prepare",
+            "artifact.materialize",
+        )
+        assert semantics.entities[identity].propagated_lifecycle_clusters == (
+            "process-execution",
+            "artifact/acceptance",
+        )
+    file_semantics = semantics.files[f"{path}::@file"]
+    assert type(semantics.entities) is MappingProxyType
+    assert type(semantics.files) is MappingProxyType
+    assert file_semantics.propagated_domains == (
+        "filesystem-read",
+        "authority/commitment",
+    )
+    assert file_semantics.propagated_transitions == (
+        "process.prepare",
+        "artifact.materialize",
+    )
+    assert file_semantics.propagated_lifecycle_clusters == (
+        "process-execution",
+        "artifact/acceptance",
+    )
+    _assert_deeply_immutable(semantics)
+
+
+def test_domain_lifecycle_places_external_callsite_rows_without_external_vertex(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/callsite_semantics.py"
+    owner = f"{path}::owner"
+    callsite = f"{owner}::call:0001"
+    primitive = _primitive_callsite_row(callsite, "reviewed.callback")
+    lifecycle_row = {
+        "binding_kind": "callsite",
+        "binding": callsite,
+        "target": "reviewed.callback",
+        "discriminant": {
+            "kind": "literal-arguments",
+            "positional": [{"index": 1, "type": "bool", "value": True}],
+            "keywords": [{"name": "mode", "type": "str", "value": "safe"}],
+        },
+        "transition_id": "process.prepare",
+    }
+    _index, _resolutions, semantics = _propagate_fixture(
+        tmp_path,
+        """
+        def owner(callback):
+            callback(ignored, True, mode="safe")
+        """,
+        path=path,
+        primitive_rows=(primitive,),
+        lifecycle_rows=(lifecycle_row,),
+    )
+
+    assert tuple(semantics.entities) == (owner,)
+    assert semantics.entities[owner].direct_domains == (
+        "external-process/provider",
+    )
+    assert semantics.entities[owner].direct_transitions == ("process.prepare",)
+    assert "reviewed.callback" not in semantics.entities
+
+
+def test_domain_lifecycle_does_not_turn_dependency_evidence_into_scc_edges(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/dependency_not_edge.py"
+    effect = f"{path}::effect"
+    base = f"{path}::Base"
+    metaclass = f"{path}::Meta"
+    _index, _resolutions, semantics = _propagate_fixture(
+        tmp_path,
+        """
+        def effect(value):
+            return value
+        @effect
+        def decorated():
+            pass
+        class Base:
+            pass
+        class Meta:
+            pass
+        class Child(Base, metaclass=Meta):
+            pass
+        """,
+        path=path,
+        primitive_rows=(
+            _primitive_entity_row(base, ("filesystem-read",)),
+            _primitive_entity_row(metaclass, ("synchronization",)),
+            _primitive_entity_row(effect, ("authority/commitment",)),
+        ),
+    )
+
+    assert semantics.entities[effect].propagated_domains == (
+        "authority/commitment",
+    )
+    assert semantics.entities[f"{path}::decorated"].propagated_domains == ()
+    assert semantics.entities[f"{path}::Child"].propagated_domains == ()
+
+
+def test_domain_lifecycle_places_external_entity_rows_on_invocation_owners(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/external_entity_semantics.py"
+    lifecycle_row = {
+        "binding_kind": "entity",
+        "binding": "os.getcwd",
+        "target": "os.getcwd",
+        "discriminant": {"kind": "none"},
+        "transition_id": "process.prepare",
+    }
+    _index, _resolutions, semantics = _propagate_fixture(
+        tmp_path,
+        """
+        import os
+        def first():
+            os.getcwd()
+        def second():
+            os.getcwd()
+        def caller():
+            first()
+        """,
+        path=path,
+        primitive_rows=(
+            _primitive_entity_row("os.getcwd", ("filesystem-read",)),
+        ),
+        lifecycle_rows=(lifecycle_row,),
+    )
+
+    assert set(semantics.entities) == {
+        f"{path}::first",
+        f"{path}::second",
+        f"{path}::caller",
+    }
+    for identity in (f"{path}::first", f"{path}::second"):
+        assert semantics.entities[identity].direct_domains == ("filesystem-read",)
+        assert semantics.entities[identity].direct_transitions == ("process.prepare",)
+    assert semantics.entities[f"{path}::caller"].direct_domains == ()
+    assert semantics.entities[f"{path}::caller"].propagated_domains == (
+        "filesystem-read",
+    )
+    assert "os.getcwd" not in semantics.entities
+
+
+def test_domain_lifecycle_file_owner_retains_direct_external_semantics(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/file_owner_semantics.py"
+    _index, _resolutions, semantics = _propagate_fixture(
+        tmp_path,
+        """
+        import os
+        os.getcwd()
+        """,
+        path=path,
+        primitive_rows=(
+            _primitive_entity_row("os.getcwd", ("filesystem-read",)),
+        ),
+        lifecycle_rows=({
+            "binding_kind": "entity",
+            "binding": "os.getcwd",
+            "target": "os.getcwd",
+            "discriminant": {"kind": "none"},
+            "transition_id": "process.prepare",
+        },),
+    )
+
+    assert semantics.entities == {}
+    file_semantics = semantics.files[f"{path}::@file"]
+    assert file_semantics.propagated_domains == ("filesystem-read",)
+    assert file_semantics.propagated_transitions == ("process.prepare",)
+    assert file_semantics.propagated_lifecycle_clusters == (
+        "process-execution",
+    )
+
+
+def test_domain_lifecycle_rejects_unresolved_and_source_population_mismatch(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/semantic_preblocks.py"
+    files = {path: _resolver_source("def owner():\n    unknown()\n")}
+    index = _fixture_index(files, tmp_path)
+    primitives = _primitive_table(index, ())
+    unresolved = resolve_calls(index, (), primitives)
+
+    with pytest.raises(ValueError, match="unresolved call"):
+        propagate_semantics(
+            index,
+            unresolved,
+            primitives,
+            _lifecycle_table(),
+            digest_inputs=_semantic_digest_inputs(),
+        )
+
+    dependency_files = {
+        path: _resolver_source("@unknown\ndef owner():\n    pass\n")
+    }
+    dependency_index = _fixture_index(dependency_files, tmp_path)
+    dependency_primitives = _primitive_table(dependency_index, ())
+    unresolved_dependency = resolve_calls(
+        dependency_index, (), dependency_primitives
+    )
+    with pytest.raises(ValueError, match="unresolved dependency"):
+        propagate_semantics(
+            dependency_index,
+            unresolved_dependency,
+            dependency_primitives,
+            _lifecycle_table(),
+            digest_inputs=_semantic_digest_inputs(),
+        )
+
+    call_files = {
+        path: _resolver_source("def owner(callback):\n    callback()\n")
+    }
+    call_index = _fixture_index(call_files, tmp_path)
+    callsite = f"{path}::owner::call:0001"
+    call_primitives = _primitive_table(
+        call_index,
+        (_primitive_callsite_row(callsite, "reviewed.callback"),),
+    )
+    resolved = resolve_calls(call_index, (), call_primitives)
+    stale = replace(resolved, reference_source_sha256="0" * 64)
+    with pytest.raises(ValueError, match="source population"):
+        propagate_semantics(
+            call_index,
+            stale,
+            call_primitives,
+            _lifecycle_table(),
+            digest_inputs=_semantic_digest_inputs(),
+        )
+    stale_primitive_population = {
+        **call_primitives,
+        "reference_source_sha256": "0" * 64,
+    }
+    with pytest.raises(ValueError, match="source population|reference source"):
+        propagate_semantics(
+            call_index,
+            resolved,
+            stale_primitive_population,
+            _lifecycle_table(),
+            digest_inputs=_semantic_digest_inputs(),
+        )
+    stale_attestation = dict(call_primitives["callsite_evidence"][0])
+    stale_attestation["call_ast_sha256"] = "0" * 64
+    stale_primitive_attestation = {
+        **call_primitives,
+        "callsite_evidence": [stale_attestation],
+    }
+    with pytest.raises(ValueError, match="callsite|primitive|AST"):
+        propagate_semantics(
+            call_index,
+            resolved,
+            stale_primitive_attestation,
+            _lifecycle_table(),
+            digest_inputs=_semantic_digest_inputs(),
+        )
+
+
+def test_domain_lifecycle_one_hop_uses_only_exact_validated_members(tmp_path: Path) -> None:
+    path = "src/lockstep/one_hop_semantics.py"
+    leaf = f"{path}::leaf"
+    root = f"{path}::root"
+    foreign_path = "src/lockstep/foreign_semantics.py"
+    _index, _resolutions, semantics = _propagate_fixture(
+        tmp_path,
+        """
+        def leaf():
+            pass
+        def root():
+            pass
+        def unrelated():
+            pass
+        """,
+        path=path,
+        primitive_rows=(_primitive_entity_row(leaf, ("filesystem-read",)),),
+        lifecycle_rows=({
+            "binding_kind": "entity",
+            "binding": leaf,
+            "target": leaf,
+            "discriminant": {"kind": "none"},
+            "transition_id": "process.prepare",
+        },),
+        extra_files={foreign_path: "def foreign():\n    pass\n"},
+    )
+
+    aggregate = semantics.build_one_hop(root=root, members=(root, leaf))
+    assert aggregate.identity == root + "::@one_hop"
+    assert aggregate.root == root
+    assert aggregate.members == (root, leaf)
+    assert aggregate.propagated_domains == ("filesystem-read",)
+    assert aggregate.propagated_transitions == ("process.prepare",)
+    assert aggregate.propagated_lifecycle_clusters == ("process-execution",)
+    inputs = semantics.digest_inputs
+    aggregate_payload = {
+        "schema": "lockstep.architecture-one-hop-semantics/v1",
+        "identity": root + "::@one_hop",
+        "root": root,
+        "members": [
+            {
+                "identity": member,
+                "semantic_dependency_sha256": (
+                    semantics.entities[member].semantic_dependency_sha256
+                ),
+            }
+            for member in (root, leaf)
+        ],
+        "propagated_domains": ["filesystem-read"],
+        "propagated_transitions": ["process.prepare"],
+        "propagated_lifecycle_clusters": ["process-execution"],
+        "rule_inputs": {
+            "allowlist_digest": inputs.allowlist_digest,
+            "primitive_digest": semantics.primitive_digest,
+            "lifecycle_digest": semantics.lifecycle_digest,
+            "schema_digest": inputs.schema_digest,
+            "threshold_digest": inputs.threshold_digest,
+            "analyzer_version": inputs.analyzer_version,
+            "rule_version": inputs.rule_version,
+        },
+    }
+    assert aggregate.semantic_dependency_sha256 == _canonical_sha256(
+        aggregate_payload
+    )
+
+    root_only = semantics.build_one_hop(root=root, members=(root,))
+    assert root_only.members == (root,)
+    assert root_only.propagated_domains == ()
+
+    invalid_members = (
+        (),
+        (leaf,),
+        (leaf, root),
+        (root, root),
+        (root, "src/lockstep/missing.py::unknown"),
+        (root, f"{foreign_path}::foreign"),
+        (root, f"{path}::unrelated", leaf),
+    )
+    for members in invalid_members:
+        with pytest.raises(ValueError):
+            semantics.build_one_hop(root=root, members=members)
+
+
+def test_domain_lifecycle_rejects_malformed_rule_objects_before_partial_result(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/strict_semantic_rules.py"
+    files = {
+        path: _resolver_source(
+            "def owner():\n    pass\n\ndef other():\n    pass\n"
+        )
+    }
+    index = _fixture_index(files, tmp_path)
+    primitives = _primitive_table(index, ())
+    resolutions = resolve_calls(index, (), primitives)
+    lifecycle = _lifecycle_table()
+
+    primitive_variants = (
+        {**primitives, "extra": True},
+        {key: value for key, value in primitives.items() if key != "schema_version"},
+        {**primitives, "schema_version": 2},
+        {**primitives, "rows": ()},
+        {
+            **primitives,
+            "callsite_evidence": [{
+                "selector": f"{path}::owner::call:0001",
+                "owner_source_sha256": "0" * 64,
+                "call_ast_sha256": "0" * 64,
+            }],
+        },
+        {
+            **primitives,
+            "rows": [{
+                **_primitive_entity_row(f"{path}::owner"),
+                "extra": True,
+            }],
+        },
+        {
+            **primitives,
+            "rows": [{
+                **_primitive_entity_row(f"{path}::owner"),
+                "domains": ["authority/commitment", "filesystem-read"],
+            }],
+        },
+    )
+    for malformed_primitives in primitive_variants:
+        with pytest.raises(ValueError, match="primitive|effect|callsite"):
+            propagate_semantics(
+                index,
+                resolutions,
+                malformed_primitives,
+                lifecycle,
+                digest_inputs=_semantic_digest_inputs(),
+            )
+
+    altered_transition = dict(lifecycle["transitions"][0])
+    altered_transition["to"] = "wrong"
+    extra_transition_key = dict(lifecycle["transitions"][0])
+    extra_transition_key["extra"] = True
+    missing_transition_key = dict(lifecycle["transitions"][0])
+    missing_transition_key.pop("from")
+    lifecycle_variants = (
+        {**lifecycle, "extra": True},
+        {key: value for key, value in lifecycle.items() if key != "rows"},
+        {**lifecycle, "schema": "wrong"},
+        {**lifecycle, "transitions": lifecycle["transitions"][:-1]},
+        {**lifecycle, "transitions": list(reversed(lifecycle["transitions"]))},
+        {
+            **lifecycle,
+            "transitions": [altered_transition, *lifecycle["transitions"][1:]],
+        },
+        {
+            **lifecycle,
+            "transitions": [extra_transition_key, *lifecycle["transitions"][1:]],
+        },
+        {
+            **lifecycle,
+            "transitions": [missing_transition_key, *lifecycle["transitions"][1:]],
+        },
+        {**lifecycle, "rows": ()},
+    )
+    for malformed_lifecycle in lifecycle_variants:
+        with pytest.raises(ValueError, match="lifecycle|transition"):
+            propagate_semantics(
+                index,
+                resolutions,
+                primitives,
+                malformed_lifecycle,
+                digest_inputs=_semantic_digest_inputs(),
+            )
+
+    owner = f"{path}::owner"
+    other = f"{path}::other"
+    ordered_rows = tuple(
+        {
+            "binding_kind": "entity",
+            "binding": binding,
+            "target": binding,
+            "discriminant": {"kind": "none"},
+            "transition_id": "process.prepare",
+        }
+        for binding in sorted((owner, other))
+    )
+    propagate_semantics(
+        index,
+        resolutions,
+        primitives,
+        _lifecycle_table(ordered_rows),
+        digest_inputs=_semantic_digest_inputs(),
+    )
+    for malformed_rows in (
+        tuple(reversed(ordered_rows)),
+        (ordered_rows[0], ordered_rows[0]),
+        ({**ordered_rows[0], "binding": f"{path}::missing", "target": f"{path}::missing"},),
+        ({**ordered_rows[0], "target": owner},),
+    ):
+        with pytest.raises(ValueError, match="lifecycle|order|duplicate|orphan|target"):
+            propagate_semantics(
+                index,
+                resolutions,
+                primitives,
+                _lifecycle_table(malformed_rows),
+                digest_inputs=_semantic_digest_inputs(),
+            )
+
+    invalid_digest_inputs = (
+        {"allowlist_digest": "not-a-digest"},
+        {"schema_digest": "B" * 64},
+        {"threshold_digest": "0" * 63},
+        {"analyzer_version": ""},
+        {"rule_version": ""},
+    )
+    for changes in invalid_digest_inputs:
+        values = {
+            "allowlist_digest": "a" * 64,
+            "schema_digest": "b" * 64,
+            "threshold_digest": "c" * 64,
+            "analyzer_version": "task-12c-test",
+            "rule_version": "v1",
+            **changes,
+        }
+        with pytest.raises(ValueError, match="digest|version"):
+            domain_lifecycle.SemanticDigestInputs(**values)
+
+
+def test_domain_lifecycle_literal_rows_fail_closed_on_every_binding_drift(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/lifecycle_literal_drift.py"
+    owner = f"{path}::owner"
+    callsite = f"{owner}::call:0001"
+    source = _resolver_source(
+        """
+        def owner(callback, dynamic):
+            callback(dynamic, 7, alpha="a", omega=True)
+            callback(8)
+        """
+    )
+    index = _fixture_index({path: source}, tmp_path)
+    second_callsite = f"{owner}::call:0002"
+    primitives = _primitive_table(
+        index,
+        (
+            _primitive_callsite_row(callsite, "reviewed.callback"),
+            _primitive_callsite_row(second_callsite, "reviewed.callback"),
+        ),
+    )
+    resolutions = resolve_calls(index, (), primitives)
+    valid = {
+        "binding_kind": "callsite",
+        "binding": callsite,
+        "target": "reviewed.callback",
+        "discriminant": {
+            "kind": "literal-arguments",
+            "positional": [{"index": 1, "type": "int", "value": 7}],
+            "keywords": [
+                {"name": "alpha", "type": "str", "value": "a"},
+                {"name": "omega", "type": "bool", "value": True},
+            ],
+        },
+        "transition_id": "process.prepare",
+    }
+    valid_lifecycle = _lifecycle_table((valid,))
+    propagate_semantics(
+        index,
+        resolutions,
+        primitives,
+        valid_lifecycle,
+        digest_inputs=_semantic_digest_inputs(),
+    )
+
+    evidence = primitives["callsite_evidence"]
+    rows = primitives["rows"]
+    missing_evidence_key = dict(evidence[0])
+    missing_evidence_key.pop("call_ast_sha256")
+    primitive_variants = (
+        {**primitives, "callsite_evidence": evidence[:-1]},
+        {**primitives, "callsite_evidence": [*evidence, evidence[0]]},
+        {**primitives, "callsite_evidence": list(reversed(evidence))},
+        {**primitives, "callsite_evidence": [missing_evidence_key, evidence[1]]},
+        {**primitives, "rows": list(reversed(rows))},
+        {**primitives, "rows": [*rows, rows[0]]},
+        {**primitives, "rows": [{**rows[0], "selector": f"{owner}::call:9999"}, rows[1]]},
+        {**primitives, "rows": [{**rows[0], "selector_kind": "unknown"}, rows[1]]},
+        {**primitives, "rows": [{**rows[0], "semantic_target": "reviewed.other"}, rows[1]]},
+        {**primitives, "rows": [{**rows[0], "domains": []}, rows[1]]},
+        {**primitives, "rows": [{**rows[0], "domains": ["filesystem-read", "filesystem-read"]}, rows[1]]},
+        {**primitives, "rows": [{**rows[0], "domains": ["unknown-domain"]}, rows[1]]},
+        {**primitives, "rows": [{**rows[0], "domains": ["authority/commitment", "filesystem-read"]}, rows[1]]},
+    )
+    for malformed_primitives in primitive_variants:
+        with pytest.raises(ValueError, match="primitive|effect|callsite|domain|order"):
+            propagate_semantics(
+                index,
+                resolutions,
+                malformed_primitives,
+                valid_lifecycle,
+                digest_inputs=_semantic_digest_inputs(),
+            )
+
+    drifted_discriminants = (
+        {**valid["discriminant"], "positional": [] , "keywords": []},
+        {**valid["discriminant"], "positional": [{"index": 0, "type": "int", "value": 7}]},
+        {**valid["discriminant"], "positional": [{"index": 1, "type": "int", "value": 8}]},
+        {**valid["discriminant"], "positional": [{"index": 1, "type": "bool", "value": True}]},
+        {
+            **valid["discriminant"],
+            "positional": [
+                {"index": 2, "type": "int", "value": 8},
+                {"index": 1, "type": "int", "value": 7},
+            ],
+        },
+        {
+            **valid["discriminant"],
+            "positional": [
+                {"index": 1, "type": "int", "value": 7},
+                {"index": 1, "type": "int", "value": 7},
+            ],
+        },
+        {
+            **valid["discriminant"],
+            "keywords": list(reversed(valid["discriminant"]["keywords"])),
+        },
+        {
+            **valid["discriminant"],
+            "keywords": [
+                valid["discriminant"]["keywords"][0],
+                valid["discriminant"]["keywords"][0],
+            ],
+        },
+        {
+            **valid["discriminant"],
+            "positional": [{"index": 1, "type": "null", "value": False}],
+        },
+        {
+            key: value
+            for key, value in valid["discriminant"].items()
+            if key != "keywords"
+        },
+        {**valid["discriminant"], "spread": True},
+    )
+    invalid_rows = [
+        {**valid, "discriminant": discriminant}
+        for discriminant in drifted_discriminants
+    ]
+    invalid_rows.extend(
+        (
+            {**valid, "target": "reviewed.other"},
+            {**valid, "binding": f"{owner}::call:9999"},
+            {**valid, "binding_kind": "unknown"},
+            {**valid, "transition_id": "unknown.transition"},
+            {key: value for key, value in valid.items() if key != "target"},
+        )
+    )
+    for row in invalid_rows:
+        with pytest.raises(ValueError, match="lifecycle|literal|binding|target"):
+            propagate_semantics(
+                index,
+                resolutions,
+                primitives,
+                _lifecycle_table((row,)),
+                digest_inputs=_semantic_digest_inputs(),
+            )
+    with pytest.raises(ValueError, match="duplicate|ambiguous"):
+        propagate_semantics(
+            index,
+            resolutions,
+            primitives,
+            _lifecycle_table((valid, valid)),
+            digest_inputs=_semantic_digest_inputs(),
+        )
+
+
+def test_domain_lifecycle_semantic_digest_changes_with_source_and_rule_inputs(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/semantic_digest_fixture.py"
+    source = "def owner():\n    return 1\n"
+    _index, _resolutions, baseline = _propagate_fixture(
+        tmp_path, source, path=path
+    )
+    identity = f"{path}::owner"
+
+    changed_files = {path: _resolver_source("def owner():\n    return 2\n")}
+    changed_index = _fixture_index(changed_files, tmp_path)
+    changed_primitives = _primitive_table(changed_index, ())
+    changed_resolutions = resolve_calls(changed_index, (), changed_primitives)
+    changed_source = propagate_semantics(
+        changed_index,
+        changed_resolutions,
+        changed_primitives,
+        _lifecycle_table(),
+        digest_inputs=_semantic_digest_inputs(),
+    )
+    changed_rules = propagate_semantics(
+        _index,
+        _resolutions,
+        _primitive_table(_index, ()),
+        _lifecycle_table(),
+        digest_inputs=replace(_semantic_digest_inputs(), rule_version="v2"),
+    )
+    rule_variants = (
+        {"allowlist_digest": "d" * 64},
+        {"schema_digest": "e" * 64},
+        {"threshold_digest": "f" * 64},
+        {"analyzer_version": "task-12c-test-v2"},
+    )
+    variant_digests = []
+    for changes in rule_variants:
+        variant = propagate_semantics(
+            _index,
+            _resolutions,
+            _primitive_table(_index, ()),
+            _lifecycle_table(),
+            digest_inputs=replace(_semantic_digest_inputs(), **changes),
+        )
+        variant_digests.append(
+            variant.entities[identity].semantic_dependency_sha256
+        )
+    changed_primitive = _propagate_fixture(
+        tmp_path,
+        source,
+        path=path,
+        primitive_rows=(
+            _primitive_entity_row(identity, ("filesystem-read",)),
+        ),
+    )[2]
+    changed_lifecycle = _propagate_fixture(
+        tmp_path,
+        source,
+        path=path,
+        lifecycle_rows=({
+            "binding_kind": "entity",
+            "binding": identity,
+            "target": identity,
+            "discriminant": {"kind": "none"},
+            "transition_id": "process.prepare",
+        },),
+    )[2]
+
+    digests = {
+        baseline.entities[identity].semantic_dependency_sha256,
+        changed_source.entities[identity].semantic_dependency_sha256,
+        changed_rules.entities[identity].semantic_dependency_sha256,
+        changed_primitive.entities[identity].semantic_dependency_sha256,
+        changed_lifecycle.entities[identity].semantic_dependency_sha256,
+        *variant_digests,
+    }
+    assert len(digests) == 9
+
+
+def test_domain_lifecycle_entity_file_and_one_hop_digests_use_closed_payloads(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/closed_semantic_payload.py"
+    identity = f"{path}::owner"
+    index, _resolutions, semantics = _propagate_fixture(
+        tmp_path,
+        "def owner():\n    return 1\n",
+        path=path,
+    )
+    primitives = _primitive_table(index, ())
+    lifecycle = _lifecycle_table()
+    primitive_digest = _canonical_sha256(primitives)
+    lifecycle_digest = _canonical_sha256(lifecycle)
+    digest_inputs = _semantic_digest_inputs()
+    rule_inputs = {
+        "allowlist_digest": digest_inputs.allowlist_digest,
+        "primitive_digest": primitive_digest,
+        "lifecycle_digest": lifecycle_digest,
+        "schema_digest": digest_inputs.schema_digest,
+        "threshold_digest": digest_inputs.threshold_digest,
+        "analyzer_version": digest_inputs.analyzer_version,
+        "rule_version": digest_inputs.rule_version,
+    }
+    entity_payload = {
+        "schema": "lockstep.architecture-entity-semantics/v1",
+        "identity": identity,
+        "source_sha256": index.entities[identity].span.sha256,
+        "imports": [],
+        "aliases": [],
+        "receivers": [],
+        "calls": [],
+        "dependencies": [],
+        "containment": [],
+        "direct_domains": [],
+        "propagated_domains": [],
+        "direct_transitions": [],
+        "propagated_transitions": [],
+        "propagated_lifecycle_clusters": [],
+        "rule_inputs": rule_inputs,
+    }
+    entity_digest = _canonical_sha256(entity_payload)
+    assert semantics.entities[identity].semantic_dependency_sha256 == entity_digest
+    assert semantics.primitive_digest == primitive_digest
+    assert semantics.lifecycle_digest == lifecycle_digest
+
+    file_payload = {
+        "schema": "lockstep.architecture-file-semantics/v1",
+        "identity": f"{path}::@file",
+        "file_sha256": index.file_sha256[path],
+        "definitions": [{
+            "identity": identity,
+            "semantic_dependency_sha256": entity_digest,
+        }],
+        "imports": [],
+        "aliases": [],
+        "receivers": [],
+        "calls": [],
+        "dependencies": [],
+        "propagated_domains": [],
+        "propagated_transitions": [],
+        "propagated_lifecycle_clusters": [],
+        "rule_inputs": rule_inputs,
+    }
+    assert semantics.files[f"{path}::@file"].semantic_dependency_sha256 == (
+        _canonical_sha256(file_payload)
+    )
+
+    aggregate = semantics.build_one_hop(root=identity, members=(identity,))
+    one_hop_payload = {
+        "schema": "lockstep.architecture-one-hop-semantics/v1",
+        "identity": identity + "::@one_hop",
+        "root": identity,
+        "members": [{
+            "identity": identity,
+            "semantic_dependency_sha256": entity_digest,
+        }],
+        "propagated_domains": [],
+        "propagated_transitions": [],
+        "propagated_lifecycle_clusters": [],
+        "rule_inputs": rule_inputs,
+    }
+    assert aggregate.semantic_dependency_sha256 == _canonical_sha256(one_hop_payload)
+
+
+def test_domain_lifecycle_entity_digest_binds_all_exact_owner_evidence(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/rich_semantic_payload.py"
+    owner = f"{path}::owner"
+    files = {
+        path: _resolver_source(
+            """
+            def target(value):
+                return value
+            class Worker:
+                def run(self):
+                    pass
+            @target
+            def owner():
+                import os as operating
+                alias = target
+                worker = Worker()
+                alias(worker.run())
+                operating.getcwd()
+                class Nested:
+                    pass
+            """
+        )
+    }
+    index = _fixture_index(files, tmp_path)
+    primitives = _primitive_table(
+        index,
+        (_primitive_entity_row("os.getcwd", ("filesystem-read",)),),
+    )
+    resolutions = resolve_calls(index, (), primitives)
+    lifecycle = _lifecycle_table()
+    digest_inputs = _semantic_digest_inputs()
+    semantics = propagate_semantics(
+        index,
+        resolutions,
+        primitives,
+        lifecycle,
+        digest_inputs=digest_inputs,
+    )
+    primitive_digest = _canonical_sha256(primitives)
+    lifecycle_digest = _canonical_sha256(lifecycle)
+    rule_inputs = {
+        "allowlist_digest": digest_inputs.allowlist_digest,
+        "primitive_digest": primitive_digest,
+        "lifecycle_digest": lifecycle_digest,
+        "schema_digest": digest_inputs.schema_digest,
+        "threshold_digest": digest_inputs.threshold_digest,
+        "analyzer_version": digest_inputs.analyzer_version,
+        "rule_version": digest_inputs.rule_version,
+    }
+    imports = [
+        {
+            "identity": record.identity,
+            "owner": record.owner,
+            "kind": record.kind,
+            "module": record.module,
+            "level": record.level,
+            "aliases": [dict(alias) for alias in record.aliases],
+            "targets": list(record.targets),
+            "span_sha256": record.span_sha256,
+            "import_semantic_sha256": record.import_semantic_sha256,
+        }
+        for record in index.imports.values()
+        if record.owner == owner
+    ]
+    aliases = [
+        {"binding": binding, "target": target}
+        for binding, target in sorted(resolutions.aliases.items())
+        if binding.rsplit("::", 1)[0] == owner
+    ]
+    receivers = [
+        {"binding": binding, "target": target}
+        for binding, target in sorted(resolutions.receivers.items())
+        if binding.rsplit("::", 1)[0] == owner
+    ]
+    calls = [
+        {"callsite": record.callsite, "target": record.target}
+        for record in resolutions.calls.values()
+        if record.callsite.rsplit("::call:", 1)[0] == owner
+    ]
+    dependencies = [
+        {
+            "reference": record.reference,
+            "owner": record.owner,
+            "kind": record.kind,
+            "target": record.target,
+        }
+        for record in resolutions.dependencies.values()
+        if record.owner == owner
+    ]
+    payload = {
+        "schema": "lockstep.architecture-entity-semantics/v1",
+        "identity": owner,
+        "source_sha256": index.entities[owner].span.sha256,
+        "imports": imports,
+        "aliases": aliases,
+        "receivers": receivers,
+        "calls": calls,
+        "dependencies": dependencies,
+        "containment": [
+            identity
+            for identity, entity in index.entities.items()
+            if entity.parent == owner
+        ],
+        "direct_domains": ["filesystem-read"],
+        "propagated_domains": ["filesystem-read"],
+        "direct_transitions": [],
+        "propagated_transitions": [],
+        "propagated_lifecycle_clusters": [],
+        "rule_inputs": rule_inputs,
+    }
+    assert semantics.entities[owner].semantic_dependency_sha256 == (
+        _canonical_sha256(payload)
+    )
+    file_payload = {
+        "schema": "lockstep.architecture-file-semantics/v1",
+        "identity": f"{path}::@file",
+        "file_sha256": index.file_sha256[path],
+        "definitions": [
+            {
+                "identity": identity,
+                "semantic_dependency_sha256": (
+                    semantics.entities[identity].semantic_dependency_sha256
+                ),
+            }
+            for identity in index.entities
+        ],
+        "imports": [
+            {
+                "identity": record.identity,
+                "import_semantic_sha256": record.import_semantic_sha256,
+            }
+            for record in index.imports.values()
+        ],
+        "aliases": [],
+        "receivers": [],
+        "calls": [],
+        "dependencies": [],
+        "propagated_domains": ["filesystem-read"],
+        "propagated_transitions": [],
+        "propagated_lifecycle_clusters": [],
+        "rule_inputs": rule_inputs,
+    }
+    assert semantics.files[f"{path}::@file"].semantic_dependency_sha256 == (
+        _canonical_sha256(file_payload)
     )
