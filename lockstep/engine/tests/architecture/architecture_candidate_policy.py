@@ -311,7 +311,7 @@ def _scoped_nodes(root):
         found.append((node, parent))
         for child in ast.iter_child_nodes(node):
             if child is not root and isinstance(
-                    child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                    child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 continue
             visit(child, node)
     visit(root)
@@ -493,41 +493,44 @@ def _import_bindings(module):
     return bindings
 
 
-def _alias_target(node, bindings):
-    if (not isinstance(node, (ast.Assign, ast.AnnAssign))
-            or not isinstance(getattr(node, "value", None), ast.Name)):
-        return (), None
-    targets = node.targets if isinstance(node, ast.Assign) else (node.target,)
-    return tuple(target.id for target in targets if isinstance(target, ast.Name)), bindings.get(node.value.id)
-
-
-def _alias_bindings(module, bindings):
-    answer = dict(bindings)
-    changed = True
-    while changed:
-        changed = False
-        for node in module.body:
-            targets, value = _alias_target(node, answer)
-            for target in targets:
-                if value is not None and answer.get(target) != value:
-                    answer[target] = value
-                    changed = True
-    return answer
-
-
-def _module_reference_bindings(path, index, nodes, vertices):
+def _module_reference_bindings(path, index, nodes, vertices, resolutions):
     module = ast.parse(index.files[path], filename=path)
     bindings = {nodes[item].name: item for item in vertices}
     bindings.update(_import_bindings(module))
-    return _alias_bindings(module, bindings)
+    prefix = f"{path}::@file::"
+    for binding, target in resolutions.aliases.items():
+        if binding.startswith(prefix):
+            bindings[binding.removeprefix(prefix)] = target
+    return bindings
 
 
-def _reference_edges(path, index, nodes, vertices):
-    bindings = _module_reference_bindings(path, index, nodes, vertices)
+def _local_names(node):
+    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+        return set()
+    names = {argument.arg for argument in (
+        *node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs)}
+    if node.args.vararg is not None:
+        names.add(node.args.vararg.arg)
+    if node.args.kwarg is not None:
+        names.add(node.args.kwarg.arg)
+    globals_ = set()
+    for member, _parent in _scoped_nodes(node):
+        if isinstance(member, ast.Name) and isinstance(member.ctx, ast.Store):
+            names.add(member.id)
+        elif isinstance(member, ast.Global):
+            globals_.update(member.names)
+    return names - globals_
+
+
+def _reference_edges(path, index, nodes, vertices, resolutions):
+    bindings = _module_reference_bindings(path, index, nodes, vertices, resolutions)
     edges, external = defaultdict(set), defaultdict(set)
     for owner in vertices:
+        locals_ = _local_names(nodes[owner])
         for member in ast.walk(nodes[owner]):
             if not isinstance(member, ast.Name) or not isinstance(member.ctx, ast.Load):
+                continue
+            if member.id in locals_:
                 continue
             target = bindings.get(member.id)
             if target in vertices and target != owner:
@@ -540,7 +543,7 @@ def _reference_edges(path, index, nodes, vertices):
 def _file(path, index, nodes, semantics, resolutions, calls, rules):
     identities = tuple(item for item in index.entities if item.rpartition("::")[0] == path)
     vertices = {item for item in identities if index.entities[item].parent == f"{path}::@file"}
-    edges, external = _reference_edges(path, index, nodes, vertices)
+    edges, external = _reference_edges(path, index, nodes, vertices, resolutions)
     for owner, record in calls:
         source = _top(owner, path, index)
         if source not in vertices or not isinstance(record, ResolvedCall):

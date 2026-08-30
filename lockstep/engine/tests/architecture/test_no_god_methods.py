@@ -7097,6 +7097,23 @@ def test_candidate_policy_class_lambda_resolved_call_is_cohesion_edge(
     assert metric.cohesion_components == 2
 
 
+def test_candidate_policy_method_owned_lambda_contributes_field_evidence(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/method_lambda_field.py"
+    index, resolutions, semantics = _propagate_fixture(
+        tmp_path,
+        """
+        class Aggregate:
+            def outer(self): return lambda: self.items
+            def reader(self): return self.items
+        """, path=path)
+    metric = evaluate_candidates(
+        index, measure_legacy_metrics(index), semantics, resolutions
+    ).classes[f"{path}::Aggregate"]
+    assert metric.cohesion_components == 1
+
+
 def test_candidate_policy_cls_fields_normalize_to_closed_mutable_field_identity(
     tmp_path: Path,
 ) -> None:
@@ -7364,6 +7381,31 @@ def test_candidate_policy_file_plain_alias_and_import_references_form_edges(
         index, measure_legacy_metrics(index), semantics, resolutions
     ).files[f"{path}::@file"]
     assert metric.definition_dependency_components == 3
+
+
+def test_candidate_policy_file_rebound_alias_and_lexical_shadowing_are_not_edges(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/reference_shadowing.py"
+    index, resolutions, semantics = _propagate_fixture(
+        tmp_path,
+        """
+        import json
+        def leaf(): pass
+        def other(): pass
+        alias = leaf
+        alias = other
+        def use_alias(): return alias
+        def local_json():
+            json = 1
+            return json
+        def module_json(): return json
+        def isolated(): pass
+        """, path=path)
+    metric = evaluate_candidates(
+        index, measure_legacy_metrics(index), semantics, resolutions
+    ).files[f"{path}::@file"]
+    assert metric.definition_dependency_components == 6
 
 
 def test_candidate_policy_file_subsystems_formula_and_hard_boundary(
@@ -7885,7 +7927,7 @@ def test_diagnostics_renders_all_candidate_kinds_in_stable_order() -> None:
         51, 0, (), 0, 1, (), (), (), file_signals, 0,
         ("definition_count_gt_50",), True)
     report = candidate_policy.ArchitectureReport(
-        MappingProxyType({"z.py::f": function}),
+        MappingProxyType({"z.py::later": function, "z.py::earlier": function}),
         MappingProxyType({"a.py::root::@one_hop": one_hop}),
         MappingProxyType({"m.py::C": klass}),
         MappingProxyType({"b.py::@file": file_metric}),
@@ -7904,11 +7946,12 @@ def test_diagnostics_renders_all_candidate_kinds_in_stable_order() -> None:
         ("one_hop", "a.py::root::@one_hop"),
         ("file", "b.py::@file"),
         ("class", "m.py::C"),
-        ("function", "z.py::f"),
+        ("function", "z.py::later"),
+        ("function", "z.py::earlier"),
     ]
     assert value["candidates"][0]["metrics"]["members"][0] == "a.py::root"
     assert len(value["candidates"][0]["metrics"]["members"]) == 14
-    assert value["candidates"][2]["metrics"]["method_count"] == 13
+    assert value["candidates"][2]["metrics"]["method_count"] == 25
     assert value["candidates"][3]["metrics"]["hard_triggers"] == [
         "cyclomatic_gt_15"]
     assert value["unresolved_callsites"] == ["z.py::f::call:0001"]
