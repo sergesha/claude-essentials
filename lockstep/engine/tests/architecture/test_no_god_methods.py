@@ -6489,6 +6489,7 @@ def test_candidate_policy_checked_in_schema_and_thresholds_are_canonical() -> No
         signals = definition["properties"]["signals"]
         assert signals["additionalProperties"] is False
         assert tuple(signals["required"]) == _CANDIDATE_SIGNAL_ORDER[kind]
+        assert set(signals["properties"]) == set(signals["required"])
         assert all(value == {"type": "boolean"}
                    for value in signals["properties"].values())
         assert definition["properties"]["composite_score"] == {
@@ -6498,6 +6499,7 @@ def test_candidate_policy_checked_in_schema_and_thresholds_are_canonical() -> No
         assert definition["properties"]["hard_triggers"]["items"]["enum"] == list(
             _CANDIDATE_HARD_TRIGGER_ORDER[kind]
         )
+        assert definition["properties"]["hard_triggers"]["type"] == "array"
         assert definition["properties"]["hard_triggers"]["uniqueItems"] is True
         for field_name in ("direct_domains", "propagated_domains"):
             if field_name in definition["properties"]:
@@ -6546,6 +6548,14 @@ def test_candidate_policy_checked_in_schema_and_thresholds_are_canonical() -> No
             assert value["type"] == "array" and value["uniqueItems"] is True
             assert value["items"]["type"] == "string"
     assert schema["$defs"]["one_hop"]["properties"]["root"]["type"] == "string"
+    function_identity = r"^src/lockstep/.+\.py::[^:]+(?:\.[^:]+)*$"
+    callsite_identity = r"^src/lockstep/.+\.py::.+::call:[0-9]{4}$"
+    assert schema["$defs"]["one_hop"]["properties"]["root"]["pattern"] == function_identity
+    assert schema["$defs"]["one_hop"]["properties"]["members"]["items"]["pattern"] == function_identity
+    assert schema["$defs"]["class"]["properties"]["bases"]["items"]["pattern"] == function_identity
+    assert schema["$defs"]["function"]["properties"]["unresolved_callsites"]["items"]["pattern"] == callsite_identity
+    assert schema["$defs"]["class"]["properties"]["mutable_fields"]["items"]["pattern"] == r"^self\.[A-Za-z_][A-Za-z0-9_]*$"
+    assert schema["$defs"]["file"]["properties"]["subsystem_imports"]["items"]["pattern"] == r"^[A-Za-z_][A-Za-z0-9_.-]*$"
 
     thresholds = json.loads(threshold_path.read_bytes())
     assert set(thresholds) == {"schema", "rule_version", "kinds"}
@@ -6796,8 +6806,10 @@ def test_candidate_policy_one_hop_fixed_point_names_order_overlap_and_metrics(
     assert first.max_nesting == 4
     assert first.legacy_syntactic_fanout_union == 3
     assert first.resolved_fanout_union == 3
-    assert first.propagated_domains == ("filesystem-read",)
-    assert first.propagated_lifecycle_clusters == ("delivery",)
+    assert first.propagated_domains == (
+        "filesystem-read", "filesystem-write", "durable-state")
+    assert first.propagated_transitions == ("publication.apply", "delivery.deliver")
+    assert first.propagated_lifecycle_clusters == ("publication", "delivery")
 
 
 def test_candidate_policy_one_hop_formula_and_helper_hard_boundary(
@@ -6865,14 +6877,14 @@ def test_candidate_policy_one_hop_composite_formula_without_hard_trigger(
     )
     legacy = dict(measure_legacy_metrics(index))
     metric_type = type(legacy[root])
-    legacy[root] = metric_type(12, 20, 4, 10)
-    legacy[helper] = metric_type(12, 20, 1, 10)
+    legacy[root] = metric_type(12, 0, 4, 10)
+    legacy[helper] = metric_type(12, 0, 1, 10)
     metric = evaluate_candidates(
         index, MappingProxyType(legacy), semantics, resolutions
     ).one_hops[root + "::@one_hop"]
 
-    assert tuple(metric.signals.values()) == (True, True, True, False, True, False)
-    assert metric.composite_score == 4
+    assert tuple(metric.signals.values()) == (True, False, True, False, True, False)
+    assert metric.composite_score == 3
     assert metric.hard_triggers == ()
     assert metric.candidate is True
 
@@ -6952,7 +6964,7 @@ def test_candidate_policy_lambda_is_real_cohesion_vertex_and_inheritance_is_excl
         class Child(Base):
             projection = lambda self: self.items
             @decorator
-            def direct(self): return self.items
+            def direct(self): pass
         """, path=path)
     metric = evaluate_candidates(
         index, measure_legacy_metrics(index), semantics, resolutions
@@ -6961,7 +6973,7 @@ def test_candidate_policy_lambda_is_real_cohesion_vertex_and_inheritance_is_excl
     assert metric.method_count == 1
     assert metric.public_method_count == 1
     assert metric.mutable_fields == ()
-    assert metric.cohesion_components == 1
+    assert metric.cohesion_components == 2
     assert metric.bases == (f"{path}::Base",)
 
 
@@ -7116,7 +7128,7 @@ def test_candidate_policy_class_composite_rule_without_hard_trigger(
 ) -> None:
     path = "src/lockstep/class_composite.py"
     public = [f"    def m{i}(self): self.f{i} = {i}" for i in range(8)]
-    private = [f"    def _m{i}(self): pass" for i in range(7)]
+    private = [f"    def _m{i}(self): pass" for i in range(6)]
     index, resolutions, semantics = _propagate_fixture(
         tmp_path, "class Aggregate:\n" + "\n".join((*public, *private)) + "\n",
         path=path)
@@ -7124,9 +7136,36 @@ def test_candidate_policy_class_composite_rule_without_hard_trigger(
         index, measure_legacy_metrics(index), semantics, resolutions
     ).classes[f"{path}::Aggregate"]
 
-    assert tuple(metric.signals.values()) == (True, True, True, True, False, False)
-    assert metric.composite_score == 4
+    assert tuple(metric.signals.values()) == (False, True, True, True, False, False)
+    assert metric.composite_score == 3
     assert metric.hard_triggers == ()
+    assert metric.candidate is True
+
+
+def test_candidate_policy_class_lifecycle_mixing_drives_exact_three_formula(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/class_lifecycle.py"
+    methods = ["    def m0(self): first(); second()"] + [
+        f"    def m{i}(self): pass" for i in range(1, 15)]
+    source = "def first(): pass\ndef second(): pass\nclass Aggregate:\n" + "\n".join(methods)
+    index, resolutions, semantics = _propagate_fixture(
+        tmp_path, source, path=path,
+        lifecycle_rows=(
+            {"binding_kind": "entity", "binding": f"{path}::first",
+             "target": f"{path}::first", "discriminant": {"kind": "none"},
+             "transition_id": "process.prepare"},
+            {"binding_kind": "entity", "binding": f"{path}::second",
+             "target": f"{path}::second", "discriminant": {"kind": "none"},
+             "transition_id": "publication.apply"},
+        ))
+    metric = evaluate_candidates(
+        index, measure_legacy_metrics(index), semantics, resolutions
+    ).classes[f"{path}::Aggregate"]
+    assert metric.propagated_domains == ()
+    assert metric.propagated_lifecycle_clusters == ("process-execution", "publication")
+    assert metric.composite_score == 3
+    assert metric.signals["lifecycle_mixing"] is True
     assert metric.candidate is True
 
 
@@ -7170,18 +7209,19 @@ def test_candidate_policy_file_attributes_nested_function_and_class_dependencies
     index, resolutions, semantics = _propagate_fixture(
         tmp_path,
         """
-        def leaf(): pass
+        def leaf_a(): pass
+        def leaf_b(): pass
         def outer():
-            def nested(): leaf()
+            def nested(): leaf_a()
             class Nested:
-                def method(self): leaf()
+                def method(self): leaf_b()
             nested()
         def isolated(): pass
         """, path=path)
     metric = evaluate_candidates(
         index, measure_legacy_metrics(index), semantics, resolutions
     ).files[f"{path}::@file"]
-    assert metric.definition_count == 6
+    assert metric.definition_count == 7
     assert metric.definition_dependency_components == 2
 
 
@@ -7224,16 +7264,45 @@ def test_candidate_policy_file_composite_rule_without_hard_trigger(
     imports = "\n".join(("import lockstep.runtime", "import lockstep.workflow",
                           "import lockstep.authoring", "import json"))
     classes = "\n".join(f"class C{i}: pass" for i in range(6))
-    functions = "\n".join(f"def f{i}(): pass" for i in range(19))
+    functions = "\n".join(f"def f{i}(): pass" for i in range(18))
     index, resolutions, semantics = _propagate_fixture(
         tmp_path, f"{imports}\n{classes}\n{functions}\n", path=path)
     metric = evaluate_candidates(
         index, measure_legacy_metrics(index), semantics, resolutions
     ).files[f"{path}::@file"]
 
-    assert tuple(metric.signals.values()) == (True, True, True, True, False, False)
-    assert metric.composite_score == 4
+    assert tuple(metric.signals.values()) == (False, True, True, True, False, False)
+    assert metric.composite_score == 3
     assert metric.hard_triggers == ()
+    assert metric.candidate is True
+
+
+def test_candidate_policy_file_lifecycle_mixing_drives_exact_three_formula(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/file_lifecycle.py"
+    names = ("process", "publish", "deliver")
+    source = "\n".join(
+        [*(f"def {name}(): pass" for name in names),
+         *(f"def f{i}(): pass" for i in range(22))])
+    lifecycle_rows = tuple({
+        "binding_kind": "entity", "binding": f"{path}::{name}",
+        "target": f"{path}::{name}", "discriminant": {"kind": "none"},
+        "transition_id": transition,
+    } for name, transition in (
+        ("deliver", "delivery.deliver"), ("process", "process.prepare"),
+        ("publish", "publication.apply")))
+    index, resolutions, semantics = _propagate_fixture(
+        tmp_path, source, path=path, lifecycle_rows=lifecycle_rows)
+    metric = evaluate_candidates(
+        index, measure_legacy_metrics(index), semantics, resolutions
+    ).files[f"{path}::@file"]
+    assert metric.definition_count == 25
+    assert metric.propagated_domains == ()
+    assert metric.propagated_lifecycle_clusters == (
+        "process-execution", "publication", "delivery")
+    assert metric.composite_score == 3
+    assert metric.signals["lifecycle_mixing"] is True
     assert metric.candidate is True
 
 
