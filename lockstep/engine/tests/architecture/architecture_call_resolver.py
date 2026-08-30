@@ -62,7 +62,7 @@ _ClassInfo = namedtuple("_ClassInfo", "scope methods bases")
 _NAMED = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 
 _CONDITIONAL = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try, ast.TryStar, ast.With,
-                ast.AsyncWith, ast.Match, ast.comprehension, ast.IfExp, ast.BoolOp, ast.Lambda)
+                ast.AsyncWith, ast.Match, ast.comprehension, ast.IfExp, ast.BoolOp, ast.Lambda, ast.NamedExpr)
 
 _EFFECT_DOMAINS = ("decode/validate", "planning/transformation", "filesystem-read",
                    "filesystem-write", "durable-state", "synchronization",
@@ -105,6 +105,8 @@ class _Model:
         self.classes: dict[str, _ClassInfo] = {}
         self.named_scopes: dict[str, _Scope] = {}
         self.import_modules: set[str] = set()
+        self.modules = {path.removeprefix("src/").removesuffix(".py").replace("/", ".")
+                        .removesuffix(".__init__"): path for path in index.files}
         for path in sorted(index.files):
             tree = ast.parse(index.files[path], filename=path)
             module = _Scope("module", None, f"{path}::@file", tree)
@@ -132,21 +134,17 @@ class _Model:
                 child.params.add(arg.arg)
                 if arg.annotation is not None:
                     self._child(arg.annotation, scope, owner, conditional, arg)
-            for default in (*node.args.defaults, *node.args.kw_defaults):
+            for default in (*node.args.kw_defaults, *node.args.defaults):
                 if default is not None:
                     self._child(default, scope, owner, conditional, node.args)
             self._child(node.body, child, owner, True, node)
             return
-        if isinstance(
-            node,
-            (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp),
-        ):
+        if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
             child = _Scope("comprehension", scope, owner, node)
             self.scopes.append(child)
             generators = node.generators
-            element_nodes = (
-                (node.key, node.value) if isinstance(node, ast.DictComp) else (node.elt,)
-            )
+            element_nodes = ((node.key, node.value) if isinstance(node, ast.DictComp)
+                             else (node.elt,))
             for element in element_nodes:
                 self._child(element, child, owner, True, node)
             for position, generator in enumerate(generators):
@@ -160,8 +158,6 @@ class _Model:
         if isinstance(node, ast.Call):
             self.calls[owner].append(node)
         child_conditional = conditional or isinstance(node, _CONDITIONAL)
-        if isinstance(node, ast.NamedExpr):
-            child_conditional = True
         for child in ast.iter_child_nodes(node):
             self._child(child, scope, owner, child_conditional, node)
 
@@ -174,6 +170,10 @@ class _Model:
         parent: ast.AST,
     ) -> None:
         if isinstance(child, ast.AST):
+            if child is getattr(parent, "target", None) and isinstance(parent, ast.NamedExpr):
+                while scope.kind == "comprehension":
+                    assert scope.parent is not None
+                    scope = scope.parent
             self.parents[id(child)] = parent
             self._visit(child, scope, owner, conditional)
         elif isinstance(child, list):
@@ -409,6 +409,8 @@ def _validate_callsite_evidence(model: _Model, record: Mapping[str, object]) -> 
 
 def _symbol_use_is_safe(model: _Model, node: ast.Name) -> bool:
     parent = model.parents.get(id(node))
+    while isinstance(parent, ast.Tuple):
+        parent = model.parents.get(id(parent))
     if isinstance(parent, ast.Call) and parent.func is node:
         return True
     if isinstance(parent, ast.Attribute) and parent.value is node:
@@ -458,28 +460,41 @@ class _Resolver:
         self.receivers: dict[tuple[int, str], str] = {}
         self.field_receivers: dict[tuple[str, str], str] = {}
         self.bases: dict[str, tuple[str, ...] | None] = {}
-        for prepare in (
-            self._prepare_symbols,
-            self._prepare_bases,
-            self._prepare_fields,
-        ):
+        for prepare in (self._prepare_symbols, self._prepare_bases, self._prepare_fields):
             prepare()
 
-    def _normalize_target(self, label: str, kind: str) -> _Target:
-        entity = None
-        parts = label.split(".")
-        for cut in range(len(parts), 0, -1):
-            module = "/".join(parts[:cut])
-            candidates = (f"src/{module}.py", f"{module}.py", f"src/{module}/__init__.py")
-            path = next((item for item in candidates if item in self.model.index.files), None)
-            if path is not None:
-                rest = ".".join(parts[cut:])
-                entity = f"{path}::{rest or '@file'}"
-                break
-        if entity is not None and not entity.endswith("::@file"):
-            scope = self.model.named_scopes.get(entity)
-            return _Target(entity, scope.kind if scope else kind)
-        return _Target(label, kind)
+    def _normalize_target(self, label: str, kind: str) -> _Target | None:
+        seen: set[str] = set()
+        while label not in seen:
+            seen.add(label)
+            parts = label.split(".")
+            cut = next((cut for cut in range(len(parts), 0, -1)
+                        if ".".join(parts[:cut]) in self.model.modules), None)
+            if cut is None:
+                return _Target(label, kind)
+            path = self.model.modules[".".join(parts[:cut])]
+            rest = ".".join(parts[cut:])
+            if not rest:
+                return _Target(label, kind)
+            identity = f"{path}::{rest}"
+            scope = self.model.named_scopes.get(identity)
+            if scope is not None:
+                return _Target(identity, scope.kind)
+            module_scope = next(scope for scope in self.model.scopes
+                                if scope.identity == f"{path}::@file")
+            head, *tail = rest.split(".")
+            alias = self.aliases.get((id(module_scope), head))
+            if alias is not None:
+                if not tail:
+                    return alias
+                label = ".".join((alias.label, *tail))
+                continue
+            bindings = module_scope.bindings.get(head, ())
+            if (len(bindings) != 1 or bindings[0].kind != "import"
+                    or bindings[0].conditional):
+                return None
+            label = ".".join((str(bindings[0].value), *tail))
+        return None
 
     def _declaration_valid(self, scope: _Scope, name: str, load: ast.Name) -> tuple[str, _Scope] | None:
         globals_ = scope.globals.get(name, ())
@@ -526,7 +541,8 @@ class _Resolver:
             if bindings:
                 return self._binding_target(current, original, name, load, bindings)
             parent = current.parent
-            if parent is not None and parent.kind == "class" and original.kind in {"function", "lambda"}:
+            if (parent is not None and parent.kind == "class" and
+                    original.kind in {"function", "lambda", "comprehension"}):
                 parent = parent.parent
             current = parent
         builtin_target = f"builtins.{name}"
@@ -553,6 +569,13 @@ class _Resolver:
             return alias if available else None
         if len(bindings) != 1 or binding.conditional:
             return None
+        pending_scope = original
+        while pending_scope.kind == "comprehension":
+            assert pending_scope.parent is not None
+            pending_scope = pending_scope.parent
+        pending_identity = binding.value if binding.kind == "class" else None
+        if pending_scope.identity == pending_identity:
+            return None
         if binding.kind in {"function", "class"} and current is original:
             ancestor = self.model.parents.get(id(load))
             while ancestor is not None and ancestor is not binding.node:
@@ -578,12 +601,11 @@ class _Resolver:
                 method = self._lookup_method(base.label, expression.attr)
                 return _Target(method, "function") if method else None
             target = self._normalize_target(f"{base.label}.{expression.attr}", "import")
+            if target is None:
+                return None
             parent = self.model.parents.get(id(expression))
-            if (
-                isinstance(parent, ast.Attribute)
-                and parent.value is expression
-                and target.label not in self.model.import_modules
-            ):
+            if (isinstance(parent, ast.Attribute) and parent.value is expression
+                    and target.label not in self.model.import_modules):
                 return None
             return target
         return None
@@ -645,13 +667,8 @@ class _Resolver:
     def _receiver_candidate(
         self, scope: _Scope, name: str, bindings: Sequence[_Binding]
     ) -> str | None:
-        if not all(
-            (
-                len(bindings) == 1,
-                bindings[0].kind == "store" if bindings else False,
-                not bindings[0].conditional if bindings else False,
-            )
-        ):
+        if (len(bindings) != 1 or bindings[0].kind != "store"
+                or bindings[0].conditional):
             return None
         assignment = self.model.parents.get(id(bindings[0].node))
         value = assignment.value if isinstance(
@@ -720,7 +737,8 @@ class _Resolver:
             if not isinstance(node, ast.Attribute):
                 continue
             owner_scope = self.model.node_scope.get(id(node))
-            if owner_scope is None or self.model.enclosing_class(owner_scope) is not self.model.classes[identity]:
+            if (owner_scope is None or self.model.enclosing_class(owner_scope)
+                    is not self.model.classes[identity]):
                 continue
             pair = _self_attribute(node)
             if pair and (field is None or pair[1] == field):
@@ -842,16 +860,12 @@ class _Resolver:
                     target.label
                     for store in stores
                     if id(store) not in self.model.conditional
-                    if isinstance(
-                        parent := self.model.parents.get(id(store)),
-                        (ast.Assign, ast.AnnAssign),
-                    )
+                    if isinstance(parent := self.model.parents.get(id(store)),
+                                  (ast.Assign, ast.AnnAssign))
                     if isinstance(parent.value, ast.Call)
-                    if (target := self._resolve_expr(
-                        self.model.node_scope[id(store)], parent.value.func
-                    ))
-                    and target.kind == "class"
-                    and target.label in self.model.classes
+                    if (target := self._resolve_expr(self.model.node_scope[id(store)],
+                                                     parent.value.func))
+                    if target.kind == "class" and target.label in self.model.classes
                 ]
                 if len(constructors) == len(stores) and len(set(constructors)) == 1:
                     self.field_receivers[(identity, field)] = constructors[0]
@@ -883,15 +897,10 @@ class _Resolver:
             else:
                 receiver = self.receivers.get((id(scope), value.id))
         elif isinstance(value, ast.Call):
-            is_super = all(
-                (
-                    isinstance(value.func, ast.Name),
-                    getattr(value.func, "id", None) == "super",
-                    class_info is not None,
-                    not value.args,
-                    not value.keywords,
-                )
-            )
+            is_super = all((
+                isinstance(value.func, ast.Name), getattr(value.func, "id", None) == "super",
+                class_info is not None, not value.args, not value.keywords,
+            ))
             if is_super:
                 target = self._resolve_name(scope, "super", value.func)
                 if getattr(target, "label", None) == "builtins.super":
@@ -899,12 +908,8 @@ class _Resolver:
                     parents_only = True
             else:
                 target = self._resolve_expr(scope, value.func)
-                if all(
-                    (
-                        getattr(target, "kind", None) == "class",
-                        getattr(target, "label", None) in self.model.classes,
-                    )
-                ):
+                if all((getattr(target, "kind", None) == "class",
+                        getattr(target, "label", None) in self.model.classes)):
                     receiver = target.label
         if receiver is None:
             return self._resolve_expr(scope, expression)
@@ -951,10 +956,8 @@ class _Resolver:
             for scope in self.model.scopes
             for name in scope.bindings
             if (target := self.receivers.get((id(scope), name))) is not None
-        }
-        receiver_evidence.update(
-            {f"{identity}::self.{field}": target for (identity, field), target in self.field_receivers.items()}
-        )
+        } | {f"{identity}::self.{field}": target
+             for (identity, field), target in self.field_receivers.items()}
         return ResolutionIndex(MappingProxyType(records), MappingProxyType(alias_evidence),
                                MappingProxyType(receiver_evidence))
 
@@ -973,15 +976,15 @@ class _Resolver:
             used_rows.add(("callsite", callsite))
             target = _Target(str(primitive["semantic_target"]), "primitive")
         elif primitive is not None:
-            external = not target.label.startswith(("src/", "builtins."))
+            external = target.kind != "builtin" and not target.label.startswith("src/")
             if not all((external, primitive["semantic_target"] == target.label)):
                 raise ValueError(f"stale callsite primitive row: {callsite}")
             used_rows.add(("callsite", callsite))
         if target is None:
             return UnresolvedCall(callsite, call.lineno, call.col_offset,
                                   ast.dump(call, include_attributes=False))
-        external = all((target.kind != "primitive",
-                        not target.label.startswith(("src/", "builtins."))))
+        external = all((target.kind not in {"primitive", "builtin"},
+                        not target.label.startswith("src/")))
         if external and target.label in entity_primitives:
             used_rows.add(("entity", target.label))
         covered = any((not external, target.label in self.allowlist,
