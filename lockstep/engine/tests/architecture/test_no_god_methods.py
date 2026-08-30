@@ -10,6 +10,7 @@ import json
 import operator
 from pathlib import Path
 import subprocess
+import textwrap
 from types import MappingProxyType
 import warnings
 
@@ -946,3 +947,1460 @@ def test_legacy_metrics_characterize_current_complexity_length_and_pruned_fanout
     _assert_deeply_immutable(next(iter(metrics.values())))
     with pytest.raises(TypeError):
         metrics[f"{path}::parent"] = next(iter(metrics.values()))
+
+
+def _resolver_source(source: str) -> bytes:
+    return textwrap.dedent(source).lstrip("\n").encode("utf-8")
+
+
+def _resolver_fixture(
+    tmp_path: Path,
+    source: str,
+    *,
+    path: str = "src/lockstep/resolver_fixture.py",
+    extra_files: Mapping[str, str] | None = None,
+    allowlist: object = (),
+    primitives: object = (),
+):
+    files = {path: _resolver_source(source)}
+    files.update(
+        {
+            extra_path: _resolver_source(extra_source)
+            for extra_path, extra_source in (extra_files or {}).items()
+        }
+    )
+    index = _fixture_index(files, tmp_path)
+    return resolve_calls(index, allowlist, primitives)
+
+
+def _resolver_calls(result: object) -> Mapping[str, object]:
+    calls = result.calls
+    assert isinstance(calls, Mapping)
+    assert all(key == record.callsite for key, record in calls.items())
+    return calls
+
+
+def _resolver_target(result: object, callsite: str) -> str:
+    record = _resolver_calls(result)[callsite]
+    assert type(record).__name__ == "ResolvedCall"
+    return record.target
+
+
+def _assert_unresolved_call(result: object, callsite: str) -> object:
+    record = _resolver_calls(result)[callsite]
+    assert type(record).__name__ == "UnresolvedCall"
+    return record
+
+
+def _primitive_callsite_row(callsite: str, semantic_target: str) -> Mapping[str, object]:
+    return {
+        "selector_kind": "callsite",
+        "selector": callsite,
+        "semantic_target": semantic_target,
+        "domains": ["external-process/provider"],
+    }
+
+
+def test_resolver_callsite_owners_follow_preorder_pruning_and_lambda_attribution(
+    tmp_path: Path,
+) -> None:
+    """Catches body-first traversal, nested-owner leakage, and dropped lambdas."""
+
+    path = "src/lockstep/owners.py"
+    result = _resolver_fixture(
+        tmp_path,
+        """
+        @decorate(decorator_argument())
+        def owner(value: annotation() = default()):
+            body()
+            local_lambda = lambda: lambda_body()
+            def nested():
+                nested_body()
+            class Nested:
+                class_owned = lambda: nested_class_lambda()
+            return final()
+
+        class Box:
+            class_owned = lambda: class_lambda()
+
+        file_owned = lambda: file_lambda()
+        file_call()
+        """,
+        path=path,
+    )
+
+    calls = _resolver_calls(result)
+    expected_by_owner = {
+        f"{path}::owner": (
+            "Call(func=Name(id='decorate', ctx=Load()), args=[Call(func=Name(id='decorator_argument', ctx=Load()), args=[], keywords=[])], keywords=[])",
+            "Call(func=Name(id='decorator_argument', ctx=Load()), args=[], keywords=[])",
+            "Call(func=Name(id='annotation', ctx=Load()), args=[], keywords=[])",
+            "Call(func=Name(id='default', ctx=Load()), args=[], keywords=[])",
+            "Call(func=Name(id='body', ctx=Load()), args=[], keywords=[])",
+            "Call(func=Name(id='lambda_body', ctx=Load()), args=[], keywords=[])",
+            "Call(func=Name(id='final', ctx=Load()), args=[], keywords=[])",
+        ),
+        f"{path}::owner.nested": (
+            "Call(func=Name(id='nested_body', ctx=Load()), args=[], keywords=[])",
+        ),
+        f"{path}::owner.Nested": (
+            "Call(func=Name(id='nested_class_lambda', ctx=Load()), args=[], keywords=[])",
+        ),
+        f"{path}::Box": (
+            "Call(func=Name(id='class_lambda', ctx=Load()), args=[], keywords=[])",
+        ),
+        f"{path}::@file": (
+            "Call(func=Name(id='file_lambda', ctx=Load()), args=[], keywords=[])",
+            "Call(func=Name(id='file_call', ctx=Load()), args=[], keywords=[])",
+        ),
+    }
+    expected_calls = {
+        f"{owner}::call:{ordinal:04d}"
+        for owner, dumps in expected_by_owner.items()
+        for ordinal in range(1, len(dumps) + 1)
+    }
+    assert set(calls) == expected_calls
+    for owner, expected_dumps in expected_by_owner.items():
+        assert tuple(
+            calls[f"{owner}::call:{ordinal:04d}"].ast_dump
+            for ordinal in range(1, len(expected_dumps) + 1)
+        ) == expected_dumps
+
+
+def test_resolver_accepts_9999_calls_and_rejects_call_10000_per_owner(
+    tmp_path: Path,
+) -> None:
+    """Catches off-by-one and five-digit per-owner callsite ordinals."""
+
+    path = "src/lockstep/call_limit.py"
+    accepted_source = "def owner():\n" + "    unknown()\n" * 9_999
+    accepted = _resolver_fixture(tmp_path, accepted_source, path=path)
+    assert tuple(_resolver_calls(accepted))[-1] == f"{path}::owner::call:9999"
+
+    with pytest.raises(ValueError, match=r"call.*9,?999|9,?999.*call"):
+        _resolver_fixture(
+            tmp_path,
+            accepted_source + "    unknown()\n",
+            path=path,
+        )
+
+
+def test_resolver_callsite_limit_is_per_owner_not_file_or_index(
+    tmp_path: Path,
+) -> None:
+    """Catches a shared counter that rejects more than 9,999 calls in total."""
+
+    path = "src/lockstep/multi_owner_limit.py"
+    source = (
+        "def first():\n"
+        + "    unknown()\n" * 5_000
+        + "def second():\n"
+        + "    unknown()\n" * 5_000
+    )
+    result = _resolver_fixture(tmp_path, source, path=path)
+    calls = _resolver_calls(result)
+
+    assert len(calls) == 10_000
+    assert f"{path}::first::call:5000" in calls
+    assert f"{path}::second::call:5000" in calls
+
+
+def test_resolver_exact_name_import_module_class_decorator_and_base_binding(
+    tmp_path: Path,
+) -> None:
+    """Catches fuzzy names, import-label drift, and ignored decorator/base scopes."""
+
+    path = "src/lockstep/exact_bindings.py"
+    result = _resolver_fixture(
+        tmp_path,
+        """
+        from package import external as renamed
+        from package import decorate as dec
+        import package.module as module
+
+        def local():
+            pass
+
+        class Base:
+            def inherited(self):
+                pass
+
+        @dec()
+        class Worker(Base):
+            def run(self, items):
+                local()
+                renamed()
+                module.work()
+                Worker.run()
+                len(items)
+
+            def inherited_call(self):
+                self.inherited()
+        """,
+        path=path,
+        allowlist=frozenset({"builtins.len"}),
+    )
+
+    assert _resolver_target(result, f"{path}::Worker::call:0001") == "package.decorate"
+    assert [
+        _resolver_target(result, f"{path}::Worker.run::call:{ordinal:04d}")
+        for ordinal in range(1, 6)
+    ] == [
+        f"{path}::local",
+        "package.external",
+        "package.module.work",
+        f"{path}::Worker.run",
+        "builtins.len",
+    ]
+    assert _resolver_target(
+        result, f"{path}::Worker.inherited_call::call:0001"
+    ) == f"{path}::Base.inherited"
+
+
+@pytest.mark.parametrize(
+    ("case", "source", "owner", "target"),
+    (
+        (
+            "parameter_is_local",
+            """
+            def target():
+                pass
+            def owner(target):
+                target()
+            """,
+            "owner",
+            None,
+        ),
+        (
+            "named_function_binding",
+            """
+            def target():
+                pass
+            def owner():
+                target()
+            """,
+            "owner",
+            "target",
+        ),
+        (
+            "named_class_binding",
+            """
+            class Target:
+                pass
+            def owner():
+                Target()
+            """,
+            "owner",
+            "Target",
+        ),
+        (
+            "store_shadows_outer_for_complete_scope",
+            """
+            def target():
+                pass
+            def replacement():
+                pass
+            def owner():
+                target()
+                target = replacement
+            """,
+            "owner",
+            None,
+        ),
+        (
+            "delete_shadows_outer_for_complete_scope",
+            """
+            def target():
+                pass
+            def owner():
+                target()
+                del target
+            """,
+            "owner",
+            None,
+        ),
+        (
+            "augstore_shadows_outer_for_complete_scope",
+            """
+            def target():
+                pass
+            def owner():
+                target()
+                target += 1
+            """,
+            "owner",
+            None,
+        ),
+        (
+            "import_shadows_outer_for_complete_scope",
+            """
+            def target():
+                pass
+            def owner():
+                target()
+                from package import target
+            """,
+            "owner",
+            None,
+        ),
+        (
+            "function_definition_shadows_outer_for_complete_scope",
+            """
+            def target():
+                pass
+            def owner():
+                target()
+                def target():
+                    pass
+            """,
+            "owner",
+            None,
+        ),
+        (
+            "class_definition_shadows_outer_for_complete_scope",
+            """
+            def Target():
+                pass
+            def owner():
+                Target()
+                class Target:
+                    pass
+            """,
+            "owner",
+            None,
+        ),
+    ),
+    ids=lambda value: value if isinstance(value, str) and "\n" not in value else None,
+)
+def test_resolver_lexical_binding_never_falls_through_a_local_scope(
+    tmp_path: Path,
+    case: str,
+    source: str,
+    owner: str,
+    target: str | None,
+) -> None:
+    path = f"src/lockstep/{case}.py"
+    result = _resolver_fixture(tmp_path, source, path=path)
+    callsite = f"{path}::{owner}::call:0001"
+
+    if target is None:
+        _assert_unresolved_call(result, callsite)
+    else:
+        assert _resolver_target(result, callsite) == f"{path}::{target}"
+
+
+def test_resolver_valid_global_and_nonlocal_redirects_are_exact(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/redirects.py"
+    result = _resolver_fixture(
+        tmp_path,
+        """
+        def module_target():
+            pass
+
+        def global_owner():
+            global module_target
+            module_target()
+
+        def outer():
+            def enclosed_target():
+                pass
+            def inner():
+                nonlocal enclosed_target
+                enclosed_target()
+
+            class ThroughClass:
+                def method(self):
+                    nonlocal enclosed_target
+                    enclosed_target()
+        """,
+        path=path,
+    )
+
+    assert _resolver_target(
+        result, f"{path}::global_owner::call:0001"
+    ) == f"{path}::module_target"
+    assert _resolver_target(
+        result, f"{path}::outer.inner::call:0001"
+    ) == f"{path}::outer.enclosed_target"
+    assert _resolver_target(
+        result, f"{path}::outer.ThroughClass.method::call:0001"
+    ) == f"{path}::outer.enclosed_target"
+
+
+def test_resolver_binding_applies_symbol_rules_to_decorators_and_bases(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/decorator_base_alias.py"
+    result = _resolver_fixture(
+        tmp_path,
+        """
+        from package import decorate as imported_decorator
+        decorator_alias = imported_decorator
+        class Base:
+            def inherited(self):
+                pass
+        base_alias = Base
+        @decorator_alias()
+        class Child(base_alias):
+            def owner(self):
+                self.inherited()
+        """,
+        path=path,
+    )
+
+    assert _resolver_target(
+        result, f"{path}::Child::call:0001"
+    ) == "package.decorate"
+    assert _resolver_target(
+        result, f"{path}::Child.owner::call:0001"
+    ) == f"{path}::Base.inherited"
+
+
+@pytest.mark.parametrize(
+    ("case", "source", "owner"),
+    (
+        (
+            "duplicate_global",
+            """
+            def target():
+                pass
+            def owner():
+                global target
+                global target
+                target()
+            """,
+            "owner",
+        ),
+        (
+            "duplicate_nonlocal",
+            """
+            def outer():
+                def target():
+                    pass
+                def owner():
+                    nonlocal target
+                    nonlocal target
+                    target()
+            """,
+            "outer.owner",
+        ),
+        (
+            "declaration_after_use",
+            """
+            def target():
+                pass
+            def owner():
+                target()
+                global target
+            """,
+            "owner",
+        ),
+        (
+            "nonlocal_declaration_after_use",
+            """
+            def outer():
+                def target():
+                    pass
+                def owner():
+                    target()
+                    nonlocal target
+            """,
+            "outer.owner",
+        ),
+        (
+            "missing_global",
+            """
+            def owner():
+                global missing
+                missing()
+            """,
+            "owner",
+        ),
+        (
+            "missing_nonlocal",
+            """
+            def outer():
+                def owner():
+                    nonlocal missing
+                    missing()
+            """,
+            "outer.owner",
+        ),
+        (
+            "global_store",
+            """
+            def target():
+                pass
+            def replacement():
+                pass
+            def owner():
+                global target
+                target = replacement
+                target()
+            """,
+            "owner",
+        ),
+        (
+            "global_delete",
+            """
+            def target():
+                pass
+            def owner():
+                global target
+                del target
+                target()
+            """,
+            "owner",
+        ),
+        (
+            "global_augstore",
+            """
+            def target():
+                pass
+            def owner():
+                global target
+                target += 1
+                target()
+            """,
+            "owner",
+        ),
+        (
+            "nonlocal_store",
+            """
+            def outer():
+                def target():
+                    pass
+                def replacement():
+                    pass
+                def owner():
+                    nonlocal target
+                    target = replacement
+                    target()
+            """,
+            "outer.owner",
+        ),
+        (
+            "nonlocal_delete",
+            """
+            def outer():
+                def target():
+                    pass
+                def owner():
+                    nonlocal target
+                    del target
+                    target()
+            """,
+            "outer.owner",
+        ),
+        (
+            "nonlocal_augstore",
+            """
+            def outer():
+                def target():
+                    pass
+                def owner():
+                    nonlocal target
+                    target += 1
+                    target()
+            """,
+            "outer.owner",
+        ),
+    ),
+    ids=lambda value: value if isinstance(value, str) and "\n" not in value else None,
+)
+def test_resolver_binding_rejects_invalid_global_and_nonlocal_declarations(
+    tmp_path: Path,
+    case: str,
+    source: str,
+    owner: str,
+) -> None:
+    path = f"src/lockstep/{case}.py"
+    result = _resolver_fixture(tmp_path, source, path=path)
+    _assert_unresolved_call(result, f"{path}::{owner}::call:0001")
+
+
+_CONDITIONAL_RECEIVER_ASSIGNMENTS = (
+    ("if", "if flag:\n    receiver = Worker()"),
+    ("for", "for _ in items:\n    receiver = Worker()"),
+    ("comprehension", "values = [(receiver := Worker()) for _ in items]"),
+    ("while", "while flag:\n    receiver = Worker()\n    break"),
+    ("try", "try:\n    receiver = Worker()\nexcept Exception:\n    pass"),
+    ("except", "try:\n    pass\nexcept Exception:\n    receiver = Worker()"),
+    ("finally", "try:\n    pass\nfinally:\n    receiver = Worker()"),
+    ("with", "with manager as receiver:\n    pass"),
+    ("match", "match subject:\n    case receiver:\n        pass"),
+    ("conditional_expression", "receiver = Worker() if flag else Worker()"),
+    ("short_circuit", "receiver = flag and Worker()"),
+    (
+        "lambda",
+        "builder = lambda: (receiver := Worker())\nbuilder()",
+    ),
+    ("assignment_expression", "if (receiver := Worker()):\n    pass"),
+    (
+        "mutually_exclusive_branches",
+        "if flag:\n    receiver = Worker()\nelse:\n    receiver = Worker()",
+    ),
+    (
+        "exception_target_cleanup",
+        "try:\n    pass\nexcept Exception as receiver:\n    pass",
+    ),
+    ("loop_target", "for receiver in items:\n    pass"),
+)
+
+
+@pytest.mark.parametrize(
+    ("case", "assignment"),
+    _CONDITIONAL_RECEIVER_ASSIGNMENTS,
+    ids=[case for case, _assignment in _CONDITIONAL_RECEIVER_ASSIGNMENTS],
+)
+def test_resolver_receiver_assignment_is_unconditional_across_every_control_form(
+    tmp_path: Path,
+    case: str,
+    assignment: str,
+) -> None:
+    path = f"src/lockstep/conditional_{case}.py"
+    source = (
+        "class Worker:\n"
+        "    def run(self):\n"
+        "        pass\n"
+        "def owner(flag, items, manager, subject):\n"
+        f"{textwrap.indent(assignment, '    ')}\n"
+        "    receiver.run()\n"
+    )
+    result = _resolver_fixture(tmp_path, source, path=path)
+    receiver_calls = [
+        record
+        for record in _records_named(result, "UnresolvedCall")
+        if "Attribute(value=Name(id='receiver'" in record.ast_dump
+        and "attr='run'" in record.ast_dump
+    ]
+    assert len(receiver_calls) == 1
+
+
+def test_resolver_self_cls_and_super_use_unique_declared_inheritance(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/inheritance.py"
+    result = _resolver_fixture(
+        tmp_path,
+        """
+        class Base:
+            def inherited(self):
+                pass
+
+        class Other:
+            pass
+
+        class Child(Base, Other):
+            def own(self):
+                pass
+            def instance(self):
+                self.own()
+            @classmethod
+            def class_side(cls):
+                cls.own()
+            def parent(self):
+                super().inherited()
+        """,
+        path=path,
+        allowlist=frozenset({"builtins.super"}),
+    )
+
+    assert _resolver_target(
+        result, f"{path}::Child.instance::call:0001"
+    ) == f"{path}::Child.own"
+    assert _resolver_target(
+        result, f"{path}::Child.class_side::call:0001"
+    ) == f"{path}::Child.own"
+    assert _resolver_target(
+        result, f"{path}::Child.parent::call:0001"
+    ) == f"{path}::Base.inherited"
+    assert _resolver_target(
+        result, f"{path}::Child.parent::call:0002"
+    ) == "builtins.super"
+
+
+@pytest.mark.parametrize(
+    ("receiver", "decorator", "parameter"),
+    (
+        ("self", "", "self"),
+        ("cls", "@classmethod\n    ", "cls"),
+        ("super()", "", "self"),
+    ),
+    ids=("self", "cls", "super"),
+)
+def test_resolver_receiver_rejects_ambiguous_inheritance(
+    tmp_path: Path,
+    receiver: str,
+    decorator: str,
+    parameter: str,
+) -> None:
+    path = "src/lockstep/ambiguous_inheritance.py"
+    owner_definition = (
+        f"    {decorator}def owner({parameter}):\n"
+        f"        {receiver}.collide()\n"
+    )
+    result = _resolver_fixture(
+        tmp_path,
+        (
+            "class Left:\n"
+            "    def collide(self):\n"
+            "        pass\n"
+            "class Right:\n"
+            "    def collide(self):\n"
+            "        pass\n"
+            "class Child(Left, Right):\n"
+            f"{owner_definition}"
+        ),
+        path=path,
+        allowlist=frozenset({"builtins.super"}),
+    )
+
+    _assert_unresolved_call(result, f"{path}::Child.owner::call:0001")
+
+
+def test_resolver_receiver_accepts_immutable_constructor_annotation_and_inline_forms(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/local_receivers.py"
+    result = _resolver_fixture(
+        tmp_path,
+        """
+        class Worker:
+            def run(self):
+                pass
+        def owner():
+            assigned = Worker()
+            assigned.run()
+            annotated: Worker
+            annotated.run()
+            Worker().run()
+        """,
+        path=path,
+    )
+
+    assert [
+        _resolver_target(result, f"{path}::owner::call:{ordinal:04d}")
+        for ordinal in range(1, 6)
+    ] == [
+        f"{path}::Worker",
+        f"{path}::Worker.run",
+        f"{path}::Worker.run",
+        f"{path}::Worker.run",
+        f"{path}::Worker",
+    ]
+
+
+def test_resolver_receiver_rejects_an_ambiguous_constructor_binding(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/ambiguous_constructor.py"
+    result = _resolver_fixture(
+        tmp_path,
+        """
+        from lockstep.left import Worker
+        from lockstep.right import Worker
+        def owner():
+            worker = Worker()
+            worker.run()
+        """,
+        path=path,
+        extra_files={
+            "src/lockstep/left.py": """
+            class Worker:
+                def run(self):
+                    pass
+            """,
+            "src/lockstep/right.py": """
+            class Worker:
+                def run(self):
+                    pass
+            """,
+        },
+    )
+
+    _assert_unresolved_call(result, f"{path}::owner::call:0002")
+
+
+_LOCAL_RECEIVER_INVALIDATIONS = (
+    ("rebound", "worker = Worker()\nworker = Worker()"),
+    ("deleted", "worker = Worker()\ndel worker"),
+    ("augmented", "worker = Worker()\nworker += other"),
+    ("passed_positionally", "worker = Worker()\nconsume(worker)"),
+    ("passed_by_keyword", "worker = Worker()\nconsume(value=worker)"),
+    ("captured", "worker = Worker()\ninner = lambda: worker"),
+    (
+        "nested_scope_write",
+        "worker = Worker()\ndef nested():\n    nonlocal worker\n    worker = Worker()",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("case", "setup"),
+    _LOCAL_RECEIVER_INVALIDATIONS,
+    ids=[case for case, _setup in _LOCAL_RECEIVER_INVALIDATIONS],
+)
+def test_resolver_receiver_rejects_rebind_delete_reference_and_capture(
+    tmp_path: Path,
+    case: str,
+    setup: str,
+) -> None:
+    path = f"src/lockstep/local_receiver_{case}.py"
+    source = (
+        "class Worker:\n"
+        "    def run(self):\n"
+        "        pass\n"
+        "def owner():\n"
+        f"{textwrap.indent(setup, '    ')}\n"
+        "    worker.run()\n"
+    )
+    result = _resolver_fixture(tmp_path, source, path=path)
+    callsite = next(
+        record.callsite
+        for record in _records_named(result, "UnresolvedCall")
+        if "Attribute(value=Name(id='worker'" in record.ast_dump
+        and "attr='run'" in record.ast_dump
+    )
+    _assert_unresolved_call(result, callsite)
+
+
+def test_resolver_receiver_accepts_one_class_wide_constructor_field(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/self_field.py"
+    result = _resolver_fixture(
+        tmp_path,
+        """
+        class Worker:
+            def run(self):
+                pass
+        class Service:
+            def __init__(self):
+                self.worker = Worker()
+            def reset(self):
+                self.worker = Worker()
+            def run(self):
+                self.worker.run()
+        """,
+        path=path,
+    )
+
+    assert _resolver_target(
+        result, f"{path}::Service.run::call:0001"
+    ) == f"{path}::Worker.run"
+
+
+@pytest.mark.parametrize(
+    ("case", "extra"),
+    (
+        (
+            "different_constructor",
+            "def replace(self):\n    self.worker = Other()",
+        ),
+        ("delete", "def replace(self):\n    del self.worker"),
+        ("augstore", "def replace(self):\n    self.worker += other"),
+        (
+            "dynamic_assignment",
+            "def replace(self, value):\n    self.worker = value",
+        ),
+        (
+            "conditional_assignment",
+            "def replace(self, flag):\n    if flag:\n        self.worker = Worker()",
+        ),
+    ),
+)
+def test_resolver_receiver_rejects_nonuniform_class_wide_field_bindings(
+    tmp_path: Path,
+    case: str,
+    extra: str,
+) -> None:
+    path = f"src/lockstep/self_field_{case}.py"
+    source = f"""
+        class Worker:
+            def run(self):
+                pass
+        class Other:
+            def run(self):
+                pass
+        class Service:
+            def __init__(self):
+                self.worker = Worker()
+{textwrap.indent(extra, '            ')}
+            def run(self):
+                self.worker.run()
+    """
+    result = _resolver_fixture(tmp_path, source, path=path)
+    _assert_unresolved_call(result, f"{path}::Service.run::call:0001")
+
+
+@pytest.mark.parametrize(
+    ("case", "import_line", "annotation"),
+    (
+        ("name", "from lockstep.dependency import Dependency", "Dependency"),
+        ("attribute", "import lockstep.dependency as dep", "dep.Dependency"),
+    ),
+)
+def test_resolver_receiver_accepts_exact_annotated_parameter_injection(
+    tmp_path: Path,
+    case: str,
+    import_line: str,
+    annotation: str,
+) -> None:
+    path = f"src/lockstep/injection_{case}.py"
+    result = _resolver_fixture(
+        tmp_path,
+        f"""
+        {import_line}
+        class Service:
+            def __init__(self, dependency: {annotation}):
+                self.dependency = dependency
+            def run(self):
+                self.dependency.work()
+        """,
+        path=path,
+        extra_files={
+            "src/lockstep/dependency.py": """
+            class Dependency:
+                def work(self):
+                    pass
+            """
+        },
+    )
+
+    assert _resolver_target(
+        result, f"{path}::Service.run::call:0001"
+    ) == "src/lockstep/dependency.py::Dependency.work"
+
+
+_INJECTION_NEGATIVES = (
+    ("missing_annotation", "", "self.dependency = dependency", "", ""),
+    ("string_annotation", ': "Dependency"', "self.dependency = dependency", "", ""),
+    ("generic_annotation", ": list[Dependency]", "self.dependency = dependency", "", ""),
+    (
+        "parameter_rebound",
+        ": Dependency",
+        "dependency = Dependency()\nself.dependency = dependency",
+        "",
+        "",
+    ),
+    (
+        "parameter_deleted",
+        ": Dependency",
+        "self.dependency = dependency\ndel dependency",
+        "",
+        "",
+    ),
+    (
+        "parameter_augstore",
+        ": Dependency",
+        "self.dependency = dependency\ndependency += other",
+        "",
+        "",
+    ),
+    (
+        "conditional_assignment",
+        ": Dependency",
+        "if flag:\n    self.dependency = dependency",
+        "",
+        "",
+    ),
+    (
+        "duplicate_assignment",
+        ": Dependency",
+        "self.dependency = dependency\nself.dependency = dependency",
+        "",
+        "",
+    ),
+    (
+        "parameter_returned",
+        ": Dependency",
+        "self.dependency = dependency\nreturn dependency",
+        "",
+        "",
+    ),
+    (
+        "parameter_yielded",
+        ": Dependency",
+        "self.dependency = dependency\nyield dependency",
+        "",
+        "",
+    ),
+    (
+        "parameter_stored_elsewhere",
+        ": Dependency",
+        "self.dependency = dependency\nself.other = dependency",
+        "",
+        "",
+    ),
+    (
+        "parameter_passed",
+        ": Dependency",
+        "self.dependency = dependency\nconsume(dependency)",
+        "",
+        "",
+    ),
+    (
+        "parameter_captured",
+        ": Dependency",
+        "self.dependency = dependency\ncaptured = lambda: dependency",
+        "",
+        "",
+    ),
+    (
+        "parameter_aliased",
+        ": Dependency",
+        "self.dependency = dependency\nalias = dependency",
+        "",
+        "",
+    ),
+    (
+        "field_returned",
+        ": Dependency",
+        "self.dependency = dependency",
+        "def escape(self):\n    return self.dependency",
+        "",
+    ),
+    (
+        "field_yielded",
+        ": Dependency",
+        "self.dependency = dependency",
+        "def escape(self):\n    yield self.dependency",
+        "",
+    ),
+    (
+        "field_stored_elsewhere",
+        ": Dependency",
+        "self.dependency = dependency",
+        "def escape(self):\n    self.other = self.dependency",
+        "",
+    ),
+    (
+        "field_passed",
+        ": Dependency",
+        "self.dependency = dependency",
+        "def escape(self):\n    consume(self.dependency)",
+        "",
+    ),
+    (
+        "field_captured",
+        ": Dependency",
+        "self.dependency = dependency",
+        "def escape(self):\n    captured = lambda: self.dependency",
+        "",
+    ),
+    (
+        "field_aliased",
+        ": Dependency",
+        "self.dependency = dependency",
+        "def escape(self):\n    alias = self.dependency",
+        "",
+    ),
+    (
+        "subclass_store",
+        ": Dependency",
+        "self.dependency = dependency",
+        "",
+        "def replace(self, value):\n    self.dependency = value",
+    ),
+    (
+        "subclass_delete",
+        ": Dependency",
+        "self.dependency = dependency",
+        "",
+        "def replace(self):\n    del self.dependency",
+    ),
+    (
+        "subclass_augstore",
+        ": Dependency",
+        "self.dependency = dependency",
+        "",
+        "def replace(self):\n    self.dependency += other",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("case", "annotation", "assignment", "extra_service", "subclass_body"),
+    _INJECTION_NEGATIVES,
+    ids=[case for case, *_rest in _INJECTION_NEGATIVES],
+)
+def test_resolver_receiver_rejects_inexact_or_escaped_parameter_injection(
+    tmp_path: Path,
+    case: str,
+    annotation: str,
+    assignment: str,
+    extra_service: str,
+    subclass_body: str,
+) -> None:
+    path = f"src/lockstep/injection_negative_{case}.py"
+    flag_parameter = ", flag" if case == "conditional_assignment" else ""
+    service_extra = (
+        textwrap.indent(extra_service, "    ") + "\n" if extra_service else ""
+    )
+    subclass = (
+        "\nclass Child(Service):\n" + textwrap.indent(subclass_body, "    ")
+        if subclass_body
+        else ""
+    )
+    source = (
+        "class Dependency:\n"
+        "    def work(self):\n"
+        "        pass\n"
+        "class Service:\n"
+        f"    def __init__(self, dependency{annotation}{flag_parameter}):\n"
+        f"{textwrap.indent(assignment, '        ')}\n"
+        f"{service_extra}"
+        "    def run(self):\n"
+        "        self.dependency.work()\n"
+        f"{subclass}\n"
+    )
+    result = _resolver_fixture(tmp_path, source, path=path)
+    _assert_unresolved_call(result, f"{path}::Service.run::call:0001")
+
+
+def test_resolver_receiver_limits_annotated_parameter_injection_to_init(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/injection_not_init.py"
+    result = _resolver_fixture(
+        tmp_path,
+        """
+        class Dependency:
+            def work(self):
+                pass
+        class Service:
+            def configure(self, dependency: Dependency):
+                self.dependency = dependency
+            def run(self):
+                self.dependency.work()
+        """,
+        path=path,
+    )
+
+    _assert_unresolved_call(result, f"{path}::Service.run::call:0001")
+
+
+def test_resolver_symbol_aliases_require_one_direct_immutable_assignment(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/symbol_alias.py"
+    result = _resolver_fixture(
+        tmp_path,
+        """
+        def target():
+            pass
+        class Worker:
+            def run(self):
+                pass
+        def owner():
+            alias = target
+            alias()
+            class_alias = Worker
+            class_alias().run()
+        """,
+        path=path,
+    )
+
+    assert _resolver_target(
+        result, f"{path}::owner::call:0001"
+    ) == f"{path}::target"
+    assert _resolver_target(
+        result, f"{path}::owner::call:0002"
+    ) == f"{path}::Worker.run"
+    assert _resolver_target(
+        result, f"{path}::owner::call:0003"
+    ) == f"{path}::Worker"
+
+
+_SYMBOL_ALIAS_INVALIDATIONS = (
+    ("later_store", "alias = target\nalias = replacement"),
+    ("later_delete", "alias = target\ndel alias"),
+    ("later_augstore", "alias = target\nalias += replacement"),
+    (
+        "closure_write",
+        "alias = target\ndef nested():\n    nonlocal alias\n    alias = replacement",
+    ),
+    ("conditional", "if flag:\n    alias = target"),
+    ("indirect", "first = target\nalias = first"),
+)
+
+
+@pytest.mark.parametrize(
+    ("case", "assignment"),
+    _SYMBOL_ALIAS_INVALIDATIONS,
+    ids=[case for case, _assignment in _SYMBOL_ALIAS_INVALIDATIONS],
+)
+def test_resolver_binding_rejects_rebound_conditional_and_indirect_symbol_aliases(
+    tmp_path: Path,
+    case: str,
+    assignment: str,
+) -> None:
+    path = f"src/lockstep/alias_{case}.py"
+    source = (
+        "def target():\n"
+        "    pass\n"
+        "def replacement():\n"
+        "    pass\n"
+        "def owner(flag=False):\n"
+        f"{textwrap.indent(assignment, '    ')}\n"
+        "    alias()\n"
+    )
+    result = _resolver_fixture(tmp_path, source, path=path)
+    _assert_unresolved_call(result, f"{path}::owner::call:0001")
+
+
+@pytest.mark.parametrize(
+    ("case", "expression"),
+    (
+        ("unknown_name", "unknown()"),
+        ("parameter_receiver", "value.method()"),
+        ("nested_dynamic_attribute", "module.dynamic.method()"),
+        ("reflective_getattr", "getattr(value, 'method')()"),
+        ("dunder_reflection", "value.__getattribute__('method')()"),
+        ("subscript_callable", "registry['handler']()"),
+    ),
+)
+def test_resolver_callsite_dynamic_and_reflective_forms_remain_unresolved(
+    tmp_path: Path,
+    case: str,
+    expression: str,
+) -> None:
+    path = f"src/lockstep/dynamic_{case}.py"
+    result = _resolver_fixture(
+        tmp_path,
+        f"""
+        import package.module as module
+        def owner(value, registry):
+            {expression}
+        """,
+        path=path,
+        allowlist=frozenset({"builtins.getattr"}),
+    )
+
+    _assert_unresolved_call(result, f"{path}::owner::call:0001")
+
+
+def test_resolver_binding_star_import_never_creates_a_name_binding(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/star_import.py"
+    result = _resolver_fixture(
+        tmp_path,
+        """
+        from package import *
+        def owner():
+            imported_name()
+        """,
+        path=path,
+    )
+    _assert_unresolved_call(result, f"{path}::owner::call:0001")
+
+
+def test_resolver_callsite_unresolved_record_has_stable_coordinate_and_ast_dump(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/unresolved.py"
+    result = _resolver_fixture(
+        tmp_path,
+        """
+        def owner(value):
+            mystery(value)
+        """,
+        path=path,
+    )
+
+    record = _assert_unresolved_call(result, f"{path}::owner::call:0001")
+    assert {field.name for field in fields(record)} == {
+        "callsite",
+        "line",
+        "column",
+        "ast_dump",
+    }
+    assert (record.line, record.column) == (2, 4)
+    assert record.ast_dump == (
+        "Call(func=Name(id='mystery', ctx=Load()), "
+        "args=[Name(id='value', ctx=Load())], keywords=[])"
+    )
+
+
+def test_resolver_callsite_effect_free_allowlist_matches_exact_builtin_target(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/allowlist.py"
+    exact = _resolver_fixture(
+        tmp_path,
+        """
+        def owner(items):
+            len(items)
+        """,
+        path=path,
+        allowlist=frozenset({"builtins.len"}),
+    )
+    assert _resolver_target(exact, f"{path}::owner::call:0001") == "builtins.len"
+
+    for inexact in (frozenset({"len"}), frozenset({"builtins.length"})):
+        unresolved = _resolver_fixture(
+            tmp_path,
+            """
+            def owner(items):
+                len(items)
+            """,
+            path=path,
+            allowlist=inexact,
+        )
+        _assert_unresolved_call(unresolved, f"{path}::owner::call:0001")
+
+
+def test_resolver_callsite_primitive_is_an_exact_terminal_override(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/callsite_primitive.py"
+    callsite = f"{path}::owner::call:0001"
+    source = """
+        def owner(callback):
+            callback()
+    """
+    exact = _resolver_fixture(
+        tmp_path,
+        source,
+        path=path,
+        primitives=(_primitive_callsite_row(callsite, "reviewed.callback"),),
+    )
+    assert _resolver_target(exact, callsite) == "reviewed.callback"
+
+    for wrong_row in (
+        _primitive_callsite_row(f"{path}::owner::call:0002", "reviewed.callback"),
+        {
+            **_primitive_callsite_row(callsite, "reviewed.callback"),
+            "selector_kind": "entity",
+        },
+    ):
+        unresolved = _resolver_fixture(
+            tmp_path,
+            source,
+            path=path,
+            primitives=(wrong_row,),
+        )
+        _assert_unresolved_call(unresolved, callsite)
+
+
+def test_resolver_callsite_and_entity_primitive_selector_spaces_are_disjoint(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/disjoint_selectors.py"
+    callsite = f"{path}::owner::call:0001"
+    rows = (
+        _primitive_callsite_row(callsite, "reviewed.callback"),
+        {
+            **_primitive_callsite_row(callsite, "reviewed.callback"),
+            "selector_kind": "entity",
+        },
+    )
+
+    with pytest.raises(ValueError, match="selector|disjoint|callsite"):
+        _resolver_fixture(
+            tmp_path,
+            """
+            def owner(callback):
+                callback()
+            """,
+            path=path,
+            primitives=rows,
+        )
+
+
+def test_resolver_callsite_primitive_is_invalidated_by_source_ordinal_change(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/ordinal_invalidation.py"
+    stale_callsite = f"{path}::owner::call:0002"
+    row = _primitive_callsite_row(stale_callsite, "reviewed.callback")
+    before = _resolver_fixture(
+        tmp_path,
+        """
+        def owner(callback):
+            other()
+            callback()
+        """,
+        path=path,
+        primitives=(row,),
+    )
+    assert _resolver_target(before, stale_callsite) == "reviewed.callback"
+
+    after = _resolver_fixture(
+        tmp_path,
+        """
+        def owner(callback):
+            callback()
+        """,
+        path=path,
+        primitives=(row,),
+    )
+    _assert_unresolved_call(after, f"{path}::owner::call:0001")
+    assert stale_callsite not in _resolver_calls(after)
+
+
+def test_resolver_callsite_primitive_cannot_override_new_static_semantics(
+    tmp_path: Path,
+) -> None:
+    """Catches a stale callsite row overriding a newly exact lexical target."""
+
+    path = "src/lockstep/semantic_invalidation.py"
+    callsite = f"{path}::owner::call:0001"
+    row = _primitive_callsite_row(callsite, "reviewed.callback")
+    result = _resolver_fixture(
+        tmp_path,
+        """
+        def target():
+            pass
+        def owner():
+            target()
+        """,
+        path=path,
+        primitives=(row,),
+    )
+
+    assert _resolver_target(result, callsite) == f"{path}::target"
+
+
+def test_resolver_result_records_aliases_and_receivers_are_deeply_immutable(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/immutable_resolution.py"
+    result = _resolver_fixture(
+        tmp_path,
+        """
+        def target():
+            pass
+        class Worker:
+            def run(self):
+                pass
+        def owner():
+            alias = target
+            alias()
+            worker = Worker()
+            worker.run()
+            unknown()
+        """,
+        path=path,
+    )
+
+    assert type(result).__name__ == "ResolutionIndex"
+    assert {field.name for field in fields(result)} == {"calls", "aliases", "receivers"}
+    assert isinstance(result.aliases, Mapping)
+    assert isinstance(result.receivers, Mapping)
+    assert f"{path}::target" in result.aliases.values()
+    assert f"{path}::Worker" in result.receivers.values()
+    resolved = _records_named(result, "ResolvedCall")
+    unresolved = _records_named(result, "UnresolvedCall")
+    assert {field.name for field in fields(resolved[0])} == {"callsite", "target"}
+    assert {field.name for field in fields(unresolved[0])} == {
+        "callsite",
+        "line",
+        "column",
+        "ast_dump",
+    }
+    _assert_deeply_immutable(result)
