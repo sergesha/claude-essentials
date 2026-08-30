@@ -6519,6 +6519,33 @@ def test_candidate_policy_checked_in_schema_and_thresholds_are_canonical() -> No
                 cluster for cluster, _transition, _source, _target
                 in _LIFECYCLE_TRANSITIONS
             ))
+    integer_fields = {
+        "function": {"cyclomatic", "cognitive", "max_nesting",
+                     "legacy_syntactic_fanout", "resolved_fanout", "composite_score"},
+        "one_hop": {"helper_count", "summed_cyclomatic", "summed_cognitive",
+                    "max_nesting", "legacy_syntactic_fanout_union",
+                    "resolved_fanout_union", "composite_score"},
+        "class": {"method_count", "public_method_count", "mutable_field_count",
+                  "cohesion_components", "composite_score"},
+        "file": {"definition_count", "class_count", "subsystem_import_count",
+                 "definition_dependency_components", "composite_score"},
+    }
+    for kind, names in integer_fields.items():
+        for name in names - {"composite_score"}:
+            assert schema["$defs"][kind]["properties"][name] == {
+                "minimum": 0, "type": "integer"
+            }
+    array_contracts = {
+        "function": ("unresolved_callsites",),
+        "one_hop": ("members",), "class": ("bases", "mutable_fields"),
+        "file": ("subsystem_imports",),
+    }
+    for kind, names in array_contracts.items():
+        for name in names:
+            value = schema["$defs"][kind]["properties"][name]
+            assert value["type"] == "array" and value["uniqueItems"] is True
+            assert value["items"]["type"] == "string"
+    assert schema["$defs"]["one_hop"]["properties"]["root"]["type"] == "string"
 
     thresholds = json.loads(threshold_path.read_bytes())
     assert set(thresholds) == {"schema", "rule_version", "kinds"}
@@ -6546,6 +6573,29 @@ def test_candidate_policy_checked_in_schema_and_thresholds_are_canonical() -> No
             "domain_mixing": 4, "lifecycle_mixing": 3},
             "hard": {"definition_count_gt_50": 50}, "minimum_signals": 3},
     }
+
+
+def test_candidate_policy_binds_exact_rule_digests_and_versions(tmp_path: Path) -> None:
+    path = "src/lockstep/digest_binding.py"
+    index, resolutions, semantics = _propagate_fixture(tmp_path, "def root(): pass", path=path)
+    schema_digest = hashlib.sha256(
+        (ARCHITECTURE_TEST_ROOT / "architecture_metrics.schema.json").read_bytes()
+    ).hexdigest()
+    threshold_digest = hashlib.sha256(
+        (ARCHITECTURE_TEST_ROOT / "architecture_thresholds.json").read_bytes()
+    ).hexdigest()
+    semantics = replace(semantics, digest_inputs=domain_lifecycle.SemanticDigestInputs(
+        semantics.digest_inputs.allowlist_digest, schema_digest, threshold_digest,
+        "task-12c-policy", "v1"))
+
+    report = evaluate_candidates(index, measure_legacy_metrics(index), semantics, resolutions)
+
+    assert report.allowlist_digest == semantics.digest_inputs.allowlist_digest
+    assert report.primitive_digest == semantics.primitive_digest
+    assert report.lifecycle_digest == semantics.lifecycle_digest
+    assert report.schema_digest == schema_digest
+    assert report.threshold_digest == threshold_digest
+    assert (report.analyzer_version, report.rule_version) == ("task-12c-policy", "v1")
 
 
 def test_candidate_policy_recomputes_function_formula_and_ignores_no_stored_claim(
@@ -6590,6 +6640,11 @@ def test_candidate_policy_recomputes_function_formula_and_ignores_no_stored_clai
     assert metric.candidate is True
     assert metric.resolved_fanout == 1
     assert metric.unresolved_callsites == ()
+    assert metric.direct_domains == ()
+    assert metric.propagated_domains == ("filesystem-read", "filesystem-write")
+    assert metric.direct_transitions == ()
+    assert metric.propagated_transitions == ("publication.apply",)
+    assert metric.propagated_lifecycle_clusters == ("publication",)
 
 
 @pytest.mark.parametrize(
@@ -6636,6 +6691,40 @@ def test_candidate_policy_function_boundaries_order_and_mixing_prerequisite(
     metric = evaluate_candidates(index, hard, semantics, resolutions).functions[identity]
     assert metric.hard_triggers == _CANDIDATE_HARD_TRIGGER_ORDER["function"]
     assert metric.candidate is True
+
+
+def test_candidate_policy_exact_three_lifecycle_signal_and_below_three_boundary(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/lifecycle_formula.py"
+    root = f"{path}::root"
+    index, resolutions, semantics = _propagate_fixture(
+        tmp_path, "def first(): pass\ndef second(): pass\ndef root(): first(); second()",
+        path=path,
+        lifecycle_rows=(
+            {"binding_kind": "entity", "binding": f"{path}::first",
+             "target": f"{path}::first", "discriminant": {"kind": "none"},
+             "transition_id": "process.prepare"},
+            {"binding_kind": "entity", "binding": f"{path}::second",
+             "target": f"{path}::second", "discriminant": {"kind": "none"},
+             "transition_id": "publication.apply"},
+        ),
+    )
+    legacy = dict(measure_legacy_metrics(index))
+    metric_type = type(legacy[root])
+    legacy[root] = metric_type(10, 15, 0, 0)
+    metric = evaluate_candidates(
+        index, MappingProxyType(legacy), semantics, resolutions).functions[root]
+    assert metric.composite_score == 3
+    assert metric.signals["lifecycle_mixing"] is True
+    assert metric.candidate is True
+
+    legacy[root] = metric_type(10, 0, 0, 0)
+    below = evaluate_candidates(
+        index, MappingProxyType(legacy), semantics, resolutions).functions[root]
+    assert below.composite_score == 2
+    assert below.signals["lifecycle_mixing"] is True
+    assert below.candidate is False
 
 
 def test_candidate_policy_one_hop_closure_is_private_scc_and_excludes_shared(
@@ -6705,7 +6794,8 @@ def test_candidate_policy_one_hop_fixed_point_names_order_overlap_and_metrics(
     assert first.summed_cyclomatic == 16
     assert first.summed_cognitive == 30
     assert first.max_nesting == 4
-    assert first.legacy_syntactic_fanout_union >= 10
+    assert first.legacy_syntactic_fanout_union == 3
+    assert first.resolved_fanout_union == 3
     assert first.propagated_domains == ("filesystem-read",)
     assert first.propagated_lifecycle_clusters == ("delivery",)
 
@@ -6724,6 +6814,42 @@ def test_candidate_policy_one_hop_formula_and_helper_hard_boundary(
     assert metric.helper_count == 13
     assert metric.hard_triggers == ("helper_count_gt_12",)
     assert metric.candidate is True
+
+    twelve_source = "def root(): " + "; ".join(
+        f"_h{i}()" for i in range(12)) + "\n" + "\n".join(
+        f"def _h{i}(): pass" for i in range(12))
+    twelve_index, twelve_resolutions, twelve_semantics = _propagate_fixture(
+        tmp_path, twelve_source, path="src/lockstep/helper_nontrigger.py")
+    twelve = evaluate_candidates(
+        twelve_index, measure_legacy_metrics(twelve_index), twelve_semantics,
+        twelve_resolutions).one_hops[
+            "src/lockstep/helper_nontrigger.py::root::@one_hop"]
+    assert twelve.helper_count == 12
+    assert twelve.hard_triggers == ()
+
+
+def test_candidate_policy_one_hop_same_class_private_and_root_without_helpers(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/class_helpers.py"
+    index, resolutions, semantics = _propagate_fixture(
+        tmp_path,
+        """
+        class Service:
+            def root(self): self._helper(); self.__private(); self.__str__()
+            def _helper(self): pass
+            def __private(self): pass
+            def __str__(self): pass
+            def leaf(self): pass
+        """, path=path)
+    report = evaluate_candidates(index, measure_legacy_metrics(index), semantics, resolutions)
+    root = f"{path}::Service.root"
+    assert report.one_hops[root + "::@one_hop"].members == (
+        root, f"{path}::Service.__private", f"{path}::Service._helper")
+    leaf = f"{path}::Service.leaf"
+    leaf_metric = report.one_hops[leaf + "::@one_hop"]
+    assert leaf_metric.members == (leaf,)
+    assert leaf_metric.helper_count == 0
 
 
 def test_candidate_policy_one_hop_composite_formula_without_hard_trigger(
@@ -6813,6 +6939,99 @@ def test_candidate_policy_class_store_forms_calls_lambdas_bases_and_formula(
     assert metric.bases == (f"{path}::Base",)
 
 
+def test_candidate_policy_lambda_is_real_cohesion_vertex_and_inheritance_is_excluded(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/lambda_cohesion.py"
+    index, resolutions, semantics = _propagate_fixture(
+        tmp_path,
+        """
+        def decorator(value): return value
+        class Base:
+            def inherited(self): self.base = True
+        class Child(Base):
+            projection = lambda self: self.items
+            @decorator
+            def direct(self): return self.items
+        """, path=path)
+    metric = evaluate_candidates(
+        index, measure_legacy_metrics(index), semantics, resolutions
+    ).classes[f"{path}::Child"]
+
+    assert metric.method_count == 1
+    assert metric.public_method_count == 1
+    assert metric.mutable_fields == ()
+    assert metric.cohesion_components == 1
+    assert metric.bases == (f"{path}::Base",)
+
+
+def test_candidate_policy_cls_fields_normalize_to_closed_mutable_field_identity(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/cls_fields.py"
+    index, resolutions, semantics = _propagate_fixture(
+        tmp_path,
+        """
+        class Aggregate:
+            @classmethod
+            def write(cls): cls.items = []
+            @classmethod
+            def read(cls): return cls.items
+        """, path=path, allowlist=("builtins.classmethod",))
+    metric = evaluate_candidates(
+        index, measure_legacy_metrics(index), semantics, resolutions
+    ).classes[f"{path}::Aggregate"]
+    assert metric.mutable_fields == ("self.items",)
+    assert metric.cohesion_components == 1
+
+
+def _unresolved_candidate_fixture(tmp_path: Path, source: str, path: str):
+    files = {path: _resolver_source(source)}
+    index = _fixture_index(files, tmp_path)
+    primitives = _primitive_table(index, ())
+    resolutions = resolve_calls(index, (), primitives)
+    entity_semantics = MappingProxyType({
+        identity: domain_lifecycle.EntitySemantics(
+            identity, (), (), (), (), (), "a" * 64)
+        for identity in index.entities
+    })
+    file_identity = f"{path}::@file"
+    semantics = domain_lifecycle.SemanticIndex(
+        entity_semantics,
+        MappingProxyType({file_identity: domain_lifecycle.FileSemantics(
+            file_identity, (), (), (), "b" * 64)}),
+        "c" * 64, "d" * 64, _semantic_digest_inputs())
+    return index, resolutions, semantics
+
+
+@pytest.mark.parametrize(
+    "body",
+    (
+        "setattr(self, 'field', value)",
+        "delattr(self, 'field')",
+        "alias = self.field; alias = value; alias.append(1)",
+        "self.field.unknown_mutator(value)",
+        "consume(self.field)",
+    ),
+)
+def test_candidate_policy_mutable_field_uncertainty_is_never_ignored(
+    tmp_path: Path, body: str
+) -> None:
+    path = "src/lockstep/unresolved_fields.py"
+    index, resolutions, semantics = _unresolved_candidate_fixture(
+        tmp_path,
+        f"class Mutable:\n    def mutate(self, value):\n"
+        + textwrap.indent(body, "        ") + "\n",
+        path,
+    )
+
+    report = evaluate_candidates(
+        index, measure_legacy_metrics(index), semantics, resolutions)
+
+    assert report.unresolved_callsites
+    assert report.functions[f"{path}::Mutable.mutate"].unresolved_callsites
+
+
 def test_candidate_policy_class_exact_mutators_and_immutable_local_aliases(
     tmp_path: Path,
 ) -> None:
@@ -6880,6 +7099,17 @@ def test_candidate_policy_class_hard_trigger_order_and_nontrigger_boundaries(
     assert metric.hard_triggers == _CANDIDATE_HARD_TRIGGER_ORDER["class"]
     assert metric.candidate is True
 
+    boundary_path = "src/lockstep/class_boundary.py"
+    boundary_methods = "\n".join(
+        f"    def m{i}(self): self.f{i} = {i}" for i in range(24))
+    boundary_index, boundary_resolutions, boundary_semantics = _propagate_fixture(
+        tmp_path, f"class Aggregate:\n{boundary_methods}\n", path=boundary_path)
+    boundary = evaluate_candidates(
+        boundary_index, measure_legacy_metrics(boundary_index), boundary_semantics,
+        boundary_resolutions).classes[f"{boundary_path}::Aggregate"]
+    assert boundary.method_count == 24 and boundary.mutable_field_count == 24
+    assert boundary.hard_triggers == ()
+
 
 def test_candidate_policy_class_composite_rule_without_hard_trigger(
     tmp_path: Path,
@@ -6933,6 +7163,28 @@ def test_candidate_policy_file_dependency_components_are_exact_and_containment_i
     assert metric.definition_dependency_components == 4
 
 
+def test_candidate_policy_file_attributes_nested_function_and_class_dependencies_to_top_owner(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/nested_components.py"
+    index, resolutions, semantics = _propagate_fixture(
+        tmp_path,
+        """
+        def leaf(): pass
+        def outer():
+            def nested(): leaf()
+            class Nested:
+                def method(self): leaf()
+            nested()
+        def isolated(): pass
+        """, path=path)
+    metric = evaluate_candidates(
+        index, measure_legacy_metrics(index), semantics, resolutions
+    ).files[f"{path}::@file"]
+    assert metric.definition_count == 6
+    assert metric.definition_dependency_components == 2
+
+
 def test_candidate_policy_file_subsystems_formula_and_hard_boundary(
     tmp_path: Path,
 ) -> None:
@@ -6953,6 +7205,16 @@ def test_candidate_policy_file_subsystems_formula_and_hard_boundary(
     assert metric.subsystem_import_count == 4
     assert metric.hard_triggers == ("definition_count_gt_50",)
     assert metric.candidate is True
+
+    boundary_path = "src/lockstep/file_boundary.py"
+    boundary_definitions = "\n".join(f"def f{i}(): pass" for i in range(50))
+    boundary_index, boundary_resolutions, boundary_semantics = _propagate_fixture(
+        tmp_path, boundary_definitions, path=boundary_path)
+    boundary = evaluate_candidates(
+        boundary_index, measure_legacy_metrics(boundary_index), boundary_semantics,
+        boundary_resolutions).files[f"{boundary_path}::@file"]
+    assert boundary.definition_count == 50
+    assert boundary.hard_triggers == ()
 
 
 def test_candidate_policy_file_composite_rule_without_hard_trigger(
