@@ -2146,7 +2146,7 @@ def test_resolver_binding_applies_symbol_rules_to_decorators_and_bases(
     tmp_path: Path,
 ) -> None:
     path = "src/lockstep/decorator_base_alias.py"
-    result = _resolver_fixture(
+    result = _resolver_fixture_with_primitive_rows(
         tmp_path,
         """
         from package import decorate as imported_decorator
@@ -2160,6 +2160,12 @@ def test_resolver_binding_applies_symbol_rules_to_decorators_and_bases(
             def owner(self):
                 self.inherited()
         """,
+        (
+            _primitive_entity_row(
+                "package.decorate",
+                ("planning/transformation",),
+            ),
+        ),
         path=path,
     )
 
