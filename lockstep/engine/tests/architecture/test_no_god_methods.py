@@ -1784,8 +1784,8 @@ _CONDITIONAL_BINDING_CASES = (
     ),
     (
         "lambda",
-        "builder = lambda: (receiver := Worker())\nbuilder()",
-        "builder = lambda: (alias := target)\nbuilder()",
+        "builder = lambda: ((receiver := Worker()), receiver.run())\nbuilder()",
+        "builder = lambda: ((alias := target), alias())\nbuilder()",
         "builder = lambda: dependency\nself.dependency = builder()",
     ),
     (
@@ -1828,15 +1828,24 @@ def test_resolver_receiver_assignment_is_unconditional_across_every_control_form
     _injection_assignment: str,
 ) -> None:
     path = f"src/lockstep/conditional_{case}.py"
+    observed_call = "" if case == "lambda" else "    receiver.run()\n"
     source = (
         "class Worker:\n"
         "    def run(self):\n"
         "        pass\n"
         "def owner(flag, items, manager, subject):\n"
         f"{textwrap.indent(assignment, '    ')}\n"
-        "    receiver.run()\n"
+        f"{observed_call}"
     )
     result = _resolver_fixture(tmp_path, source, path=path)
+    if case == "lambda":
+        record = _assert_unresolved_call(result, f"{path}::owner::call:0002")
+        assert record.ast_dump == (
+            "Call(func=Attribute(value=Name(id='receiver', ctx=Load()), "
+            "attr='run', ctx=Load()), args=[], keywords=[])"
+        )
+        return
+
     receiver_calls = [
         record
         for record in _records_named(result, "UnresolvedCall")
@@ -1859,14 +1868,22 @@ def test_resolver_binding_rejects_symbol_aliases_in_every_conditional_form(
     _injection_assignment: str,
 ) -> None:
     path = f"src/lockstep/conditional_alias_{case}.py"
+    observed_call = "" if case == "lambda" else "    alias()\n"
     source = (
         "def target():\n"
         "    pass\n"
         "def owner(flag=False, items=(), manager=None, subject=None):\n"
         f"{textwrap.indent(assignment, '    ')}\n"
-        "    alias()\n"
+        f"{observed_call}"
     )
     result = _resolver_fixture(tmp_path, source, path=path)
+    if case == "lambda":
+        record = _assert_unresolved_call(result, f"{path}::owner::call:0001")
+        assert record.ast_dump == (
+            "Call(func=Name(id='alias', ctx=Load()), args=[], keywords=[])"
+        )
+        return
+
     alias_calls = [
         record
         for record in _records_named(result, "UnresolvedCall")
