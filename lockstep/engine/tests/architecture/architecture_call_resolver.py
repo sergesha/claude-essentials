@@ -29,10 +29,29 @@ class UnresolvedCall:
 
 
 @dataclass(frozen=True, slots=True)
+class ResolvedDependency:
+    reference: str
+    owner: str
+    kind: str
+    target: str
+
+
+@dataclass(frozen=True, slots=True)
+class UnresolvedDependency:
+    reference: str
+    owner: str
+    kind: str
+    line: int
+    column: int
+    ast_dump: str
+
+
+@dataclass(frozen=True, slots=True)
 class ResolutionIndex:
     calls: Mapping[str, object]
     aliases: Mapping[str, str]
     receivers: Mapping[str, str]
+    dependencies: Mapping[str, object]
 
 
 @dataclass(slots=True)
@@ -407,8 +426,15 @@ def _validate_callsite_evidence(model: _Model, record: Mapping[str, object]) -> 
     raise ValueError(f"callsite AST evidence mismatch: {selector}")
 
 
-def _symbol_use_is_safe(model: _Model, node: ast.Name) -> bool:
+def _symbol_use_is_safe(
+    model: _Model, node: ast.Name, *, receiver: bool = False
+) -> bool:
     parent = model.parents.get(id(node))
+    if receiver:
+        if not isinstance(parent, ast.Attribute) or parent.value is not node:
+            return False
+        grand = model.parents.get(id(parent))
+        return isinstance(grand, ast.Call) and grand.func is parent
     while isinstance(parent, ast.Tuple):
         parent = model.parents.get(id(parent))
     if isinstance(parent, ast.Call) and parent.func is node:
@@ -419,14 +445,6 @@ def _symbol_use_is_safe(model: _Model, node: ast.Name) -> bool:
     if isinstance(parent, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
         return True
     return isinstance(parent, (ast.keyword, ast.Subscript))
-
-
-def _receiver_use_is_safe(model: _Model, node: ast.Name) -> bool:
-    parent = model.parents.get(id(node))
-    if not isinstance(parent, ast.Attribute) or parent.value is not node:
-        return False
-    grand = model.parents.get(id(parent))
-    return isinstance(grand, ast.Call) and grand.func is parent
 
 
 def _self_attribute(node: ast.AST) -> tuple[str, str] | None:
@@ -686,7 +704,7 @@ class _Resolver:
         if receiver not in self.model.classes:
             return None
         if any(
-            not _receiver_use_is_safe(self.model, node)
+            not _symbol_use_is_safe(self.model, node, receiver=True)
             for node in scope.loads.get(name, ())
         ):
             return None
@@ -958,8 +976,48 @@ class _Resolver:
             if (target := self.receivers.get((id(scope), name))) is not None
         } | {f"{identity}::self.{field}": target
              for (identity, field), target in self.field_receivers.items()}
+        dependency_evidence: dict[str, object] = {}
+        for scope in self.model.scopes:
+            if not isinstance(scope.node, _NAMED):
+                continue
+            expressions = [
+                ("decorator", expression)
+                for expression in scope.node.decorator_list
+            ]
+            if isinstance(scope.node, ast.ClassDef):
+                expressions.extend(
+                    ("base", expression) for expression in scope.node.bases
+                )
+                expressions.extend(
+                    ("metaclass", keyword.value)
+                    for keyword in scope.node.keywords
+                    if keyword.arg == "metaclass"
+                )
+            if len(expressions) > 9_999:
+                raise ValueError(
+                    f"owner exceeds 9,999 dependency references: {scope.identity}"
+                )
+            parent = scope.parent
+            assert parent is not None
+            for ordinal, (kind, expression) in enumerate(expressions, 1):
+                reference = f"{scope.identity}::dependency:{ordinal:04d}"
+                target = self._resolve_expr(parent, expression)
+                if target is None:
+                    dependency_evidence[reference] = UnresolvedDependency(
+                        reference,
+                        scope.identity,
+                        kind,
+                        expression.lineno,
+                        expression.col_offset,
+                        ast.dump(expression, include_attributes=False),
+                    )
+                else:
+                    dependency_evidence[reference] = ResolvedDependency(
+                        reference, scope.identity, kind, target.label
+                    )
         return ResolutionIndex(MappingProxyType(records), MappingProxyType(alias_evidence),
-                               MappingProxyType(receiver_evidence))
+                               MappingProxyType(receiver_evidence),
+                               MappingProxyType(dependency_evidence))
 
     def _resolve_record(self, callsite: str, call: ast.Call,
                         callsite_primitives: Mapping[str, Mapping[str, object]],
