@@ -454,9 +454,10 @@ def _assert_deeply_immutable(root: object) -> None:
     seen: set[int] = set()
 
     def visit(value: object) -> None:
-        if isinstance(
-            value, (type(None), bool, int, float, str, bytes, Path, ast.AST)
-        ):
+        assert not isinstance(value, ast.AST), (
+            "public analyzer records must not expose mutable ast.AST"
+        )
+        if isinstance(value, (type(None), bool, int, float, str, bytes, Path)):
             return
         marker = id(value)
         if marker in seen:
@@ -499,7 +500,6 @@ def _assert_deeply_immutable(root: object) -> None:
 @dataclass(frozen=True, slots=True)
 class _LegacyEntityFixture:
     identity: str
-    node: ast.FunctionDef | ast.AsyncFunctionDef
     source: bytes
 
 
@@ -527,6 +527,45 @@ def test_source_index_covers_every_tracked_python_file() -> None:
     assert all(index.files[path] == (ENGINE_ROOT / path).read_bytes() for path in tracked_paths)
     assert set(index.file_sha256) == set(tracked_paths)
     _assert_deeply_immutable(index)
+
+
+def test_source_index_accepts_an_exact_supplied_snapshot(tmp_path: Path) -> None:
+    paths = ("src/lockstep/one.py", "src/lockstep/two.py")
+    files = {paths[0]: b"one = 1\n", paths[1]: b"two = 2\n"}
+
+    index = build_source_index(tmp_path, paths, files)
+
+    assert dict(index.files) == files
+
+
+@pytest.mark.parametrize(
+    "kind", ("normalized_collision", "missing", "extra", "extra_non_bytes")
+)
+def test_source_index_rejects_an_inexact_supplied_snapshot(
+    tmp_path: Path, kind: str
+) -> None:
+    paths = ("src/lockstep/one.py", "src/lockstep/two.py")
+    files: dict[str, object] = {path: b"pass\n" for path in paths}
+    if kind == "normalized_collision":
+        files[r"src\lockstep\one.py"] = b"one = 2\n"
+        error, message = ValueError, "duplicate normalized supplied path: src/lockstep/one.py"
+    elif kind == "missing":
+        del files[paths[1]]
+        error, message = ValueError, "supplied files missing tracked paths: src/lockstep/two.py"
+    else:
+        files["src/lockstep/extra.py"] = (
+            b"extra = 3\n" if kind == "extra" else "not bytes"
+        )
+        error, message = (
+            (ValueError, "supplied files contain untracked paths: src/lockstep/extra.py")
+            if kind == "extra"
+            else (TypeError, "source bytes required for src/lockstep/extra.py")
+        )
+
+    with pytest.raises(error) as caught:
+        build_source_index(tmp_path, paths, files)
+
+    assert str(caught.value) == message
 
 
 def test_source_index_identity_and_containment_follow_lexical_ast_order(
@@ -837,21 +876,15 @@ def test_legacy_metrics_characterize_current_complexity_length_and_pruned_fanout
         b"    if flag and ready() and other():\n"
         b"        pass\n"
     )
-    nodes = {
-        node.name: node
-        for node in ast.walk(ast.parse(source))
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
     identities = (
-        (f"{path}::parent", "parent"),
-        (f"{path}::parent.nested", "nested"),
-        (f"{path}::parent.Nested.method", "method"),
-        (f"{path}::branch_forms", "branch_forms"),
+        f"{path}::parent",
+        f"{path}::parent.nested",
+        f"{path}::parent.Nested.method",
+        f"{path}::branch_forms",
     )
     index = _LegacyIndexFixture(
         entities=MappingProxyType({
-            identity: _LegacyEntityFixture(identity, nodes[name], source)
-            for identity, name in identities
+            identity: _LegacyEntityFixture(identity, source) for identity in identities
         })
     )
 
