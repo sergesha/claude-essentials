@@ -8,14 +8,14 @@ from dataclasses import dataclass, fields, is_dataclass, replace
 import hashlib
 import json
 import operator
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import subprocess
 import textwrap
 from types import MappingProxyType
 
 import pytest
-from jsonschema import Draft202012Validator
+from jsonschema import Draft202012Validator, FormatChecker
 
 import architecture_call_resolver as call_resolver
 import architecture_candidate_policy as candidate_policy
@@ -6550,27 +6550,60 @@ def test_candidate_policy_checked_in_schema_and_thresholds_are_canonical() -> No
             assert value["type"] == "array" and value["uniqueItems"] is True
             assert value["items"]["type"] == "string"
     assert schema["$defs"]["one_hop"]["properties"]["root"]["type"] == "string"
-    function_identity = (r"^src/lockstep/(?!\.\.?/)(?!.*(?:/\.\.?)(?:/|$))"
-                         r"(?!.*//)(?!.*\\)[^:]+\.py::[^:]+$")
-    callsite_identity = function_identity[:-1] + r"::call:[0-9]{4}$"
-    assert schema["$defs"]["one_hop"]["properties"]["root"]["pattern"] == function_identity
-    assert schema["$defs"]["one_hop"]["properties"]["members"]["items"]["pattern"] == function_identity
-    assert schema["$defs"]["class"]["properties"]["bases"]["items"]["pattern"] == function_identity
-    assert schema["$defs"]["function"]["properties"]["unresolved_callsites"]["items"]["pattern"] == callsite_identity
-    python_identifier = r"^[^\W\d]\w*$"
-    assert schema["$defs"]["class"]["properties"]["mutable_fields"]["items"]["pattern"] == r"^self\.[^\W\d]\w*$"
-    subsystem_pattern = python_identifier
-    assert schema["$defs"]["file"]["properties"]["subsystem_imports"]["items"]["pattern"] == subsystem_pattern
+    function_identity = {"format": "lockstep-function-identity", "type": "string"}
+    callsite_identity = {"format": "lockstep-callsite-identity", "type": "string"}
+    assert schema["$defs"]["one_hop"]["properties"]["root"] == function_identity
+    assert schema["$defs"]["one_hop"]["properties"]["members"]["items"] == function_identity
+    assert schema["$defs"]["class"]["properties"]["bases"]["items"] == function_identity
+    assert schema["$defs"]["function"]["properties"]["unresolved_callsites"]["items"] == callsite_identity
+    mutable_field = {"format": "lockstep-mutable-field", "type": "string"}
+    subsystem = {"format": "python-identifier", "type": "string"}
+    assert schema["$defs"]["class"]["properties"]["mutable_fields"]["items"] == mutable_field
+    assert schema["$defs"]["file"]["properties"]["subsystem_imports"]["items"] == subsystem
+    checker = FormatChecker()
+
+    @checker.checks("python-identifier")
+    def python_identifier(value: object) -> bool:
+        return isinstance(value, str) and value.isidentifier()
+
+    @checker.checks("lockstep-function-identity")
+    def stable_function_identity(value: object) -> bool:
+        if not isinstance(value, str) or value.count("::") != 1:
+            return False
+        path_text, qualified = value.split("::")
+        path = PurePosixPath(path_text)
+        return all((not path.is_absolute(), path.as_posix() == path_text,
+                    path_text.startswith("src/lockstep/"), path_text.endswith(".py"),
+                    all(part not in {"", ".", ".."} for part in path.parts),
+                    "\\" not in path_text, all(part.isidentifier()
+                    for part in qualified.split("."))))
+
+    @checker.checks("lockstep-callsite-identity")
+    def stable_callsite_identity(value: object) -> bool:
+        if not isinstance(value, str) or "::call:" not in value:
+            return False
+        owner, ordinal = value.rsplit("::call:", 1)
+        return stable_function_identity(owner) and len(ordinal) == 4 and ordinal.isdigit()
+
+    @checker.checks("lockstep-mutable-field")
+    def stable_mutable_field(value: object) -> bool:
+        return (isinstance(value, str) and value.startswith("self.")
+                and value[5:].isidentifier())
+
     identity_schema = schema["$defs"]["one_hop"]["properties"]["root"]
     for invalid in ("src/lockstep/../x.py::f", "src/lockstep//x.py::f",
-                    "src/other/x.py::f", "src/lockstep/x.py::f:g"):
-        assert Draft202012Validator(identity_schema).is_valid(invalid) is False
-    for valid in ("src/lockstep/x-y.py::f", "src/lockstep/путь/модуль.py::функция"):
-        assert Draft202012Validator(identity_schema).is_valid(valid) is True
+                    "src/other/x.py::f", "src/lockstep/x.py::f:g",
+                    "src/lockstep/x.py::not a name", "src/lockstep/x.py::f/g",
+                    "src/lockstep/x.py::f..g"):
+        assert Draft202012Validator(identity_schema, format_checker=checker).is_valid(invalid) is False
+    for valid in ("src/lockstep/x-y.py::f", "src/lockstep/путь/модуль.py::функция",
+                  "src/lockstep/x.py::℘", "src/lockstep/x.py::a·b"):
+        assert Draft202012Validator(identity_schema, format_checker=checker).is_valid(valid) is True
     subsystem_schema = schema["$defs"]["file"]["properties"]["subsystem_imports"]["items"]
     for invalid in ("runtime.effects", "foo-bar", "", "1runtime"):
-        assert Draft202012Validator(subsystem_schema).is_valid(invalid) is False
-    assert Draft202012Validator(subsystem_schema).is_valid("исполнение") is True
+        assert Draft202012Validator(subsystem_schema, format_checker=checker).is_valid(invalid) is False
+    for valid in ("исполнение", "℘", "a·b"):
+        assert Draft202012Validator(subsystem_schema, format_checker=checker).is_valid(valid) is True
 
     thresholds = json.loads(threshold_path.read_bytes())
     assert set(thresholds) == {"schema", "rule_version", "kinds"}
