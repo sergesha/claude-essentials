@@ -241,9 +241,10 @@ def _helper_allowed(root, target, index, nodes):
 def _closure(root, functions, index, nodes, calls):
     edges, callers = defaultdict(set), defaultdict(set)
     for owner, record in calls:
-        if isinstance(record, ResolvedCall) and owner in functions and record.target in functions:
-            edges[owner].add(record.target)
+        if isinstance(record, ResolvedCall) and record.target in functions:
             callers[record.target].add(owner)
+            if owner in functions:
+                edges[owner].add(record.target)
     eligible = {item for item in functions if _helper_allowed(root, item, index, nodes)}
     closure, pending = set(), [root]
     while pending:
@@ -304,23 +305,55 @@ def _one_hop(root, members, legacy, semantics, calls, nodes, rules):
         semantic.propagated_lifecycle_clusters, signals, score, hard, candidate)
 
 
-def _field_evidence(node):
-    fields, mutable, aliases, stores = set(), set(), {}, defaultdict(int)
-    for member in ast.walk(node):
-        if isinstance(member, ast.Name) and isinstance(member.ctx, ast.Store):
-            stores[member.id] += 1
-        if isinstance(member, ast.Assign) and len(member.targets) == 1:
-            target, value = member.targets[0], member.value
-            if (isinstance(target, ast.Name) and isinstance(value, ast.Attribute)
-                    and isinstance(value.value, ast.Name) and value.value.id in {"self", "cls"}):
-                aliases[target.id] = value.attr
+def _scoped_nodes(root):
+    found = []
+    def visit(node, parent=None):
+        found.append((node, parent))
+        for child in ast.iter_child_nodes(node):
+            if child is not root and isinstance(
+                    child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                continue
+            visit(child, node)
+    visit(root)
+    return tuple(found)
+
+
+def _field_attributes(scoped):
+    fields, mutable = set(), set()
+    for member, parent in scoped:
         if (isinstance(member, ast.Attribute) and isinstance(member.value, ast.Name)
                 and member.value.id in {"self", "cls"}):
-            fields.add(member.attr)
+            if not (isinstance(parent, ast.Call) and parent.func is member):
+                fields.add(member.attr)
             if isinstance(member.ctx, (ast.Store, ast.Del)):
                 mutable.add(member.attr)
-    aliases = {name: field for name, field in aliases.items() if stores[name] == 1}
-    for member in ast.walk(node):
+    return fields, mutable
+
+
+def _field_aliases(scoped):
+    stores = defaultdict(int)
+    aliases = {}
+    for member, _parent in scoped:
+        if isinstance(member, ast.Name) and isinstance(member.ctx, ast.Store):
+            stores[member.id] += 1
+        if not isinstance(member, ast.Assign) or len(member.targets) != 1:
+            continue
+        target, value = member.targets[0], member.value
+        if (isinstance(target, ast.Name) and isinstance(value, ast.Attribute)
+                and isinstance(value.value, ast.Name) and value.value.id in {"self", "cls"}):
+            aliases[target.id] = value.attr
+    return {name: field for name, field in aliases.items() if stores[name] == 1}
+
+
+def _direct_field_evidence(scoped):
+    fields, mutable = _field_attributes(scoped)
+    aliases = _field_aliases(scoped)
+    return fields, mutable, aliases
+
+
+def _mutated_alias_fields(scoped, aliases):
+    mutable = set()
+    for member, _parent in scoped:
         if not isinstance(member, ast.Call) or not isinstance(member.func, ast.Attribute):
             continue
         receiver = member.func.value
@@ -329,7 +362,68 @@ def _field_evidence(node):
                  else aliases.get(receiver.id) if isinstance(receiver, ast.Name) else None)
         if field is not None and member.func.attr in _MUTATORS:
             mutable.add(field)
+    return mutable
+
+
+def _field_evidence(node):
+    scoped = _scoped_nodes(node)
+    fields, mutable, aliases = _direct_field_evidence(scoped)
+    mutable |= _mutated_alias_fields(scoped, aliases)
     return fields, mutable
+
+
+def _class_lambdas(identity, node, index):
+    answer = []
+    for member in ast.walk(node):
+        if not isinstance(member, ast.Lambda):
+            continue
+        evidence = (identity.rpartition("::")[0], member.lineno, member.col_offset,
+                    member.end_lineno, member.end_col_offset)
+        if index.lambda_owners.get(evidence) == identity:
+            answer.append(member)
+    return tuple(answer)
+
+
+def _lambda_call_owners(identity, labels, lambdas):
+    owners = {}
+    for label, node in zip(labels, lambdas):
+        for member, _parent in _scoped_nodes(node):
+            if isinstance(member, ast.Call):
+                owners[(member.lineno, member.col_offset)] = f"{identity}.{label}"
+    return owners
+
+
+def _cohesion(identity, vertices, calls, resolutions, labels, lambdas):
+    edges = defaultdict(set)
+    names = tuple(vertices)
+    for position, left in enumerate(names):
+        for right in names[position + 1:]:
+            if vertices[left] & vertices[right]:
+                edges[left].add(right)
+    lambda_owners = _lambda_call_owners(identity, labels, lambdas)
+    for owner, record in calls:
+        if not isinstance(record, ResolvedCall) or record.target not in vertices:
+            continue
+        source = owner
+        if owner == identity:
+            evidence = resolutions.call_evidence.get(record.callsite)
+            if evidence is not None:
+                source = lambda_owners.get((evidence.line, evidence.column), owner)
+        if source in vertices:
+            edges[source].add(record.target)
+    return len(_components(vertices, edges))
+
+
+def _class_semantics(identity, methods, semantics):
+    members = (identity, *methods)
+    transitions_order, clusters_order = _vocabulary()
+    domains = _ordered(_DOMAINS, *(semantics.entities[item].propagated_domains
+                                    for item in members))
+    transitions = _ordered(transitions_order,
+        *(semantics.entities[item].propagated_transitions for item in members))
+    clusters = _ordered(clusters_order,
+        *(semantics.entities[item].propagated_lifecycle_clusters for item in members))
+    return domains, transitions, clusters
 
 
 def _class(identity, node, index, legacy, semantics, resolutions, calls, nodes, rules):
@@ -338,28 +432,16 @@ def _class(identity, node, index, legacy, semantics, resolutions, calls, nodes, 
     for method in methods:
         fields, changed = _field_evidence(nodes[method])
         vertices[method], mutable = fields, mutable | changed
-    lambdas = [item for item in ast.walk(node) if isinstance(item, ast.Lambda)]
-    for label, lambda_node in zip(index.class_lambda_evidence.get(identity, ()), lambdas):
+    labels = index.class_lambda_evidence.get(identity, ())
+    lambdas = _class_lambdas(identity, node, index)
+    for label, lambda_node in zip(labels, lambdas):
         fields, changed = _field_evidence(lambda_node)
         vertices[f"{identity}.{label}"], mutable = fields, mutable | changed
-    edges = defaultdict(set)
-    names = tuple(vertices)
-    for position, left in enumerate(names):
-        for right in names[position + 1:]:
-            if vertices[left] & vertices[right]:
-                edges[left].add(right)
-    for owner, record in calls:
-        if owner in vertices and isinstance(record, ResolvedCall) and record.target in vertices:
-            edges[owner].add(record.target)
-    cohesion = len(_components(vertices, edges))
+    cohesion = _cohesion(identity, vertices, calls, resolutions, labels, lambdas)
     bases = tuple(dict.fromkeys(record.target for record in resolutions.dependencies.values()
         if isinstance(record, ResolvedDependency) and record.owner == identity
         and record.kind == "base" and record.target in index.entities))
-    semantic_members = (identity, *methods)
-    transitions_order, clusters_order = _vocabulary()
-    domains = _ordered(_DOMAINS, *(semantics.entities[item].propagated_domains for item in semantic_members))
-    transitions = _ordered(transitions_order, *(semantics.entities[item].propagated_transitions for item in semantic_members))
-    clusters = _ordered(clusters_order, *(semantics.entities[item].propagated_lifecycle_clusters for item in semantic_members))
+    domains, transitions, clusters = _class_semantics(identity, methods, semantics)
     policy = rules["kinds"]["class"]
     threshold = policy["signals"]
     public = sum(not item.rsplit(".", 1)[-1].startswith("_") for item in methods)
@@ -398,10 +480,67 @@ def _subsystems(path, index):
     return tuple(sorted(labels))
 
 
+def _import_bindings(module):
+    bindings = {}
+    for node in module.body:
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                bindings[alias.asname or alias.name.split(".")[0]] = "@import:" + alias.name
+        elif isinstance(node, ast.ImportFrom):
+            module_name = "." * node.level + (node.module or "")
+            for alias in node.names:
+                bindings[alias.asname or alias.name] = "@import:" + module_name + "." + alias.name
+    return bindings
+
+
+def _alias_target(node, bindings):
+    if (not isinstance(node, (ast.Assign, ast.AnnAssign))
+            or not isinstance(getattr(node, "value", None), ast.Name)):
+        return (), None
+    targets = node.targets if isinstance(node, ast.Assign) else (node.target,)
+    return tuple(target.id for target in targets if isinstance(target, ast.Name)), bindings.get(node.value.id)
+
+
+def _alias_bindings(module, bindings):
+    answer = dict(bindings)
+    changed = True
+    while changed:
+        changed = False
+        for node in module.body:
+            targets, value = _alias_target(node, answer)
+            for target in targets:
+                if value is not None and answer.get(target) != value:
+                    answer[target] = value
+                    changed = True
+    return answer
+
+
+def _module_reference_bindings(path, index, nodes, vertices):
+    module = ast.parse(index.files[path], filename=path)
+    bindings = {nodes[item].name: item for item in vertices}
+    bindings.update(_import_bindings(module))
+    return _alias_bindings(module, bindings)
+
+
+def _reference_edges(path, index, nodes, vertices):
+    bindings = _module_reference_bindings(path, index, nodes, vertices)
+    edges, external = defaultdict(set), defaultdict(set)
+    for owner in vertices:
+        for member in ast.walk(nodes[owner]):
+            if not isinstance(member, ast.Name) or not isinstance(member.ctx, ast.Load):
+                continue
+            target = bindings.get(member.id)
+            if target in vertices and target != owner:
+                edges[owner].add(target)
+            elif isinstance(target, str) and target.startswith("@import:"):
+                external[target].add(owner)
+    return edges, external
+
+
 def _file(path, index, nodes, semantics, resolutions, calls, rules):
     identities = tuple(item for item in index.entities if item.rpartition("::")[0] == path)
     vertices = {item for item in identities if index.entities[item].parent == f"{path}::@file"}
-    edges, external = defaultdict(set), defaultdict(set)
+    edges, external = _reference_edges(path, index, nodes, vertices)
     for owner, record in calls:
         source = _top(owner, path, index)
         if source not in vertices or not isinstance(record, ResolvedCall):
