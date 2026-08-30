@@ -359,6 +359,26 @@ def test_analyzer_role_modules_are_the_complete_test_owned_role_set() -> None:
     }
 
 
+def _public_top_level_function_names(path: Path) -> set[str]:
+    module = ast.parse(path.read_text(encoding="utf-8"))
+    return {
+        node.name
+        for node in module.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and not node.name.startswith("_")
+    }
+
+
+def test_analyzer_role_modules_have_exactly_one_public_entrypoint() -> None:
+    assert {
+        role: _public_top_level_function_names(ARCHITECTURE_TEST_ROOT / f"{role}.py")
+        for role in ANALYZER_ROLE_MODULES
+    } == {
+        role: {entrypoint.__name__}
+        for role, entrypoint in ANALYZER_ROLE_ENTRYPOINTS.items()
+    }
+
+
 def _analyzer_internal_import_edges(path: Path) -> set[tuple[str, str]]:
     edges: set[tuple[str, str]] = set()
     for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
