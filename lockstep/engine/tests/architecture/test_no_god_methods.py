@@ -11,6 +11,7 @@ import operator
 from pathlib import Path, PurePosixPath
 import re
 import subprocess
+import sys
 import textwrap
 from types import MappingProxyType
 
@@ -6458,6 +6459,20 @@ def test_candidate_policy_records_are_exact_frozen_slotted() -> None:
     assert report_type.__dataclass_params__.frozen
 
 
+def test_candidate_policy_metric_map_freezes_values_and_binds_global_ast_rank() -> None:
+    first = candidate_policy._metric_map({"x.py::f": 1}, {"x.py::f": 3})
+    same = candidate_policy._metric_map({"x.py::f": 1}, {"x.py::f": 3})
+    different_rank = candidate_policy._metric_map({"x.py::f": 1}, {"x.py::f": 4})
+    assert first == same
+    assert first != different_rank
+    with pytest.raises((AttributeError, TypeError)):
+        first._values = MappingProxyType({})
+    with pytest.raises((AttributeError, TypeError)):
+        first.ast_order = MappingProxyType({})
+    with pytest.raises(TypeError):
+        first._values["x.py::f"] = 2
+
+
 def test_candidate_policy_checked_in_schema_and_thresholds_are_canonical() -> None:
     schema_path = ARCHITECTURE_TEST_ROOT / "architecture_metrics.schema.json"
     threshold_path = ARCHITECTURE_TEST_ROOT / "architecture_thresholds.json"
@@ -7539,6 +7554,22 @@ def test_candidate_policy_file_does_not_double_count_comprehension_outer_iterabl
     assert metric.definition_dependency_components == 3
 
 
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="PEP-695 syntax needs Python 3.12")
+@pytest.mark.parametrize(("source", "components"), (
+    ("class T: pass\ndef outer[T](value: T): return value\ndef isolated(): pass", 3),
+    ("class Leaf: pass\ndef outer[T: Leaf](value: T): return value\ndef isolated(): pass", 2),
+))
+def test_candidate_policy_file_resolves_pep695_type_parameter_scopes(
+    tmp_path: Path, source: str, components: int
+) -> None:
+    path = "src/lockstep/type_parameter_components.py"
+    index, resolutions, semantics = _propagate_fixture(tmp_path, source, path=path)
+    metric = evaluate_candidates(
+        index, measure_legacy_metrics(index), semantics, resolutions
+    ).files[f"{path}::@file"]
+    assert metric.definition_dependency_components == components
+
+
 def test_candidate_policy_file_subsystems_formula_and_hard_boundary(
     tmp_path: Path,
 ) -> None:
@@ -7660,6 +7691,8 @@ def test_manifest_checked_in_empty_ratchet_is_closed_canonical_json() -> None:
         ({"unknown": True}, "manifest keys"),
         ({"schema_version": "1"}, "schema_version"),
         ({"scan_root": "./src/lockstep"}, "scan_root"),
+        ({"reference_commit": 7}, "reference_commit"),
+        ({"analyzer_digest": 7}, "analyzer_digest"),
         ({"exceptions": [{"entity": "missing"}]}, "exception"),
     ),
 )
@@ -7976,6 +8009,8 @@ def test_manifest_reads_review_and_historical_inputs_from_exact_git_tree_blob(
     mutations.append((bad_reviewed_digest, "reviewed semantic"))
     bad_evidence_digest = json.loads(json.dumps(manifest)); bad_evidence_digest["exceptions"][0]["review_evidence"]["review_evidence_sha256"] = "0" * 64
     mutations.append((bad_evidence_digest, "review evidence digest"))
+    bad_evidence_type = json.loads(json.dumps(manifest)); bad_evidence_type["exceptions"][0]["review_evidence"] = 7
+    mutations.append((bad_evidence_type, "review evidence keys"))
     for value, reason in mutations:
         rejected_manifest(value, reason)
 
@@ -8038,8 +8073,23 @@ def test_manifest_reads_review_and_historical_inputs_from_exact_git_tree_blob(
     assert recomputed.valid is False
     assert any("historical recomputation" in error for error in recomputed.errors)
 
-    subprocess.run(("git", "add", "lockstep/engine/src/lockstep/sample.py"),
+    gate_path.unlink()
+    subprocess.run(("git", "add", "-u", "lockstep/engine/tests/architecture/test_gate.py"),
                    cwd=repo, check=True)
+    subprocess.run(("git", "-c", "user.name=Test", "-c",
+                    "user.email=test@example.invalid", "commit", "-qm", "gate removed"),
+                   cwd=repo, check=True)
+    removed_gate_commit = subprocess.run(
+        ("git", "rev-parse", "HEAD"), cwd=repo, check=True,
+        capture_output=True, text=True).stdout.strip()
+    missing_current_gate = verify_manifest(
+        report, manifest, repo_root=repo, current_commit=removed_gate_commit)
+    assert missing_current_gate.valid is False
+    assert any("focused gate" in error for error in missing_current_gate.errors)
+
+    gate_path.write_text("def test_focus(): pass\n", encoding="utf-8")
+    subprocess.run(("git", "add", "lockstep/engine/tests/architecture/test_gate.py",
+                    "lockstep/engine/src/lockstep/sample.py"), cwd=repo, check=True)
     subprocess.run(("git", "-c", "user.name=Test", "-c",
                     "user.email=test@example.invalid", "commit", "-qm", "source drift"),
                    cwd=repo, check=True)

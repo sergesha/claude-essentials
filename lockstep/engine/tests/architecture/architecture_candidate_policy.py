@@ -19,12 +19,14 @@ from architecture_legacy_metrics import LegacyMetrics, measure_legacy_metrics
 from architecture_source_index import SourceIndex
 
 
+@dataclass(frozen=True, slots=True)
 class _MetricMap(Mapping):
-    __slots__ = ("_values", "ast_order")
+    _values: Mapping
+    ast_order: Mapping
 
-    def __init__(self, values, ast_order):
-        self._values = MappingProxyType(dict(values))
-        self.ast_order = MappingProxyType(dict(ast_order))
+    def __post_init__(self):
+        object.__setattr__(self, "_values", MappingProxyType(dict(self._values)))
+        object.__setattr__(self, "ast_order", MappingProxyType(dict(self.ast_order)))
 
     def __getitem__(self, key):
         return self._values[key]
@@ -580,19 +582,30 @@ class _ReferenceVisitor:
             self.visit(child, table)
 
     def _named(self, node, table):
-        outer = (*node.decorator_list, *node.args.defaults,
-                 *(item for item in node.args.kw_defaults if item is not None),
-                 *(item.annotation for item in (*node.args.posonlyargs,
-                    *node.args.args, *node.args.kwonlyargs)
-                   if item.annotation is not None),
-                 *(item.annotation for item in (node.args.vararg, node.args.kwarg)
-                   if item is not None and item.annotation is not None),
-                 *((node.returns,) if node.returns is not None else ()))
-        for child in outer:
+        defaults = (*node.decorator_list, *node.args.defaults,
+                    *(item for item in node.args.kw_defaults if item is not None))
+        for child in defaults:
             self.visit(child, table)
-        body_table = _child_table(table, node, self.used)
+        annotation_table, body_table = self._named_tables(node, table)
+        annotations = (*(getattr(node, "type_params", ())),
+            *(item.annotation for item in (*node.args.posonlyargs,
+               *node.args.args, *node.args.kwonlyargs) if item.annotation is not None),
+            *(item.annotation for item in (node.args.vararg, node.args.kwarg)
+              if item is not None and item.annotation is not None),
+            *((node.returns,) if node.returns is not None else ()))
+        for child in annotations:
+            self.visit(child, annotation_table)
         for child in node.body:
             self.visit(child, body_table)
+
+    def _named_tables(self, node, table):
+        child = _child_table(table, node, self.used)
+        if child.get_type() != "type parameter":
+            return table, child
+        body = next((item for item in child.get_children()
+                     if item.get_name() == node.name
+                     and item.get_type() in {"function", "class"}), child)
+        return child, body
 
     def _lambda(self, node, table):
         for child in (*node.args.defaults,
@@ -601,11 +614,13 @@ class _ReferenceVisitor:
         self.visit(node.body, _child_table(table, node, self.used))
 
     def _class(self, node, table):
-        outer = (*node.decorator_list, *node.bases,
+        for child in node.decorator_list:
+            self.visit(child, table)
+        annotation_table, body_table = self._named_tables(node, table)
+        outer = (*getattr(node, "type_params", ()), *node.bases,
                  *(item.value for item in node.keywords))
         for child in outer:
-            self.visit(child, table)
-        body_table = _child_table(table, node, self.used)
+            self.visit(child, annotation_table)
         for child in node.body:
             self.visit(child, body_table)
 

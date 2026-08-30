@@ -77,25 +77,28 @@ def _blob(repo, commit, path):
 
 
 def _ancestor(repo, older, newer):
-    if _COMMIT.fullmatch(older or "") is None or _COMMIT.fullmatch(newer or "") is None:
+    if (not isinstance(older, str) or not isinstance(newer, str)
+            or _COMMIT.fullmatch(older) is None or _COMMIT.fullmatch(newer) is None):
         return False
     return subprocess.run(("git", "merge-base", "--is-ancestor", older, newer), cwd=repo, check=False, capture_output=True).returncode == 0
 
 
 def _top_values(manifest, errors):
-    checks = ((type(manifest["schema_version"]) is int and manifest["schema_version"] == 1, "schema_version must equal integer 1"), (manifest["ratchet_version"] == "v1", "ratchet_version must equal v1"), (manifest["scan_root"] == "src/lockstep", "scan_root must equal src/lockstep"), (_COMMIT.fullmatch(manifest["reference_commit"]) is not None, "reference_commit must be a lowercase commit id"), (isinstance(manifest["exceptions"], list), "exceptions must be an ordered array"), (isinstance(manifest["population"], list), "population must be an ordered array"))
+    checks = ((type(manifest["schema_version"]) is int and manifest["schema_version"] == 1, "schema_version must equal integer 1"), (manifest["ratchet_version"] == "v1", "ratchet_version must equal v1"), (manifest["scan_root"] == "src/lockstep", "scan_root must equal src/lockstep"), (isinstance(manifest["reference_commit"], str) and _COMMIT.fullmatch(manifest["reference_commit"]) is not None, "reference_commit must be a lowercase commit id"), (isinstance(manifest["exceptions"], list), "exceptions must be an ordered array"), (isinstance(manifest["population"], list), "population must be an ordered array"))
     for valid, message in checks:
         if not valid:
             errors.append(message)
     for name in ("analyzer_digest", "primitive_digest", "allowlist_digest", "lifecycle_digest", "schema_digest", "threshold_digest"):
-        if _SHA.fullmatch(manifest.get(name, "")) is None:
+        if not isinstance(manifest.get(name), str) or _SHA.fullmatch(manifest[name]) is None:
             errors.append(f"{name} must be a lowercase SHA-256 digest")
 
 
 def _population_values(rows, errors):
     paths = []
     for row in rows:
-        if not isinstance(row, dict) or set(row) != {"path", "source_sha256"} or _SHA.fullmatch(row.get("source_sha256", "")) is None:
+        if (not isinstance(row, dict) or set(row) != {"path", "source_sha256"}
+                or not isinstance(row.get("source_sha256"), str)
+                or _SHA.fullmatch(row["source_sha256"]) is None):
             errors.append("population entry is malformed"); continue
         raw = row.get("path")
         path = PurePosixPath(raw) if isinstance(raw, str) else PurePosixPath("/")
@@ -129,7 +132,13 @@ def _historical(repo, commit, manifest, analyzer_version):
     if any(hashlib.sha256(files[row["path"]]).hexdigest() != row["source_sha256"] for row in manifest["population"]):
         raise ValueError("population source digest mismatch")
     index = build_source_index(Path(repo) / "lockstep/engine", paths, files)
-    rules = {name: json.loads(_show(repo, commit, _ARCH + filename)) for name, filename in _RULES.items()}
+    rules = {}
+    for name, filename in _RULES.items():
+        raw = _show(repo, commit, _ARCH + filename)
+        value = json.loads(raw)
+        if raw != _canonical(value):
+            raise ValueError(filename + " is not exact canonical JSON")
+        rules[name] = value
     digests = {name: _digest(value) for name, value in rules.items()}
     analyzers = [{"path": name, "sha256": hashlib.sha256(_show(repo, commit, _ARCH + name)).hexdigest()} for name in _ANALYZERS]
     if _digest(analyzers) != manifest["analyzer_digest"]:
@@ -210,7 +219,7 @@ def _review_path(evidence, errors):
 
 
 @lru_cache(maxsize=256)
-def _focused(repo, node):
+def _focused(repo, current_commit, node):
     result = subprocess.run((sys.executable, "-m", "pytest", "--collect-only", "-q", node), cwd=repo, check=False, capture_output=True, text=True)
     return result.returncode == 0 and node.rsplit("::", 1)[-1] in result.stdout
 
@@ -302,7 +311,7 @@ def _validate_exception(repo, current_commit, exception, current, reviewed,
     reviewed_semantic = _semantic(
         identity, kind, metric, reviewed_semantics)
     gates = exception.get("focused_gate")
-    if not isinstance(gates, list) or not gates or any(not isinstance(node, str) or not _focused(repo, node) for node in gates): errors.append("focused gate missing or failed collection")
+    if not isinstance(gates, list) or not gates or any(not isinstance(node, str) or not _focused(repo, current_commit, node) for node in gates): errors.append("focused gate missing or failed collection")
     _evidence(repo, current_commit, exception, reviewed_semantic, errors)
 
 
@@ -357,6 +366,11 @@ def verify_manifest(report, manifest, *, repo_root, current_commit):
     if any(not isinstance(item, dict) or set(item) != _EXCEPTION
            for item in manifest["exceptions"]):
         errors.append("exception keys must be exact")
+        return ManifestVerdict(False, tuple(errors), ())
+    if any(not isinstance(item.get("review_evidence"), dict)
+           or set(item["review_evidence"]) != _EVIDENCE
+           for item in manifest["exceptions"]):
+        errors.append("review evidence keys must be exact")
         return ManifestVerdict(False, tuple(errors), ())
     repo = Path(repo_root)
     context = _current_context(repo, current_commit, report, manifest, errors)
