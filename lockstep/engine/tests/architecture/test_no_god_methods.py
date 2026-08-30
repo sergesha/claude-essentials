@@ -448,18 +448,52 @@ def _fixture_index(files: Mapping[str, bytes], tmp_path: Path):
     return build_source_index(tmp_path, tuple(files), files)
 
 
-def _assert_frozen_record(record: object) -> None:
-    assert is_dataclass(record)
-    assert type(record).__dataclass_params__.frozen
-    record_fields = fields(record)
-    assert record_fields
-    with pytest.raises((AttributeError, TypeError)):
-        setattr(record, record_fields[0].name, object())
+def _assert_deeply_immutable(root: object) -> None:
+    """Prove the complete public index graph cannot expose mutable state."""
 
+    seen: set[int] = set()
 
-def _assert_item_assignment_fails(collection: object, key: object) -> None:
-    with pytest.raises(TypeError):
-        operator.setitem(collection, key, object())
+    def visit(value: object) -> None:
+        if isinstance(
+            value, (type(None), bool, int, float, str, bytes, Path, ast.AST)
+        ):
+            return
+        marker = id(value)
+        if marker in seen:
+            return
+        seen.add(marker)
+        if is_dataclass(value) and not isinstance(value, type):
+            record_fields = fields(value)
+            assert type(value).__dataclass_params__.frozen
+            with pytest.raises((AttributeError, TypeError)):
+                setattr(
+                    value,
+                    record_fields[0].name if record_fields else "_immutability_probe",
+                    object(),
+                )
+            for field in record_fields:
+                visit(getattr(value, field.name))
+            return
+        if isinstance(value, Mapping):
+            probe_key = next(iter(value), object())
+            probe_value = value[probe_key] if probe_key in value else object()
+            with pytest.raises(TypeError):
+                operator.setitem(value, probe_key, probe_value)
+            for key, item in value.items():
+                visit(key)
+                visit(item)
+            return
+        if isinstance(value, frozenset):
+            for item in value:
+                visit(item)
+            return
+        assert isinstance(value, tuple), (
+            f"ordered index collections must be tuples, got {type(value).__name__}"
+        )
+        for item in value:
+            visit(item)
+
+    visit(root)
 
 
 @dataclass(frozen=True, slots=True)
@@ -492,9 +526,7 @@ def test_source_index_covers_every_tracked_python_file() -> None:
     assert tuple(index.files) == tracked_paths
     assert all(index.files[path] == (ENGINE_ROOT / path).read_bytes() for path in tracked_paths)
     assert set(index.file_sha256) == set(tracked_paths)
-    _assert_frozen_record(index)
-    _assert_item_assignment_fails(index.files, tracked_paths[0])
-    _assert_item_assignment_fails(index.file_sha256, tracked_paths[0])
+    _assert_deeply_immutable(index)
 
 
 def test_source_index_identity_and_containment_follow_lexical_ast_order(
@@ -539,7 +571,7 @@ def test_source_index_identity_and_containment_follow_lexical_ast_order(
         ("src/lockstep/zeta.py::last", "src/lockstep/zeta.py::@file"),
     ]
     assert all(type(entity).__name__ == "Entity" for entity in entities)
-    _assert_frozen_record(entities[0])
+    _assert_deeply_immutable(index)
 
 
 def test_source_index_rejects_duplicate_stable_identity(tmp_path: Path) -> None:
@@ -592,8 +624,7 @@ def test_source_span_includes_decorators_and_hashes_exact_crlf_bytes(
     assert index.file_sha256[path] == hashlib.sha256(source).hexdigest()
     assert index.files[path] == source
     assert index.files[path].count(b"\r\n") == 12
-    for span in spans:
-        _assert_frozen_record(span)
+    _assert_deeply_immutable(index)
 
 
 def _alias_pairs(record: object) -> tuple[tuple[str, str | None], ...]:
@@ -695,16 +726,7 @@ def test_source_index_import_records_follow_complete_file_ast_order(
             ).encode("utf-8")
         ).hexdigest()
         assert record.import_semantic_sha256 == expected_digest
-        _assert_frozen_record(record)
-        assert isinstance(record.aliases, tuple)
-        assert isinstance(record.targets, tuple)
-        _assert_item_assignment_fails(record.aliases, 0)
-        _assert_item_assignment_fails(record.targets, 0)
-        first_alias = record.aliases[0]
-        if isinstance(first_alias, Mapping):
-            _assert_item_assignment_fails(first_alias, "name")
-        else:
-            _assert_frozen_record(first_alias)
+    _assert_deeply_immutable(index)
 
 
 def test_lambda_attribution_is_function_then_class_then_file_and_class_evidence(
@@ -741,11 +763,7 @@ def test_lambda_attribution_is_function_then_class_then_file_and_class_evidence(
         f"{path}::Box": ("@lambda:0001", "@lambda:0002")
     }
     assert all("lambda" not in entity.identity for entity in _records_named(index, "Entity"))
-    _assert_item_assignment_fails(index.lambda_owners, object())
-    _assert_item_assignment_fails(index.class_lambda_evidence, f"{path}::Box")
-    evidence = index.class_lambda_evidence[f"{path}::Box"]
-    assert isinstance(evidence, tuple)
-    _assert_item_assignment_fails(evidence, 0)
+    _assert_deeply_immutable(index)
 
 
 def test_source_index_accepts_9999_imports_and_rejects_import_10000(
@@ -759,6 +777,7 @@ def test_source_index_accepts_9999_imports_and_rejects_import_10000(
     assert _records_named(accepted, "ImportRecord")[-1].identity == (
         f"{path}::import:9999"
     )
+    _assert_deeply_immutable(accepted)
 
     with pytest.raises(ValueError, match=r"import.*9,?999|9,?999.*import"):
         _fixture_index({path: accepted_source + b"import os\n"}, tmp_path)
