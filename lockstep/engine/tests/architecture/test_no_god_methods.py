@@ -4966,42 +4966,68 @@ _DEPENDENCY_FAIL_CLOSED_CASES = (
         "decorators = ()\n@decorators[0]\ndef Owner():\n    pass\n",
         "Owner",
         "decorator",
+        2,
+        1,
+        "Subscript(value=Name(id='decorators', ctx=Load()), slice=Constant(value=0), ctx=Load())",
     ),
     (
         "decorator_reflection",
         "import package\n@getattr(package, 'decorate')\ndef Owner():\n    pass\n",
         "Owner",
         "decorator",
+        2,
+        1,
+        "Call(func=Name(id='getattr', ctx=Load()), args=[Name(id='package', ctx=Load()), Constant(value='decorate')], keywords=[])",
     ),
     (
         "star_base",
         "bases = ()\nclass Owner(*bases):\n    pass\n",
         "Owner",
         "base",
+        2,
+        12,
+        "Starred(value=Name(id='bases', ctx=Load()), ctx=Load())",
     ),
     (
         "ambiguous_rebound_base",
         "class First:\n    pass\nclass Second:\n    pass\nbase = First\nbase = Second\nclass Owner(base):\n    pass\n",
         "Owner",
         "base",
+        7,
+        12,
+        "Name(id='base', ctx=Load())",
     ),
     (
         "conditional_metaclass_alias",
         "class First:\n    pass\nclass Second:\n    pass\nif flag:\n    meta = First\nelse:\n    meta = Second\nclass Owner(metaclass=meta):\n    pass\n",
         "Owner",
         "metaclass",
+        9,
+        22,
+        "Name(id='meta', ctx=Load())",
     ),
     (
         "star_import_decorator",
         "from package import *\n@decorate\ndef Owner():\n    pass\n",
         "Owner",
         "decorator",
+        2,
+        1,
+        "Name(id='decorate', ctx=Load())",
     ),
 )
 
 
 @pytest.mark.parametrize(
-    ("case", "source", "owner_name", "kind"),
+    (
+        "case",
+        "source",
+        "owner_name",
+        "kind",
+        "line",
+        "column",
+        "ast_dump",
+    ),
     _DEPENDENCY_FAIL_CLOSED_CASES,
     ids=[case for case, *_rest in _DEPENDENCY_FAIL_CLOSED_CASES],
 )
@@ -5011,6 +5037,9 @@ def test_resolver_dependency_dynamic_ambiguous_and_star_forms_fail_closed(
     source: str,
     owner_name: str,
     kind: str,
+    line: int,
+    column: int,
+    ast_dump: str,
 ) -> None:
     """Catches guessing dependency targets outside exact Name/Attribute rules."""
 
@@ -5020,9 +5049,79 @@ def test_resolver_dependency_dynamic_ambiguous_and_star_forms_fail_closed(
         _resolver_fixture(tmp_path, source, path=path), reference
     )
 
-    assert record.owner == f"{path}::{owner_name}"
-    assert record.kind == kind
+    assert (
+        record.reference,
+        record.owner,
+        record.kind,
+        record.line,
+        record.column,
+        record.ast_dump,
+    ) == (
+        reference,
+        f"{path}::{owner_name}",
+        kind,
+        line,
+        column,
+        ast_dump,
+    )
     assert not hasattr(record, "target")
+
+
+def test_resolver_dependency_plain_unresolved_names_keep_exact_owner_preorder(
+    tmp_path: Path,
+) -> None:
+    """Catches dropping plain Names or assigning base before decorator."""
+
+    path = "src/lockstep/dependency_plain_unresolved_names.py"
+    owner = f"{path}::Owner"
+    result = _resolver_fixture(
+        tmp_path,
+        """
+        @missing_decorator
+        class Owner(missing_base):
+            pass
+        """,
+        path=path,
+    )
+    dependencies = _resolver_dependencies(result)
+    references = (
+        f"{owner}::dependency:0001",
+        f"{owner}::dependency:0002",
+    )
+
+    assert tuple(dependencies) == references
+    assert tuple(
+        (
+            dependencies[reference].reference,
+            dependencies[reference].owner,
+            dependencies[reference].kind,
+            dependencies[reference].line,
+            dependencies[reference].column,
+            dependencies[reference].ast_dump,
+        )
+        for reference in references
+    ) == (
+        (
+            references[0],
+            owner,
+            "decorator",
+            1,
+            1,
+            "Name(id='missing_decorator', ctx=Load())",
+        ),
+        (
+            references[1],
+            owner,
+            "base",
+            2,
+            12,
+            "Name(id='missing_base', ctx=Load())",
+        ),
+    )
+    assert all(
+        not hasattr(dependencies[reference], "target")
+        for reference in references
+    )
 
 
 def test_resolver_dependency_unresolved_evidence_keeps_expression_calls_once(
