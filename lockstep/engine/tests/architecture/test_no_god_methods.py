@@ -293,21 +293,140 @@ def _resolver_functions() -> tuple[tuple[str, ast.AST], ...]:
 _RESOLVER_FUNCTION_CASES = _resolver_functions()
 
 
-def test_resolver_support_has_no_class_hard_adjudication_trigger() -> None:
-    """Catches a resolver class that becomes its own god object."""
+_MUTATOR_METHODS = frozenset(
+    {
+        "append",
+        "extend",
+        "insert",
+        "remove",
+        "pop",
+        "clear",
+        "sort",
+        "reverse",
+        "update",
+        "setdefault",
+        "add",
+        "discard",
+        "difference_update",
+        "intersection_update",
+        "symmetric_difference_update",
+    }
+)
 
-    tree = _resolver_module_tree()
-    resolver_class = _direct_named_member(tree, "_Resolver")
+
+def _resolver_class() -> ast.ClassDef:
+    owner = _direct_named_member(_resolver_module_tree(), "_Resolver")
+    assert isinstance(owner, ast.ClassDef)
+    return owner
+
+
+def _resolver_mutable_fields() -> set[str]:
+    fields = {
+        node.attr
+        for node in ast.walk(_resolver_class())
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "self"
+        and isinstance(node.ctx, (ast.Store, ast.Del))
+    }
+    fields.update(
+        call.func.value.attr
+        for call in ast.walk(_resolver_class())
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and call.func.attr in _MUTATOR_METHODS
+        and isinstance(call.func.value, ast.Attribute)
+        and isinstance(call.func.value.value, ast.Name)
+        and call.func.value.value.id == "self"
+    )
+    return fields
+
+
+def _resolver_one_hop_counts() -> tuple[tuple[str, int], ...]:
+    functions = dict(_RESOLVER_FUNCTION_CASES)
+    direct: dict[str, set[str]] = {identity: set() for identity in functions}
+    for identity, node in functions.items():
+        owner = identity.rsplit(".", 1)[0] if "." in identity else ""
+        for call in ast.walk(node):
+            if not isinstance(call, ast.Call):
+                continue
+            candidate: str | None = None
+            if isinstance(call.func, ast.Name):
+                candidate = call.func.id
+            elif (
+                isinstance(call.func, ast.Attribute)
+                and isinstance(call.func.value, ast.Name)
+                and call.func.value.id in {"self", "cls"}
+            ):
+                candidate = f"{owner}.{call.func.attr}"
+            if candidate in functions:
+                final_name = candidate.rsplit(".", 1)[-1]
+                true_dunder = final_name.startswith("__") and final_name.endswith("__")
+                if final_name.startswith("_") and not true_dunder:
+                    direct[identity].add(candidate)
+
+    counts = []
+    for root in functions:
+        closure: set[str] = set()
+        pending = list(direct[root])
+        while pending:
+            helper = pending.pop()
+            if helper in closure:
+                continue
+            closure.add(helper)
+            pending.extend(direct[helper] - closure)
+        changed = True
+        while changed:
+            changed = False
+            for helper in tuple(closure):
+                callers = {
+                    caller
+                    for caller, callees in direct.items()
+                    if helper in callees
+                }
+                if any(caller != root and caller not in closure for caller in callers):
+                    closure.remove(helper)
+                    changed = True
+        counts.append((root, len(closure)))
+    return tuple(counts)
+
+
+_RESOLVER_ONE_HOP_CASES = _resolver_one_hop_counts()
+
+
+def test_resolver_class_does_not_trigger_method_count_gt_24() -> None:
+    """Freezes the class method-count hard adjudication trigger."""
+
     method_count = sum(
         isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
-        for member in resolver_class.body
+        for member in _resolver_class().body
     )
 
     assert method_count <= 24, "_Resolver triggers method_count_gt_24"
 
 
-def test_resolver_support_has_no_file_hard_adjudication_trigger() -> None:
-    """Catches a resolver role file that becomes a giant aggregate."""
+def test_resolver_class_does_not_trigger_line_count_gt_600() -> None:
+    """Freezes the class structural-length hard adjudication trigger."""
+
+    owner = _resolver_class()
+    decorators = getattr(owner, "decorator_list", ())
+    start_line = min((node.lineno for node in decorators), default=owner.lineno)
+
+    assert owner.end_lineno - start_line + 1 <= 600, (
+        "_Resolver triggers line_count_gt_600"
+    )
+
+
+def test_resolver_class_does_not_trigger_mutable_field_count_gt_24() -> None:
+    """Freezes the class mutable-field hard adjudication trigger."""
+
+    assert len(_resolver_mutable_fields()) <= 24, (
+        "_Resolver triggers mutable_field_count_gt_24"
+    )
+
+
+def test_resolver_file_does_not_trigger_definition_count_gt_50() -> None:
+    """Freezes the file definition-count hard adjudication trigger."""
 
     tree = _resolver_module_tree()
     definition_count = sum(
@@ -318,6 +437,34 @@ def test_resolver_support_has_no_file_hard_adjudication_trigger() -> None:
     assert definition_count <= 50, (
         "architecture_call_resolver.py triggers definition_count_gt_50"
     )
+
+
+def test_resolver_file_does_not_trigger_physical_line_count_gt_1000() -> None:
+    """Freezes the file structural-length hard adjudication trigger."""
+
+    physical_line_count = len(
+        (ARCHITECTURE_TEST_ROOT / "architecture_call_resolver.py")
+        .read_bytes()
+        .splitlines()
+    )
+
+    assert physical_line_count <= 1_000, (
+        "architecture_call_resolver.py triggers physical_line_count_gt_1000"
+    )
+
+
+@pytest.mark.parametrize(
+    ("root", "helper_count"),
+    _RESOLVER_ONE_HOP_CASES,
+    ids=[root for root, _helper_count in _RESOLVER_ONE_HOP_CASES],
+)
+def test_resolver_one_hop_does_not_trigger_helper_count_gt_12(
+    root: str,
+    helper_count: int,
+) -> None:
+    """Freezes the one-hop helper-reach hard adjudication trigger."""
+
+    assert helper_count <= 12, f"{root} triggers helper_count_gt_12"
 
 
 @pytest.mark.parametrize(
@@ -1167,7 +1314,6 @@ def _resolver_fixture(
     extra_files: Mapping[str, str] | None = None,
     allowlist: object = (),
     primitives: object = (),
-    raw_primitives: bool = False,
 ):
     files = {path: _resolver_source(source)}
     files.update(
@@ -1177,17 +1323,27 @@ def _resolver_fixture(
         }
     )
     index = _fixture_index(files, tmp_path)
-    if not raw_primitives:
-        if isinstance(primitives, (tuple, list)) and primitives:
-            primitives = _primitive_table(index, tuple(primitives))
-        elif isinstance(primitives, Mapping) and set(primitives) == {
-            "schema_version",
-            "rows",
-        }:
-            rows = primitives["rows"]
-            if isinstance(rows, list) and all(isinstance(row, Mapping) for row in rows):
-                primitives = _primitive_table(index, tuple(rows))
     return resolve_calls(index, allowlist, primitives)
+
+
+def _resolver_fixture_with_primitive_rows(
+    tmp_path: Path,
+    source: str,
+    rows: tuple[Mapping[str, object], ...],
+    *,
+    path: str = "src/lockstep/resolver_fixture.py",
+    extra_files: Mapping[str, str] | None = None,
+    allowlist: object = (),
+):
+    files = {path: _resolver_source(source)}
+    files.update(
+        {
+            extra_path: _resolver_source(extra_source)
+            for extra_path, extra_source in (extra_files or {}).items()
+        }
+    )
+    index = _fixture_index(files, tmp_path)
+    return resolve_calls(index, allowlist, _primitive_table(index, rows))
 
 
 def _resolver_calls(result: object) -> Mapping[str, object]:
@@ -1242,10 +1398,6 @@ def _primitive_entity_row(
         "semantic_target": selector,
         "domains": list(domains),
     }
-
-
-def _rule_table(rows: tuple[Mapping[str, object], ...]) -> Mapping[str, object]:
-    return {"schema_version": 1, "rows": list(rows)}
 
 
 def test_resolver_callsite_owners_follow_preorder_pruning_and_lambda_attribution(
@@ -1441,7 +1593,7 @@ def test_resolver_exact_name_import_module_class_decorator_and_base_binding(
     """Catches fuzzy names, import-label drift, and ignored decorator/base scopes."""
 
     path = "src/lockstep/exact_bindings.py"
-    result = _resolver_fixture(
+    result = _resolver_fixture_with_primitive_rows(
         tmp_path,
         """
         from package import external as renamed
@@ -1467,6 +1619,11 @@ def test_resolver_exact_name_import_module_class_decorator_and_base_binding(
             def inherited_call(self):
                 self.inherited()
         """,
+        (
+            _primitive_entity_row("package.decorate", ("planning/transformation",)),
+            _primitive_entity_row("package.external"),
+            _primitive_entity_row("package.module.work"),
+        ),
         path=path,
         allowlist=frozenset({"builtins.len"}),
     )
@@ -1553,7 +1710,7 @@ def test_resolver_binding_evaluates_lambda_defaults_in_the_enclosing_frame(
         def target():
             pass
         def owner():
-            callback = lambda positional=target(), *, keyword=target(): body()
+            callback = lambda target=target(), *, keyword=target(): target()
         """,
         path=path,
     )
@@ -1582,6 +1739,43 @@ def test_resolver_binding_treats_match_pattern_capture_as_conditional_local(
                     pass
             captured()
         """,
+        path=path,
+    )
+
+    _assert_unresolved_call(result, f"{path}::owner::call:0001")
+
+
+_MATCH_STRING_CAPTURE_CASES = (
+    ("star", "[*captured]"),
+    ("mapping_rest", "{**captured}"),
+    ("nested_as", "(1 | 2) as captured"),
+)
+
+
+@pytest.mark.parametrize(
+    ("case", "pattern"),
+    _MATCH_STRING_CAPTURE_CASES,
+    ids=[case for case, *_rest in _MATCH_STRING_CAPTURE_CASES],
+)
+def test_resolver_binding_treats_every_string_pattern_capture_as_local(
+    tmp_path: Path,
+    case: str,
+    pattern: str,
+) -> None:
+    """Catches MatchStar, MatchMapping.rest, and nested MatchAs omissions."""
+
+    path = f"src/lockstep/match_string_capture_{case}.py"
+    result = _resolver_fixture(
+        tmp_path,
+        (
+            "def captured():\n"
+            "    pass\n"
+            "def owner(subject):\n"
+            "    match subject:\n"
+            f"        case {pattern}:\n"
+            "            pass\n"
+            "    captured()\n"
+        ),
         path=path,
     )
 
@@ -1618,6 +1812,27 @@ def test_resolver_binding_isolates_comprehension_target_frame(
             f"    {expression}\n"
             "    target()\n"
         ),
+        path=path,
+    )
+
+    _assert_unresolved_call(result, f"{path}::owner::call:0001")
+    assert _resolver_target(result, f"{path}::owner::call:0002") == f"{path}::target"
+
+
+def test_resolver_binding_evaluates_comprehension_outer_iterable_in_enclosing_frame(
+    tmp_path: Path,
+) -> None:
+    """Catches applying the comprehension target to its outermost iterable."""
+
+    path = "src/lockstep/comprehension_outer_iterable.py"
+    result = _resolver_fixture(
+        tmp_path,
+        """
+        def target():
+            pass
+        def owner():
+            [target() for target in target()]
+        """,
         path=path,
     )
 
@@ -2484,6 +2699,60 @@ def test_resolver_receiver_rejects_nested_or_lambda_shadowed_self_cls(
     _assert_unresolved_call(result, f"{path}::{owner}::call:0001")
 
 
+_CAPTURED_CLASS_RECEIVER_CASES = (
+    (
+        "nested_self",
+        "def owner(self):\n        def nested():\n            self.shared()",
+        "Box.owner.nested",
+    ),
+    (
+        "nested_cls",
+        "@classmethod\n    def owner(cls):\n        def nested():\n            cls.shared()",
+        "Box.owner.nested",
+    ),
+    (
+        "lambda_self",
+        "def owner(self):\n        nested = lambda: self.shared()",
+        "Box.owner",
+    ),
+    (
+        "lambda_cls",
+        "@classmethod\n    def owner(cls):\n        nested = lambda: cls.shared()",
+        "Box.owner",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("case", "owner_source", "call_owner"),
+    _CAPTURED_CLASS_RECEIVER_CASES,
+    ids=[case for case, *_rest in _CAPTURED_CLASS_RECEIVER_CASES],
+)
+def test_resolver_receiver_accepts_nested_or_lambda_captured_self_cls(
+    tmp_path: Path,
+    case: str,
+    owner_source: str,
+    call_owner: str,
+) -> None:
+    """Catches rejecting a valid closure capture while fixing shadowing."""
+
+    path = f"src/lockstep/captured_class_receiver_{case}.py"
+    result = _resolver_fixture(
+        tmp_path,
+        (
+            "class Box:\n"
+            "    def shared(self):\n"
+            "        pass\n"
+            f"    {owner_source}\n"
+        ),
+        path=path,
+    )
+
+    assert _resolver_target(result, f"{path}::{call_owner}::call:0001") == (
+        f"{path}::Box.shared"
+    )
+
+
 _INVALID_SUPER_RECEIVER_CASES = (
     (
         "explicit_arguments",
@@ -3199,7 +3468,10 @@ def test_resolver_rule_table_rejects_duplicate_allowlist_targets(
 ) -> None:
     """Catches silently collapsing duplicate reviewed targets into a set."""
 
-    with pytest.raises(ValueError, match="duplicate.*allowlist|allowlist.*duplicate"):
+    with pytest.raises(
+        ValueError,
+        match=r"^duplicate effect-free allowlist target: builtins\.len$",
+    ):
         _resolver_fixture(
             tmp_path,
             "def owner():\n    pass\n",
@@ -3221,12 +3493,12 @@ def test_resolver_rule_table_rejects_duplicate_primitive_binding(
         _primitive_callsite_row(callsite, "reviewed.first"),
         _primitive_callsite_row(callsite, "reviewed.second"),
     )
-    with pytest.raises(ValueError, match="duplicate.*primitive|primitive.*duplicate"):
-        _resolver_fixture(
+    with pytest.raises(ValueError, match=r"^duplicate primitive binding: "):
+        _resolver_fixture_with_primitive_rows(
             tmp_path,
             "def owner(callback):\n    callback()\n",
+            rows,
             path=path,
-            primitives=_rule_table(rows),
         )
 
 
@@ -3306,7 +3578,7 @@ def test_resolver_rule_table_rejects_invalid_callsite_evidence(
     )
     table["callsite_evidence"] = mutate(table["callsite_evidence"])
 
-    with pytest.raises(ValueError, match="evidence|stale|selector"):
+    with pytest.raises(ValueError, match=rf"^invalid callsite evidence: {case}$"):
         resolve_calls(index, (), table)
 
 
@@ -3326,7 +3598,7 @@ def test_resolver_rule_table_rejects_noncanonical_callsite_evidence_order(
     table = dict(_primitive_table(index, rows))
     table["callsite_evidence"] = list(reversed(table["callsite_evidence"]))
 
-    with pytest.raises(ValueError, match="evidence|order|canonical"):
+    with pytest.raises(ValueError, match=r"^noncanonical callsite evidence order$"):
         resolve_calls(index, (), table)
 
 
@@ -3342,7 +3614,7 @@ def test_resolver_callsite_evidence_invalidates_reference_source_change(
     }
     before_index = _fixture_index(before_files, tmp_path)
     callsite = f"{path}::owner::call:0001"
-    table = _primitive_table(
+    before_table = _primitive_table(
         before_index,
         (_primitive_callsite_row(callsite, "reviewed.callback"),),
     )
@@ -3351,8 +3623,8 @@ def test_resolver_callsite_evidence_invalidates_reference_source_change(
         tmp_path,
     )
 
-    with pytest.raises(ValueError, match="reference|source|stale|evidence"):
-        resolve_calls(after_index, (), table)
+    with pytest.raises(ValueError, match=r"^reference source evidence mismatch$"):
+        resolve_calls(after_index, (), before_table)
 
 
 def test_resolver_callsite_evidence_invalidates_changed_expression_at_same_ordinal(
@@ -3366,7 +3638,7 @@ def test_resolver_callsite_evidence_invalidates_changed_expression_at_same_ordin
         tmp_path,
     )
     callsite = f"{path}::owner::call:0001"
-    table = _primitive_table(
+    before_table = _primitive_table(
         before_index,
         (_primitive_callsite_row(callsite, "reviewed.callback"),),
     )
@@ -3374,8 +3646,22 @@ def test_resolver_callsite_evidence_invalidates_changed_expression_at_same_ordin
         {path: b"def owner(replacement):\n    replacement()\n"},
         tmp_path,
     )
+    table = dict(
+        _primitive_table(
+            after_index,
+            (_primitive_callsite_row(callsite, "reviewed.callback"),),
+        )
+    )
+    current_evidence = dict(table["callsite_evidence"][0])
+    current_evidence["call_ast_sha256"] = before_table["callsite_evidence"][0][
+        "call_ast_sha256"
+    ]
+    table["callsite_evidence"] = [current_evidence]
 
-    with pytest.raises(ValueError, match="source|stale|evidence|AST"):
+    with pytest.raises(
+        ValueError,
+        match=rf"^callsite AST evidence mismatch: {callsite}$",
+    ):
         resolve_calls(after_index, (), table)
 
 
@@ -3403,21 +3689,21 @@ def test_resolver_rule_table_rejects_invalid_primitive_domains(
     path = f"src/lockstep/invalid_domains_{case}.py"
     callsite = f"{path}::owner::call:0001"
     row = {**_primitive_callsite_row(callsite, "reviewed.callback"), "domains": domains}
-    with pytest.raises(ValueError, match="domain"):
-        _resolver_fixture(
+    with pytest.raises(ValueError, match=rf"^invalid primitive domains: {case}$"):
+        _resolver_fixture_with_primitive_rows(
             tmp_path,
             "def owner(callback):\n    callback()\n",
+            (row,),
             path=path,
-            primitives=_rule_table((row,)),
         )
 
 
 _MALFORMED_RULE_TABLE_CASES = (
-    "allowlist_extra_top_key",
+    "allowlist_schema_bool",
     "allowlist_non_array_targets",
-    "primitive_extra_top_key",
-    "primitive_non_object_row",
-    "primitive_extra_row_key",
+    "allowlist_empty_target",
+    "primitive_schema_bool",
+    "primitive_rows_not_array",
     "primitive_empty_selector",
     "primitive_empty_semantic_target",
 )
@@ -3437,20 +3723,25 @@ def test_resolver_rule_table_rejects_malformed_object_or_row(
     index = _fixture_index(files, tmp_path)
     allowlist: object = {"schema_version": 1, "targets": []}
     primitives = dict(_primitive_table(index, ()))
-    if case == "allowlist_extra_top_key":
-        allowlist = {"schema_version": 1, "targets": [], "extra": True}
+    expected = ""
+    if case == "allowlist_schema_bool":
+        allowlist = {"schema_version": True, "targets": []}
+        expected = "invalid effect-free allowlist schema_version"
     elif case == "allowlist_non_array_targets":
         allowlist = {"schema_version": 1, "targets": ("builtins.len",)}
-    elif case == "primitive_extra_top_key":
-        primitives["extra"] = True
-    elif case == "primitive_non_object_row":
-        primitives["rows"] = ["row"]
-    elif case == "primitive_extra_row_key":
-        primitives["rows"] = [
-            {**_primitive_entity_row("external.target"), "extra": True}
-        ]
+        expected = "effect-free allowlist targets must be an array"
+    elif case == "allowlist_empty_target":
+        allowlist = {"schema_version": 1, "targets": [""]}
+        expected = "effect-free allowlist target must be non-empty"
+    elif case == "primitive_schema_bool":
+        primitives["schema_version"] = True
+        expected = "invalid effect primitive schema_version"
+    elif case == "primitive_rows_not_array":
+        primitives["rows"] = ()
+        expected = "effect primitive rows must be an array"
     elif case == "primitive_empty_selector":
         primitives["rows"] = [_primitive_entity_row("")]
+        expected = "effect primitive selector must be non-empty"
     elif case == "primitive_empty_semantic_target":
         primitives["rows"] = [
             {
@@ -3458,9 +3749,49 @@ def test_resolver_rule_table_rejects_malformed_object_or_row(
                 "semantic_target": "",
             }
         ]
+        expected = "effect primitive semantic_target must be non-empty"
 
-    with pytest.raises(ValueError, match="allowlist|primitive|selector"):
-        resolve_calls(index, allowlist, primitives)
+    primitive_input: object = () if case.startswith("allowlist_") else primitives
+    with pytest.raises(ValueError, match=rf"^{expected}$"):
+        resolve_calls(index, allowlist, primitive_input)
+
+
+_STRUCTURALLY_MALFORMED_PRIMITIVE_ROWS = (
+    ("non_object", "row", "invalid effect primitive row"),
+    (
+        "extra_key",
+        {**_primitive_entity_row("external.target"), "extra": True},
+        "invalid effect primitive row",
+    ),
+    (
+        "invalid_selector_kind",
+        {
+            **_primitive_entity_row("external.target"),
+            "selector_kind": "pattern",
+        },
+        "invalid primitive selector kind",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("case", "row", "expected"),
+    _STRUCTURALLY_MALFORMED_PRIMITIVE_ROWS,
+    ids=[case for case, *_rest in _STRUCTURALLY_MALFORMED_PRIMITIVE_ROWS],
+)
+def test_resolver_rule_table_rejects_structurally_malformed_row_before_evidence(
+    tmp_path: Path,
+    case: str,
+    row: object,
+    expected: str,
+) -> None:
+    with pytest.raises(ValueError, match=rf"^{expected}$"):
+        _resolver_fixture(
+            tmp_path,
+            "def owner():\n    pass\n",
+            path=f"src/lockstep/structural_row_{case}.py",
+            primitives=(row,),
+        )
 
 
 _UNUSED_PRIMITIVE_CASES = (
@@ -3492,16 +3823,16 @@ def test_resolver_rule_table_rejects_unused_or_stale_primitive_rows(
 ) -> None:
     path = f"src/lockstep/unused_primitive_{case}.py"
     row = row_factory(path)
-    with pytest.raises(ValueError, match="unused|stale|source|evidence"):
-        _resolver_fixture(
+    with pytest.raises(ValueError, match=rf"^(unused|stale) primitive row: {case}$"):
+        _resolver_fixture_with_primitive_rows(
             tmp_path,
             source,
+            (row,),
             path=path,
-            primitives=_rule_table((row,)),
         )
 
 
-_EXTERNAL_EFFECT_CLOSURE_CASES = (
+_STATIC_EXTERNAL_TARGET_CASES = (
     (
         "os_open",
         "os",
@@ -3560,15 +3891,36 @@ _EXTERNAL_EFFECT_CLOSURE_CASES = (
         "subprocess.Popen",
         ("external-process/provider", "lifecycle-control"),
     ),
+    (
+        "arbitrary_nested_module",
+        "acme.transport",
+        "acme.transport.send()",
+        "acme.transport.send",
+        ("external-process/provider",),
+    ),
+    (
+        "arbitrary_vendor_gateway",
+        "vendor.gateway",
+        "vendor.gateway.dispatch()",
+        "vendor.gateway.dispatch",
+        ("external-process/provider",),
+    ),
+    (
+        "arbitrary_external_constructor",
+        "custom_service",
+        "custom_service.Factory()",
+        "custom_service.Factory",
+        ("lifecycle-control",),
+    ),
 )
 
 
 @pytest.mark.parametrize(
     ("case", "module", "expression", "target", "domains"),
-    _EXTERNAL_EFFECT_CLOSURE_CASES,
-    ids=[case for case, *_rest in _EXTERNAL_EFFECT_CLOSURE_CASES],
+    _STATIC_EXTERNAL_TARGET_CASES,
+    ids=[case for case, *_rest in _STATIC_EXTERNAL_TARGET_CASES],
 )
-def test_resolver_effect_closure_requires_primitive_for_static_external_target(
+def test_resolver_effect_closure_requires_exact_coverage_for_any_external_target(
     tmp_path: Path,
     case: str,
     module: str,
@@ -3581,16 +3933,70 @@ def test_resolver_effect_closure_requires_primitive_for_static_external_target(
     path = f"src/lockstep/external_effect_{case}.py"
     source = f"import {module}\ndef owner():\n    {expression}\n"
     assert tuple(sorted(domains, key=_EFFECT_DOMAINS.index)) == domains
-    with pytest.raises(ValueError, match="primitive|effect|external"):
+    with pytest.raises(
+        ValueError,
+        match=rf"^external target lacks exact effect coverage: {target}$",
+    ):
         _resolver_fixture(tmp_path, source, path=path)
 
-    covered = _resolver_fixture(
-        tmp_path,
-        source,
-        path=path,
-        primitives=_rule_table((_primitive_entity_row(target, domains),)),
-    )
-    assert _resolver_target(covered, f"{path}::owner::call:0001") == target
+
+_EXTERNAL_COVERAGE_KINDS = ("allowlist", "entity", "callsite")
+
+
+@pytest.mark.parametrize(
+    "coverage_kind",
+    _EXTERNAL_COVERAGE_KINDS,
+    ids=_EXTERNAL_COVERAGE_KINDS,
+)
+def test_resolver_effect_closure_accepts_each_exact_external_coverage_kind(
+    tmp_path: Path,
+    coverage_kind: str,
+) -> None:
+    path = f"src/lockstep/external_coverage_{coverage_kind}.py"
+    source = "import external_api as api\ndef owner():\n    api.perform()\n"
+    target = "external_api.perform"
+    callsite = f"{path}::owner::call:0001"
+    if coverage_kind == "allowlist":
+        covered = _resolver_fixture(
+            tmp_path,
+            source,
+            path=path,
+            allowlist=frozenset({target}),
+        )
+    else:
+        row = (
+            _primitive_entity_row(target)
+            if coverage_kind == "entity"
+            else {
+                **_primitive_callsite_row(callsite, target),
+                "domains": ["external-process/provider"],
+            }
+        )
+        covered = _resolver_fixture_with_primitive_rows(
+            tmp_path,
+            source,
+            (row,),
+            path=path,
+        )
+
+    assert _resolver_target(covered, callsite) == target
+
+
+def test_resolver_effect_closure_entity_coverage_is_exact_not_prefix_based(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/external_inexact_entity.py"
+    target = "external_api.perform"
+    with pytest.raises(
+        ValueError,
+        match=rf"^external target lacks exact effect coverage: {target}$",
+    ):
+        _resolver_fixture_with_primitive_rows(
+            tmp_path,
+            "import external_api as api\ndef owner():\n    api.perform()\n",
+            (_primitive_entity_row("external_api"),),
+            path=path,
+        )
 
 
 def test_resolver_callsite_effect_free_allowlist_matches_exact_builtin_target(
@@ -3630,11 +4036,11 @@ def test_resolver_callsite_primitive_is_an_exact_terminal_override(
         def owner(callback):
             callback()
     """
-    exact = _resolver_fixture(
+    exact = _resolver_fixture_with_primitive_rows(
         tmp_path,
         source,
+        (_primitive_callsite_row(callsite, "reviewed.callback"),),
         path=path,
-        primitives=(_primitive_callsite_row(callsite, "reviewed.callback"),),
     )
     assert _resolver_target(exact, callsite) == "reviewed.callback"
 
@@ -3652,15 +4058,15 @@ def test_resolver_callsite_and_entity_primitive_selector_spaces_are_disjoint(
         },
     )
 
-    with pytest.raises(ValueError, match="selector|disjoint|callsite"):
-        _resolver_fixture(
+    with pytest.raises(ValueError, match=r"^primitive selector spaces overlap$"):
+        _resolver_fixture_with_primitive_rows(
             tmp_path,
             """
             def owner(callback):
                 callback()
             """,
+            rows,
             path=path,
-            primitives=rows,
         )
 
 
@@ -3682,7 +4088,7 @@ def test_resolver_callsite_primitive_is_invalidated_by_source_ordinal_change(
     before = resolve_calls(before_index, (), table)
     assert _resolver_target(before, stale_callsite) == "reviewed.callback"
 
-    with pytest.raises(ValueError, match="unused|stale|source|evidence"):
+    with pytest.raises(ValueError, match=r"^reference source evidence mismatch$"):
         _resolver_fixture(
             tmp_path,
             """
@@ -3691,7 +4097,6 @@ def test_resolver_callsite_primitive_is_invalidated_by_source_ordinal_change(
             """,
             path=path,
             primitives=table,
-            raw_primitives=True,
         )
 
 
@@ -3703,8 +4108,11 @@ def test_resolver_callsite_primitive_cannot_override_new_static_semantics(
     path = "src/lockstep/semantic_invalidation.py"
     callsite = f"{path}::owner::call:0001"
     row = _primitive_callsite_row(callsite, "reviewed.callback")
-    with pytest.raises(ValueError, match="unused|stale"):
-        _resolver_fixture(
+    with pytest.raises(
+        ValueError,
+        match=rf"^stale callsite primitive row: {callsite}$",
+    ):
+        _resolver_fixture_with_primitive_rows(
             tmp_path,
             """
             def target():
@@ -3712,8 +4120,8 @@ def test_resolver_callsite_primitive_cannot_override_new_static_semantics(
             def owner():
                 target()
             """,
+            (row,),
             path=path,
-            primitives=(row,),
         )
 
 
