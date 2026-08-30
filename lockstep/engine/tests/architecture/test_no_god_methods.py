@@ -840,6 +840,27 @@ def test_source_index_accepts_9999_imports_and_rejects_import_10000(
         _fixture_index({path: accepted_source + b"import os\n"}, tmp_path)
 
 
+def test_source_index_legacy_metrics_split_identity_at_final_separator(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/a::b.py"
+    identity = f"{path}::f"
+
+    metrics = measure_legacy_metrics(
+        _fixture_index({path: b"def f():\n    return helper()\n"}, tmp_path)
+    )
+
+    assert tuple(metrics) == (identity,)
+    metric = metrics[identity]
+    assert (
+        metric.line_count,
+        metric.cyclomatic,
+        metric.cognitive,
+        metric.max_nesting,
+        metric.legacy_syntactic_fanout,
+    ) == (2, 1, 0, 0, 1)
+
+
 def test_legacy_metrics_characterize_current_complexity_length_and_pruned_fanout() -> None:
     """Catches metric drift and nested-scope complexity/fan-out inflation."""
 
