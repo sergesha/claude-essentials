@@ -104,6 +104,7 @@ def _population_values(rows, errors):
         path = PurePosixPath(raw) if isinstance(raw, str) else PurePosixPath("/")
         if not isinstance(raw, str) or path.as_posix() != raw or path.is_absolute() or ".." in path.parts or not raw.startswith("src/lockstep/") or not raw.endswith(".py"):
             errors.append("population path is not normalized")
+            continue
         paths.append(raw)
     if paths != sorted(set(paths)):
         errors.append("population must be unique and path-sorted")
@@ -262,15 +263,35 @@ def _shape(exception, errors):
     if not isinstance(exception, dict) or set(exception) != _EXCEPTION:
         errors.append("exception keys must be exact"); return False
     valid = True
+    if not isinstance(exception.get("entity"), str) or not exception["entity"]:
+        errors.append("exception entity must be a non-empty string"); valid = False
     if exception.get("kind") not in _KINDS:
         errors.append("exception kind is invalid"); valid = False
+    reasons = exception.get("trigger_reasons")
+    if (not isinstance(reasons, list) or not reasons
+            or any(not isinstance(item, str) or not item for item in reasons)):
+        errors.append("trigger_reasons must be a non-empty string array"); valid = False
+    gates = exception.get("focused_gate")
+    if (not isinstance(gates, list) or not gates
+            or any(not isinstance(item, str) or not item for item in gates)):
+        errors.append("focused_gate must be a non-empty string array"); valid = False
+    if not isinstance(exception.get("baseline_metrics"), dict):
+        errors.append("baseline_metrics must be an object"); valid = False
+    for name in ("source_sha256", "semantic_dependency_sha256",
+                 "member_closure_sha256"):
+        value = exception.get(name)
+        if not isinstance(value, str) or _SHA.fullmatch(value) is None:
+            errors.append(name + " must be a lowercase SHA-256 digest"); valid = False
     for name in ("responsibility", "invariant", "next_review_gate"):
-        if not isinstance(exception.get(name), str) or not exception[name].strip(): errors.append("exception " + name + " must be non-empty")
+        if not isinstance(exception.get(name), str) or not exception[name].strip():
+            errors.append("exception " + name + " must be non-empty"); valid = False
     if exception.get("next_review_gate") not in _REVIEW_GATES:
-        errors.append("next_review_gate is not an allowed review boundary")
+        errors.append("next_review_gate is not an allowed review boundary"); valid = False
     expiry = exception.get("expires_on")
-    if not isinstance(expiry, dict) or set(expiry) != _EXPIRY: errors.append("expires_on keys must be exact")
-    elif any(value is not True for value in expiry.values()): errors.append("expires_on values must all be true")
+    if not isinstance(expiry, dict) or set(expiry) != _EXPIRY:
+        errors.append("expires_on keys must be exact"); valid = False
+    elif any(value is not True for value in expiry.values()):
+        errors.append("expires_on values must all be true"); valid = False
     return valid
 
 
@@ -371,6 +392,8 @@ def verify_manifest(report, manifest, *, repo_root, current_commit):
            or set(item["review_evidence"]) != _EVIDENCE
            for item in manifest["exceptions"]):
         errors.append("review evidence keys must be exact")
+        return ManifestVerdict(False, tuple(errors), ())
+    if any(not _shape(item, errors) for item in manifest["exceptions"]):
         return ManifestVerdict(False, tuple(errors), ())
     repo = Path(repo_root)
     context = _current_context(repo, current_commit, report, manifest, errors)

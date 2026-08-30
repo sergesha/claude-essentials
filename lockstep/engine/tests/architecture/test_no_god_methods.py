@@ -7558,6 +7558,8 @@ def test_candidate_policy_file_does_not_double_count_comprehension_outer_iterabl
 @pytest.mark.parametrize(("source", "components"), (
     ("class T: pass\ndef outer[T](value: T): return value\ndef isolated(): pass", 3),
     ("class Leaf: pass\ndef outer[T: Leaf](value: T): return value\ndef isolated(): pass", 2),
+    ("class T: pass\ndef outer():\n    type Alias[T] = T\n    return Alias\ndef isolated(): pass", 3),
+    ("class Leaf: pass\ndef outer():\n    type Alias[T: Leaf] = T\n    return Alias\ndef isolated(): pass", 2),
 ))
 def test_candidate_policy_file_resolves_pep695_type_parameter_scopes(
     tmp_path: Path, source: str, components: int
@@ -7908,6 +7910,20 @@ def test_manifest_reads_review_and_historical_inputs_from_exact_git_tree_blob(
     assert verdict.valid is True
     assert verdict.errors == ()
     assert verdict.accepted_exceptions == (identity,)
+
+    malformed_population = json.loads(json.dumps(manifest))
+    malformed_population["population"][0]["path"] = []
+    rejected = verify_manifest(
+        report, malformed_population, repo_root=repo, current_commit=current_commit)
+    assert rejected.valid is False
+    assert any("population path" in error for error in rejected.errors)
+
+    malformed_entity = json.loads(json.dumps(manifest))
+    malformed_entity["exceptions"][0]["entity"] = []
+    rejected = verify_manifest(
+        report, malformed_entity, repo_root=repo, current_commit=current_commit)
+    assert rejected.valid is False
+    assert any("exception entity" in error for error in rejected.errors)
 
     review_path.write_text("checkout substitution\n", encoding="utf-8")
     source_path.write_text("raise RuntimeError('checkout source substitution')\n",

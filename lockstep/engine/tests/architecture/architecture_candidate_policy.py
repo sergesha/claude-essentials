@@ -540,6 +540,8 @@ def _module_reference_bindings(path, index, nodes, vertices, resolutions):
 def _scope_name(node):
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
         return node.name
+    if hasattr(ast, "TypeAlias") and isinstance(node, ast.TypeAlias):
+        return node.name.id
     return {ast.Lambda: "lambda", ast.ListComp: "listcomp",
             ast.SetComp: "setcomp", ast.DictComp: "dictcomp",
             ast.GeneratorExp: "genexpr"}.get(type(node))
@@ -576,6 +578,8 @@ class _ReferenceVisitor:
             return self._lambda(node, table)
         if isinstance(node, ast.ClassDef):
             return self._class(node, table)
+        if hasattr(ast, "TypeAlias") and isinstance(node, ast.TypeAlias):
+            return self._type_alias(node, table)
         if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
             return self._comprehension(node, table)
         for child in ast.iter_child_nodes(node):
@@ -623,6 +627,18 @@ class _ReferenceVisitor:
             self.visit(child, annotation_table)
         for child in node.body:
             self.visit(child, body_table)
+
+    def _type_alias(self, node, table):
+        parameter_table = _child_table(table, node, self.used)
+        alias_table = parameter_table
+        if parameter_table.get_type() == "type parameter":
+            for child in node.type_params:
+                self.visit(child, parameter_table)
+            alias_table = next((item for item in parameter_table.get_children()
+                                if item.get_name() == node.name.id
+                                and item.get_type() == "type alias"),
+                               parameter_table)
+        self.visit(node.value, alias_table)
 
     def _comprehension(self, node, table):
         first = node.generators[0]
