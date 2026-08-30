@@ -9,6 +9,7 @@ import hashlib
 import json
 import operator
 from pathlib import Path
+import re
 import subprocess
 import textwrap
 from types import MappingProxyType
@@ -1219,7 +1220,8 @@ def _canonical_sha256(value: object) -> str:
 
 
 def _resolver_owner_node(index: object, owner: str) -> ast.AST:
-    path, qualified = owner.split("::", 1)
+    path, separator, qualified = owner.rpartition("::")
+    assert separator
     current: ast.AST = ast.parse(index.files[path], filename=path)
     if qualified == "@file":
         return current
@@ -1286,7 +1288,9 @@ def _primitive_table(index: object, rows: tuple[Mapping[str, object], ...]) -> M
         owner, ordinal_text = selector.rsplit("::call:", 1)
         call = _resolver_owner_calls(index, owner)[int(ordinal_text) - 1]
         if owner.endswith("::@file"):
-            owner_source_sha256 = index.file_sha256[owner.split("::", 1)[0]]
+            path, separator, _qualified = owner.rpartition("::")
+            assert separator
+            owner_source_sha256 = index.file_sha256[path]
         else:
             owner_source_sha256 = index.entities[owner].span.sha256
         evidence.append(
@@ -3487,18 +3491,20 @@ def test_resolver_rule_table_rejects_duplicate_primitive_binding(
 ) -> None:
     """Catches first-row-wins ambiguity for one exact selector binding."""
 
-    path = "src/lockstep/duplicate_primitive.py"
-    callsite = f"{path}::owner::call:0001"
+    selector = "external.duplicate"
     rows = (
-        _primitive_callsite_row(callsite, "reviewed.first"),
-        _primitive_callsite_row(callsite, "reviewed.second"),
+        {**_primitive_entity_row(selector), "semantic_target": "reviewed.first"},
+        {**_primitive_entity_row(selector), "semantic_target": "reviewed.second"},
     )
-    with pytest.raises(ValueError, match=r"^duplicate primitive binding: "):
+    with pytest.raises(
+        ValueError,
+        match=rf"^duplicate primitive binding: {re.escape(selector)}$",
+    ):
         _resolver_fixture_with_primitive_rows(
             tmp_path,
-            "def owner(callback):\n    callback()\n",
+            "def owner():\n    pass\n",
             rows,
-            path=path,
+            path="src/lockstep/duplicate_primitive.py",
         )
 
 
@@ -3528,6 +3534,58 @@ def test_resolver_rule_table_accepts_exact_top_level_callsite_evidence(
     ]
     result = resolve_calls(index, (), table)
     assert _resolver_target(result, callsite) == "reviewed.callback"
+
+
+_DELIMITED_OWNER_EVIDENCE_CASES = (
+    (
+        "entity_owner",
+        b"def owner(callback):\n    callback()\n",
+        "owner",
+        "f2ed8cd1d896381013ccee061ca9aa8fd1dedf775e67309a094b936c00093eb8",
+    ),
+    (
+        "file_owner",
+        b"callback()\n",
+        "@file",
+        "fa8cd5c1da5d9d773ba2baa5e560f185533c49ac211bc94cd5b8e2811b219b05",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("case", "source", "qualified_owner", "owner_source_sha256"),
+    _DELIMITED_OWNER_EVIDENCE_CASES,
+    ids=[case for case, *_rest in _DELIMITED_OWNER_EVIDENCE_CASES],
+)
+def test_resolver_callsite_evidence_splits_owner_path_at_final_delimiter(
+    tmp_path: Path,
+    case: str,
+    source: bytes,
+    qualified_owner: str,
+    owner_source_sha256: str,
+) -> None:
+    """Catches treating `::` inside a tracked path as the owner separator."""
+
+    path = "src/lockstep/a::b.py"
+    owner = f"{path}::{qualified_owner}"
+    callsite = f"{owner}::call:0001"
+    index = _fixture_index({path: source}, tmp_path)
+    table = _primitive_table(
+        index,
+        (_primitive_callsite_row(callsite, f"reviewed.{case}"),),
+    )
+
+    assert table["callsite_evidence"] == [
+        {
+            "selector": callsite,
+            "owner_source_sha256": owner_source_sha256,
+            "call_ast_sha256": (
+                "e09b5cb880470516e9778c1137bbd3689e6acc7c8527775cdc3d08c833ab678a"
+            ),
+        }
+    ]
+    result = resolve_calls(index, (), table)
+    assert _resolver_target(result, callsite) == f"reviewed.{case}"
 
 
 _INVALID_CALLSITE_EVIDENCE_CASES = (
@@ -3799,6 +3857,7 @@ _UNUSED_PRIMITIVE_CASES = (
         "unused_entity",
         "def target():\n    pass\ndef owner():\n    target()\n",
         lambda _path: _primitive_entity_row("external.unused"),
+        "unused primitive row",
     ),
     (
         "static_target_at_callsite",
@@ -3806,12 +3865,13 @@ _UNUSED_PRIMITIVE_CASES = (
         lambda path: _primitive_callsite_row(
             f"{path}::owner::call:0001", "reviewed.stale"
         ),
+        "stale callsite primitive row",
     ),
 )
 
 
 @pytest.mark.parametrize(
-    ("case", "source", "row_factory"),
+    ("case", "source", "row_factory", "reason"),
     _UNUSED_PRIMITIVE_CASES,
     ids=[case for case, *_rest in _UNUSED_PRIMITIVE_CASES],
 )
@@ -3820,10 +3880,16 @@ def test_resolver_rule_table_rejects_unused_or_stale_primitive_rows(
     case: str,
     source: str,
     row_factory: Callable[[str], Mapping[str, object]],
+    reason: str,
 ) -> None:
     path = f"src/lockstep/unused_primitive_{case}.py"
     row = row_factory(path)
-    with pytest.raises(ValueError, match=rf"^(unused|stale) primitive row: {case}$"):
+    selector = row["selector"]
+    assert isinstance(selector, str)
+    with pytest.raises(
+        ValueError,
+        match=rf"^{re.escape(reason)}: {re.escape(selector)}$",
+    ):
         _resolver_fixture_with_primitive_rows(
             tmp_path,
             source,
