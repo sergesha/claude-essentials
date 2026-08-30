@@ -7503,6 +7503,42 @@ def test_candidate_policy_file_attributes_same_line_scopes_and_defaults_exactly(
     assert metric.definition_dependency_components == 2
 
 
+@pytest.mark.parametrize("signature", (
+    "def outer(value: Leaf): return value",
+    "def outer() -> Leaf: return Leaf()",
+))
+def test_candidate_policy_file_attributes_runtime_annotations(
+    tmp_path: Path, signature: str
+) -> None:
+    path = "src/lockstep/annotation_components.py"
+    source = f"class Leaf: pass\n{signature}\ndef isolated(): pass"
+    index, resolutions, semantics = _propagate_fixture(tmp_path, source, path=path)
+    metric = evaluate_candidates(
+        index, measure_legacy_metrics(index), semantics, resolutions
+    ).files[f"{path}::@file"]
+    assert metric.definition_dependency_components == 2
+
+
+def test_candidate_policy_file_does_not_double_count_comprehension_outer_iterable(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/comprehension_scope.py"
+    index, resolutions, semantics = _propagate_fixture(
+        tmp_path,
+        """
+        import json
+        class Outer:
+            json = ()
+            values = (item for item in json)
+        def module_json(): return json
+        def isolated(): pass
+        """, path=path)
+    metric = evaluate_candidates(
+        index, measure_legacy_metrics(index), semantics, resolutions
+    ).files[f"{path}::@file"]
+    assert metric.definition_dependency_components == 3
+
+
 def test_candidate_policy_file_subsystems_formula_and_hard_boundary(
     tmp_path: Path,
 ) -> None:
@@ -7711,6 +7747,13 @@ def test_manifest_reads_review_and_historical_inputs_from_exact_git_tree_blob(
     wrong_review = review_path.with_name("wrong.md")
     wrong_review_bytes = review_bytes.replace(identity.encode(), b"src/lockstep/wrong.py::wrong")
     wrong_review.write_bytes(wrong_review_bytes)
+    incidental_review = review_path.with_name("incidental.md")
+    incidental_bytes = (
+        "Entity: `src/lockstep/wrong.py::wrong`\n"
+        f"Semantic dependency SHA-256: `{'0' * 64}`\n"
+        f"Notes only: {identity} {semantic_digest}\n"
+    ).encode()
+    incidental_review.write_bytes(incidental_bytes)
     review_link = review_path.with_name("candidate-link.md")
     review_link.symlink_to(review_path.name)
     rule_values = {
@@ -7838,6 +7881,7 @@ def test_manifest_reads_review_and_historical_inputs_from_exact_git_tree_blob(
                            encoding="utf-8")
     (architecture / "architecture_thresholds.json").write_text(
         '{"checkout":"substitution"}', encoding="utf-8")
+    manifest_verifier._historical_cached.cache_clear()
     assert verify_manifest(
         report, manifest, repo_root=repo, current_commit=current_commit).valid is True
     bad = json.loads(json.dumps(manifest))
@@ -7914,6 +7958,24 @@ def test_manifest_reads_review_and_historical_inputs_from_exact_git_tree_blob(
     mutations.append((nested_nonancestor, "review commit ancestor"))
     missing_node = json.loads(json.dumps(manifest)); missing_node["exceptions"][0]["focused_gate"] = ["lockstep/engine/tests/architecture/test_gate.py::test_absent"]
     mutations.append((missing_node, "focused gate"))
+    bad_next_gate = json.loads(json.dumps(manifest)); bad_next_gate["exceptions"][0]["next_review_gate"] = "whenever"
+    mutations.append((bad_next_gate, "next_review_gate"))
+    omitted_population = json.loads(json.dumps(manifest)); omitted_population["population"] = []
+    mutations.append((omitted_population, "population"))
+    bad_verdict = json.loads(json.dumps(manifest)); bad_verdict["exceptions"][0]["review_evidence"]["verdict"] = "FAIL"
+    bad_verdict_evidence = bad_verdict["exceptions"][0]["review_evidence"]
+    bad_verdict_evidence["review_evidence_sha256"] = _canonical_sha256({key: value for key, value in bad_verdict_evidence.items() if key != "review_evidence_sha256"})
+    mutations.append((bad_verdict, "verdict"))
+    bad_counts = json.loads(json.dumps(manifest)); bad_counts["exceptions"][0]["review_evidence"]["finding_counts"]["minor"] = 1
+    bad_counts_evidence = bad_counts["exceptions"][0]["review_evidence"]
+    bad_counts_evidence["review_evidence_sha256"] = _canonical_sha256({key: value for key, value in bad_counts_evidence.items() if key != "review_evidence_sha256"})
+    mutations.append((bad_counts, "finding counts"))
+    bad_reviewed_digest = json.loads(json.dumps(manifest)); bad_reviewed_digest["exceptions"][0]["review_evidence"]["reviewed_semantic_dependency_sha256"] = "0" * 64
+    bad_reviewed_evidence = bad_reviewed_digest["exceptions"][0]["review_evidence"]
+    bad_reviewed_evidence["review_evidence_sha256"] = _canonical_sha256({key: value for key, value in bad_reviewed_evidence.items() if key != "review_evidence_sha256"})
+    mutations.append((bad_reviewed_digest, "reviewed semantic"))
+    bad_evidence_digest = json.loads(json.dumps(manifest)); bad_evidence_digest["exceptions"][0]["review_evidence"]["review_evidence_sha256"] = "0" * 64
+    mutations.append((bad_evidence_digest, "review evidence digest"))
     for value, reason in mutations:
         rejected_manifest(value, reason)
 
@@ -7932,6 +7994,16 @@ def test_manifest_reads_review_and_historical_inputs_from_exact_git_tree_blob(
                       if key != "review_evidence_sha256"}
     wrong_evidence["review_evidence_sha256"] = _canonical_sha256(without_digest)
     rejected_manifest(wrong, "review artifact entity")
+
+    incidental = json.loads(json.dumps(manifest))
+    incidental_evidence = incidental["exceptions"][0]["review_evidence"]
+    incidental_evidence["project_relative_artifact_path"] = ".superpowers/reviews/incidental.md"
+    incidental_evidence["git_tree_artifact_path"] = "lockstep/.superpowers/reviews/incidental.md"
+    incidental_evidence["artifact_blob_sha256"] = hashlib.sha256(incidental_bytes).hexdigest()
+    incidental_evidence["review_evidence_sha256"] = _canonical_sha256({
+        key: value for key, value in incidental_evidence.items()
+        if key != "review_evidence_sha256"})
+    rejected_manifest(incidental, "review artifact entity")
 
     linked = json.loads(json.dumps(manifest))
     linked_evidence = linked["exceptions"][0]["review_evidence"]
@@ -7965,6 +8037,21 @@ def test_manifest_reads_review_and_historical_inputs_from_exact_git_tree_blob(
         forged_report, forged, repo_root=repo, current_commit=current_commit)
     assert recomputed.valid is False
     assert any("historical recomputation" in error for error in recomputed.errors)
+
+    subprocess.run(("git", "add", "lockstep/engine/src/lockstep/sample.py"),
+                   cwd=repo, check=True)
+    subprocess.run(("git", "-c", "user.name=Test", "-c",
+                    "user.email=test@example.invalid", "commit", "-qm", "source drift"),
+                   cwd=repo, check=True)
+    changed_commit = subprocess.run(
+        ("git", "rev-parse", "HEAD"), cwd=repo, check=True,
+        capture_output=True, text=True).stdout.strip()
+    manifest_verifier._historical_cached.cache_clear()
+    changed = verify_manifest(
+        report, manifest, repo_root=repo, current_commit=changed_commit)
+    assert changed.valid is False
+    assert any("population" in error or "current commit" in error
+               for error in changed.errors)
 
 
 def test_diagnostics_is_pure_canonical_rendering_of_computed_results(
@@ -8022,10 +8109,15 @@ def test_diagnostics_renders_all_candidate_kinds_in_stable_order() -> None:
         51, 0, (), 0, 1, (), (), (), file_signals, 0,
         ("definition_count_gt_50",), True)
     report = candidate_policy.ArchitectureReport(
-        MappingProxyType({"z.py::later": function, "z.py::earlier": function}),
-        MappingProxyType({"a.py::root::@one_hop": one_hop}),
-        MappingProxyType({"m.py::C": klass}),
-        MappingProxyType({"b.py::@file": file_metric}),
+        candidate_policy._metric_map(
+            {"a.py::later": function, "a.py::earlier": function},
+            {"a.py::later": 2, "a.py::earlier": 0}),
+        candidate_policy._metric_map(
+            {"a.py::root::@one_hop": one_hop}, {"a.py::root::@one_hop": 1}),
+        candidate_policy._metric_map(
+            {"a.py::C": klass}, {"a.py::C": 1}),
+        candidate_policy._metric_map(
+            {"a.py::@file": file_metric}, {"a.py::@file": -1}),
         ("z.py::f::call:0001",), "a" * 64, "b" * 64, "c" * 64,
         "d" * 64, "e" * 64, "task-12c-test", "v1")
     verdict = manifest_verifier.ManifestVerdict(
@@ -8038,16 +8130,16 @@ def test_diagnostics_renders_all_candidate_kinds_in_stable_order() -> None:
         sort_keys=True, separators=(",", ":")) + "\n"
 
     assert [(row["kind"], row["identity"]) for row in value["candidates"]] == [
+        ("file", "a.py::@file"),
+        ("function", "a.py::earlier"),
         ("one_hop", "a.py::root::@one_hop"),
-        ("file", "b.py::@file"),
-        ("class", "m.py::C"),
-        ("function", "z.py::later"),
-        ("function", "z.py::earlier"),
+        ("class", "a.py::C"),
+        ("function", "a.py::later"),
     ]
-    assert value["candidates"][0]["metrics"]["members"][0] == "a.py::root"
-    assert len(value["candidates"][0]["metrics"]["members"]) == 14
-    assert value["candidates"][2]["metrics"]["method_count"] == 25
-    assert value["candidates"][3]["metrics"]["hard_triggers"] == [
+    assert value["candidates"][2]["metrics"]["members"][0] == "a.py::root"
+    assert len(value["candidates"][2]["metrics"]["members"]) == 14
+    assert value["candidates"][3]["metrics"]["method_count"] == 25
+    assert value["candidates"][4]["metrics"]["hard_triggers"] == [
         "cyclomatic_gt_15"]
     assert value["unresolved_callsites"] == ["z.py::f::call:0001"]
 

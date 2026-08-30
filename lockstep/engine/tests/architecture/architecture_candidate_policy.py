@@ -19,6 +19,27 @@ from architecture_legacy_metrics import LegacyMetrics, measure_legacy_metrics
 from architecture_source_index import SourceIndex
 
 
+class _MetricMap(Mapping):
+    __slots__ = ("_values", "ast_order")
+
+    def __init__(self, values, ast_order):
+        self._values = MappingProxyType(dict(values))
+        self.ast_order = MappingProxyType(dict(ast_order))
+
+    def __getitem__(self, key):
+        return self._values[key]
+
+    def __iter__(self):
+        return iter(self._values)
+
+    def __len__(self):
+        return len(self._values)
+
+
+def _metric_map(values, ast_order):
+    return _MetricMap(values, ast_order)
+
+
 @dataclass(frozen=True, slots=True)
 class FunctionMetrics:
     cyclomatic: int
@@ -560,7 +581,13 @@ class _ReferenceVisitor:
 
     def _named(self, node, table):
         outer = (*node.decorator_list, *node.args.defaults,
-                 *(item for item in node.args.kw_defaults if item is not None))
+                 *(item for item in node.args.kw_defaults if item is not None),
+                 *(item.annotation for item in (*node.args.posonlyargs,
+                    *node.args.args, *node.args.kwonlyargs)
+                   if item.annotation is not None),
+                 *(item.annotation for item in (node.args.vararg, node.args.kwarg)
+                   if item is not None and item.annotation is not None),
+                 *((node.returns,) if node.returns is not None else ()))
         for child in outer:
             self.visit(child, table)
         body_table = _child_table(table, node, self.used)
@@ -583,12 +610,18 @@ class _ReferenceVisitor:
             self.visit(child, body_table)
 
     def _comprehension(self, node, table):
-        outer = node.generators[0].iter
-        self.visit(outer, table)
+        first = node.generators[0]
+        self.visit(first.iter, table)
         body_table = _child_table(table, node, self.used)
-        for child in ast.iter_child_nodes(node):
-            if child is not outer:
-                self.visit(child, body_table)
+        self.visit(first.target, body_table)
+        for condition in first.ifs:
+            self.visit(condition, body_table)
+        for generator in node.generators[1:]:
+            self.visit(generator, body_table)
+        payload = ((node.key, node.value) if isinstance(node, ast.DictComp)
+                   else (node.elt,))
+        for child in payload:
+            self.visit(child, body_table)
 
 
 def _module_loads(root, bindings, module_table):
@@ -656,18 +689,22 @@ def _evaluate(index, legacy, semantics, resolutions, rules, vocabulary):
             or not isinstance(semantics, SemanticIndex) or not isinstance(resolutions, ResolutionIndex)):
         raise TypeError("invalid candidate policy inputs")
     nodes, calls = _nodes(index), _calls(resolutions)
-    functions = MappingProxyType({identity: _function(identity, metric,
-        semantics.entities[identity], calls, rules) for identity, metric in legacy.items()})
+    rank = {identity: position for path in index.files for position, identity in
+            enumerate(item for item in nodes if item.partition("::")[0] == path)}
+    functions = _metric_map({identity: _function(identity, metric,
+        semantics.entities[identity], calls, rules) for identity, metric in legacy.items()}, rank)
     function_ids = set(legacy)
-    one_hops = MappingProxyType({root + "::@one_hop": _one_hop(root,
+    one_hops = _metric_map({root + "::@one_hop": _one_hop(root,
         _closure(root, function_ids, index, nodes, calls), legacy, semantics, calls,
-        nodes, rules) for root in legacy})
-    classes = MappingProxyType({identity: _class(identity, node, index, legacy,
+        nodes, rules) for root in legacy},
+        {root + "::@one_hop": rank[root] for root in legacy})
+    classes = _metric_map({identity: _class(identity, node, index, legacy,
         semantics, resolutions, calls, nodes, rules, vocabulary)
         for identity, node in nodes.items()
-        if isinstance(node, ast.ClassDef)})
-    files = MappingProxyType({f"{path}::@file": _file(path, index, nodes, semantics,
-        resolutions, calls, rules) for path in index.files})
+        if isinstance(node, ast.ClassDef)}, rank)
+    files = _metric_map({f"{path}::@file": _file(path, index, nodes, semantics,
+        resolutions, calls, rules) for path in index.files},
+        {f"{path}::@file": -1 for path in index.files})
     unresolved = tuple(record.callsite for record in resolutions.calls.values()
                        if isinstance(record, UnresolvedCall))
     inputs = semantics.digest_inputs

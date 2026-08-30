@@ -24,7 +24,8 @@ def _candidates(report):
     for kind, values in kinds:
         for ast_order, (identity, metrics) in enumerate(values.items()):
             if metrics.candidate:
-                rows.append((identity.partition("::")[0], ast_order,
+                rank = getattr(values, "ast_order", {}).get(identity, ast_order)
+                rows.append((identity.partition("::")[0], rank,
                              kind_order[kind], identity,
                              {"identity": identity, "kind": kind,
                               "metrics": _plain(metrics)}))
