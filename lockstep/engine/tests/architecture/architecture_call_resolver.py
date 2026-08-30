@@ -47,11 +47,37 @@ class UnresolvedDependency:
 
 
 @dataclass(frozen=True, slots=True)
+class PositionalLiteralEvidence:
+    index: int
+    type: str
+    value: None | bool | int | str
+
+
+@dataclass(frozen=True, slots=True)
+class KeywordLiteralEvidence:
+    name: str
+    type: str
+    value: None | bool | int | str
+
+
+@dataclass(frozen=True, slots=True)
+class CallsiteEvidence:
+    callsite: str
+    owner: str
+    line: int
+    column: int
+    positional: tuple[PositionalLiteralEvidence, ...]
+    keywords: tuple[KeywordLiteralEvidence, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class ResolutionIndex:
     calls: Mapping[str, object]
     aliases: Mapping[str, str]
     receivers: Mapping[str, str]
     dependencies: Mapping[str, object]
+    reference_source_sha256: str
+    call_evidence: Mapping[str, CallsiteEvidence]
 
 
 @dataclass(slots=True)
@@ -89,28 +115,6 @@ _EFFECT_DOMAINS = ("decode/validate", "planning/transformation", "filesystem-rea
                    "projection/output")
 
 
-def _arg_nodes(arguments: ast.arguments) -> tuple[ast.arg, ...]:
-    nodes = [*arguments.posonlyargs, *arguments.args]
-    if arguments.vararg is not None:
-        nodes.append(arguments.vararg)
-    nodes.extend(arguments.kwonlyargs)
-    if arguments.kwarg is not None:
-        nodes.append(arguments.kwarg)
-    return tuple(nodes)
-
-
-def _assigned_names(node: ast.AST) -> tuple[str, ...]:
-    found: list[str] = []
-    for item in ast.walk(node):
-        if isinstance(item, ast.Name) and isinstance(item.ctx, (ast.Store, ast.Del)):
-            found.append(item.id)
-        elif isinstance(item, (ast.MatchAs, ast.MatchStar)) and item.name is not None:
-            found.append(item.name)
-        elif isinstance(item, ast.MatchMapping) and item.rest is not None:
-            found.append(item.rest)
-    return tuple(found)
-
-
 class _Model:
     """Private AST model reparsed from the exact indexed source bytes."""
 
@@ -126,6 +130,18 @@ class _Model:
         self.import_modules: set[str] = set()
         self.modules = {path.removeprefix("src/").removesuffix(".py").replace("/", ".")
                         .removesuffix(".__init__"): path for path in index.files}
+        population = [
+            {"path": path, "source_sha256": index.file_sha256[path]}
+            for path in sorted(index.files)
+        ]
+        encoded = json.dumps(
+            population,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        self.reference_source_sha256 = hashlib.sha256(encoded).hexdigest()
         for path in sorted(index.files):
             tree = ast.parse(index.files[path], filename=path)
             module = _Scope("module", None, f"{path}::@file", tree)
@@ -135,21 +151,25 @@ class _Model:
         for scope in self.scopes:
             self._collect_scope_facts(scope)
 
-    def _mark(self, node: ast.AST, scope: _Scope, conditional: bool) -> None:
-        self.node_scope[id(node)] = scope
-        if conditional:
-            self.conditional.add(id(node))
-
     def _visit(self, node: ast.AST, scope: _Scope, owner: str, conditional: bool) -> None:
-        self._mark(node, scope, conditional)
+        self.node_scope[id(node)] = scope
+        self.conditional.update((id(node),) * conditional)
         if isinstance(node, _NAMED):
             self._register_named(node, scope, conditional)
             return
         if isinstance(node, ast.Lambda):
             child = _Scope("lambda", scope, owner, node)
             self.scopes.append(child)
-            self._mark(node.args, scope, conditional)
-            for arg in _arg_nodes(node.args):
+            self.node_scope[id(node.args)] = scope
+            self.conditional.update((id(node.args),) * conditional)
+            arguments = (
+                *node.args.posonlyargs,
+                *node.args.args,
+                *filter(None, (node.args.vararg,)),
+                *node.args.kwonlyargs,
+                *filter(None, (node.args.kwarg,)),
+            )
+            for arg in arguments:
                 child.params.add(arg.arg)
                 if arg.annotation is not None:
                     self._child(arg.annotation, scope, owner, conditional, arg)
@@ -167,7 +187,8 @@ class _Model:
             for element in element_nodes:
                 self._child(element, child, owner, True, node)
             for position, generator in enumerate(generators):
-                self._mark(generator, child, True)
+                self.node_scope[id(generator)] = child
+                self.conditional.add(id(generator))
                 iter_scope = scope if position == 0 else child
                 self._child(generator.target, child, owner, True, generator)
                 self._child(generator.iter, iter_scope, owner, conditional, generator)
@@ -231,7 +252,14 @@ class _Model:
         self._child(node.args, parent, identity, conditional, node)
         if node.returns is not None:
             self._child(node.returns, parent, identity, conditional, node)
-        for arg in _arg_nodes(node.args):
+        arguments = (
+            *node.args.posonlyargs,
+            *node.args.args,
+            *filter(None, (node.args.vararg,)),
+            *node.args.kwonlyargs,
+            *filter(None, (node.args.kwarg,)),
+        )
+        for arg in arguments:
             child.params.add(arg.arg)
         for statement in node.body:
             self._visit(statement, child, identity, conditional)
@@ -243,6 +271,10 @@ class _Model:
             conditional = id(node) in self.conditional
             if isinstance(node, ast.Name):
                 self._collect_name_fact(scope, node, conditional)
+            elif isinstance(node, (ast.MatchAs, ast.MatchStar, ast.MatchMapping)):
+                name = node.rest if isinstance(node, ast.MatchMapping) else node.name
+                if name is not None:
+                    scope.bindings[name].append(_Binding("store", None, node, True))
             else:
                 self._collect_statement_fact(scope, node, conditional)
 
@@ -291,14 +323,6 @@ class _Model:
             scope.bindings[node.name].extend(
                 (_Binding("store", None, node, True), _Binding("del", None, node, True))
             )
-        elif isinstance(node, ast.Match):
-            captured = (
-                (name, case.pattern)
-                for case in node.cases
-                for name in _assigned_names(case.pattern)
-            )
-            for name, pattern in captured:
-                scope.bindings[name].append(_Binding("store", None, pattern, True))
 
     def enclosing_class(self, scope: _Scope) -> _ClassInfo | None:
         current = scope.parent
@@ -355,6 +379,20 @@ def _read_primitives(model: _Model, value: object) -> tuple[Mapping[str, object]
     callsites = {row["selector"] for row in rows if row["selector_kind"] == "callsite"}
     entities = {row["selector"] for row in rows if row["selector_kind"] == "entity"}
     _require(not callsites & entities, "primitive selector spaces overlap")
+    mismatch = next(
+        (
+            row
+            for row in rows
+            if row["selector_kind"] == "entity"
+            and row["selector"] in model.index.entities
+            and row["semantic_target"] != row["selector"]
+        ),
+        None,
+    )
+    if mismatch is not None:
+        raise ValueError(
+            f"internal entity primitive target mismatch: {mismatch['selector']}"
+        )
     if envelope is not None:
         _validate_primitive_evidence(model, envelope, rows)
     return rows
@@ -384,11 +422,7 @@ def _primitive_row(row: object) -> Mapping[str, object]:
 
 def _validate_primitive_evidence(model: _Model, envelope: Mapping[str, object],
                                  rows: tuple[Mapping[str, object], ...]) -> None:
-    population = [{"path": path, "source_sha256": model.index.file_sha256[path]}
-                  for path in sorted(model.index.files)]
-    encoded = json.dumps(population, ensure_ascii=False, allow_nan=False,
-                         sort_keys=True, separators=(",", ":")).encode("utf-8")
-    _require(envelope["reference_source_sha256"] == hashlib.sha256(encoded).hexdigest(),
+    _require(envelope["reference_source_sha256"] == model.reference_source_sha256,
              "reference source evidence mismatch")
     evidence = envelope["callsite_evidence"]
     records_valid = isinstance(evidence, list) and all(
@@ -426,6 +460,40 @@ def _validate_callsite_evidence(model: _Model, record: Mapping[str, object]) -> 
     raise ValueError(f"callsite AST evidence mismatch: {selector}")
 
 
+def _direct_literal(node: ast.AST) -> tuple[str, None | bool | int | str] | None:
+    if not isinstance(node, ast.Constant):
+        return None
+    value = node.value
+    if value is None:
+        return "null", None
+    if type(value) is bool:
+        return "bool", value
+    if type(value) is int:
+        return "int", value
+    if type(value) is str:
+        return "str", value
+    return None
+
+
+def _callsite_evidence(
+    callsite: str, owner: str, call: ast.Call
+) -> CallsiteEvidence:
+    positional = tuple(
+        PositionalLiteralEvidence(index, literal[0], literal[1])
+        for index, argument in enumerate(call.args)
+        if (literal := _direct_literal(argument)) is not None
+    )
+    keywords = tuple(
+        KeywordLiteralEvidence(keyword.arg, literal[0], literal[1])
+        for keyword in call.keywords
+        if keyword.arg is not None
+        and (literal := _direct_literal(keyword.value)) is not None
+    )
+    return CallsiteEvidence(
+        callsite, owner, call.lineno, call.col_offset, positional, keywords
+    )
+
+
 def _symbol_use_is_safe(
     model: _Model, node: ast.Name, *, receiver: bool = False
 ) -> bool:
@@ -445,13 +513,6 @@ def _symbol_use_is_safe(
     if isinstance(parent, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
         return True
     return isinstance(parent, (ast.keyword, ast.Subscript))
-
-
-def _self_attribute(node: ast.AST) -> tuple[str, str] | None:
-    if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
-        if node.value.id in {"self", "cls"}:
-            return node.value.id, node.attr
-    return None
 
 
 def _is_descendant(scope: _Scope, parent: _Scope) -> bool:
@@ -478,7 +539,7 @@ class _Resolver:
         self.receivers: dict[tuple[int, str], str] = {}
         self.field_receivers: dict[tuple[str, str], str] = {}
         self.bases: dict[str, tuple[str, ...] | None] = {}
-        for prepare in (self._prepare_symbols, self._prepare_bases, self._prepare_fields):
+        for prepare in (self._prepare_symbols, self._prepare_fields):
             prepare()
 
     def _normalize_target(self, label: str, kind: str) -> _Target | None:
@@ -648,6 +709,20 @@ class _Resolver:
             receiver = self._receiver_candidate(scope, name, bindings)
             if receiver is not None:
                 self.receivers[(id(scope), name)] = receiver
+        for identity, info in self.model.classes.items():
+            parent = info.scope.parent
+            assert parent is not None
+            targets = tuple(
+                self._resolve_expr(parent, expression) for expression in info.bases
+            )
+            complete = all(
+                getattr(target, "kind", None) == "class"
+                and target.label in self.model.classes
+                for target in targets
+            )
+            self.bases[identity] = (
+                tuple(target.label for target in targets) if complete else None
+            )
 
     def _alias_candidate(
         self, scope: _Scope, name: str, bindings: Sequence[_Binding]
@@ -722,18 +797,6 @@ class _Resolver:
             return None
         return receiver
 
-    def _prepare_bases(self) -> None:
-        for identity, info in self.model.classes.items():
-            parent = info.scope.parent
-            assert parent is not None
-            targets = tuple(self._resolve_expr(parent, expression) for expression in info.bases)
-            complete = all(
-                getattr(target, "kind", None) == "class"
-                and target.label in self.model.classes
-                for target in targets
-            )
-            self.bases[identity] = tuple(target.label for target in targets) if complete else None
-
     def _lookup_method(self, class_identity: str, name: str, *, parents_only: bool = False) -> str | None:
         info = self.model.classes[class_identity]
         if not parents_only and name in info.methods:
@@ -758,7 +821,12 @@ class _Resolver:
             if (owner_scope is None or self.model.enclosing_class(owner_scope)
                     is not self.model.classes[identity]):
                 continue
-            pair = _self_attribute(node)
+            pair = (
+                (node.value.id, node.attr)
+                if isinstance(node.value, ast.Name)
+                and node.value.id in {"self", "cls"}
+                else None
+            )
             if pair and (field is None or pair[1] == field):
                 attributes.append(node)
         return attributes
@@ -782,7 +850,14 @@ class _Resolver:
             return None
         function = init_scope.node
         assert isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef))
-        argument = next((arg for arg in _arg_nodes(function.args) if arg.arg == parameter), None)
+        arguments = (
+            *function.args.posonlyargs,
+            *function.args.args,
+            *((function.args.vararg,) if function.args.vararg is not None else ()),
+            *function.args.kwonlyargs,
+            *((function.args.kwarg,) if function.args.kwarg is not None else ()),
+        )
+        argument = next((arg for arg in arguments if arg.arg == parameter), None)
         if argument is None or not isinstance(argument.annotation, (ast.Name, ast.Attribute)):
             return None
         parent_scope = init_scope.parent
@@ -864,13 +939,9 @@ class _Resolver:
     def _prepare_fields(self) -> None:
         for identity in self.model.classes:
             attributes = self._class_attributes(identity)
-            fields = {
-                pair[1] for node in attributes if (pair := _self_attribute(node))
-            }
+            fields = {node.attr for node in attributes}
             for field in fields:
-                matching = [
-                    node for node in attributes if _self_attribute(node)[1] == field
-                ]
+                matching = [node for node in attributes if node.attr == field]
                 stores = [node for node in matching if isinstance(node.ctx, ast.Store)]
                 if any(isinstance(node.ctx, ast.Del) for node in matching) or not stores:
                     continue
@@ -897,7 +968,12 @@ class _Resolver:
         class_identity = getattr(getattr(class_info, "scope", None), "identity", "")
         value = expression.value
         if isinstance(value, ast.Attribute):
-            pair = _self_attribute(value)
+            pair = (
+                (value.value.id, value.attr)
+                if isinstance(value.value, ast.Name)
+                and value.value.id in {"self", "cls"}
+                else None
+            )
             field = dict((pair,) if pair else ()).get("self")
             receiver = self.field_receivers.get((class_identity, field))
             if receiver is None:
@@ -947,11 +1023,16 @@ class _Resolver:
 
     def result(self) -> ResolutionIndex:
         records: dict[str, object] = {}
+        call_evidence: dict[str, CallsiteEvidence] = {}
         callsite_primitives = {str(row["selector"]): row for row in self.primitives
                                if row["selector_kind"] == "callsite"}
         entity_primitives = {str(row["selector"]): row for row in self.primitives
                              if row["selector_kind"] == "entity"}
-        used_rows: set[tuple[str, str]] = set()
+        used_rows: set[tuple[str, str]] = {
+            ("entity", selector)
+            for selector in entity_primitives
+            if selector in self.model.index.entities
+        }
         for owner, calls in self.model.calls.items():
             if len(calls) > 9_999:
                 raise ValueError(f"owner exceeds 9,999 callsites: {owner}")
@@ -959,6 +1040,7 @@ class _Resolver:
                 callsite = f"{owner}::call:{ordinal:04d}"
                 records[callsite] = self._resolve_record(
                     callsite, call, callsite_primitives, entity_primitives, used_rows)
+                call_evidence[callsite] = _callsite_evidence(callsite, owner, call)
         for row in self.primitives:
             binding = str(row["selector_kind"]), str(row["selector"])
             if binding not in used_rows:
@@ -1015,9 +1097,14 @@ class _Resolver:
                     dependency_evidence[reference] = ResolvedDependency(
                         reference, scope.identity, kind, target.label
                     )
-        return ResolutionIndex(MappingProxyType(records), MappingProxyType(alias_evidence),
-                               MappingProxyType(receiver_evidence),
-                               MappingProxyType(dependency_evidence))
+        return ResolutionIndex(
+            MappingProxyType(records),
+            MappingProxyType(alias_evidence),
+            MappingProxyType(receiver_evidence),
+            MappingProxyType(dependency_evidence),
+            self.model.reference_source_sha256,
+            MappingProxyType(call_evidence),
+        )
 
     def _resolve_record(self, callsite: str, call: ast.Call,
                         callsite_primitives: Mapping[str, Mapping[str, object]],
