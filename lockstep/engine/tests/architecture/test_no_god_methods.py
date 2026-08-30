@@ -7494,6 +7494,11 @@ def test_manifest_reads_review_and_historical_inputs_from_exact_git_tree_blob(
         "Finding counts: C0 / I0 / M0\n\nVerdict: PASS\n"
     ).encode()
     review_path.write_bytes(review_bytes)
+    wrong_review = review_path.with_name("wrong.md")
+    wrong_review_bytes = review_bytes.replace(identity.encode(), b"src/lockstep/wrong.py::wrong")
+    wrong_review.write_bytes(wrong_review_bytes)
+    review_link = review_path.with_name("candidate-link.md")
+    review_link.symlink_to(review_path.name)
     rule_values = {
         "architecture_effect_free_allowlist.json": allowlist,
         "architecture_effect_primitives.json": primitives,
@@ -7514,6 +7519,9 @@ def test_manifest_reads_review_and_historical_inputs_from_exact_git_tree_blob(
     for filename in analyzer_names:
         (architecture / filename).write_bytes(
             (ARCHITECTURE_TEST_ROOT / filename).read_bytes())
+    (architecture / "architecture_candidate_policy.py").write_text(
+        "raise RuntimeError('historical analyzer Python must not execute')\n",
+        encoding="utf-8")
 
     subprocess.run(("git", "init", "-q"), cwd=repo, check=True)
     subprocess.run(("git", "add", "."), cwd=repo, check=True)
@@ -7567,6 +7575,25 @@ def test_manifest_reads_review_and_historical_inputs_from_exact_git_tree_blob(
             "focused_gate_missing_or_renamed", "review_evidence_unverifiable",
             "analyzer_or_rule_version_changed")},
     }
+    assert set(exception) == {
+        "entity", "kind", "trigger_reasons", "responsibility", "invariant",
+        "focused_gate", "baseline_metrics", "source_sha256",
+        "semantic_dependency_sha256", "member_closure_sha256", "review_evidence",
+        "next_review_gate", "expires_on",
+    }
+    assert set(evidence) == {
+        "project_relative_artifact_path", "git_tree_artifact_path", "review_commit",
+        "artifact_blob_sha256", "reviewer_role", "verdict", "finding_counts",
+        "reviewed_semantic_dependency_sha256", "review_evidence_sha256",
+    }
+    assert set(exception["expires_on"]) == {
+        "source_changed", "semantic_dependency_changed", "member_closure_changed",
+        "any_metric_increased", "any_component_increased",
+        "composite_score_increased", "new_domain", "new_lifecycle_cluster",
+        "focused_gate_missing_or_renamed", "review_evidence_unverifiable",
+        "analyzer_or_rule_version_changed",
+    }
+    assert set(baseline) == set(_CANDIDATE_FIELD_ORDER["FunctionMetrics"])
     analyzer_digest = _canonical_sha256([
         {"path": filename, "sha256": hashlib.sha256(
             (architecture / filename).read_bytes()).hexdigest()}
@@ -7593,13 +7620,97 @@ def test_manifest_reads_review_and_historical_inputs_from_exact_git_tree_blob(
     assert verdict.accepted_exceptions == (identity,)
 
     review_path.write_text("checkout substitution\n", encoding="utf-8")
+    source_path.write_text("raise RuntimeError('checkout source substitution')\n",
+                           encoding="utf-8")
+    (architecture / "architecture_thresholds.json").write_text(
+        '{"checkout":"substitution"}', encoding="utf-8")
     assert verify_manifest(
         report, manifest, repo_root=repo, current_commit=current_commit).valid is True
     bad = json.loads(json.dumps(manifest))
     bad["exceptions"][0]["review_evidence"]["artifact_blob_sha256"] = "0" * 64
+    bad_evidence = bad["exceptions"][0]["review_evidence"]
+    bad_evidence["review_evidence_sha256"] = _canonical_sha256({
+        key: value for key, value in bad_evidence.items()
+        if key != "review_evidence_sha256"})
     rejected = verify_manifest(report, bad, repo_root=repo, current_commit=current_commit)
     assert rejected.valid is False
     assert any("artifact blob" in error for error in rejected.errors)
+
+    def rejected_manifest(value, reason: str) -> None:
+        outcome = verify_manifest(report, value, repo_root=repo, current_commit=current_commit)
+        assert outcome.valid is False
+        assert any(reason in error for error in outcome.errors), outcome.errors
+
+    mutations = []
+    duplicate = json.loads(json.dumps(manifest)); duplicate["exceptions"].append(duplicate["exceptions"][0])
+    mutations.append((duplicate, "duplicate"))
+    missing = json.loads(json.dumps(manifest)); missing["exceptions"] = []
+    mutations.append((missing, "candidate"))
+    trigger = json.loads(json.dumps(manifest)); trigger["exceptions"][0]["trigger_reasons"] = ["signal:cyclomatic"]
+    mutations.append((trigger, "trigger"))
+    stale_source = json.loads(json.dumps(manifest)); stale_source["exceptions"][0]["source_sha256"] = "0" * 64
+    mutations.append((stale_source, "source"))
+    stale_semantic = json.loads(json.dumps(manifest)); stale_semantic["exceptions"][0]["semantic_dependency_sha256"] = "0" * 64
+    mutations.append((stale_semantic, "semantic"))
+    stale_closure = json.loads(json.dumps(manifest)); stale_closure["exceptions"][0]["member_closure_sha256"] = "0" * 64
+    mutations.append((stale_closure, "member closure"))
+    stale_metric = json.loads(json.dumps(manifest)); stale_metric["exceptions"][0]["baseline_metrics"]["cyclomatic"] -= 1
+    mutations.append((stale_metric, "baseline"))
+    bad_expiry = json.loads(json.dumps(manifest)); bad_expiry["exceptions"][0]["expires_on"]["source_changed"] = False
+    mutations.append((bad_expiry, "expires_on"))
+    bad_focus = json.loads(json.dumps(manifest)); bad_focus["exceptions"][0]["focused_gate"] = ["missing.py::test_missing"]
+    mutations.append((bad_focus, "focused gate"))
+    bad_path = json.loads(json.dumps(manifest)); bad_path["exceptions"][0]["review_evidence"]["project_relative_artifact_path"] = ".superpowers/reviews/../candidate.md"
+    bad_path_evidence = bad_path["exceptions"][0]["review_evidence"]
+    bad_path_evidence["review_evidence_sha256"] = _canonical_sha256({key: value for key, value in bad_path_evidence.items() if key != "review_evidence_sha256"})
+    mutations.append((bad_path, "review path"))
+    bad_role = json.loads(json.dumps(manifest)); bad_role["exceptions"][0]["review_evidence"]["reviewer_role"] = "author"
+    bad_role_evidence = bad_role["exceptions"][0]["review_evidence"]
+    bad_role_evidence["review_evidence_sha256"] = _canonical_sha256({key: value for key, value in bad_role_evidence.items() if key != "review_evidence_sha256"})
+    mutations.append((bad_role, "reviewer role"))
+    nonancestor = json.loads(json.dumps(manifest)); nonancestor["reference_commit"] = "0" * 40
+    mutations.append((nonancestor, "ancestor"))
+    for value, reason in mutations:
+        rejected_manifest(value, reason)
+
+    unresolved_report = replace(report, unresolved_callsites=(identity + "::call:0001",))
+    unresolved = verify_manifest(
+        unresolved_report, manifest, repo_root=repo, current_commit=current_commit)
+    assert unresolved.valid is False
+    assert any("unresolved" in error for error in unresolved.errors)
+
+    wrong = json.loads(json.dumps(manifest))
+    wrong_evidence = wrong["exceptions"][0]["review_evidence"]
+    wrong_evidence["project_relative_artifact_path"] = ".superpowers/reviews/wrong.md"
+    wrong_evidence["git_tree_artifact_path"] = "lockstep/.superpowers/reviews/wrong.md"
+    wrong_evidence["artifact_blob_sha256"] = hashlib.sha256(wrong_review_bytes).hexdigest()
+    without_digest = {key: value for key, value in wrong_evidence.items()
+                      if key != "review_evidence_sha256"}
+    wrong_evidence["review_evidence_sha256"] = _canonical_sha256(without_digest)
+    rejected_manifest(wrong, "review artifact entity")
+
+    linked = json.loads(json.dumps(manifest))
+    linked_evidence = linked["exceptions"][0]["review_evidence"]
+    linked_evidence["project_relative_artifact_path"] = ".superpowers/reviews/candidate-link.md"
+    linked_evidence["git_tree_artifact_path"] = "lockstep/.superpowers/reviews/candidate-link.md"
+    linked_evidence["artifact_blob_sha256"] = hashlib.sha256(review_path.name.encode()).hexdigest()
+    linked_evidence["review_evidence_sha256"] = _canonical_sha256({
+        key: value for key, value in linked_evidence.items()
+        if key != "review_evidence_sha256"})
+    rejected_manifest(linked, "regular blob")
+
+    no_longer_candidate = replace(
+        metric, hard_triggers=(), candidate=False,
+        signals=MappingProxyType({key: False for key in metric.signals}),
+        composite_score=0,
+    )
+    stale_report = replace(
+        report, functions=MappingProxyType({identity: no_longer_candidate}))
+    stale = verify_manifest(
+        stale_report, manifest, repo_root=repo, current_commit=current_commit)
+    assert stale.valid is False
+    assert any("noncandidate" in error or "stale exception" in error
+               for error in stale.errors)
 
 
 def test_diagnostics_is_pure_canonical_rendering_of_computed_results(
@@ -7628,6 +7739,45 @@ def test_diagnostics_is_pure_canonical_rendering_of_computed_results(
                      "valid": False},
         "unresolved_callsites": [],
     }
+
+
+def test_diagnostics_renders_all_candidate_kinds_in_stable_order() -> None:
+    false = MappingProxyType({"domain_mixing": False})
+    function = candidate_policy.FunctionMetrics(
+        16, 1, 0, 0, 0, (), (), (), (), (), ("z.py::f::call:0001",),
+        false, 0, ("cyclomatic_gt_15",), True)
+    one_hop = candidate_policy.OneHopMetrics(
+        "a.py::root", ("a.py::root",), 0, 1, 0, 0, 0, 0, (), (), (),
+        false, 0, ("helper_count_gt_8",), True)
+    klass = candidate_policy.ClassMetrics(
+        13, 13, (), 0, 1, (), (), (), (), false, 0,
+        ("method_count_gt_12",), True)
+    file_metric = candidate_policy.FileMetrics(
+        25, 0, (), 0, 1, (), (), (), false, 0,
+        ("definition_count_gt_24",), True)
+    report = candidate_policy.ArchitectureReport(
+        MappingProxyType({"z.py::f": function}),
+        MappingProxyType({"a.py::root::@one_hop": one_hop}),
+        MappingProxyType({"m.py::C": klass}),
+        MappingProxyType({"b.py::@file": file_metric}),
+        ("z.py::f::call:0001",), "a" * 64, "b" * 64, "c" * 64,
+        "d" * 64, "e" * 64, "task-12c-test", "v1")
+    verdict = manifest_verifier.ManifestVerdict(
+        True, (), ("a.py::root::@one_hop",))
+
+    value = json.loads(render_report(report, verdict))
+
+    assert [(row["kind"], row["identity"]) for row in value["candidates"]] == [
+        ("one_hop", "a.py::root::@one_hop"),
+        ("file", "b.py::@file"),
+        ("class", "m.py::C"),
+        ("function", "z.py::f"),
+    ]
+    assert value["candidates"][0]["metrics"]["members"] == ["a.py::root"]
+    assert value["candidates"][2]["metrics"]["method_count"] == 13
+    assert value["candidates"][3]["metrics"]["hard_triggers"] == [
+        "cyclomatic_gt_15"]
+    assert value["unresolved_callsites"] == ["z.py::f::call:0001"]
 
 
 def test_domain_lifecycle_entity_digest_binds_all_exact_owner_evidence(
