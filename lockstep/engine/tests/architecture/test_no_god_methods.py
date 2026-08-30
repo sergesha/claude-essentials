@@ -7925,9 +7925,7 @@ def test_manifest_reads_review_and_historical_inputs_from_exact_git_tree_blob(
     index = build_source_index(inner / "engine", (stable_path,), {stable_path: source})
     allowlist = {"schema_version": 1, "targets": []}
     primitives = _primitive_table(index, ())
-    lifecycle = json.loads(
-        (ARCHITECTURE_TEST_ROOT / "architecture_lifecycle.json").read_bytes()
-    )
+    lifecycle = _lifecycle_table()
     schema = json.loads(
         (ARCHITECTURE_TEST_ROOT / "architecture_metrics.schema.json").read_bytes()
     )
