@@ -7747,6 +7747,36 @@ def test_manifest_reads_review_and_historical_inputs_from_exact_git_tree_blob(
     mutations.append((bad_role, "reviewer role"))
     nonancestor = json.loads(json.dumps(manifest)); nonancestor["reference_commit"] = "0" * 40
     mutations.append((nonancestor, "ancestor"))
+    unknown_exception = json.loads(json.dumps(manifest)); unknown_exception["exceptions"][0]["unknown"] = True
+    mutations.append((unknown_exception, "exception keys"))
+    missing_exception = json.loads(json.dumps(manifest)); del missing_exception["exceptions"][0]["responsibility"]
+    mutations.append((missing_exception, "exception keys"))
+    wrong_kind = json.loads(json.dumps(manifest)); wrong_kind["exceptions"][0]["kind"] = "method"
+    mutations.append((wrong_kind, "exception kind"))
+    unknown_evidence = json.loads(json.dumps(manifest)); unknown_evidence["exceptions"][0]["review_evidence"]["unknown"] = True
+    mutations.append((unknown_evidence, "review evidence keys"))
+    missing_evidence = json.loads(json.dumps(manifest)); del missing_evidence["exceptions"][0]["review_evidence"]["verdict"]
+    mutations.append((missing_evidence, "review evidence keys"))
+    wrong_expiry = json.loads(json.dumps(manifest)); wrong_expiry["exceptions"][0]["expires_on"]["unknown"] = True
+    mutations.append((wrong_expiry, "expires_on keys"))
+    missing_expiry = json.loads(json.dumps(manifest)); del missing_expiry["exceptions"][0]["expires_on"]["new_domain"]
+    mutations.append((missing_expiry, "expires_on keys"))
+    baseline_unknown = json.loads(json.dumps(manifest)); baseline_unknown["exceptions"][0]["baseline_metrics"]["unknown"] = 1
+    mutations.append((baseline_unknown, "baseline"))
+    baseline_missing = json.loads(json.dumps(manifest)); del baseline_missing["exceptions"][0]["baseline_metrics"]["candidate"]
+    mutations.append((baseline_missing, "baseline"))
+    baseline_coercion = json.loads(json.dumps(manifest)); baseline_coercion["exceptions"][0]["baseline_metrics"]["cyclomatic"] = "17"
+    mutations.append((baseline_coercion, "baseline"))
+    bad_population = json.loads(json.dumps(manifest)); bad_population["population"][0]["source_sha256"] = "0" * 64
+    mutations.append((bad_population, "population"))
+    bad_rule_digest = json.loads(json.dumps(manifest)); bad_rule_digest["threshold_digest"] = "0" * 64
+    mutations.append((bad_rule_digest, "threshold"))
+    nested_nonancestor = json.loads(json.dumps(manifest)); nested_nonancestor["exceptions"][0]["review_evidence"]["review_commit"] = "0" * 40
+    nested_evidence = nested_nonancestor["exceptions"][0]["review_evidence"]
+    nested_evidence["review_evidence_sha256"] = _canonical_sha256({key: value for key, value in nested_evidence.items() if key != "review_evidence_sha256"})
+    mutations.append((nested_nonancestor, "review commit ancestor"))
+    missing_node = json.loads(json.dumps(manifest)); missing_node["exceptions"][0]["focused_gate"] = ["lockstep/engine/tests/architecture/test_gate.py::test_absent"]
+    mutations.append((missing_node, "focused gate"))
     for value, reason in mutations:
         rejected_manifest(value, reason)
 
@@ -7789,6 +7819,16 @@ def test_manifest_reads_review_and_historical_inputs_from_exact_git_tree_blob(
     assert any("noncandidate" in error or "stale exception" in error
                for error in stale.errors)
 
+    forged_metric = replace(metric, cyclomatic=metric.cyclomatic + 1)
+    forged_report = replace(
+        report, functions=MappingProxyType({identity: forged_metric}))
+    forged = json.loads(json.dumps(manifest))
+    forged["exceptions"][0]["baseline_metrics"]["cyclomatic"] += 1
+    recomputed = verify_manifest(
+        forged_report, forged, repo_root=repo, current_commit=current_commit)
+    assert recomputed.valid is False
+    assert any("historical recomputation" in error for error in recomputed.errors)
+
 
 def test_diagnostics_is_pure_canonical_rendering_of_computed_results(
     monkeypatch: pytest.MonkeyPatch,
@@ -7819,19 +7859,31 @@ def test_diagnostics_is_pure_canonical_rendering_of_computed_results(
 
 
 def test_diagnostics_renders_all_candidate_kinds_in_stable_order() -> None:
-    false = MappingProxyType({"domain_mixing": False})
+    function_signals = MappingProxyType({key: False for key in (
+        "cyclomatic", "cognitive", "nesting", "legacy_syntactic_fanout",
+        "domain_mixing", "lifecycle_mixing")})
+    one_hop_signals = MappingProxyType({key: False for key in (
+        "summed_cyclomatic", "summed_cognitive", "nesting",
+        "legacy_syntactic_fanout_union", "domain_mixing", "lifecycle_mixing")})
+    class_signals = MappingProxyType({key: False for key in (
+        "method_count", "public_method_count", "mutable_field_count",
+        "cohesion_components", "domain_mixing", "lifecycle_mixing")})
+    file_signals = MappingProxyType({key: False for key in (
+        "definition_count", "class_count", "subsystem_import_count",
+        "definition_dependency_components", "domain_mixing", "lifecycle_mixing")})
     function = candidate_policy.FunctionMetrics(
         16, 1, 0, 0, 0, (), (), (), (), (), ("z.py::f::call:0001",),
-        false, 0, ("cyclomatic_gt_15",), True)
+        function_signals, 0, ("cyclomatic_gt_15",), True)
     one_hop = candidate_policy.OneHopMetrics(
-        "a.py::root", ("a.py::root",), 0, 1, 0, 0, 0, 0, (), (), (),
-        false, 0, ("helper_count_gt_8",), True)
+        "a.py::root", ("a.py::root", *(f"a.py::_h{i}" for i in range(13))), 13, 1, 0,
+        0, 0, 0, (), (), (), one_hop_signals, 0,
+        ("helper_count_gt_12",), True)
     klass = candidate_policy.ClassMetrics(
-        13, 13, (), 0, 1, (), (), (), (), false, 0,
-        ("method_count_gt_12",), True)
+        25, 13, (), 0, 1, (), (), (), (), class_signals, 0,
+        ("method_count_gt_24",), True)
     file_metric = candidate_policy.FileMetrics(
-        25, 0, (), 0, 1, (), (), (), false, 0,
-        ("definition_count_gt_24",), True)
+        51, 0, (), 0, 1, (), (), (), file_signals, 0,
+        ("definition_count_gt_50",), True)
     report = candidate_policy.ArchitectureReport(
         MappingProxyType({"z.py::f": function}),
         MappingProxyType({"a.py::root::@one_hop": one_hop}),
@@ -7843,6 +7895,10 @@ def test_diagnostics_renders_all_candidate_kinds_in_stable_order() -> None:
         True, (), ("a.py::root::@one_hop",))
 
     value = json.loads(render_report(report, verdict))
+    rendered = render_report(report, verdict)
+    assert rendered == json.dumps(
+        json.loads(rendered), ensure_ascii=False, allow_nan=False,
+        sort_keys=True, separators=(",", ":")) + "\n"
 
     assert [(row["kind"], row["identity"]) for row in value["candidates"]] == [
         ("one_hop", "a.py::root::@one_hop"),
@@ -7850,7 +7906,8 @@ def test_diagnostics_renders_all_candidate_kinds_in_stable_order() -> None:
         ("class", "m.py::C"),
         ("function", "z.py::f"),
     ]
-    assert value["candidates"][0]["metrics"]["members"] == ["a.py::root"]
+    assert value["candidates"][0]["metrics"]["members"][0] == "a.py::root"
+    assert len(value["candidates"][0]["metrics"]["members"]) == 14
     assert value["candidates"][2]["metrics"]["method_count"] == 13
     assert value["candidates"][3]["metrics"]["hard_triggers"] == [
         "cyclomatic_gt_15"]
