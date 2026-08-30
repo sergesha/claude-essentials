@@ -5386,19 +5386,52 @@ _LIFECYCLE_TRANSITIONS = (
 def _lifecycle_table(
     rows: tuple[Mapping[str, object], ...] = (),
 ) -> Mapping[str, object]:
-    return {
-        "schema": "lockstep.architecture-lifecycle/v1",
-        "transitions": [
-            {
-                "cluster": cluster,
-                "transition_id": transition_id,
-                "from": list(from_states),
-                "to": to_state,
-            }
-            for cluster, transition_id, from_states, to_state in _LIFECYCLE_TRANSITIONS
-        ],
-        "rows": [dict(row) for row in rows],
+    artifact = json.loads(
+        (ARCHITECTURE_TEST_ROOT / "architecture_lifecycle.json").read_bytes()
+    )
+    return {**artifact, "rows": [dict(row) for row in rows]}
+
+
+def test_domain_lifecycle_rule_table_is_checked_in_canonical_json() -> None:
+    path = ARCHITECTURE_TEST_ROOT / "architecture_lifecycle.json"
+    raw = path.read_bytes()
+    parsed = json.loads(raw)
+    canonical = json.dumps(
+        parsed,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    assert raw == canonical
+    assert not raw.endswith(b"\n")
+    assert set(parsed) == {"schema", "transitions", "rows"}
+    assert parsed["schema"] == "lockstep.architecture-lifecycle/v1"
+    assert parsed["rows"] == []
+    assert parsed["transitions"] == [
+        {
+            "cluster": cluster,
+            "transition_id": transition_id,
+            "from": list(from_states),
+            "to": to_state,
+        }
+        for cluster, transition_id, from_states, to_state in _LIFECYCLE_TRANSITIONS
+    ]
+
+
+def test_domain_lifecycle_uses_only_public_call_resolver_boundary() -> None:
+    source = (
+        ARCHITECTURE_TEST_ROOT / "architecture_domain_lifecycle.py"
+    ).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+
+    private_attributes = {
+        node.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and node.attr.startswith("_")
     }
+    assert not ({"_Model", "_read_primitives"} & private_attributes)
 
 
 def _semantic_digest_inputs():
