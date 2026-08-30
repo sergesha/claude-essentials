@@ -5435,6 +5435,86 @@ _LIFECYCLE_TRANSITIONS = (
 )
 
 
+def _entity_lifecycle_row(binding: str, transition_id: str) -> Mapping[str, object]:
+    return {
+        "binding_kind": "entity",
+        "binding": binding,
+        "target": binding,
+        "discriminant": {"kind": "none"},
+        "transition_id": transition_id,
+    }
+
+
+_PRODUCTION_LIFECYCLE_ROWS = (
+    {
+        "binding_kind": "callsite",
+        "binding": "src/lockstep/runtime/providers/_codex_supervisor.py::run::call:0028",
+        "target": "src/lockstep/runtime/providers/_codex_supervisor.py::_publish_terminal",
+        "discriminant": {
+            "kind": "literal-arguments",
+            "positional": [],
+            "keywords": [
+                {"name": "quiescent", "type": "bool", "value": True},
+            ],
+        },
+        "transition_id": "process.terminal",
+    },
+    {
+        "binding_kind": "callsite",
+        "binding": "src/lockstep/runtime/publication.py::ProjectPublisher.prepare::call:0023",
+        "target": "src/lockstep/runtime/publication.py::ProjectPublisher._write_atomic",
+        "discriminant": {
+            "kind": "literal-arguments",
+            "positional": [],
+            "keywords": [
+                {"name": "mutable", "type": "bool", "value": True},
+            ],
+        },
+        "transition_id": "publication.prepare",
+    },
+    _entity_lifecycle_row(
+        "src/lockstep/authoring_compilation.py::_authoring_plan",
+        "authoring.plan",
+    ),
+    _entity_lifecycle_row(
+        "src/lockstep/authoring_publisher.py::_publish_owned_temporary",
+        "authoring.replace",
+    ),
+    _entity_lifecycle_row(
+        "src/lockstep/authoring_publisher.py::_publish_target",
+        "authoring.directory-durable",
+    ),
+    _entity_lifecycle_row(
+        "src/lockstep/runtime/effects/ledger.py::EffectLedger.mark_launching",
+        "process.launch",
+    ),
+    _entity_lifecycle_row(
+        "src/lockstep/runtime/effects/ledger.py::EffectLedger.mark_running",
+        "process.running",
+    ),
+    _entity_lifecycle_row(
+        "src/lockstep/runtime/effects/owner_consent.py::OwnerConsentAuthority.issue",
+        "consent.issue",
+    ),
+    _entity_lifecycle_row(
+        "src/lockstep/runtime/graph_runtime.py::GraphRuntime.commitment_guard",
+        "commitment.hold",
+    ),
+    _entity_lifecycle_row(
+        "src/lockstep/runtime/graph_runtime.py::GraphRuntime.resume",
+        "commitment.commit",
+    ),
+    _entity_lifecycle_row(
+        "src/lockstep/runtime/providers/codex.py::_CodexAttemptDriver._commit_prepared_launch",
+        "process.prepare",
+    ),
+    _entity_lifecycle_row(
+        "src/lockstep/runtime/providers/codex.py::_CodexAttemptDriver._commit_ready_supervisor",
+        "process.running",
+    ),
+)
+
+
 def _lifecycle_table(
     rows: tuple[Mapping[str, object], ...] = (),
 ) -> Mapping[str, object]:
@@ -5460,7 +5540,7 @@ def test_domain_lifecycle_rule_table_is_checked_in_canonical_json() -> None:
     assert not raw.endswith(b"\n")
     assert set(parsed) == {"schema", "transitions", "rows"}
     assert parsed["schema"] == "lockstep.architecture-lifecycle/v1"
-    assert parsed["rows"] == []
+    assert parsed["rows"] == list(_PRODUCTION_LIFECYCLE_ROWS)
     assert parsed["transitions"] == [
         {
             "cluster": cluster,
