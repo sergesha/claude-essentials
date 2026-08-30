@@ -12,7 +12,6 @@ from architecture_source_index import SourceIndex
 
 @dataclass(frozen=True, slots=True)
 class LegacyMetrics:
-    line_count: int
     cyclomatic: int
     cognitive: int
     max_nesting: int
@@ -88,7 +87,6 @@ def _source_metrics(
             ):
                 cyclomatic, cognitive, nesting = _complexity(node)
                 measured[identity] = LegacyMetrics(
-                    node.end_lineno - node.lineno + 1,
                     cyclomatic,
                     cognitive,
                     nesting,
