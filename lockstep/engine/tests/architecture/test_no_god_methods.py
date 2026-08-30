@@ -4989,6 +4989,22 @@ def test_resolver_dependency_normalizes_parameterized_base_to_origin(
     ) == "collections.abc.Mapping"
 
 
+def test_resolver_local_parameterized_base_stays_out_of_dependency_and_dispatch(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/local_parameterized_base.py"
+    result = _resolver_fixture(
+        tmp_path,
+        "class Base:\n    def inherited(self): pass\n"
+        "class Owner(Base[int]):\n    def run(self): self.inherited()\n",
+        path=path,
+    )
+
+    _assert_unresolved_dependency(
+        result, f"{path}::Owner::dependency:0001")
+    _assert_unresolved_call(result, f"{path}::Owner.run::call:0001")
+
+
 def test_resolver_dependency_owner_preorder_prunes_nested_owners_and_path_delimiters(
     tmp_path: Path,
 ) -> None:
@@ -6716,6 +6732,39 @@ def test_candidate_policy_binds_exact_rule_digests_and_versions(tmp_path: Path) 
     assert (report.analyzer_version, report.rule_version) == ("task-12c-policy", "v1")
 
 
+def _repository_architecture_report():
+    tracked = subprocess.run(
+        ("git", "ls-files", "src/lockstep"), cwd=ENGINE_ROOT,
+        check=True, capture_output=True, text=True,
+    ).stdout.splitlines()
+    paths = tuple(sorted(path for path in tracked if path.endswith(".py")))
+    files = {path: (ENGINE_ROOT / path).read_bytes() for path in paths}
+    index = build_source_index(ENGINE_ROOT, paths, files)
+    rule_names = {
+        "allowlist": "architecture_effect_free_allowlist.json",
+        "primitives": "architecture_effect_primitives.json",
+        "lifecycle": "architecture_lifecycle.json",
+        "schema": "architecture_metrics.schema.json",
+        "thresholds": "architecture_thresholds.json",
+    }
+    rules = {
+        name: json.loads((ARCHITECTURE_TEST_ROOT / filename).read_bytes())
+        for name, filename in rule_names.items()
+    }
+    resolutions = resolve_calls(index, rules["allowlist"], rules["primitives"])
+    semantics = propagate_semantics(
+        index, resolutions, rules["primitives"], rules["lifecycle"],
+        digest_inputs=domain_lifecycle.SemanticDigestInputs(
+            _canonical_sha256(rules["allowlist"]),
+            _canonical_sha256(rules["schema"]),
+            _canonical_sha256(rules["thresholds"]),
+            "task-12c", "v1",
+        ),
+    )
+    return evaluate_candidates(
+        index, measure_legacy_metrics(index), semantics, resolutions)
+
+
 def test_candidate_policy_recomputes_function_formula_and_ignores_no_stored_claim(
     tmp_path: Path,
 ) -> None:
@@ -7716,6 +7765,20 @@ def test_manifest_checked_in_empty_ratchet_is_closed_canonical_json() -> None:
     assert manifest["ratchet_version"] == "v1"
     assert manifest["scan_root"] == "src/lockstep"
     assert manifest["exceptions"] == []
+
+
+def test_repository_ratchet_lists_every_unremediated_candidate() -> None:
+    manifest = json.loads(
+        (ARCHITECTURE_TEST_ROOT / "architecture_exceptions.json").read_bytes())
+    assert manifest["exceptions"] == []
+    report = _repository_architecture_report()
+    assert report.unresolved_callsites == ()
+    verdict = manifest_verifier.ManifestVerdict(
+        False, ("repository candidates remain unremediated",), ())
+    rendered = render_report(report, verdict)
+    candidates = json.loads(rendered)["candidates"]
+
+    assert candidates == [], rendered
 
 
 @pytest.mark.parametrize(
