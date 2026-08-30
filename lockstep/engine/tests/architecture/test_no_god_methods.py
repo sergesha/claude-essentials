@@ -6479,6 +6479,7 @@ def test_candidate_policy_checked_in_schema_and_thresholds_are_canonical() -> No
                               ("one_hop", "OneHopMetrics"),
                               ("class", "ClassMetrics"), ("file", "FileMetrics")):
         definition = schema["$defs"][kind]
+        assert definition["type"] == "object"
         assert tuple(definition["required"]) == _CANDIDATE_FIELD_ORDER[record_name]
         assert set(definition["properties"]) == set(definition["required"])
         assert tuple(definition["x-lockstep-signal-order"]) == _CANDIDATE_SIGNAL_ORDER[kind]
@@ -6487,6 +6488,7 @@ def test_candidate_policy_checked_in_schema_and_thresholds_are_canonical() -> No
         )
         assert definition["x-lockstep-candidate-rule"] == _CANDIDATE_RULE[kind]
         signals = definition["properties"]["signals"]
+        assert signals["type"] == "object"
         assert signals["additionalProperties"] is False
         assert tuple(signals["required"]) == _CANDIDATE_SIGNAL_ORDER[kind]
         assert set(signals["properties"]) == set(signals["required"])
@@ -6548,14 +6550,24 @@ def test_candidate_policy_checked_in_schema_and_thresholds_are_canonical() -> No
             assert value["type"] == "array" and value["uniqueItems"] is True
             assert value["items"]["type"] == "string"
     assert schema["$defs"]["one_hop"]["properties"]["root"]["type"] == "string"
-    function_identity = r"^src/lockstep/.+\.py::[^:]+(?:\.[^:]+)*$"
-    callsite_identity = r"^src/lockstep/.+\.py::.+::call:[0-9]{4}$"
+    function_identity = (r"^src/lockstep/(?:[A-Za-z_][A-Za-z0-9_]*/)*"
+                         r"[A-Za-z_][A-Za-z0-9_]*\.py::"
+                         r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
+    callsite_identity = function_identity[:-1] + r"::call:[0-9]{4}$"
     assert schema["$defs"]["one_hop"]["properties"]["root"]["pattern"] == function_identity
     assert schema["$defs"]["one_hop"]["properties"]["members"]["items"]["pattern"] == function_identity
     assert schema["$defs"]["class"]["properties"]["bases"]["items"]["pattern"] == function_identity
     assert schema["$defs"]["function"]["properties"]["unresolved_callsites"]["items"]["pattern"] == callsite_identity
     assert schema["$defs"]["class"]["properties"]["mutable_fields"]["items"]["pattern"] == r"^self\.[A-Za-z_][A-Za-z0-9_]*$"
-    assert schema["$defs"]["file"]["properties"]["subsystem_imports"]["items"]["pattern"] == r"^[A-Za-z_][A-Za-z0-9_.-]*$"
+    subsystem_pattern = r"^[A-Za-z_][A-Za-z0-9_]*$"
+    assert schema["$defs"]["file"]["properties"]["subsystem_imports"]["items"]["pattern"] == subsystem_pattern
+    identity_schema = schema["$defs"]["one_hop"]["properties"]["root"]
+    for invalid in ("src/lockstep/../x.py::f", "src/lockstep//x.py::f",
+                    "src/other/x.py::f", "src/lockstep/x-y.py::f", "src/lockstep/x.py::f:g"):
+        assert Draft202012Validator(identity_schema).is_valid(invalid) is False
+    subsystem_schema = schema["$defs"]["file"]["properties"]["subsystem_imports"]["items"]
+    for invalid in ("runtime.effects", "foo-bar", "", "1runtime"):
+        assert Draft202012Validator(subsystem_schema).is_valid(invalid) is False
 
     thresholds = json.loads(threshold_path.read_bytes())
     assert set(thresholds) == {"schema", "rule_version", "kinds"}
@@ -7147,7 +7159,7 @@ def test_candidate_policy_class_lifecycle_mixing_drives_exact_three_formula(
 ) -> None:
     path = "src/lockstep/class_lifecycle.py"
     methods = ["    def m0(self): first(); second()"] + [
-        f"    def m{i}(self): pass" for i in range(1, 15)]
+        f"    def _m{i}(self): pass" for i in range(1, 15)]
     source = "def first(): pass\ndef second(): pass\nclass Aggregate:\n" + "\n".join(methods)
     index, resolutions, semantics = _propagate_fixture(
         tmp_path, source, path=path,
