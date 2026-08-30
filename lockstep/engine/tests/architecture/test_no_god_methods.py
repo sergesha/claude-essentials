@@ -6827,12 +6827,12 @@ def test_candidate_policy_one_hop_fixed_point_names_order_overlap_and_metrics(
 ) -> None:
     path = "src/lockstep/one_hop_policy.py"
     root = f"{path}::root"
-    second = f"{path}::second"
+    second = f"{path}::_second"
     index, resolutions, semantics = _propagate_fixture(
         tmp_path,
         """
-        def root(): _a(); __private(); __str__()
-        def second(): _a()
+        def root(): _second(); __private(); __str__()
+        def _second(): _a()
         def _a(): _b()
         def _b(): _leaf()
         def _leaf(): pass
@@ -6860,14 +6860,16 @@ def test_candidate_policy_one_hop_fixed_point_names_order_overlap_and_metrics(
     first = report.one_hops[root + "::@one_hop"]
     overlapping = report.one_hops[second + "::@one_hop"]
 
-    assert first.members == (root, f"{path}::__private")
+    assert first.members == (
+        root, f"{path}::__private", f"{path}::_a", f"{path}::_b",
+        f"{path}::_leaf", second)
     assert f"{path}::__str__" not in first.members
     assert overlapping.members == (second, f"{path}::_a", f"{path}::_b", f"{path}::_leaf")
-    assert first.summed_cyclomatic == 16
+    assert first.summed_cyclomatic == 20
     assert first.summed_cognitive == 30
     assert first.max_nesting == 4
-    assert first.legacy_syntactic_fanout_union == 3
-    assert first.resolved_fanout_union == 3
+    assert first.legacy_syntactic_fanout_union == 6
+    assert first.resolved_fanout_union == 6
     assert first.propagated_domains == (
         "filesystem-read", "filesystem-write", "durable-state")
     assert first.propagated_transitions == ("publication.apply", "delivery.deliver")
