@@ -514,7 +514,14 @@ def _local_names(node):
     if node.args.kwarg is not None:
         names.add(node.args.kwarg.arg)
     globals_ = set()
-    for member, _parent in _scoped_nodes(node):
+    def direct(member):
+        yield member
+        for child in ast.iter_child_nodes(member):
+            if child is not node and isinstance(
+                    child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                continue
+            yield from direct(child)
+    for member in direct(node):
         if isinstance(member, ast.Name) and isinstance(member.ctx, ast.Store):
             names.add(member.id)
         elif isinstance(member, ast.Global):
@@ -522,17 +529,56 @@ def _local_names(node):
     return names - globals_
 
 
+def _class_local_names(node):
+    names = set()
+    for statement in node.body:
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(statement.name)
+            continue
+        for member in ast.walk(statement):
+            if isinstance(member, ast.Name) and isinstance(member.ctx, ast.Store):
+                names.add(member.id)
+    return names
+
+
+def _module_loads(root, bindings):
+    found = set()
+    def visit(node, scopes, is_root=False):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            if not any(node.id in names for _kind, names in scopes) and node.id in bindings:
+                found.add(bindings[node.id])
+            return
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for child in (*node.decorator_list, *node.args.defaults,
+                          *(item for item in node.args.kw_defaults if item is not None)):
+                visit(child, scopes)
+            lexical = tuple(scope for scope in scopes if scope[0] != "class")
+            body_scopes = (*lexical, ("function", _local_names(node)))
+            for child in node.body:
+                visit(child, body_scopes)
+            return
+        if isinstance(node, ast.Lambda):
+            lexical = tuple(scope for scope in scopes if scope[0] != "class")
+            visit(node.body, (*lexical, ("function", _local_names(node))))
+            return
+        if isinstance(node, ast.ClassDef):
+            for child in (*node.decorator_list, *node.bases, *node.keywords):
+                visit(child.value if isinstance(child, ast.keyword) else child, scopes)
+            body_scopes = (*scopes, ("class", _class_local_names(node)))
+            for child in node.body:
+                visit(child, body_scopes)
+            return
+        for child in ast.iter_child_nodes(node):
+            visit(child, scopes)
+    visit(root, (), True)
+    return found
+
+
 def _reference_edges(path, index, nodes, vertices, resolutions):
     bindings = _module_reference_bindings(path, index, nodes, vertices, resolutions)
     edges, external = defaultdict(set), defaultdict(set)
     for owner in vertices:
-        locals_ = _local_names(nodes[owner])
-        for member in ast.walk(nodes[owner]):
-            if not isinstance(member, ast.Name) or not isinstance(member.ctx, ast.Load):
-                continue
-            if member.id in locals_:
-                continue
-            target = bindings.get(member.id)
+        for target in _module_loads(nodes[owner], bindings):
             if target in vertices and target != owner:
                 edges[owner].add(target)
             elif isinstance(target, str) and target.startswith("@import:"):

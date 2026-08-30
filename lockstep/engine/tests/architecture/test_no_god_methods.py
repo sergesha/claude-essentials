@@ -7408,6 +7408,28 @@ def test_candidate_policy_file_rebound_alias_and_lexical_shadowing_are_not_edges
     assert metric.definition_dependency_components == 6
 
 
+def test_candidate_policy_file_nested_scope_shadowing_is_not_module_reference(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/nested_reference_shadowing.py"
+    index, resolutions, semantics = _propagate_fixture(
+        tmp_path,
+        """
+        import json
+        def outer():
+            def nested():
+                json = 1
+                return json
+            return nested
+        def module_json(): return json
+        def isolated(): pass
+        """, path=path)
+    metric = evaluate_candidates(
+        index, measure_legacy_metrics(index), semantics, resolutions
+    ).files[f"{path}::@file"]
+    assert metric.definition_dependency_components == 3
+
+
 def test_candidate_policy_file_subsystems_formula_and_hard_boundary(
     tmp_path: Path,
 ) -> None:
