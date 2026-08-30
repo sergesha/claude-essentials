@@ -6583,7 +6583,8 @@ def test_candidate_policy_checked_in_schema_and_thresholds_are_canonical() -> No
         if not isinstance(value, str) or "::call:" not in value:
             return False
         owner, ordinal = value.rsplit("::call:", 1)
-        return stable_function_identity(owner) and len(ordinal) == 4 and ordinal.isdigit()
+        return (stable_function_identity(owner) and len(ordinal) == 4
+                and ordinal.isascii() and ordinal.isdigit())
 
     @checker.checks("lockstep-mutable-field")
     def stable_mutable_field(value: object) -> bool:
@@ -6604,6 +6605,19 @@ def test_candidate_policy_checked_in_schema_and_thresholds_are_canonical() -> No
         assert Draft202012Validator(subsystem_schema, format_checker=checker).is_valid(invalid) is False
     for valid in ("исполнение", "℘", "a·b"):
         assert Draft202012Validator(subsystem_schema, format_checker=checker).is_valid(valid) is True
+    callsite_schema = schema["$defs"]["function"]["properties"]["unresolved_callsites"]["items"]
+    assert Draft202012Validator(callsite_schema, format_checker=checker).is_valid(
+        "src/lockstep/x-y.py::функция::call:0001") is True
+    for invalid in ("src/lockstep/x.py::f::call:001",
+                    "src/lockstep/x.py::f::call:00001",
+                    "src/lockstep/x.py::f::call:٠٠٠١",
+                    "src/lockstep/x.py::not a name::call:0001"):
+        assert Draft202012Validator(callsite_schema, format_checker=checker).is_valid(invalid) is False
+    mutable_schema = schema["$defs"]["class"]["properties"]["mutable_fields"]["items"]
+    for valid in ("self.items", "self.поле", "self.℘"):
+        assert Draft202012Validator(mutable_schema, format_checker=checker).is_valid(valid) is True
+    for invalid in ("cls.items", "self.not a name", "self.1field", "self.a.b"):
+        assert Draft202012Validator(mutable_schema, format_checker=checker).is_valid(invalid) is False
 
     thresholds = json.loads(threshold_path.read_bytes())
     assert set(thresholds) == {"schema", "rule_version", "kinds"}
