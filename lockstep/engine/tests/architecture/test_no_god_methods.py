@@ -6550,24 +6550,27 @@ def test_candidate_policy_checked_in_schema_and_thresholds_are_canonical() -> No
             assert value["type"] == "array" and value["uniqueItems"] is True
             assert value["items"]["type"] == "string"
     assert schema["$defs"]["one_hop"]["properties"]["root"]["type"] == "string"
-    function_identity = (r"^src/lockstep/(?:[A-Za-z_][A-Za-z0-9_]*/)*"
-                         r"[A-Za-z_][A-Za-z0-9_]*\.py::"
-                         r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
+    function_identity = (r"^src/lockstep/(?!\.\.?/)(?!.*(?:/\.\.?)(?:/|$))"
+                         r"(?!.*//)(?!.*\\)[^:]+\.py::[^:]+$")
     callsite_identity = function_identity[:-1] + r"::call:[0-9]{4}$"
     assert schema["$defs"]["one_hop"]["properties"]["root"]["pattern"] == function_identity
     assert schema["$defs"]["one_hop"]["properties"]["members"]["items"]["pattern"] == function_identity
     assert schema["$defs"]["class"]["properties"]["bases"]["items"]["pattern"] == function_identity
     assert schema["$defs"]["function"]["properties"]["unresolved_callsites"]["items"]["pattern"] == callsite_identity
-    assert schema["$defs"]["class"]["properties"]["mutable_fields"]["items"]["pattern"] == r"^self\.[A-Za-z_][A-Za-z0-9_]*$"
-    subsystem_pattern = r"^[A-Za-z_][A-Za-z0-9_]*$"
+    python_identifier = r"^[^\W\d]\w*$"
+    assert schema["$defs"]["class"]["properties"]["mutable_fields"]["items"]["pattern"] == r"^self\.[^\W\d]\w*$"
+    subsystem_pattern = python_identifier
     assert schema["$defs"]["file"]["properties"]["subsystem_imports"]["items"]["pattern"] == subsystem_pattern
     identity_schema = schema["$defs"]["one_hop"]["properties"]["root"]
     for invalid in ("src/lockstep/../x.py::f", "src/lockstep//x.py::f",
-                    "src/other/x.py::f", "src/lockstep/x-y.py::f", "src/lockstep/x.py::f:g"):
+                    "src/other/x.py::f", "src/lockstep/x.py::f:g"):
         assert Draft202012Validator(identity_schema).is_valid(invalid) is False
+    for valid in ("src/lockstep/x-y.py::f", "src/lockstep/путь/модуль.py::функция"):
+        assert Draft202012Validator(identity_schema).is_valid(valid) is True
     subsystem_schema = schema["$defs"]["file"]["properties"]["subsystem_imports"]["items"]
     for invalid in ("runtime.effects", "foo-bar", "", "1runtime"):
         assert Draft202012Validator(subsystem_schema).is_valid(invalid) is False
+    assert Draft202012Validator(subsystem_schema).is_valid("исполнение") is True
 
     thresholds = json.loads(threshold_path.read_bytes())
     assert set(thresholds) == {"schema", "rule_version", "kinds"}
