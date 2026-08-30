@@ -17,6 +17,7 @@ import warnings
 
 import pytest
 
+import architecture_call_resolver as call_resolver
 from architecture_candidate_policy import evaluate_candidates
 from architecture_call_resolver import resolve_calls
 from architecture_diagnostics import render_report
@@ -1366,6 +1367,27 @@ def _resolver_target(result: object, callsite: str) -> str:
 def _assert_unresolved_call(result: object, callsite: str) -> object:
     record = _resolver_calls(result)[callsite]
     assert type(record).__name__ == "UnresolvedCall"
+    return record
+
+
+def _resolver_dependencies(result: object) -> Mapping[str, object]:
+    dependencies = result.dependencies
+    assert isinstance(dependencies, Mapping)
+    assert all(
+        key == record.reference for key, record in dependencies.items()
+    )
+    return dependencies
+
+
+def _resolver_dependency_target(result: object, reference: str) -> str:
+    record = _resolver_dependencies(result)[reference]
+    assert type(record).__name__ == "ResolvedDependency"
+    return record.target
+
+
+def _assert_unresolved_dependency(result: object, reference: str) -> object:
+    record = _resolver_dependencies(result)[reference]
+    assert type(record).__name__ == "UnresolvedDependency"
     return record
 
 
@@ -4525,7 +4547,11 @@ def test_resolver_result_records_aliases_and_receivers_are_deeply_immutable(
     )
 
     assert type(result).__name__ == "ResolutionIndex"
-    assert {field.name for field in fields(result)} == {"calls", "aliases", "receivers"}
+    assert {
+        "calls",
+        "aliases",
+        "receivers",
+    } <= {field.name for field in fields(result)}
     assert isinstance(result.aliases, Mapping)
     assert isinstance(result.receivers, Mapping)
     assert f"{path}::target" in result.aliases.values()
@@ -4540,3 +4566,536 @@ def test_resolver_result_records_aliases_and_receivers_are_deeply_immutable(
         "ast_dump",
     }
     _assert_deeply_immutable(result)
+
+
+def test_resolver_dependency_result_records_and_mappings_are_deeply_immutable(
+    tmp_path: Path,
+) -> None:
+    """Catches a mutable dependency map or records outside ResolutionIndex."""
+
+    path = "src/lockstep/immutable_dependencies.py"
+    result = _resolver_fixture(
+        tmp_path,
+        """
+        def target(value):
+            return value
+        @target
+        @missing_decorator
+        def owner():
+            pass
+        """,
+        path=path,
+    )
+
+    assert {field.name for field in fields(result)} == {
+        "calls",
+        "aliases",
+        "receivers",
+        "dependencies",
+    }
+    dependencies = _resolver_dependencies(result)
+    resolved_dependencies = _records_named(result, "ResolvedDependency")
+    unresolved_dependencies = _records_named(result, "UnresolvedDependency")
+    assert tuple(dependencies) == (
+        f"{path}::owner::dependency:0001",
+        f"{path}::owner::dependency:0002",
+    )
+    assert {field.name for field in fields(resolved_dependencies[0])} == {
+        "reference",
+        "owner",
+        "kind",
+        "target",
+    }
+    assert {field.name for field in fields(unresolved_dependencies[0])} == {
+        "reference",
+        "owner",
+        "kind",
+        "line",
+        "column",
+        "ast_dump",
+    }
+    _assert_deeply_immutable(result)
+
+
+def test_resolver_dependency_records_are_public_frozen_and_slotted() -> None:
+    """Catches private, mutable, or shape-drifting dependency evidence records."""
+
+    resolved_type = call_resolver.ResolvedDependency
+    unresolved_type = call_resolver.UnresolvedDependency
+    resolved = resolved_type("owner::dependency:0001", "owner", "decorator", "target")
+    unresolved = unresolved_type(
+        "owner::dependency:0002",
+        "owner",
+        "base",
+        7,
+        11,
+        "Name(id='unknown', ctx=Load())",
+    )
+
+    assert tuple(field.name for field in fields(resolved)) == (
+        "reference",
+        "owner",
+        "kind",
+        "target",
+    )
+    assert tuple(field.name for field in fields(unresolved)) == (
+        "reference",
+        "owner",
+        "kind",
+        "line",
+        "column",
+        "ast_dump",
+    )
+    assert resolved_type.__slots__ == tuple(field.name for field in fields(resolved))
+    assert unresolved_type.__slots__ == tuple(field.name for field in fields(unresolved))
+    _assert_deeply_immutable(resolved)
+    _assert_deeply_immutable(unresolved)
+
+
+def test_resolver_dependency_resolves_exact_symbols_imports_classes_and_aliases(
+    tmp_path: Path,
+) -> None:
+    """Catches a dependency path that does not reuse the closed symbol rules."""
+
+    path = "src/lockstep/dependency_exact_bindings.py"
+    result = _resolver_fixture(
+        tmp_path,
+        """
+        import package.decorators as decorators
+
+        def local_decorator(value):
+            return value
+
+        class LocalBase:
+            pass
+
+        class LocalMeta:
+            pass
+
+        decorator_alias = local_decorator
+        base_alias = LocalBase
+        meta_alias = LocalMeta
+
+        @decorator_alias
+        def sync_owner():
+            pass
+
+        @decorators.decorate
+        async def async_owner():
+            pass
+
+        @decorator_alias
+        class Child(base_alias, option=local_decorator, metaclass=meta_alias):
+            @local_decorator
+            def method(self):
+                pass
+        """,
+        path=path,
+    )
+
+    expected = {
+        f"{path}::sync_owner::dependency:0001": (
+            f"{path}::sync_owner",
+            "decorator",
+            f"{path}::local_decorator",
+        ),
+        f"{path}::async_owner::dependency:0001": (
+            f"{path}::async_owner",
+            "decorator",
+            "package.decorators.decorate",
+        ),
+        f"{path}::Child::dependency:0001": (
+            f"{path}::Child",
+            "decorator",
+            f"{path}::local_decorator",
+        ),
+        f"{path}::Child::dependency:0002": (
+            f"{path}::Child",
+            "base",
+            f"{path}::LocalBase",
+        ),
+        f"{path}::Child::dependency:0003": (
+            f"{path}::Child",
+            "metaclass",
+            f"{path}::LocalMeta",
+        ),
+        f"{path}::Child.method::dependency:0001": (
+            f"{path}::Child.method",
+            "decorator",
+            f"{path}::local_decorator",
+        ),
+    }
+    dependencies = _resolver_dependencies(result)
+
+    assert set(dependencies) == set(expected)
+    assert {
+        reference: (record.owner, record.kind, record.target)
+        for reference, record in dependencies.items()
+    } == expected
+
+
+_RELATIVE_DEPENDENCY_IMPORT_CASES = (
+    (
+        "current_package_symbol",
+        "src/lockstep/pkg/sub/consumer.py",
+        "from .dependency import decorate",
+        "decorate",
+        "src/lockstep/pkg/sub/dependency.py",
+        "src/lockstep/pkg/sub/dependency.py::decorate",
+    ),
+    (
+        "parent_package_symbol",
+        "src/lockstep/pkg/sub/consumer.py",
+        "from ..dependency import decorate",
+        "decorate",
+        "src/lockstep/pkg/dependency.py",
+        "src/lockstep/pkg/dependency.py::decorate",
+    ),
+    (
+        "relative_only_module",
+        "src/lockstep/pkg/sub/consumer.py",
+        "from . import dependency",
+        "dependency.decorate",
+        "src/lockstep/pkg/sub/dependency.py",
+        "src/lockstep/pkg/sub/dependency.py::decorate",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("case", "path", "statement", "expression", "dependency_path", "expected"),
+    _RELATIVE_DEPENDENCY_IMPORT_CASES,
+    ids=[case for case, *_rest in _RELATIVE_DEPENDENCY_IMPORT_CASES],
+)
+def test_resolver_dependency_normalizes_relative_imports(
+    tmp_path: Path,
+    case: str,
+    path: str,
+    statement: str,
+    expression: str,
+    dependency_path: str,
+    expected: str,
+) -> None:
+    """Catches dependency targets that discard ImportFrom package level."""
+
+    result = _resolver_fixture(
+        tmp_path,
+        f"{statement}\n@{expression}\ndef owner():\n    pass\n",
+        path=path,
+        extra_files={dependency_path: "def decorate(value):\n    return value\n"},
+    )
+    reference = f"{path}::owner::dependency:0001"
+
+    assert _resolver_dependency_target(result, reference) == expected, case
+
+
+def test_resolver_dependency_reexport_target_changes_without_reference_drift(
+    tmp_path: Path,
+) -> None:
+    """Catches stale semantic targets hidden behind a stable re-export alias."""
+
+    path = "src/lockstep/reexport_consumer.py"
+    source = "from lockstep.provider import Exported\n@Exported\ndef owner():\n    pass\n"
+    common = {
+        "src/lockstep/first.py": "def Decorator(value):\n    return value\n",
+        "src/lockstep/second.py": "def Decorator(value):\n    return value\n",
+    }
+    before = _resolver_fixture(
+        tmp_path,
+        source,
+        path=path,
+        extra_files={
+            **common,
+            "src/lockstep/provider.py": (
+                "from lockstep.first import Decorator as Exported\n"
+            ),
+        },
+    )
+    after = _resolver_fixture(
+        tmp_path,
+        source,
+        path=path,
+        extra_files={
+            **common,
+            "src/lockstep/provider.py": (
+                "from lockstep.second import Decorator as Exported\n"
+            ),
+        },
+    )
+    reference = f"{path}::owner::dependency:0001"
+
+    assert _resolver_dependency_target(
+        before, reference
+    ) == "src/lockstep/first.py::Decorator"
+    assert _resolver_dependency_target(
+        after, reference
+    ) == "src/lockstep/second.py::Decorator"
+
+
+def test_resolver_dependency_owner_preorder_prunes_nested_owners_and_path_delimiters(
+    tmp_path: Path,
+) -> None:
+    """Catches nested leakage, class-field order drift, and first-delimiter splits."""
+
+    path = "src/lockstep/a::dependency_owners.py"
+    result = _resolver_fixture(
+        tmp_path,
+        """
+        def outer_decorator(value):
+            return value
+        def nested_decorator(value):
+            return value
+        class Base:
+            pass
+        class Meta:
+            pass
+
+        @outer_decorator
+        @nested_decorator
+        def outer():
+            @nested_decorator
+            def nested():
+                pass
+
+            @nested_decorator
+            class Nested(Base, metaclass=Meta):
+                pass
+        """,
+        path=path,
+    )
+    dependencies = _resolver_dependencies(result)
+
+    expected_by_owner = {
+        f"{path}::outer": (
+            ("decorator", f"{path}::outer_decorator"),
+            ("decorator", f"{path}::nested_decorator"),
+        ),
+        f"{path}::outer.nested": (
+            ("decorator", f"{path}::nested_decorator"),
+        ),
+        f"{path}::outer.Nested": (
+            ("decorator", f"{path}::nested_decorator"),
+            ("base", f"{path}::Base"),
+            ("metaclass", f"{path}::Meta"),
+        ),
+    }
+    assert set(dependencies) == {
+        f"{owner}::dependency:{ordinal:04d}"
+        for owner, expected in expected_by_owner.items()
+        for ordinal in range(1, len(expected) + 1)
+    }
+    for owner, expected in expected_by_owner.items():
+        assert tuple(
+            (
+                dependencies[f"{owner}::dependency:{ordinal:04d}"].kind,
+                dependencies[f"{owner}::dependency:{ordinal:04d}"].target,
+            )
+            for ordinal in range(1, len(expected) + 1)
+        ) == expected
+    assert all(
+        record.reference.startswith(record.owner + "::dependency:")
+        for record in dependencies.values()
+    )
+
+
+def test_resolver_dependency_accepts_9999_references_per_owner(
+    tmp_path: Path,
+) -> None:
+    """Catches rejecting the last valid four-digit dependency ordinal."""
+
+    path = "src/lockstep/dependency_limit.py"
+    source = (
+        "def Decorator(value):\n"
+        "    return value\n"
+        + "@Decorator\n" * 9_999
+        + "def owner():\n"
+        "    pass\n"
+    )
+    dependencies = _resolver_dependencies(
+        _resolver_fixture(tmp_path, source, path=path)
+    )
+
+    assert len(dependencies) == 9_999
+    assert tuple(dependencies)[-1] == f"{path}::owner::dependency:9999"
+
+
+def test_resolver_dependency_rejects_reference_10000_per_owner(
+    tmp_path: Path,
+) -> None:
+    """Catches emitting an unstable five-digit dependency reference."""
+
+    path = "src/lockstep/dependency_overflow.py"
+    source = (
+        "def Decorator(value):\n"
+        "    return value\n"
+        + "@Decorator\n" * 10_000
+        + "def owner():\n"
+        "    pass\n"
+    )
+
+    with pytest.raises(ValueError):
+        _resolver_fixture(tmp_path, source, path=path)
+
+
+def test_resolver_dependency_limit_is_per_owner_not_index(tmp_path: Path) -> None:
+    """Catches applying the four-digit bound across independent owners."""
+
+    path = "src/lockstep/dependency_multi_owner_limit.py"
+    source = (
+        "def Decorator(value):\n"
+        "    return value\n"
+        + "@Decorator\n" * 5_000
+        + "def first():\n"
+        "    pass\n"
+        + "@Decorator\n" * 5_000
+        + "def second():\n"
+        "    pass\n"
+    )
+    dependencies = _resolver_dependencies(
+        _resolver_fixture(tmp_path, source, path=path)
+    )
+
+    assert len(dependencies) == 10_000
+    assert f"{path}::first::dependency:5000" in dependencies
+    assert f"{path}::second::dependency:5000" in dependencies
+
+
+_DEPENDENCY_FAIL_CLOSED_CASES = (
+    (
+        "decorator_subscript",
+        "decorators = ()\n@decorators[0]\ndef Owner():\n    pass\n",
+        "Owner",
+        "decorator",
+    ),
+    (
+        "decorator_reflection",
+        "import package\n@getattr(package, 'decorate')\ndef Owner():\n    pass\n",
+        "Owner",
+        "decorator",
+    ),
+    (
+        "star_base",
+        "bases = ()\nclass Owner(*bases):\n    pass\n",
+        "Owner",
+        "base",
+    ),
+    (
+        "ambiguous_rebound_base",
+        "class First:\n    pass\nclass Second:\n    pass\nbase = First\nbase = Second\nclass Owner(base):\n    pass\n",
+        "Owner",
+        "base",
+    ),
+    (
+        "conditional_metaclass_alias",
+        "class First:\n    pass\nclass Second:\n    pass\nif flag:\n    meta = First\nelse:\n    meta = Second\nclass Owner(metaclass=meta):\n    pass\n",
+        "Owner",
+        "metaclass",
+    ),
+    (
+        "star_import_decorator",
+        "from package import *\n@decorate\ndef Owner():\n    pass\n",
+        "Owner",
+        "decorator",
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("case", "source", "owner_name", "kind"),
+    _DEPENDENCY_FAIL_CLOSED_CASES,
+    ids=[case for case, *_rest in _DEPENDENCY_FAIL_CLOSED_CASES],
+)
+def test_resolver_dependency_dynamic_ambiguous_and_star_forms_fail_closed(
+    tmp_path: Path,
+    case: str,
+    source: str,
+    owner_name: str,
+    kind: str,
+) -> None:
+    """Catches guessing dependency targets outside exact Name/Attribute rules."""
+
+    path = f"src/lockstep/dependency_fail_closed_{case}.py"
+    reference = f"{path}::{owner_name}::dependency:0001"
+    record = _assert_unresolved_dependency(
+        _resolver_fixture(tmp_path, source, path=path), reference
+    )
+
+    assert record.owner == f"{path}::{owner_name}"
+    assert record.kind == kind
+    assert not hasattr(record, "target")
+
+
+def test_resolver_dependency_unresolved_evidence_keeps_expression_calls_once(
+    tmp_path: Path,
+) -> None:
+    """Catches resolving dynamic dependency expressions or replacing their callsites."""
+
+    path = "src/lockstep/dependency_expression_calls.py"
+    result = _resolver_fixture(
+        tmp_path,
+        """
+        def factory():
+            pass
+        def metaclass_factory():
+            pass
+        @factory()
+        def decorated():
+            pass
+        class Dynamic(
+            factory(),
+            metaclass=metaclass_factory(),
+        ):
+            pass
+        """,
+        path=path,
+    )
+    expected_dependencies = {
+        f"{path}::decorated::dependency:0001": (
+            f"{path}::decorated",
+            "decorator",
+            5,
+            1,
+            "Call(func=Name(id='factory', ctx=Load()), args=[], keywords=[])",
+        ),
+        f"{path}::Dynamic::dependency:0001": (
+            f"{path}::Dynamic",
+            "base",
+            9,
+            4,
+            "Call(func=Name(id='factory', ctx=Load()), args=[], keywords=[])",
+        ),
+        f"{path}::Dynamic::dependency:0002": (
+            f"{path}::Dynamic",
+            "metaclass",
+            10,
+            14,
+            "Call(func=Name(id='metaclass_factory', ctx=Load()), args=[], keywords=[])",
+        ),
+    }
+    dependencies = _resolver_dependencies(result)
+
+    assert set(dependencies) == set(expected_dependencies)
+    assert {
+        reference: (
+            record.owner,
+            record.kind,
+            record.line,
+            record.column,
+            record.ast_dump,
+        )
+        for reference, record in dependencies.items()
+    } == expected_dependencies
+    assert tuple(_resolver_calls(result)) == (
+        f"{path}::decorated::call:0001",
+        f"{path}::Dynamic::call:0001",
+        f"{path}::Dynamic::call:0002",
+    )
+    assert (
+        _resolver_target(result, f"{path}::decorated::call:0001"),
+        _resolver_target(result, f"{path}::Dynamic::call:0001"),
+        _resolver_target(result, f"{path}::Dynamic::call:0002"),
+    ) == (
+        f"{path}::factory",
+        f"{path}::factory",
+        f"{path}::metaclass_factory",
+    )
