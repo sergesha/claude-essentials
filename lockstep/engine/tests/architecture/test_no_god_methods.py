@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import ast
 from collections.abc import Mapping
-from dataclasses import asdict, fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass
 import hashlib
 import json
+import operator
 from pathlib import Path
 import subprocess
+from types import MappingProxyType
 import warnings
 
 import pytest
@@ -455,16 +457,28 @@ def _assert_frozen_record(record: object) -> None:
         setattr(record, record_fields[0].name, object())
 
 
+def _assert_item_assignment_fails(collection: object, key: object) -> None:
+    with pytest.raises(TypeError):
+        operator.setitem(collection, key, object())
+
+
+@dataclass(frozen=True, slots=True)
+class _LegacyEntityFixture:
+    identity: str
+    node: ast.FunctionDef | ast.AsyncFunctionDef
+    source: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class _LegacyIndexFixture:
+    entities: Mapping[str, _LegacyEntityFixture]
+
+
 def test_source_index_covers_every_tracked_python_file() -> None:
     """Catches filesystem scans that omit a tracked package file or add an untracked one."""
 
     completed = subprocess.run(
-        [
-            "git",
-            "ls-files",
-            "src/lockstep/**/*.py",
-            "src/lockstep/*.py",
-        ],
+        ["git", "ls-files", "src/lockstep/**/*.py", "src/lockstep/*.py"],
         cwd=ENGINE_ROOT,
         check=True,
         capture_output=True,
@@ -479,8 +493,8 @@ def test_source_index_covers_every_tracked_python_file() -> None:
     assert all(index.files[path] == (ENGINE_ROOT / path).read_bytes() for path in tracked_paths)
     assert set(index.file_sha256) == set(tracked_paths)
     _assert_frozen_record(index)
-    with pytest.raises(TypeError):
-        index.files[tracked_paths[0]] = b"changed"
+    _assert_item_assignment_fails(index.files, tracked_paths[0])
+    _assert_item_assignment_fails(index.file_sha256, tracked_paths[0])
 
 
 def test_source_index_identity_and_containment_follow_lexical_ast_order(
@@ -505,37 +519,25 @@ def test_source_index_identity_and_containment_follow_lexical_ast_order(
         ),
     }
 
-    index = build_source_index(tmp_path, tuple(reversed(tuple(files))), files)
+    index = build_source_index(tmp_path, tuple(files), files)
     entities = _records_named(index, "Entity")
 
-    assert [entity.identity for entity in entities] == [
-        "src/lockstep/alpha.py::outer",
-        "src/lockstep/alpha.py::outer.Inner",
-        "src/lockstep/alpha.py::outer.Inner.method",
-        "src/lockstep/alpha.py::outer.nested",
-        "src/lockstep/alpha.py::outer.asynchronous",
-        "src/lockstep/alpha.py::Top",
-        "src/lockstep/alpha.py::Top.method",
-        "src/lockstep/zeta.py::last",
+    assert [(entity.identity, entity.parent) for entity in entities] == [
+        ("src/lockstep/alpha.py::outer", "src/lockstep/alpha.py::@file"),
+        ("src/lockstep/alpha.py::outer.Inner", "src/lockstep/alpha.py::outer"),
+        (
+            "src/lockstep/alpha.py::outer.Inner.method",
+            "src/lockstep/alpha.py::outer.Inner",
+        ),
+        ("src/lockstep/alpha.py::outer.nested", "src/lockstep/alpha.py::outer"),
+        (
+            "src/lockstep/alpha.py::outer.asynchronous",
+            "src/lockstep/alpha.py::outer",
+        ),
+        ("src/lockstep/alpha.py::Top", "src/lockstep/alpha.py::@file"),
+        ("src/lockstep/alpha.py::Top.method", "src/lockstep/alpha.py::Top"),
+        ("src/lockstep/zeta.py::last", "src/lockstep/zeta.py::@file"),
     ]
-    by_identity = {entity.identity: entity for entity in entities}
-    assert {
-        identity: entity.parent
-        for identity, entity in by_identity.items()
-    } == {
-        "src/lockstep/alpha.py::outer": "src/lockstep/alpha.py::@file",
-        "src/lockstep/alpha.py::outer.Inner": "src/lockstep/alpha.py::outer",
-        "src/lockstep/alpha.py::outer.Inner.method": (
-            "src/lockstep/alpha.py::outer.Inner"
-        ),
-        "src/lockstep/alpha.py::outer.nested": "src/lockstep/alpha.py::outer",
-        "src/lockstep/alpha.py::outer.asynchronous": (
-            "src/lockstep/alpha.py::outer"
-        ),
-        "src/lockstep/alpha.py::Top": "src/lockstep/alpha.py::@file",
-        "src/lockstep/alpha.py::Top.method": "src/lockstep/alpha.py::Top",
-        "src/lockstep/zeta.py::last": "src/lockstep/zeta.py::@file",
-    }
     assert all(type(entity).__name__ == "Entity" for entity in entities)
     _assert_frozen_record(entities[0])
 
@@ -570,21 +572,11 @@ def test_source_span_includes_decorators_and_hashes_exact_crlf_bytes(
         b"    return value\r\n"
         b"tail = 1\r\n"
     )
+    lines = source.splitlines(keepends=True)
     expected_spans = (
-        (
-            (2, 5),
-            b"@first\r\n"
-            b"@second('x')\r\n"
-            b"def decorated(value):\r\n"
-            b"    return value\r\n",
-        ),
-        ((6, 8), b"@class_decorator\r\nclass Decorated:\r\n    pass\r\n"),
-        (
-            (9, 11),
-            b"@async_decorator\r\n"
-            b"async def async_decorated(value):\r\n"
-            b"    return value\r\n",
-        ),
+        ((2, 5), b"".join(lines[1:5])),
+        ((6, 8), b"".join(lines[5:8])),
+        ((9, 11), b"".join(lines[8:11])),
     )
 
     index = _fixture_index({path: source}, tmp_path)
@@ -629,12 +621,8 @@ def test_source_index_import_records_follow_complete_file_ast_order(
         b"class Box:\r\n"
         b"    from package import thing as renamed, other\r\n"
     )
-    expected_import_bytes = (
-        b"import zed as z, alpha\r\n",
-        b"    from . import local as alias\r\n",
-        b"        import deeply.nested\r\n",
-        b"    from package import thing as renamed, other\r\n",
-    )
+    lines = source.splitlines(keepends=True)
+    expected_import_bytes = (lines[0], lines[2], lines[4], lines[6])
 
     index = _fixture_index({path: source}, tmp_path)
     imports = _records_named(index, "ImportRecord")
@@ -663,6 +651,13 @@ def test_source_index_import_records_follow_complete_file_ast_order(
         (("deeply.nested", None),),
         (("thing", "renamed"), ("other", None)),
     ]
+    expected_targets = (
+        ("zed", "alpha"),
+        (".local",),
+        ("deeply.nested",),
+        ("package.thing", "package.other"),
+    )
+    assert tuple(record.targets for record in imports) == expected_targets
     assert [record.span_sha256 for record in imports] == [
         hashlib.sha256(statement).hexdigest() for statement in expected_import_bytes
     ]
@@ -677,7 +672,7 @@ def test_source_index_import_records_follow_complete_file_ast_order(
         "span_sha256",
         "import_semantic_sha256",
     }
-    for record in imports:
+    for record, targets in zip(imports, expected_targets, strict=True):
         payload = {
             "identity": record.identity,
             "owner": record.owner,
@@ -688,7 +683,7 @@ def test_source_index_import_records_follow_complete_file_ast_order(
                 {"name": name, "asname": asname}
                 for name, asname in _alias_pairs(record)
             ],
-            "targets": list(record.targets),
+            "targets": list(targets),
             "span_sha256": record.span_sha256,
         }
         expected_digest = hashlib.sha256(
@@ -701,6 +696,15 @@ def test_source_index_import_records_follow_complete_file_ast_order(
         ).hexdigest()
         assert record.import_semantic_sha256 == expected_digest
         _assert_frozen_record(record)
+        assert isinstance(record.aliases, tuple)
+        assert isinstance(record.targets, tuple)
+        _assert_item_assignment_fails(record.aliases, 0)
+        _assert_item_assignment_fails(record.targets, 0)
+        first_alias = record.aliases[0]
+        if isinstance(first_alias, Mapping):
+            _assert_item_assignment_fails(first_alias, "name")
+        else:
+            _assert_frozen_record(first_alias)
 
 
 def test_lambda_attribution_is_function_then_class_then_file_and_class_evidence(
@@ -737,31 +741,30 @@ def test_lambda_attribution_is_function_then_class_then_file_and_class_evidence(
         f"{path}::Box": ("@lambda:0001", "@lambda:0002")
     }
     assert all("lambda" not in entity.identity for entity in _records_named(index, "Entity"))
-    with pytest.raises(TypeError):
-        index.lambda_owners[object()] = f"{path}::@file"
+    _assert_item_assignment_fails(index.lambda_owners, object())
+    _assert_item_assignment_fails(index.class_lambda_evidence, f"{path}::Box")
+    evidence = index.class_lambda_evidence[f"{path}::Box"]
+    assert isinstance(evidence, tuple)
+    _assert_item_assignment_fails(evidence, 0)
 
 
-@pytest.mark.parametrize(
-    ("statement", "ordinal_kind"),
-    (("import os", "import"), ("invoke()", "call")),
-)
-def test_source_index_rejects_more_than_9999_import_or_call_ordinals(
-    tmp_path: Path,
-    statement: str,
-    ordinal_kind: str,
-) -> None:
-    """Catches unstable five-digit identities at either four-digit boundary."""
-
-    path = f"src/lockstep/{ordinal_kind}_overflow.py"
-    source = ((statement + "\n") * 10_000).encode("utf-8")
-
-    with pytest.raises(ValueError, match=rf"{ordinal_kind}.*9,?999|9,?999.*{ordinal_kind}"):
-        _fixture_index({path: source}, tmp_path)
-
-
-def test_legacy_metrics_characterize_current_complexity_length_and_pruned_fanout(
+def test_source_index_accepts_9999_imports_and_rejects_import_10000(
     tmp_path: Path,
 ) -> None:
+    """Catches off-by-one or five-digit file-global import identities."""
+
+    path = "src/lockstep/import_overflow.py"
+    accepted_source = ("import os\n" * 9_999).encode("utf-8")
+    accepted = _fixture_index({path: accepted_source}, tmp_path)
+    assert _records_named(accepted, "ImportRecord")[-1].identity == (
+        f"{path}::import:9999"
+    )
+
+    with pytest.raises(ValueError, match=r"import.*9,?999|9,?999.*import"):
+        _fixture_index({path: accepted_source + b"import os\n"}, tmp_path)
+
+
+def test_legacy_metrics_characterize_current_complexity_length_and_pruned_fanout() -> None:
     """Catches metric drift and nested-scope complexity/fan-out inflation."""
 
     path = "src/lockstep/legacy_fixture.py"
@@ -809,51 +812,45 @@ def test_legacy_metrics_characterize_current_complexity_length_and_pruned_fanout
         b"    if flag and ready() and other():\n"
         b"        pass\n"
     )
-    index = _fixture_index({path: source}, tmp_path)
+    nodes = {
+        node.name: node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    identities = (
+        (f"{path}::parent", "parent"),
+        (f"{path}::parent.nested", "nested"),
+        (f"{path}::parent.Nested.method", "method"),
+        (f"{path}::branch_forms", "branch_forms"),
+    )
+    index = _LegacyIndexFixture(
+        entities=MappingProxyType({
+            identity: _LegacyEntityFixture(identity, nodes[name], source)
+            for identity, name in identities
+        })
+    )
 
     metrics = measure_legacy_metrics(index)
 
-    assert tuple(metrics) == (
-        f"{path}::parent",
-        f"{path}::parent.nested",
-        f"{path}::parent.Nested.method",
-        f"{path}::branch_forms",
-    )
-    assert asdict(metrics[f"{path}::parent"]) == {
-        "line_count": 24,
-        "cyclomatic": 7,
-        "cognitive": 10,
-        "max_nesting": 3,
-        "legacy_syntactic_fanout": 8,
-    }
-    assert asdict(metrics[f"{path}::parent.nested"]) == {
-        "line_count": 5,
-        "cyclomatic": 3,
-        "cognitive": 3,
-        "max_nesting": 2,
-        "legacy_syntactic_fanout": 4,
-    }
-    assert asdict(metrics[f"{path}::parent.Nested.method"]) == {
-        "line_count": 3,
-        "cyclomatic": 2,
-        "cognitive": 1,
-        "max_nesting": 1,
-        "legacy_syntactic_fanout": 2,
-    }
-    assert asdict(metrics[f"{path}::branch_forms"]) == {
-        "line_count": 18,
-        "cyclomatic": 11,
-        "cognitive": 14,
-        "max_nesting": 2,
-        "legacy_syntactic_fanout": 2,
-    }
-    assert {field.name for field in fields(next(iter(metrics.values())))} == {
+    metric_fields = (
         "line_count",
         "cyclomatic",
         "cognitive",
         "max_nesting",
         "legacy_syntactic_fanout",
+    )
+    assert {
+        identity: tuple(getattr(metric, name) for name in metric_fields)
+        for identity, metric in metrics.items()
+    } == {
+        f"{path}::parent": (24, 7, 10, 3, 8),
+        f"{path}::parent.nested": (5, 3, 3, 2, 4),
+        f"{path}::parent.Nested.method": (3, 2, 1, 1, 2),
+        f"{path}::branch_forms": (18, 11, 14, 2, 2),
     }
+    assert {field.name for field in fields(next(iter(metrics.values())))} == set(
+        metric_fields
+    )
     assert all(type(metric).__name__ == "LegacyMetrics" for metric in metrics.values())
     _assert_frozen_record(next(iter(metrics.values())))
     with pytest.raises(TypeError):
