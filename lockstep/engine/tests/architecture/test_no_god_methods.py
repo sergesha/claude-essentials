@@ -8018,6 +8018,58 @@ def test_command_service_remediation_matches_exact_analyzer_projection() -> None
     )
 
 
+def test_n1_adapter_remediation_matches_exact_analyzer_projection() -> None:
+    report = _repository_architecture_report()
+    assert report.unresolved_callsites == ()
+    scoped_paths = {
+        "src/lockstep/cli.py",
+        "src/lockstep/_cli_scenario.py",
+        "src/lockstep/_cli_consent.py",
+        "src/lockstep/_cli_parser.py",
+        "src/lockstep/_cli_support.py",
+        "src/lockstep/mcp/server.py",
+        "src/lockstep/mcp/_scenario_dryrun.py",
+    }
+    scoped_candidates = sorted(
+        (kind, identity, metric.composite_score, metric.hard_triggers)
+        for kind in ("functions", "one_hops", "classes", "files")
+        for identity, metric in getattr(report, kind).items()
+        if identity.partition("::")[0] in scoped_paths and metric.candidate
+    )
+    assert scoped_candidates == [
+        (
+            "files",
+            "src/lockstep/mcp/server.py::@file",
+            4,
+            (),
+        ),
+        (
+            "functions",
+            "src/lockstep/mcp/server.py::_containment_errors",
+            3,
+            (),
+        ),
+        (
+            "functions",
+            "src/lockstep/mcp/server.py::_project_for_context",
+            3,
+            ("nesting_gt_4",),
+        ),
+    ]
+    for kind, identity in (
+        ("files", "src/lockstep/cli.py::@file"),
+        ("functions", "src/lockstep/cli.py::_cmd_scenario"),
+        ("one_hops", "src/lockstep/cli.py::_cmd_scenario::@one_hop"),
+        ("functions", "src/lockstep/cli.py::_cmd_consent"),
+        ("functions", "src/lockstep/cli.py::_build_parser"),
+        ("one_hops", "src/lockstep/cli.py::main::@one_hop"),
+        ("functions", "src/lockstep/mcp/server.py::scenario_dryrun"),
+        ("one_hops", "src/lockstep/mcp/server.py::scenario_dryrun::@one_hop"),
+    ):
+        metric = getattr(report, kind).get(identity)
+        assert metric is None or not metric.candidate
+
+
 @pytest.mark.parametrize(
     ("mutation", "reason"),
     (

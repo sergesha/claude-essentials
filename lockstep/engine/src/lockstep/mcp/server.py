@@ -38,7 +38,6 @@ import yaml
 from mcp.server.mcpserver import Context
 from mcp.server.mcpserver import MCPServer as FastMCP
 
-from lockstep.recipe import profile
 from lockstep.authoring import (
     check_recovered_recipe,
     diff_recovered_recipe,
@@ -48,6 +47,11 @@ from lockstep.authoring import (
     render_recipe,
 )
 from lockstep.authoring_publisher import observe_authoring_project
+from lockstep.mcp._scenario_dryrun import (
+    evaluate_scenario_dryrun,
+    prevalidate_scenario_evidence,
+)
+from lockstep.recipe import profile
 from lockstep.recipe import yamlgraph_adapter as yg
 from lockstep.recipe.authority import (
     RecipeAuthorityError,
@@ -55,8 +59,7 @@ from lockstep.recipe.authority import (
     StrictRecipeIngress,
 )
 from lockstep.recipe.loader import RecipeLoader
-from lockstep.runtime import evidence as evidence_mod
-from lockstep.runtime import sessions, validators
+from lockstep.runtime import sessions
 from lockstep.runtime.engine import Engine
 from lockstep.runtime.projection import RuntimeProjection
 from lockstep.runtime.recipe_bundles import RecipeBundleStore
@@ -64,7 +67,6 @@ from lockstep.runtime.service import (
     LockstepCommandService,
     preflight_recipe,
     validate_evidence_payload,
-    validate_evidence_shape,
     validate_reason_payload,
     validate_start_input,
 )
@@ -75,12 +77,6 @@ _command: LockstepCommandService | None = None
 _command_config: tuple[Path, Path] | None = None
 _projection: RuntimeProjection | None = None
 _projection_config: tuple[Path, Path] | None = None
-
-# scenario_dryrun runs ONLY these; command (cmd_ok, git_clean,
-# junit_gate) and baseline (fresh, unchanged, changed_in, diff_only) checks
-# are reported `skipped (dryrun)` instead of executed.
-SHAPE_CHECK_TYPES = {"file_exists", "file_nonempty", "md_has_sections", "file_matches"}
-
 
 def _project_for_context(ctx: Context | None) -> Path:
     """Resolve the host project without exposing it as a tool argument.
@@ -344,56 +340,21 @@ def scenario_dryrun(
     shape checks; command/baseline checks report `skipped (dryrun)` and
     never execute. No catalog entry, checkpoint, or baseline artifact —
     nothing durable, nothing besides shape checks actually runs."""
-    raw_evidence = validate_evidence_shape(evidence)
-    forged = [key for key in raw_evidence if key.startswith("_")]
-    if forged:
-        return {
-            "accepted": False,
-            "errors": [f"reserved evidence key(s) rejected: {sorted(forged)}"],
-        }
+    raw_evidence, reserved_error = prevalidate_scenario_evidence(evidence)
+    if reserved_error is not None:
+        return reserved_error
     project_root = _project_for_context(ctx)
     _state_dir, recipes_dir = _configured_paths(project_root)
-    authorized = preflight_recipe(recipes_dir, recipe)
-    with tempfile.TemporaryDirectory(prefix="lockstep-dryrun-") as raw:
-        store = RecipeBundleStore(Path(raw) / "owner-state")
-        materialized = authorized.capture(store).materialize(store)
-        brief = _load_step_brief(materialized.source_path, step)
-    if brief is None:
-        raise ValueError(f"step {step!r} not found in recipe {recipe!r}")
-
-    schema = brief.get("evidence_schema")
-    schema_errors = evidence_mod.validate_evidence(schema, raw_evidence)
-    if schema_errors:
-        return {"accepted": False, "errors": schema_errors}
-
-    project = str(project_root)
-    path_errors = _containment_errors(schema, raw_evidence, project)
-    if path_errors:
-        return {"accepted": False, "errors": path_errors}
-
-    ctx = {"_project": project}
-    results = []
-    for check in brief.get("checks") or []:
-        ctype = check.get("type")
-        if ctype in SHAPE_CHECK_TYPES:
-            fn = validators.CHECKS.get(ctype)
-            try:
-                reasons = fn(check, raw_evidence, ctx) if fn else [f"unknown check type: {ctype!r}"]
-            except Exception as e:  # noqa: BLE001 - a recipe-pinned
-                # `path:` (never evidence-sourced, so `_containment_errors`
-                # above never sees it) can still raise inside the check
-                # itself (e.g. `_resolve_path`'s path-escape guard). dryrun
-                # is a probe tool — it must report that cleanly, not crash
-                # the whole tool call over one check's bad recipe-pinned path.
-                results.append({"type": ctype, "verdict": "error", "reasons": [str(e)]})
-                continue
-            results.append(
-                {"type": ctype, "verdict": "pass" if not reasons else "fail", "reasons": reasons}
-            )
-        else:
-            results.append({"type": ctype, "verdict": "skipped (dryrun)"})
-
-    return {"accepted": True, "results": results}
+    return evaluate_scenario_dryrun(
+        recipes_dir,
+        recipe,
+        step,
+        raw_evidence,
+        project_root=project_root,
+        containment_errors=_containment_errors,
+        load_step_brief=_load_step_brief,
+        preflight=preflight_recipe,
+    )
 
 
 # ---------------------------------------------------------------------------
