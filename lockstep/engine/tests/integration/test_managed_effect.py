@@ -82,7 +82,11 @@ def _wait_for_public_terminal(
         while time.monotonic() < deadline:
             if command._pump_failure is not None:
                 raise command._pump_failure
-            observed = projection.status(run_id, str(project))
+            try:
+                observed = projection.status(run_id, str(project))
+            except LockstepError:
+                time.sleep(0.02)
+                continue
             if observed.get("status") == "completed":
                 return observed
             time.sleep(0.02)
