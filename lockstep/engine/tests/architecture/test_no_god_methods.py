@@ -5485,6 +5485,14 @@ _PRODUCTION_LIFECYCLE_ROWS = (
         "authoring.directory-durable",
     ),
     _entity_lifecycle_row(
+        "src/lockstep/runtime/_graph_runtime_guard.py::_GraphRuntimeGuard.commitment_guard",
+        "commitment.hold",
+    ),
+    _entity_lifecycle_row(
+        "src/lockstep/runtime/_graph_runtime_guard.py::_GraphRuntimeGuard.resume",
+        "commitment.commit",
+    ),
+    _entity_lifecycle_row(
         "src/lockstep/runtime/effects/ledger.py::EffectLedger.mark_launching",
         "process.launch",
     ),
@@ -5495,14 +5503,6 @@ _PRODUCTION_LIFECYCLE_ROWS = (
     _entity_lifecycle_row(
         "src/lockstep/runtime/effects/owner_consent.py::OwnerConsentAuthority.issue",
         "consent.issue",
-    ),
-    _entity_lifecycle_row(
-        "src/lockstep/runtime/graph_runtime.py::GraphRuntime.commitment_guard",
-        "commitment.hold",
-    ),
-    _entity_lifecycle_row(
-        "src/lockstep/runtime/graph_runtime.py::GraphRuntime.resume",
-        "commitment.commit",
     ),
     _entity_lifecycle_row(
         "src/lockstep/runtime/providers/_codex_attempt.py::_CodexAttemptDriver._commit_ready_supervisor",
