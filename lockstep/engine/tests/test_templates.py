@@ -17,7 +17,6 @@ from lockstep.authoring import (
 )
 from lockstep.recipe.authority import StrictRecipeIngress
 
-
 EXPECTED_BUNDLES = {
     "reviewed-change": {
         "files": {
@@ -56,6 +55,41 @@ def _install_template(template: str, name: str, project: Path):
         name,
         project,
         state_dir=(project.parent / f"{project.name}-owner-state").resolve(),
+    )
+
+
+def _template_workflow(bundle_name: str, role: str) -> dict:
+    bundle = resources.files("lockstep.templates").joinpath(bundle_name)
+    return yaml.safe_load(bundle.joinpath(f"{role}.workflow.yaml").read_text())
+
+
+def _block_kinds(flow: list[dict]) -> list[str]:
+    discriminators = {
+        "step",
+        "verify",
+        "call",
+        "accept",
+        "parallel",
+        "escalate",
+    }
+    return [next(iter(discriminators & set(block))) for block in flow]
+
+
+def _assert_semantic_phrases(value: str, phrases: tuple[str, ...]) -> None:
+    normalized = " ".join(value.casefold().split())
+    assert all(phrase.casefold() in normalized for phrase in phrases)
+
+
+def _assert_report_cannot_authorize(step: dict) -> None:
+    contract = " ".join((step["task"], step["exit"])).casefold()
+    assert any(
+        phrase in contract
+        for phrase in (
+            "report text never self-authorizes",
+            "report text does not authorize",
+            "report text cannot authorize",
+            "report is not authorization",
+        )
     )
 
 
@@ -122,6 +156,188 @@ def test_template_show_returns_exact_roles_outputs_sources_and_compile_order() -
             "release",
         ],
     }
+
+
+def test_reviewed_change_sources_freeze_the_exact_product_inventory() -> None:
+    parent = _template_workflow("reviewed-change", "parent")
+    child = _template_workflow("reviewed-change", "review")
+
+    assert _block_kinds(parent["flow"]) == [
+        "step",
+        "step",
+        "step",
+        "verify",
+        "call",
+        "accept",
+    ]
+    plan, tests, implement, verify, call, accept = parent["flow"]
+    assert [
+        (block["step"], block["writes"], block["retry"])
+        for block in (plan, tests, implement)
+    ] == [
+        ("plan", [".lockstep/plan.md"], {"limit": 2, "exhausted": "escalate"}),
+        ("tests", ["tests/"], {"limit": 2, "exhausted": "escalate"}),
+        ("implement", ["src/"], {"limit": 2, "exhausted": "escalate"}),
+    ]
+    assert plan["artifact"] == {
+        "handle": "plan",
+        "path": ".lockstep/plan.md",
+        "markdown": {"sections": ["Goal", "Acceptance Criteria", "Steps"]},
+    }
+    assert "artifact" not in tests
+    assert "artifact" not in implement
+    _assert_semantic_phrases(
+        plan["task"], ("plan", "goal", "acceptance criteria", "steps")
+    )
+    _assert_semantic_phrases(plan["exit"], ("plan", "complete"))
+    _assert_semantic_phrases(
+        tests["task"], ("acceptance tests", "before", "implementation")
+    )
+    _assert_semantic_phrases(tests["exit"], ("acceptance tests", "frozen"))
+    _assert_semantic_phrases(
+        implement["task"], ("implementation", "without weakening", "frozen tests")
+    )
+    _assert_semantic_phrases(implement["exit"], ("implementation", "frozen tests"))
+    assert verify == {
+        "verify": {
+            "id": "tests",
+            "command": "pytest -q -p no:cacheprovider",
+            "cwd": ".",
+            "timeout": 900,
+            "retry": {"limit": 2, "exhausted": "escalate"},
+        }
+    }
+    assert call == {
+        "call": {
+            "id": "review",
+            "workflow": "{name}-review",
+            "runner": "codex",
+            "timeout_minutes": 5,
+            "artifacts": {"review": ".lockstep/review.md"},
+        }
+    }
+    assert accept == {
+        "accept": {"artifact_from": "review.review", "verdict": "PASS"}
+    }
+
+    assert _block_kinds(child["flow"]) == ["step"]
+    review = child["flow"][0]
+    assert review["step"] == "review"
+    assert review["writes"] == ["review.md"]
+    assert review["artifact"] == {
+        "handle": "review",
+        "path": "review.md",
+        "markdown": {"sections": ["Findings", "Verdict"]},
+    }
+    assert "retry" not in review
+    _assert_semantic_phrases(
+        review["task"],
+        (
+            "evidence-backed independent review",
+            "plan",
+            "frozen tests",
+            "implementation",
+            "pinned verification",
+        ),
+    )
+    _assert_semantic_phrases(
+        review["exit"], ("write", "pass", "no blocking finding")
+    )
+    _assert_report_cannot_authorize(review)
+
+
+def test_parallel_review_sources_freeze_exact_joined_artifact_inventory() -> None:
+    parent = _template_workflow("parallel-review", "parent")
+    security_child = _template_workflow("parallel-review", "security-review")
+    architecture_child = _template_workflow(
+        "parallel-review", "architecture-review"
+    )
+
+    assert _block_kinds(parent["flow"]) == ["parallel", "accept", "accept"]
+    parallel, security_accept, architecture_accept = parent["flow"]
+    parallel = parallel["parallel"]
+    assert (parallel["id"], parallel["join"], parallel["timeout_minutes"]) == (
+        "reviews",
+        "all",
+        5,
+    )
+    calls = {
+        branch: blocks[0]["call"] for branch, blocks in parallel["branches"].items()
+    }
+    assert calls == {
+        "security": {
+            "id": "security",
+            "workflow": "{name}-security-review",
+            "runner": "codex",
+            "timeout_minutes": 5,
+            "artifacts": {"review": ".lockstep/security-review.md"},
+        },
+        "architecture": {
+            "id": "architecture",
+            "workflow": "{name}-architecture-review",
+            "runner": "codex",
+            "timeout_minutes": 5,
+            "artifacts": {"review": ".lockstep/architecture-review.md"},
+        },
+    }
+    assert all("retry" not in call for call in calls.values())
+    assert [security_accept, architecture_accept] == [
+        {
+            "accept": {
+                "artifact_from": "reviews.security.security.review",
+                "verdict": "PASS",
+            }
+        },
+        {
+            "accept": {
+                "artifact_from": "reviews.architecture.architecture.review",
+                "verdict": "PASS",
+            }
+        },
+    ]
+
+    assert _block_kinds(security_child["flow"]) == ["step"]
+    assert _block_kinds(architecture_child["flow"]) == ["step"]
+    for child, path in (
+        (security_child, "security-review.md"),
+        (architecture_child, "architecture-review.md"),
+    ):
+        step = child["flow"][0]
+        assert step["writes"] == [path]
+        assert step["artifact"] == {
+            "handle": "review",
+            "path": path,
+            "markdown": {"sections": ["Findings", "Verdict"]},
+        }
+        assert "retry" not in step
+
+    security = security_child["flow"][0]
+    _assert_semantic_phrases(
+        security["task"],
+        (
+            "reachable boundaries",
+            "frozen threat model",
+            "boundary",
+            "pre-existing authority",
+            "achieved authority",
+            "delta",
+        ),
+    )
+    _assert_semantic_phrases(security["exit"], ("findings", "verdict"))
+    _assert_report_cannot_authorize(security)
+
+    architecture = architecture_child["flow"][0]
+    _assert_semantic_phrases(
+        architecture["task"],
+        (
+            "responsibility",
+            "dependency direction",
+            "cohesion",
+            "public-contract preservation",
+        ),
+    )
+    _assert_semantic_phrases(architecture["exit"], ("findings", "verdict"))
+    _assert_report_cannot_authorize(architecture)
 
 
 def test_template_show_ignores_call_shaped_metadata_without_reopening_sources(

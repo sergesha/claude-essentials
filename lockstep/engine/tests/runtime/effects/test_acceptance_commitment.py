@@ -93,3 +93,44 @@ def test_acceptance_result_rejects_caller_authority_fields(field: str) -> None:
         parse_acceptance_result(
             {**_result(), field: "caller-asserted"}, descriptor=_descriptor()
         )
+
+
+@pytest.mark.parametrize(
+    "content",
+    (
+        "PASS",
+        "# Verdict\nPASS\n",
+        {"markdown": {"sections": ["Findings", "Verdict"]}, "text": "PASS"},
+    ),
+)
+def test_report_text_and_heading_metadata_never_create_acceptance_authority(
+    content: object,
+) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        parse_acceptance_result(content, descriptor=_descriptor())
+
+
+@pytest.mark.parametrize(
+    "field",
+    ("markdown", "headings", "verdict_text", "bearer", "token"),
+)
+def test_accept_descriptor_rejects_prompt_metadata_and_caller_bearers(
+    field: str,
+) -> None:
+    raw = {
+        "schema": "lockstep.effect/v1",
+        "kind": "accept",
+        "logical_id": "accept-review",
+        "artifact_handle": "review.report",
+        "producer_result_state_key": "review_result",
+        "declared_name": "report",
+        "destination": "docs/review.md",
+        "transformation": "identity",
+        "audience": "local-project",
+        "verdict": "PASS",
+        "result_schema": "lockstep.acceptance-result/v1",
+        field: "PASS",
+    }
+
+    with pytest.raises(ValueError, match="unknown|field|closed"):
+        parse_effect_descriptor(raw)

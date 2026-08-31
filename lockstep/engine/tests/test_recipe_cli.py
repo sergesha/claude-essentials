@@ -358,6 +358,93 @@ def test_template_list_has_exact_stable_text_output(
     assert result == _Result(0, "parallel-review\nreviewed-change\n", "")
 
 
+@pytest.mark.parametrize(
+    ("template", "expected"),
+    (
+        (
+            "reviewed-change",
+            {
+                "compile_order": ["release-review", "release"],
+                "dependencies": {
+                    "release": ["release-review"],
+                    "release-review": [],
+                },
+                "name": "release",
+                "roles": {"parent": "release", "review": "release-review"},
+                "sources": {
+                    "parent": "parent.workflow.yaml",
+                    "review": "review.workflow.yaml",
+                },
+                "template": "reviewed-change",
+            },
+        ),
+        (
+            "parallel-review",
+            {
+                "compile_order": [
+                    "release-security-review",
+                    "release-architecture-review",
+                    "release",
+                ],
+                "dependencies": {
+                    "release": [
+                        "release-security-review",
+                        "release-architecture-review",
+                    ],
+                    "release-security-review": [],
+                    "release-architecture-review": [],
+                },
+                "name": "release",
+                "roles": {
+                    "parent": "release",
+                    "security-review": "release-security-review",
+                    "architecture-review": "release-architecture-review",
+                },
+                "sources": {
+                    "parent": "parent.workflow.yaml",
+                    "security-review": "security-review.workflow.yaml",
+                    "architecture-review": "architecture-review.workflow.yaml",
+                },
+                "template": "parallel-review",
+            },
+        ),
+    ),
+)
+def test_template_show_has_exact_authored_json_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    template: str,
+    expected: dict,
+) -> None:
+    result = _run_cli(
+        monkeypatch, capsys, tmp_path, "template", "show", template, "release"
+    )
+
+    assert result == _Result(
+        0,
+        json.dumps(expected, sort_keys=True) + "\n",
+        "",
+    )
+
+
+@pytest.mark.parametrize("template", ("reviewed-change", "parallel-review"))
+def test_template_init_has_exact_authored_text_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    template: str,
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+
+    result = _run_cli(
+        monkeypatch, capsys, project, "template", "init", template, "release"
+    )
+
+    assert result == _Result(0, "initialized release\n", "")
+
+
 def test_generated_start_preflight_mints_canonical_match_proof(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

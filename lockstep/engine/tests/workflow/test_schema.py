@@ -8,7 +8,6 @@ import pytest
 from lockstep.workflow.diagnostics import DiagnosticError
 from lockstep.workflow.schema import load_workflow, load_workflow_bytes, parse_workflow
 
-
 BASE = '''\
 workflow_version: "1"
 name: release
@@ -116,7 +115,7 @@ def test_loader_rejects_more_than_fifty_thousand_yaml_nodes(
     workflow_file: Path,
 ) -> None:
     nested = "".join(
-        f"-\n" + "".join(f"  - n-{group}-{index}\n" for index in range(9_000))
+        "-\n" + "".join(f"  - n-{group}-{index}\n" for index in range(9_000))
         for group in range(6)
     ).encode()
 
@@ -338,6 +337,88 @@ def test_call_export_requires_an_explicit_id(workflow_file: Path) -> None:
     )
 
     assert raises_diagnostic("LSW106", workflow_file).pointer == "/flow/0/call"
+
+
+def test_step_artifact_parses_as_the_exact_frozen_export_shape(
+    workflow_file: Path,
+) -> None:
+    workflow_file.write_text(
+        BASE
+        + '''\
+flow:
+- step: review
+  task: Review the change
+  exit: Review is complete
+  writes: [review.md]
+  artifact:
+    handle: review
+    path: review.md
+    markdown:
+      sections: [Findings, Verdict]
+'''
+    )
+
+    artifact = parse_workflow(load_workflow(workflow_file)).flow[0].artifact
+
+    assert (artifact.handle, artifact.path) == ("review", "review.md")
+    assert artifact.markdown.sections == ("Findings", "Verdict")
+    with pytest.raises((AttributeError, TypeError)):
+        artifact.handle = "other"
+
+
+@pytest.mark.parametrize(
+    ("artifact", "pointer"),
+    [
+        ("    path: review.md\n    markdown: {sections: [Findings]}\n", "/flow/0/artifact"),
+        ("    handle: review\n    markdown: {sections: [Findings]}\n", "/flow/0/artifact"),
+        ("    handle: review\n    path: review.md\n", "/flow/0/artifact"),
+        ("    handle: review\n    path: review.md\n    markdown: {}\n", "/flow/0/artifact/markdown"),
+        ("    handle: review\n    path: review.md\n    markdown: {sections: [Findings]}\n    extra: true\n", "/flow/0/artifact/extra"),
+        ("    handle: review\n    path: review.md\n    markdown: {sections: [Findings], extra: true}\n", "/flow/0/artifact/markdown/extra"),
+        ("    handle: review\n    path: review.md\n    markdown: {sections: Findings}\n", "/flow/0/artifact/markdown/sections"),
+        ("    handle: review\n    path: review.md\n    markdown: {sections: []}\n", "/flow/0/artifact/markdown/sections"),
+        ("    handle: review\n    path: review.md\n    markdown: {sections: ['']}\n", "/flow/0/artifact/markdown/sections/0"),
+        ("    handle: review\n    path: review.md\n    markdown: {sections: [Findings, Findings]}\n", "/flow/0/artifact/markdown/sections/1"),
+        ("    handle: review\n    path: review.md\n    markdown: {sections: [7]}\n", "/flow/0/artifact/markdown/sections/0"),
+    ],
+)
+def test_step_artifact_rejects_non_closed_or_invalid_markdown_shape(
+    workflow_file: Path, artifact: str, pointer: str
+) -> None:
+    workflow_file.write_text(
+        BASE
+        + "flow:\n"
+        + "- step: review\n"
+        + "  task: Review the change\n"
+        + "  exit: Review is complete\n"
+        + "  writes: [review.md]\n"
+        + "  artifact:\n"
+        + artifact
+    )
+
+    assert raises_diagnostic("LSW1", workflow_file).pointer == pointer
+
+
+def test_artifact_headings_remain_subject_to_the_existing_yaml_budgets(
+    workflow_file: Path,
+) -> None:
+    headings = ", ".join(f"Heading {index}" for index in range(10_001))
+    workflow_file.write_text(
+        BASE
+        + "flow:\n"
+        + "- step: review\n"
+        + "  task: Review the change\n"
+        + "  exit: Review is complete\n"
+        + "  writes: [review.md]\n"
+        + "  artifact:\n"
+        + "    handle: review\n"
+        + "    path: review.md\n"
+        + f"    markdown: {{sections: [{headings}]}}\n"
+    )
+
+    error = raises_diagnostic("LSW111", workflow_file)
+
+    assert "collection" in error.message
 
 
 def test_core_blocks_parse_into_typed_ir(workflow_file: Path) -> None:

@@ -2,8 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import time
+from collections import Counter
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from itertools import pairwise
 from pathlib import Path
+
+import pytest
 
 from lockstep.recipe import yamlgraph_adapter as yg
 from lockstep.runtime.effects.descriptors import (
@@ -11,10 +19,367 @@ from lockstep.runtime.effects.descriptors import (
     derive_effect_id,
     parse_effect_descriptor,
 )
-from lockstep.runtime.effects.models import ScopeDescriptor, ScopeResult
+from lockstep.runtime.effects.models import (
+    AcceptDescriptor,
+    ScopeDescriptor,
+    ScopeResult,
+)
+from lockstep.runtime.effects.owner_policy import RuntimeRequirementIndex
+from lockstep.runtime.effects.owner_provisioning import provision_runtime_snapshot
+from lockstep.runtime.engine import Engine
+from lockstep.runtime.graph_runtime import GraphRuntime
+from lockstep.runtime.providers.codex import CodexRunnerAdapter
+from lockstep.runtime.service import preflight_recipe
+from lockstep.templates import install_template
 from lockstep.workflow.compiler import compile_workflow
 from lockstep.workflow.schema import load_workflow, parse_workflow
 from lockstep.workflow.semantics import InMemoryWorkflowCatalog, validate_semantics
+from tests.runtime._runtime_commitment_harness import _runtime_config
+
+CONTROLLED_EFFECT = (
+    Path(__file__).parents[1] / "fixtures" / "controlled_effect_executable.py"
+)
+
+
+@dataclass(frozen=True)
+class _PublicParallelTrace:
+    resume_batch_sizes: tuple[int, ...]
+    resume_batch_schemas: tuple[tuple[str, ...], ...]
+    workspace_refs: tuple[str, ...]
+    artifact_refs: tuple[str, ...]
+    artifact_paths: tuple[str, ...]
+    bearer_tokens: tuple[str, ...]
+    consent_refs: tuple[str, ...]
+    receipt_digests: tuple[str, ...]
+    spawn_effect_ids: tuple[str, ...]
+    joined_value: object
+    terminal: dict[str, object]
+
+
+def _wait_for(command, predicate, *, timeout: float = 15.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if command._pump_failure is not None:
+            raise command._pump_failure
+        value = predicate()
+        if value:
+            return value
+        time.sleep(0.02)
+    pytest.fail("public parallel-review lifecycle timed out")
+
+
+def _pending_acceptances(command, run_id: str) -> tuple[AcceptDescriptor, ...]:
+    snapshot = command.runtime.snapshot(run_id, subgraphs=True)
+    descriptors = []
+    for interrupt in snapshot.pending:
+        descriptor = command._protected_interrupt_descriptor(interrupt)
+        if isinstance(descriptor, AcceptDescriptor):
+            descriptors.append(descriptor)
+    return tuple(descriptors)
+
+
+def _run_public_parallel_review_lifecycle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> _PublicParallelTrace:
+    """Drive the packaged parallel review through real owner-bound adapters."""
+
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "tracked.txt").write_bytes(b"parallel review input\n")
+    template_state = tmp_path / "template-owner-state"
+    install_template("parallel-review", "release", project, state_dir=template_state)
+    recipes = project / ".lockstep" / "recipes"
+    authorized = preflight_recipe(recipes, "release")
+    requirements = RuntimeRequirementIndex.for_authorized_closure(
+        authorized,
+        project_identity=str(project.resolve()),
+    )
+    assert len(requirements.requirements) == 2
+    assert {item.runner_selector for item in requirements.requirements} == {"codex"}
+
+    config = _runtime_config(tmp_path)
+    for selector in ("codex", "pinned"):
+        binding = config[selector]
+        assert isinstance(binding, dict)
+        binding["executable"] = str(CONTROLLED_EFFECT)
+    codex_environment = config["codex"]["environment"]
+    assert isinstance(codex_environment, dict)
+    barrier = (
+        Path(codex_environment["TMPDIR"])
+        / "lockstep-controlled-two-process-barrier"
+    )
+    barrier.mkdir()
+    codex = config["codex"]
+    pinned = config["pinned"]
+    assert isinstance(codex, dict)
+    assert isinstance(pinned, dict)
+    owner_state = tmp_path / "owner-state"
+    monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(owner_state))
+    provision_runtime_snapshot(
+        state_dir=owner_state,
+        codex=codex,
+        pinned=pinned,
+        replacement_keys=tuple(
+            item.grant_selection_key for item in requirements.requirements
+        ),
+        index=requirements,
+        project=project,
+    )
+
+    resume_batches: list[tuple[str, ...]] = []
+    resume_schemas: list[tuple[str, ...]] = []
+    spawn_calls: list[tuple[CodexRunnerAdapter, str]] = []
+    original_resume = GraphRuntime.resume
+    original_ensure_started = CodexRunnerAdapter.ensure_started
+
+    def observe_resume(runtime, run_id, source, results_by_interrupt_id):
+        resume_batches.append(tuple(sorted(results_by_interrupt_id)))
+        resume_schemas.append(
+            tuple(
+                sorted(str(result.get("schema")) for result in results_by_interrupt_id.values())
+            )
+        )
+        return original_resume(runtime, run_id, source, results_by_interrupt_id)
+
+    def observe_ensure_started(adapter, launch):
+        spawn_calls.append((adapter, launch.effect_id))
+        return original_ensure_started(adapter, launch)
+
+    monkeypatch.setattr(GraphRuntime, "resume", observe_resume)
+    monkeypatch.setattr(CodexRunnerAdapter, "ensure_started", observe_ensure_started)
+    command = Engine.command(owner_state, recipes)
+    restarted = None
+    try:
+        started = command.start("release", {}, str(project))
+        run_id = started["run_id"]
+
+        managed = _wait_for(
+            command,
+            lambda: (
+                records
+                if len(records := tuple(
+                    record
+                    for record in command.effects.list_for_thread(
+                        command.catalog.get(run_id).thread_id
+                    )
+                    if record.effect_kind == "managed"
+                )) == 2
+                and all(record.phase == "delivered" for record in records)
+                else None
+            ),
+        )
+        assert all(record.result is not None for record in managed)
+        managed_by_effect = {record.effect_id: record for record in managed}
+        assert Counter(effect_id for _adapter, effect_id in spawn_calls) == Counter(
+            {effect_id: 1 for effect_id in managed_by_effect}
+        )
+        runner = command._runtime_execution_composition.runners.codex
+        assert type(runner) is CodexRunnerAdapter
+        assert runner.spawn_count == 2
+        assert {id(adapter) for adapter, _effect_id in spawn_calls} == {id(runner)}
+        workspace_refs = tuple(record.workspace_ref for record in managed)
+        assert None not in workspace_refs
+        assert len(set(workspace_refs)) == 2
+        artifact_refs = tuple(
+            record.result.artifact_refs[0]  # type: ignore[union-attr]
+            for record in managed
+        )
+        assert len(set(artifact_refs)) == 2
+        artifacts = tuple(command.artifacts.read(ref) for ref in artifact_refs)
+        assert {item.source_path for item in artifacts} == {
+            "security-review.md",
+            "architecture-review.md",
+        }
+        artifact_bytes = {
+            str(artifact.ref): command.blobs.read(artifact.blob)
+            for artifact in artifacts
+        }
+        for artifact in artifacts:
+            producer = managed_by_effect[artifact.producer_effect_id]
+            assert str(artifact.ref) in producer.result.artifact_refs
+            assert artifact.public_run_id == run_id
+            assert artifact.project_identity == str(project.resolve())
+            assert artifact.definition_digest == command.catalog.get(
+                run_id
+            ).recipe_digest
+            assert artifact.producer_request_digest == producer.request_digest
+            assert artifact.workspace_ref == producer.workspace_ref
+            assert artifact.producer_coordinate == producer.coordinate
+            assert artifact.descriptor_digest == producer.descriptor_digest
+            assert artifact.blob.digest == hashlib.sha256(
+                artifact_bytes[str(artifact.ref)]
+            ).hexdigest()
+            assert artifact.blob.size == len(artifact_bytes[str(artifact.ref)])
+        intervals = []
+        for artifact in artifacts:
+            lines = command.blobs.read(artifact.blob).decode().splitlines()
+            intervals.append(
+                (
+                    int(next(line for line in lines if line.startswith("started_ns: ")).split()[1]),
+                    int(next(line for line in lines if line.startswith("ended_ns: ")).split()[1]),
+                )
+            )
+        assert max(start for start, _end in intervals) < min(
+            end for _start, end in intervals
+        )
+        assert any(len(batch) == 2 for batch in resume_batches)
+        assert resume_schemas.count(
+            ("lockstep.effect-result/v1", "lockstep.effect-result/v1")
+        ) == 1
+
+        first_acceptances = _wait_for(
+            command, lambda: _pending_acceptances(command, run_id)
+        )
+        assert len(first_acceptances) == 1
+        first_descriptor = first_acceptances[0]
+        first_preview = command.preview_publication_consent(
+            run_id, first_descriptor.logical_id, project=str(project)
+        )
+        first = command.issue_publication_consent(
+            run_id,
+            first_descriptor.logical_id,
+            first_preview["digest"],
+            project=str(project),
+        )
+        after_first = command.scenario_accept_artifact(first.token, project=str(project))
+        assert after_first["status"] == "awaiting"
+        command.close()
+
+        restarted = Engine.command(owner_state, recipes)
+        restarted.scenario_recover(str(project), limit=128)
+        second_acceptances = _wait_for(
+            restarted, lambda: _pending_acceptances(restarted, run_id)
+        )
+        assert len(second_acceptances) == 1
+        second_descriptor = second_acceptances[0]
+        second_preview = restarted.preview_publication_consent(
+            run_id, second_descriptor.logical_id, project=str(project)
+        )
+        second = restarted.issue_publication_consent(
+            run_id,
+            second_descriptor.logical_id,
+            second_preview["digest"],
+            project=str(project),
+        )
+        terminal = restarted.scenario_accept_artifact(
+            second.token, project=str(project)
+        )
+        assert terminal == {
+            "status": "completed",
+            "run_id": run_id,
+            "owner": "engine",
+            "next_action": None,
+        }
+        assert len(spawn_calls) == 2
+        assert restarted._runtime_execution_composition.runners.codex.spawn_count == 0
+
+        records = restarted.effects.list_for_thread(
+            restarted.catalog.get(run_id).thread_id
+        )
+        acceptance_records = tuple(
+            record
+            for record in records
+            if record.effect_kind == "accept" and record.result is not None
+        )
+        accepted = tuple(record.result for record in acceptance_records)
+        assert len(accepted) == 2
+        consent_refs = tuple(result.consent_ref for result in accepted)
+        receipt_digests = tuple(result.receipt_digest for result in accepted)
+        assert first.token != second.token
+        assert len(set(consent_refs)) == len(set(receipt_digests)) == 2
+        assert resume_schemas.count(("lockstep.acceptance-result/v1",)) == 2
+        expected_destinations = {
+            "security-review.md": ".lockstep/security-review.md",
+            "architecture-review.md": ".lockstep/architecture-review.md",
+        }
+        artifacts_by_ref = {str(artifact.ref): artifact for artifact in artifacts}
+        descriptors_by_digest = {
+            descriptor.digest: descriptor
+            for descriptor in (first_descriptor, second_descriptor)
+        }
+        assert set(descriptors_by_digest) == {
+            record.descriptor_digest for record in acceptance_records
+        }
+        assert {result.artifact_ref for result in accepted} == set(artifacts_by_ref)
+        for record in acceptance_records:
+            result = record.result
+            assert result is not None
+            artifact = artifacts_by_ref[result.artifact_ref]
+            descriptor = descriptors_by_digest[record.descriptor_digest]
+            destination = expected_destinations[artifact.source_path]
+            assert result.artifact_digest == artifact.blob.digest
+            assert result.destination == descriptor.destination == destination
+            assert descriptor.artifact_handle.endswith(f".{artifact.declared_name}")
+            assert result.transformation == "identity"
+            assert result.audience == "local-project"
+            assert (project / destination).read_bytes() == artifact_bytes[
+                result.artifact_ref
+            ]
+
+        history = tuple(restarted.runtime.history(run_id))
+        join_schedules = tuple(
+            (index, snapshot)
+            for index, snapshot in enumerate(history)
+            if len(snapshot.next) == 1
+            and snapshot.next[0].startswith("parallel-0-join-")
+        )
+        assert len(join_schedules) == 1
+        join_index, join_schedule = join_schedules[0]
+        assert "reviews_result" not in join_schedule.values
+        assert join_index > 0
+        assert history[join_index - 1].values["reviews_result"] == {
+            "outcome": "PASS",
+            "value": "pass",
+        }
+        joined = ["reviews_result" in snapshot.values for snapshot in history]
+        assert any(joined)
+        assert sum(left != right for left, right in pairwise(joined)) == 1
+        joined_values = {
+            json.dumps(snapshot.values["reviews_result"], sort_keys=True)
+            for snapshot in history
+            if "reviews_result" in snapshot.values
+        }
+        assert len(joined_values) == 1
+        joined_value = json.loads(next(iter(joined_values)))
+        assert joined_value == {"outcome": "PASS", "value": "pass"}
+        assert (project / ".lockstep/security-review.md").is_file()
+        assert (project / ".lockstep/architecture-review.md").is_file()
+        return _PublicParallelTrace(
+            resume_batch_sizes=tuple(len(batch) for batch in resume_batches),
+            resume_batch_schemas=tuple(resume_schemas),
+            workspace_refs=workspace_refs,  # type: ignore[arg-type]
+            artifact_refs=artifact_refs,
+            artifact_paths=tuple(item.source_path for item in artifacts),
+            bearer_tokens=(first.token, second.token),
+            consent_refs=consent_refs,
+            receipt_digests=receipt_digests,
+            spawn_effect_ids=tuple(effect_id for _adapter, effect_id in spawn_calls),
+            joined_value=joined_value,
+            terminal=terminal,
+        )
+    finally:
+        command.close()
+        if restarted is not None:
+            restarted.close()
+
+
+def test_packaged_parallel_review_overlaps_real_adapters_and_joins_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trace = _run_public_parallel_review_lifecycle(tmp_path, monkeypatch)
+
+    assert 2 in trace.resume_batch_sizes
+    assert len(set(trace.workspace_refs)) == 2
+    assert len(set(trace.artifact_refs)) == 2
+    assert len(trace.spawn_effect_ids) == len(set(trace.spawn_effect_ids)) == 2
+    assert set(trace.artifact_paths) == {
+        "security-review.md",
+        "architecture-review.md",
+    }
+    assert trace.joined_value == {"outcome": "PASS", "value": "pass"}
+    assert trace.terminal["status"] == "completed"
 
 
 def _compile(tmp_path: Path, *, bounded: bool = False) -> Path:

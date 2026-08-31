@@ -1,15 +1,23 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
+import yaml
+
 from lockstep.runtime.effects.authority import EffectAuthorityDenied
+from lockstep.runtime.effects.descriptors import parse_effect_descriptor
 from lockstep.runtime.engine import Engine
 from lockstep.runtime.project_snapshots import ProjectSnapshotRef
 from lockstep.runtime.service import LockstepCommandService
 from lockstep.workflow.compiler import compile_workflow
 from lockstep.workflow.schema import load_workflow, parse_workflow
-from lockstep.workflow.semantics import ResolvedCatalog, validate_semantics
-
+from lockstep.workflow.semantics import (
+    ResolvedCatalog,
+    validate_semantics,
+)
+from tests._managed_projection_fixture import managed_projection_compile
 from tests.runtime.providers.fakes import (
     FakeEffectAuthority,
     FakeRunner,
@@ -45,6 +53,153 @@ def _compile(tmp_path: Path, name: str, flow: str):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(content)
     return recipes, result
+
+
+def test_codex_child_projects_an_exact_managed_brief_and_runtime_inputs(
+    tmp_path: Path,
+) -> None:
+    original, compiled = managed_projection_compile(tmp_path)
+    specialized = yaml.safe_load(compiled.generated_files[0].content)
+    managed_name, managed_node = next(
+        (name, node)
+        for name, node in specialized["nodes"].items()
+        if node.get("message", {}).get("lockstep_effect", {}).get("kind")
+        == "managed"
+    )
+    namespace = managed_name.split(".", 1)[0]
+    original_name = managed_name.split(".", 1)[1]
+    original_node = original["nodes"][original_name]
+    expected_brief = (
+        "Task:\nReview the implementation for correctness.\n\n"
+        "Exit criterion:\nRecord findings and a final verdict.\n\n"
+        "Artifact path: review.md\n"
+        "Requested Markdown headings: Findings, Verdict\n"
+    )
+    expected_key = "managed_brief_" + hashlib.sha256(
+        b"lockstep.managed-brief/v1\0"
+        + namespace.encode("utf-8")
+        + b"\0review"
+    ).hexdigest()
+    stable_digest = hashlib.sha256(
+        b"lockstep.workflow-node/v1\0/flow/0\0step\0managed-brief"
+    ).hexdigest()[:12]
+    brief_name = f"{namespace}.step-0-managed-brief-{stable_digest}"
+
+    assert specialized["state"][expected_key] == "str"
+    assert specialized["nodes"][brief_name] == {
+        "type": "passthrough",
+        "output": {expected_key: expected_brief},
+    }
+    assert specialized["nodes"][brief_name]["output"][expected_key].encode(
+        "utf-8"
+    ) == expected_brief.encode("utf-8")
+
+    original_incoming = [
+        edge for edge in original["edges"] if edge["to"] == original_name
+    ]
+    specialized_incoming = [
+        edge for edge in specialized["edges"] if edge["to"] == brief_name
+    ]
+    assert specialized_incoming == [
+        {
+            **edge,
+            "from": (
+                edge["from"]
+                if edge["from"] in {"START", "END"}
+                else f"{namespace}.{edge['from']}"
+            ),
+            "to": brief_name,
+        }
+        for edge in original_incoming
+    ]
+    assert not [
+        edge
+        for edge in specialized["edges"]
+        if edge["to"] == managed_name and edge["from"] != brief_name
+    ]
+    assert [
+        edge
+        for edge in specialized["edges"]
+        if edge["from"] == brief_name and edge["to"] == managed_name
+    ] == [{"from": brief_name, "to": managed_name}]
+    expected_edges = []
+    for original_edge in original["edges"]:
+        edge = dict(original_edge)
+        edge["from"] = (
+            edge["from"]
+            if edge["from"] in {"START", "END"}
+            else f"{namespace}.{edge['from']}"
+        )
+        edge["to"] = (
+            brief_name
+            if edge["to"] == original_name
+            else (
+                edge["to"]
+                if edge["to"] in {"START", "END"}
+                else f"{namespace}.{edge['to']}"
+            )
+        )
+        expected_edges.append(edge)
+    expected_edges.append({"from": brief_name, "to": managed_name})
+    def canonical_edge(edge):
+        return json.dumps(edge, sort_keys=True)
+
+    assert sorted(map(canonical_edge, specialized["edges"])) == sorted(
+        map(canonical_edge, expected_edges)
+    )
+
+    descriptor = managed_node["message"]["lockstep_effect"]
+    parsed = parse_effect_descriptor(
+        descriptor, known_state_keys=set(specialized["state"])
+    )
+    expected_logical_digest = hashlib.sha256(
+        b"lockstep.specialized-logical-id/v1\0"
+        + namespace.encode("ascii")
+        + b"\0review"
+    ).hexdigest()
+    assert descriptor == {
+        "schema": "lockstep.effect/v1",
+        "kind": "managed",
+        "logical_id": f"child-{expected_logical_digest}",
+        "runner": {
+            "selector": "codex",
+            "required_capabilities": [
+                "bounded_result",
+                "credentials",
+                "network",
+                "sandbox",
+                "workspace",
+            ],
+        },
+        "inputs": {
+            "brief": {"state_key": expected_key},
+            "snapshot": {"runtime_key": "current_project_snapshot"},
+        },
+        "writes": ["review.md"],
+        "artifacts": [
+            {
+                "name": "review",
+                "source_path": "review.md",
+                "media_type": "text/markdown",
+                "required": True,
+            }
+        ],
+        "deadline_seconds": None,
+        "scope_state_keys": [f"{namespace}_scope_result"],
+        "result_schema": "lockstep.effect-result/v1",
+    }
+    assert parsed.inputs[0][0] == "brief"
+    assert parsed.inputs[1][0] == "snapshot"
+    assert managed_node["state_key"] == f"{namespace}_review_request"
+    assert specialized["state"][managed_node["state_key"]] == "dict"
+    assert managed_node["resume_key"] == f"{namespace}_review_result"
+    assert specialized["state"][managed_node["resume_key"]] == "dict"
+    assert managed_node["message"]["artifact_contract"] == {
+        "handle": "review",
+        "path": "review.md",
+        "markdown": {"sections": ["Findings", "Verdict"]},
+    }
+    assert original_node["message"]["lockstep_effect"]["kind"] == "manual"
 
 
 def test_runtime_snapshot_input_is_durable_and_reused_after_restart(

@@ -10,8 +10,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import yaml
 import pytest
+import yaml
 
 from lockstep.recipe import yamlgraph_adapter as yg
 from lockstep.runtime.effects.descriptors import parse_effect_descriptor
@@ -540,6 +540,50 @@ def test_specialization_preserves_topology_and_leaves_standalone_manual_bytes_st
     assert descriptor["runner"]["selector"] == "reviewer"
 
 
+def test_standalone_exported_step_remains_manual_and_declares_exact_artifact(
+    tmp_path: Path,
+) -> None:
+    workflow = _workflow(
+        tmp_path,
+        "standalone-export",
+        "  - step: review\n"
+        "    task: Review the change\n"
+        "    'exit': Review is complete\n"
+        "    writes: [review.md]\n"
+        "    artifact:\n"
+        "      handle: review\n"
+        "      path: review.md\n"
+        "      markdown: {sections: [Findings, Verdict]}\n",
+    )
+    catalog = ResolvedCatalog()
+
+    compiled = compile_workflow(validate_semantics(workflow, catalog), catalog)
+    document = yaml.safe_load(compiled.recipe_bytes)
+    message = next(
+        node["message"]
+        for node in document["nodes"].values()
+        if node.get("message", {}).get("lockstep_effect", {}).get("logical_id")
+        == "review"
+    )
+
+    assert message["lockstep_effect"]["kind"] == "manual"
+    assert message["lockstep_effect"]["runner"] is None
+    assert message["lockstep_effect"]["writes"] == ["review.md"]
+    assert message["lockstep_effect"]["artifacts"] == [
+        {
+            "name": "review",
+            "source_path": "review.md",
+            "media_type": "text/markdown",
+            "required": True,
+        }
+    ]
+    assert message["artifact_contract"] == {
+        "handle": "review",
+        "path": "review.md",
+        "markdown": {"sections": ["Findings", "Verdict"]},
+    }
+
+
 def test_accept_after_child_artifact_bridge_lowers_exact_publish(
     tmp_path: Path,
 ) -> None:
@@ -701,6 +745,7 @@ def test_child_artifact_contract_preserves_exact_producer_declaration_and_result
         b"nodes:\n  review:\n    type: interrupt\n"
         b"    state_key: review_request\n    resume_key: review_result\n"
         b"    idempotent: false\n    message:\n"
+        b"      artifact_contract: {handle: review, path: review.md, markdown: {sections: [Findings, Verdict]}}\n"
         b"      lockstep_effect:\n        schema: lockstep.effect/v1\n"
         b"        kind: manual\n        logical_id: review\n        runner: null\n"
         b"        inputs: {}\n        writes: [review.md]\n"
@@ -736,6 +781,11 @@ def test_child_artifact_contract_preserves_exact_producer_declaration_and_result
         "source_path": "review.md",
         "media_type": "text/markdown",
         "required": True,
+    }
+    assert producer["message"]["artifact_contract"] == {
+        "handle": "review",
+        "path": "review.md",
+        "markdown": {"sections": ["Findings", "Verdict"]},
     }
     bridge_key = publish["items"][0]["producer_result_state_key"]
     assert publish["items"][0]["declared_name"] == "review"

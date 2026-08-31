@@ -5,7 +5,10 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import timedelta
 
-from lockstep.runtime.effects.descriptors import derive_effect_id, parse_effect_descriptor
+from lockstep.runtime.effects.descriptors import (
+    derive_effect_id,
+    parse_effect_descriptor,
+)
 from lockstep.runtime.native_models import NativeCoordinate, NativeInterrupt
 from lockstep.runtime.providers.base import EffectRequest, TerminalSafetyObservation
 from lockstep.runtime.status import project_status
