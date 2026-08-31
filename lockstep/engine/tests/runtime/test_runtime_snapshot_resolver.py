@@ -97,12 +97,21 @@ def test_codex_child_projects_an_exact_managed_brief_and_runtime_inputs(
     original_incoming = [
         edge for edge in original["edges"] if edge["to"] == original_name
     ]
+    def expected_specialized_condition(edge):
+        expected = dict(edge)
+        condition = expected.get("condition")
+        if isinstance(condition, str):
+            for state_key in ("lockstep_continue", "review_result"):
+                condition = condition.replace(state_key, f"{namespace}_{state_key}")
+            expected["condition"] = condition
+        return expected
+
     specialized_incoming = [
         edge for edge in specialized["edges"] if edge["to"] == brief_name
     ]
     assert specialized_incoming == [
         {
-            **edge,
+            **expected_specialized_condition(edge),
             "from": (
                 edge["from"]
                 if edge["from"] in {"START", "END"}
@@ -124,7 +133,7 @@ def test_codex_child_projects_an_exact_managed_brief_and_runtime_inputs(
     ] == [{"from": brief_name, "to": managed_name}]
     expected_edges = []
     for original_edge in original["edges"]:
-        edge = dict(original_edge)
+        edge = expected_specialized_condition(original_edge)
         edge["from"] = (
             edge["from"]
             if edge["from"] in {"START", "END"}

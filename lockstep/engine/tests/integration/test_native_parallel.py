@@ -80,6 +80,13 @@ def _pending_acceptances(command, run_id: str) -> tuple[AcceptDescriptor, ...]:
     return tuple(descriptors)
 
 
+def _terminal_status(command, project: Path, run_id: str):
+    observed = Engine.observe(command.state_dir, command.recipes_dir).status(
+        run_id, str(project)
+    )
+    return observed if observed["status"] == "completed" else None
+
+
 def _run_public_parallel_review_lifecycle(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -245,7 +252,8 @@ def _run_public_parallel_review_lifecycle(
             project=str(project),
         )
         after_first = command.scenario_accept_artifact(first.token, project=str(project))
-        assert after_first["status"] == "awaiting"
+        assert after_first["status"] in {"running", "awaiting"}
+        assert len(_wait_for(command, lambda: _pending_acceptances(command, run_id))) == 1
         command.close()
 
         restarted = Engine.command(owner_state, recipes)
@@ -264,8 +272,11 @@ def _run_public_parallel_review_lifecycle(
             second_preview["digest"],
             project=str(project),
         )
-        terminal = restarted.scenario_accept_artifact(
+        restarted.scenario_accept_artifact(
             second.token, project=str(project)
+        )
+        terminal = _wait_for(
+            restarted, lambda: _terminal_status(restarted, project, run_id)
         )
         assert terminal == {
             "status": "completed",

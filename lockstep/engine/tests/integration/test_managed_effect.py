@@ -70,6 +70,24 @@ def _wait_for_public_worker_step(
     pytest.fail(f"public lifecycle did not reach worker step {step!r}")
 
 
+def _wait_for_public_terminal(
+    command, project: Path, run_id: str, *, timeout: float = 20.0
+) -> dict[str, object]:
+    projection = Engine.observe(command.state_dir, command.recipes_dir)
+    deadline = time.monotonic() + timeout
+    try:
+        while time.monotonic() < deadline:
+            if command._pump_failure is not None:
+                raise command._pump_failure
+            observed = projection.status(run_id, str(project))
+            if observed.get("status") == "completed":
+                return observed
+            time.sleep(0.02)
+    finally:
+        projection.close()
+    pytest.fail("public lifecycle did not reach terminal completion")
+
+
 def _public_compiled_managed_closure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     project = tmp_path / "project"
     project.mkdir()
@@ -421,10 +439,11 @@ def test_reviewed_change_survives_restart_and_publishes_only_with_fresh_consent(
         assert stored.commitment.to_dict() == preview
         assert stored.receipt_digest is None
 
-        result = reopened.scenario_accept_artifact(
+        reopened.scenario_accept_artifact(
             issued.token,
             project=str(project),
         )
+        result = _wait_for_public_terminal(reopened, project, run_id)
         redeemed = reopened.authority.inspect_token(issued.token)
         assert redeemed.receipt_digest is not None
         assert result == {
@@ -770,8 +789,8 @@ def test_public_acceptance_rejects_every_wrong_commitment_without_mutation(
         issued = command.issue_publication_consent(
             run_id, accept_step, preview["digest"], project=str(project)
         )
-        completed = command.scenario_accept_artifact(issued.token, project=str(project))
-        assert completed["status"] == "completed"
+        command.scenario_accept_artifact(issued.token, project=str(project))
+        completed = _wait_for_public_terminal(command, project, run_id)
         assert (project / ".lockstep" / "review.md").read_bytes() == artifact_bytes
         after_exact = _durable_authority_surface(command, project, run_id, owner_state)
         assert (
