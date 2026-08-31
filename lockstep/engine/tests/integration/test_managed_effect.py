@@ -392,8 +392,9 @@ def test_reviewed_change_survives_restart_and_publishes_only_with_fresh_consent(
         assert first._runtime_execution_composition.runners.codex.spawn_count == 1
         assert first._runtime_execution_composition.runners.pinned.spawn_count == 1
         assert not (project / ".lockstep" / "review.md").exists()
-        first.runtime.bind(binding)
-        pending = first.runtime.snapshot(run_id, subgraphs=True)
+        with first._admission_recovery_lock:
+            first.runtime.bind(binding)
+            pending = first.runtime.snapshot(run_id, subgraphs=True)
         assert len(pending.pending) == 1
         descriptor = first._protected_interrupt_descriptor(pending.pending[0])
         assert descriptor is not None
@@ -540,8 +541,9 @@ def _open_packaged_review_at_pending_acceptance(
         artifact = first.artifacts.read(managed.result.artifact_refs[0])
         artifact_bytes = first.blobs.read(artifact.blob)
         assert artifact_bytes.endswith(b"\n# Verdict\nPASS\n")
-        first.runtime.bind(binding)
-        pending = first.runtime.snapshot(run_id, subgraphs=True)
+        with first._admission_recovery_lock:
+            first.runtime.bind(binding)
+            pending = first.runtime.snapshot(run_id, subgraphs=True)
         accepts = tuple(
             descriptor
             for interrupt in pending.pending
