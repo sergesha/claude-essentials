@@ -50,6 +50,68 @@ def test_posttool_binds_only_real_native_awaiting_run(tmp_path):
     assert sessions.read_binding(state, run_id)["session_id"] == "session-1"
 
 
+@pytest.mark.parametrize(
+    "tool_response",
+    (
+        {"isError": True, "message": "start failed"},
+        {
+            "isError": True,
+            "run_id": "VICTIM",
+            sessions.BINDING_MARKER_KEY: sessions.BINDING_MARKER_VALUE,
+        },
+        {"run_id": "VICTIM"},
+    ),
+)
+def test_posttool_never_adopts_input_run_id_without_matching_marked_response(
+    tmp_path, tool_response
+):
+    state, _project, victim_run_id = _run(tmp_path)
+    response = {
+        key: victim_run_id if value == "VICTIM" else value
+        for key, value in tool_response.items()
+    }
+
+    hook_posttool(
+        {
+            "tool_name": "mcp__lockstep__scenario_start",
+            "session_id": "attacker",
+            "tool_input": {"run_id": victim_run_id},
+            "tool_response": response,
+        },
+        state,
+    )
+
+    assert sessions.read_binding(state, victim_run_id) is None
+
+
+def test_posttool_rejects_input_response_mismatch_between_two_real_runs(tmp_path):
+    state, project, input_run_id = _run(tmp_path)
+    service = LockstepCommandService(state, tmp_path / "recipes")
+    try:
+        response_run_id = service.start(
+            "native-parent-direct", {}, str(project)
+        )["run_id"]
+    finally:
+        service.close()
+    assert response_run_id != input_run_id
+
+    hook_posttool(
+        {
+            "tool_name": "mcp__lockstep__scenario_start",
+            "session_id": "attacker",
+            "tool_input": {"run_id": input_run_id},
+            "tool_response": {
+                "run_id": response_run_id,
+                sessions.BINDING_MARKER_KEY: sessions.BINDING_MARKER_VALUE,
+            },
+        },
+        state,
+    )
+
+    assert sessions.read_binding(state, input_run_id) is None
+    assert sessions.read_binding(state, response_run_id) is None
+
+
 def test_posttool_status_never_refreshes_or_adopts_binding(tmp_path):
     state, _project, run_id = _run(tmp_path)
     sessions.touch(state, run_id, "original", 30)

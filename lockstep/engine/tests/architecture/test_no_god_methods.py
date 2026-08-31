@@ -7920,6 +7920,46 @@ def test_recovery_driver_remediation_matches_exact_analyzer_projection() -> None
     ) not in report.functions
 
 
+def test_hook_decision_remediation_matches_exact_analyzer_projection() -> None:
+    report = _repository_architecture_report()
+    assert report.unresolved_callsites == ()
+    hooks = "src/lockstep/runtime/hooks.py"
+    scoped_paths = {
+        hooks,
+        "src/lockstep/runtime/_hook_stop_decision.py",
+        "src/lockstep/runtime/_hook_pretool_decision.py",
+        "src/lockstep/runtime/_hook_posttool_decision.py",
+    }
+    scoped_candidates = sorted(
+        (kind, identity, metric.composite_score, metric.hard_triggers)
+        for kind in ("functions", "one_hops", "classes", "files")
+        for identity, metric in getattr(report, kind).items()
+        if identity.partition("::")[0] in scoped_paths and metric.candidate
+    )
+    assert scoped_candidates == [
+        (
+            "functions",
+            f"{hooks}::_find_marked_run_id",
+            4,
+            ("cognitive_gt_25", "nesting_gt_4"),
+        ),
+        (
+            "functions",
+            f"{hooks}::_find_run_id",
+            4,
+            ("cognitive_gt_25", "nesting_gt_4"),
+        ),
+    ]
+    for kind, identity in (
+        ("functions", f"{hooks}::hook_stop"),
+        ("functions", f"{hooks}::hook_pretool"),
+        ("one_hops", f"{hooks}::hook_pretool::@one_hop"),
+        ("functions", f"{hooks}::hook_posttool"),
+        ("one_hops", f"{hooks}::hook_posttool::@one_hop"),
+    ):
+        assert not getattr(report, kind)[identity].candidate
+
+
 @pytest.mark.parametrize(
     ("mutation", "reason"),
     (
