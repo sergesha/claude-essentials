@@ -69,6 +69,7 @@ def _wait_for(command, predicate, *, timeout: float = 15.0):
 
 
 def _pending_acceptances(command, run_id: str) -> tuple[AcceptDescriptor, ...]:
+    command.runtime.bind(command.catalog.get(run_id))
     snapshot = command.runtime.snapshot(run_id, subgraphs=True)
     descriptors = []
     for interrupt in snapshot.pending:

@@ -41,6 +41,35 @@ CONTROLLED_EFFECT = (
 )
 
 
+def _wait_for_public_worker_step(
+    command,
+    owner_state: Path,
+    recipes: Path,
+    project: Path,
+    run_id: str,
+    step: str,
+    *,
+    timeout: float = 20.0,
+) -> dict[str, object]:
+    projection = Engine.observe(owner_state, recipes)
+    deadline = time.monotonic() + timeout
+    try:
+        while time.monotonic() < deadline:
+            if command._pump_failure is not None:
+                raise command._pump_failure
+            observed = projection.status(run_id, str(project))
+            if (
+                observed.get("status") == "awaiting"
+                and observed.get("owner") == "worker"
+                and observed.get("step") == step
+            ):
+                return observed
+            time.sleep(0.02)
+    finally:
+        projection.close()
+    pytest.fail(f"public lifecycle did not reach worker step {step!r}")
+
+
 def _public_compiled_managed_closure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     project = tmp_path / "project"
     project.mkdir()
@@ -273,6 +302,9 @@ def test_reviewed_change_survives_restart_and_publishes_only_with_fresh_consent(
     try:
         started = first.start("release", {}, str(project))
         run_id = started["run_id"]
+        _wait_for_public_worker_step(
+            first, owner_state, recipes, project, run_id, "plan"
+        )
         session_id = "reviewed-change-worker"
         assert sessions.touch(owner_state, run_id, session_id, 20) == "bound"
 
@@ -443,6 +475,9 @@ def _open_packaged_review_at_pending_acceptance(
     first = Engine.command(owner_state, recipes)
     try:
         run_id = first.start("release", {}, str(project))["run_id"]
+        _wait_for_public_worker_step(
+            first, owner_state, recipes, project, run_id, "plan"
+        )
         session_id = "adversarial-acceptance-worker"
         assert sessions.touch(owner_state, run_id, session_id, 20) == "bound"
 
