@@ -2,21 +2,45 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable
-from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import and_, delete, func, or_, select, update
+from sqlalchemy import and_, delete, select, update
 from sqlalchemy.exc import IntegrityError
 
 from lockstep.runtime.blobs import BlobRef
 from lockstep.runtime.catalog import RunBinding, RunCatalog
+from lockstep.runtime.effects._ledger_policy import (
+    PRELAUNCH_ERROR_CODES,
+    EffectConflict,
+    IllegalEffectTransition,
+    StaleEffectLease,
+    StaleEffectRevision,
+    _terminal_transition_replay,
+    _transition_values,
+    _validate_effect_preparation,
+    _validate_prelaunch_seal,
+    _validate_prepare_coordinate,
+    _validate_prepare_descriptor,
+    _validate_result_kind,
+    _validate_scope_seal,
+    _validate_transition_facts,
+)
+from lockstep.runtime.effects._ledger_queries import _EffectLedgerQueries
+from lockstep.runtime.effects._ledger_records import (
+    EffectRecord,
+    RunDriveWatch,
+    _PreparedEffectFacts,
+    _binding_digest,
+    _clock_now,
+    _dump,
+    _load,
+    _nonempty,
+    _utc,
+)
 from lockstep.runtime.effects.descriptors import (
     derive_effect_id,
     parse_effect_result,
-    parse_acceptance_result,
-    parse_scope_result,
 )
 from lockstep.runtime.effects.models import (
     AcceptDescriptor,
@@ -31,233 +55,7 @@ from lockstep.runtime.leases import Lease
 from lockstep.runtime.native_models import NativeCoordinate
 from lockstep.runtime.storage import SQLiteStore
 
-PRELAUNCH_ERROR_CODES = frozenset({"prelaunch_failed", "deadline_timeout"})
-
-
-class EffectConflict(RuntimeError):
-    """An immutable effect fact conflicts with an existing fact."""
-
-
-class StaleEffectRevision(RuntimeError):
-    """The caller lost the optimistic concurrency race."""
-
-
-class IllegalEffectTransition(RuntimeError):
-    """The requested phase edge is not part of the monotonic lifecycle."""
-
-
-class StaleEffectLease(RuntimeError):
-    """The supplied effect lease is not the current live fence."""
-
-
-@dataclass(frozen=True, slots=True)
-class RunDriveWatch:
-    """Durable v2 discovery record without workflow or scheduling state."""
-
-    admission_seq: int
-    public_run_id: str
-    input_blob_sha256: str | None
-    input_blob_size: int | None
-    admitted_at: datetime
-
-    def __post_init__(self) -> None:
-        if type(self.admission_seq) is not int or self.admission_seq <= 0:
-            raise ValueError("admission_seq must be a positive integer")
-        if type(self.public_run_id) is not str or not self.public_run_id:
-            raise ValueError("public_run_id must be a non-empty string")
-        if (self.input_blob_sha256 is None) != (self.input_blob_size is None):
-            raise ValueError(
-                "input blob digest and size must both be null or both be non-null"
-            )
-        if self.input_blob_sha256 is not None and (
-            type(self.input_blob_sha256) is not str
-            or len(self.input_blob_sha256) != 64
-            or any(char not in "0123456789abcdef" for char in self.input_blob_sha256)
-        ):
-            raise ValueError(
-                "input_blob_sha256 must be a lowercase SHA-256 digest"
-            )
-        if self.input_blob_size is not None and (
-            type(self.input_blob_size) is not int
-            or self.input_blob_size < 0
-            or self.input_blob_size > 64 * 1024 * 1024
-        ):
-            raise ValueError(
-                "input_blob_size must be a non-negative integer "
-                "not exceeding 64 MiB"
-            )
-        if (
-            not isinstance(self.admitted_at, datetime)
-            or self.admitted_at.tzinfo is None
-            or self.admitted_at.utcoffset() is None
-        ):
-            raise ValueError("admitted_at must be a timezone-aware datetime")
-        object.__setattr__(self, "admitted_at", self.admitted_at.astimezone(UTC))
-
-
-@dataclass(frozen=True)
-class EffectRecord:
-    effect_id: str
-    coordinate: NativeCoordinate
-    descriptor_digest: str
-    effect_kind: str
-    deadline_at: datetime | None
-    phase: str
-    lease_epoch: int
-    runner_binding_digest: str | None
-    workspace_ref: str | None
-    request_digest: str | None
-    grant_digest: str | None
-    launch_commitment_digest: str | None
-    result_ref: str | None
-    fixed_error_code: str | None
-    created_at: datetime
-    updated_at: datetime
-    revision: int
-    result: EffectResult | ScopeResult | AcceptanceResult | None = None
-
-
-@dataclass(frozen=True)
-class _PreparedEffectFacts:
-    effect_id: str
-    coordinate: NativeCoordinate
-    descriptor_digest: str
-    effect_kind: str
-    deadline_at: datetime | None
-    runner_binding_digest: str | None
-    workspace_ref: str | None
-    request_digest: str | None
-    grant_digest: str | None
-    created_at: datetime
-
-    def insert_values(self) -> dict[str, object]:
-        timestamp = _dump(self.created_at)
-        return {
-            "effect_id": self.effect_id,
-            "thread_id": self.coordinate.thread_id,
-            "checkpoint_ns": self.coordinate.checkpoint_ns,
-            "checkpoint_id": self.coordinate.checkpoint_id,
-            "task_id": self.coordinate.task_id,
-            "interrupt_id": self.coordinate.interrupt_id,
-            "descriptor_digest": self.descriptor_digest,
-            "effect_kind": self.effect_kind,
-            "deadline_at": None if self.deadline_at is None else _dump(self.deadline_at),
-            "phase": "prepared",
-            "lease_epoch": 0,
-            "runner_binding_digest": self.runner_binding_digest,
-            "workspace_ref": self.workspace_ref,
-            "request_digest": self.request_digest,
-            "grant_digest": self.grant_digest,
-            "launch_commitment_digest": None,
-            "result_ref": None,
-            "fixed_error_code": None,
-            "created_at": timestamp,
-            "updated_at": timestamp,
-            "revision": 0,
-        }
-
-    def immutable_values(self) -> dict[str, object]:
-        return {
-            "deadline_at": self.deadline_at,
-            "workspace_ref": self.workspace_ref,
-            "request_digest": self.request_digest,
-            "grant_digest": self.grant_digest,
-            "effect_kind": self.effect_kind,
-        }
-
-
-def _utc(value: datetime) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
-        raise ValueError("timestamp must include a timezone")
-    return value.astimezone(UTC)
-
-
-def _dump(value: datetime) -> str:
-    return _utc(value).isoformat()
-
-
-def _load(value: str | None) -> datetime | None:
-    return None if value is None else datetime.fromisoformat(value).astimezone(UTC)
-
-
-def _nonempty(value: str, label: str) -> str:
-    if not isinstance(value, str) or not value or len(value.encode("utf-8")) > 4096:
-        raise ValueError(f"{label} must be a bounded non-empty string")
-    return value
-
-
-def _binding_digest(value: str | None) -> str | None:
-    if value is None:
-        return None
-    if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
-        raise ValueError("runner binding must be a lowercase SHA-256 digest")
-    return value
-
-
-def _validate_prepare_coordinate(coordinate: NativeCoordinate) -> None:
-    for name in ("thread_id", "checkpoint_id", "task_id", "interrupt_id"):
-        _nonempty(getattr(coordinate, name), name)
-    if not isinstance(coordinate.checkpoint_ns, str):
-        raise TypeError("checkpoint_ns must be a string")
-
-
-def _validate_effect_preparation(
-    descriptor: EffectDescriptor,
-    *,
-    deadline: datetime | None,
-    binding: str | None,
-    request: str | None,
-    now: datetime,
-) -> None:
-    if descriptor.kind == "manual" and deadline is not None:
-        raise ValueError("unmanaged manual effect may not bind a deadline")
-    if descriptor.kind != "manual" and binding is None:
-        raise ValueError("managed effect requires a runner binding")
-    if (
-        descriptor.deadline_seconds is not None or descriptor.scope_state_keys
-    ) and deadline is None:
-        raise ValueError("bounded effect requires its resolved deadline")
-    if (
-        descriptor.runner is not None
-        and request is None
-        and (deadline is None or deadline > now)
-    ):
-        raise ValueError(
-            "runnable effect requires exact request and grant commitments"
-        )
-
-
-def _validate_prepare_descriptor(
-    descriptor: EffectDescriptor | ScopeDescriptor | AcceptDescriptor | PublishDescriptor,
-    *,
-    deadline: datetime | None,
-    binding: str | None,
-    request: str | None,
-    grant: str | None,
-    now: datetime,
-) -> None:
-    if isinstance(descriptor, EffectDescriptor):
-        _validate_effect_preparation(
-            descriptor,
-            deadline=deadline,
-            binding=binding,
-            request=request,
-            now=now,
-        )
-        return
-    if isinstance(descriptor, ScopeDescriptor):
-        if descriptor.scope_kind == "call" and binding is None:
-            raise ValueError("call scope requires a runner binding")
-        return
-    if isinstance(descriptor, AcceptDescriptor):
-        if binding is not None or request is not None or grant is not None:
-            raise ValueError("acceptance has no external launch commitment")
-        return
-    if binding is None or request is None or grant is None:
-        raise ValueError("publication requires exact authority commitments")
-
-
-class EffectLedger:
+class EffectLedger(_EffectLedgerQueries):
     """Owns attempt lifecycle facts, never workflow routing or status."""
 
     def __init__(
@@ -268,21 +66,6 @@ class EffectLedger:
     ) -> None:
         self._store = store
         self._clock = clock or (lambda: datetime.now(UTC))
-
-    def _now(self) -> datetime:
-        return _utc(self._clock())
-
-    @staticmethod
-    def _run_drive_watch(row) -> RunDriveWatch:
-        admitted_at = _load(row.admitted_at)
-        assert admitted_at is not None
-        return RunDriveWatch(
-            row.admission_seq,
-            row.public_run_id,
-            row.input_blob_sha256,
-            row.input_blob_size,
-            admitted_at,
-        )
 
     def admit_start(
         self,
@@ -304,7 +87,7 @@ class EffectLedger:
             raise ValueError("start input blob reference is invalid")
         _binding_digest(input_blob.sha256)
         table = self._store.tables.run_drive_watches
-        admitted_at = self._now()
+        admitted_at = _clock_now(self._clock)
         with self._store._v2_write_transaction() as connection:
             admitted_binding = catalog.create_in_transaction(connection, binding)
             if on_admit is not None:
@@ -337,68 +120,6 @@ class EffectLedger:
             ).one()
             return admitted_binding, self._run_drive_watch(inserted)
 
-    def max_run_drive_admission_seq(self) -> int | None:
-        table = self._store.tables.run_drive_watches
-        with self._store.read_connection() as connection:
-            return connection.execute(
-                select(func.max(table.c.admission_seq))
-            ).scalar_one()
-
-    def list_run_drive_watches(
-        self,
-        *,
-        after_admission_seq: int,
-        high_water: int,
-        limit: int,
-    ) -> tuple[RunDriveWatch, ...]:
-        if (
-            type(after_admission_seq) is not int
-            or type(high_water) is not int
-            or not 0 <= after_admission_seq <= high_water
-        ):
-            raise ValueError(
-                "run-drive watch bounds must be integers with "
-                "0 <= after_admission_seq <= high_water"
-            )
-        if type(limit) is not int or not 1 <= limit <= 128:
-            raise ValueError(
-                "run-drive watch limit must be an integer from 1 to 128"
-            )
-        table = self._store.tables.run_drive_watches
-        with self._store.read_connection() as connection:
-            rows = connection.execute(
-                select(table)
-                .where(
-                    table.c.admission_seq > after_admission_seq,
-                    table.c.admission_seq <= high_water,
-                )
-                .order_by(table.c.admission_seq)
-                .limit(limit)
-            ).all()
-        return tuple(self._run_drive_watch(row) for row in rows)
-
-    def list_run_drive_watches_by_public_run_ids(
-        self, public_run_ids: tuple[str, ...]
-    ) -> tuple[RunDriveWatch, ...]:
-        if (
-            type(public_run_ids) is not tuple
-            or not 1 <= len(public_run_ids) <= 128
-            or any(type(value) is not str or not value for value in public_run_ids)
-            or public_run_ids != tuple(sorted(set(public_run_ids)))
-        ):
-            raise ValueError(
-                "run-drive watch IDs must be a sorted unique tuple of 1 to 128 "
-                "non-empty strings"
-            )
-        table = self._store.tables.run_drive_watches
-        with self._store.read_connection() as connection:
-            rows = connection.execute(
-                select(table)
-                .where(table.c.public_run_id.in_(public_run_ids))
-                .order_by(table.c.admission_seq)
-            ).all()
-        return tuple(self._run_drive_watch(row) for row in rows)
-
     def acknowledge_run_drive_watch(self, public_run_id: str) -> None:
         if type(public_run_id) is not str or not public_run_id:
             raise ValueError("public_run_id must be a non-empty string")
@@ -407,189 +128,6 @@ class EffectLedger:
             connection.execute(
                 delete(table).where(table.c.public_run_id == public_run_id)
             )
-
-    def _result_for(
-        self, connection, effect_id: str
-    ) -> EffectResult | ScopeResult | AcceptanceResult | None:
-        observations = self._store.tables.effect_observations
-        row = connection.execute(
-            select(observations.c.result_json)
-            .where(
-                and_(
-                    observations.c.effect_id == effect_id,
-                    observations.c.result_json.is_not(None),
-                )
-            )
-            .order_by(observations.c.revision.desc())
-            .limit(1)
-        ).first()
-        if row is None:
-            return None
-        value = json.loads(row.result_json)
-        if value.get("schema") == "lockstep.scope-result/v1":
-            return parse_scope_result(value)
-        if value.get("schema") == "lockstep.acceptance-result/v1":
-            return parse_acceptance_result(value)
-        return parse_effect_result(value)
-
-    def _from_row(self, connection, row) -> EffectRecord:
-        values = row._mapping
-        return EffectRecord(
-            effect_id=values["effect_id"],
-            coordinate=NativeCoordinate(
-                thread_id=values["thread_id"],
-                checkpoint_id=values["checkpoint_id"],
-                checkpoint_ns=values["checkpoint_ns"],
-                task_id=values["task_id"],
-                interrupt_id=values["interrupt_id"],
-            ),
-            descriptor_digest=values["descriptor_digest"],
-            effect_kind=values["effect_kind"],
-            deadline_at=_load(values["deadline_at"]),
-            phase=values["phase"],
-            lease_epoch=int(values["lease_epoch"]),
-            runner_binding_digest=values["runner_binding_digest"],
-            workspace_ref=values["workspace_ref"],
-            request_digest=values["request_digest"],
-            grant_digest=values["grant_digest"],
-            launch_commitment_digest=values["launch_commitment_digest"],
-            result_ref=values["result_ref"],
-            fixed_error_code=values["fixed_error_code"],
-            created_at=_load(values["created_at"]),
-            updated_at=_load(values["updated_at"]),
-            revision=int(values["revision"]),
-            result=self._result_for(connection, values["effect_id"]),
-        )
-
-    def get(self, effect_id: str) -> EffectRecord:
-        table = self._store.tables.effects
-        with self._store.read_connection() as connection:
-            row = connection.execute(
-                select(table).where(table.c.effect_id == effect_id)
-            ).first()
-            if row is None:
-                raise KeyError(effect_id)
-            return self._from_row(connection, row)
-
-    def list_for_thread(
-        self, thread_id: str, *, limit: int = 10_000
-    ) -> tuple[EffectRecord, ...]:
-        """Bounded read-only observation of durable effect facts."""
-
-        _nonempty(thread_id, "effect thread_id")
-        if type(limit) is not int or not 1 <= limit <= 10_000:
-            raise ValueError("effect observation limit must be from 1 to 10000")
-        table = self._store.tables.effects
-        with self._store.read_connection() as connection:
-            rows = connection.execute(
-                select(table)
-                .where(table.c.thread_id == thread_id)
-                .order_by(table.c.created_at, table.c.effect_id)
-                .limit(limit + 1)
-            ).all()
-            if len(rows) > limit:
-                raise ValueError("effect observations exceed public bound")
-            return tuple(self._from_row(connection, row) for row in rows)
-
-    def list_nonterminal(self, *, limit: int | None = None) -> list[EffectRecord]:
-        if limit is not None and (type(limit) is not int or limit <= 0):
-            raise ValueError("nonterminal-effect limit must be a positive integer")
-        table = self._store.tables.effects
-        statement = (
-            select(table)
-            .where(table.c.phase.not_in({"delivered"}))
-            .order_by(table.c.deadline_at, table.c.effect_id)
-        )
-        if limit is not None:
-            statement = statement.limit(limit)
-        with self._store.read_connection() as connection:
-            rows = connection.execute(statement).all()
-            return [self._from_row(connection, row) for row in rows]
-
-    def list_nonterminal_for_thread(
-        self, thread_id: str, *, limit: int
-    ) -> list[EffectRecord]:
-        if not thread_id:
-            raise ValueError("effect thread_id must not be empty")
-        if type(limit) is not int or limit <= 0:
-            raise ValueError("nonterminal-effect limit must be a positive integer")
-        table = self._store.tables.effects
-        with self._store.read_connection() as connection:
-            rows = connection.execute(
-                select(table)
-                .where(
-                    and_(
-                        table.c.thread_id == thread_id,
-                        table.c.phase.not_in({"delivered"}),
-                    )
-                )
-                .order_by(table.c.deadline_at, table.c.effect_id)
-                .limit(limit)
-            ).all()
-            return [self._from_row(connection, row) for row in rows]
-
-    def list_recovery_threads(
-        self, *, limit: int, after_thread_id: str | None = None
-    ) -> tuple[str, ...]:
-        """Return a hard-bounded owner recovery queue, excluding parked humans."""
-
-        if type(limit) is not int or limit <= 0:
-            raise ValueError("recovery-effect limit must be a positive integer")
-        table = self._store.tables.effects
-        condition = and_(
-            table.c.phase.not_in({"delivered"}),
-            or_(
-                table.c.effect_kind != "manual",
-                table.c.phase != "prepared",
-            ),
-        )
-        if after_thread_id is not None:
-            _nonempty(after_thread_id, "recovery cursor")
-            condition = and_(condition, table.c.thread_id > after_thread_id)
-        with self._store.read_connection() as connection:
-            rows = connection.execute(
-                select(table.c.thread_id)
-                .where(condition)
-                .distinct()
-                .order_by(table.c.thread_id)
-                .limit(limit)
-            ).all()
-        return tuple(row.thread_id for row in rows)
-
-    def list_due(self, now: datetime, *, limit: int) -> list[EffectRecord]:
-        if type(limit) is not int or limit <= 0:
-            raise ValueError("due-effect limit must be a positive integer")
-        table = self._store.tables.effects
-        with self._store.read_connection() as connection:
-            rows = connection.execute(
-                select(table)
-                .where(
-                    and_(
-                        table.c.phase.in_(("prepared", "launching", "running")),
-                        table.c.deadline_at.is_not(None),
-                        table.c.deadline_at <= _dump(now),
-                    )
-                )
-                .order_by(table.c.deadline_at, table.c.effect_id)
-                .limit(limit)
-            ).all()
-            return [self._from_row(connection, row) for row in rows]
-
-    def next_deadline(self) -> datetime | None:
-        table = self._store.tables.effects
-        with self._store.read_connection() as connection:
-            row = connection.execute(
-                select(table.c.deadline_at)
-                .where(
-                    and_(
-                        table.c.phase.in_(("prepared", "launching", "running")),
-                        table.c.deadline_at.is_not(None),
-                    )
-                )
-                .order_by(table.c.deadline_at, table.c.effect_id)
-                .limit(1)
-            ).first()
-        return None if row is None else _load(row.deadline_at)
 
     def prepare(
         self,
@@ -612,7 +150,7 @@ class EffectLedger:
         if (request is None) != (grant is None):
             raise ValueError("effect request and grant digests must be bound together")
         deadline = None if deadline_at is None else _utc(deadline_at)
-        now = self._now()
+        now = _clock_now(self._clock)
         _validate_prepare_descriptor(
             descriptor,
             deadline=deadline,
@@ -681,90 +219,6 @@ class EffectLedger:
             ).one()
             return self._from_row(connection, row)
 
-    @staticmethod
-    def _validate_result_kind(
-        current: EffectRecord,
-        effect_id: str,
-        result: EffectResult | ScopeResult | AcceptanceResult | None,
-    ) -> None:
-        if result is None:
-            return
-        if result.effect_id != effect_id:
-            raise EffectConflict("result effect_id does not match ledger identity")
-        if current.effect_kind == "scope" and not isinstance(result, ScopeResult):
-            raise EffectConflict("effect result kind does not match scope")
-        if current.effect_kind == "accept" and not isinstance(
-            result, AcceptanceResult
-        ):
-            raise EffectConflict("acceptance result kind does not match descriptor")
-        if current.effect_kind not in {"scope", "accept"} and not isinstance(
-            result, EffectResult
-        ):
-            raise EffectConflict("effect result kind does not match descriptor")
-
-    @staticmethod
-    def _validate_scope_seal(
-        current: EffectRecord,
-        result: EffectResult | ScopeResult | AcceptanceResult | None,
-        scope_descriptor: ScopeDescriptor | None,
-    ) -> None:
-        if not isinstance(result, ScopeResult):
-            return
-        if scope_descriptor is None:
-            raise EffectConflict("scope seal requires its validated descriptor")
-        if scope_descriptor.digest != current.descriptor_digest:
-            raise EffectConflict("scope descriptor does not match prepared digest")
-        if result.scope_digest != current.descriptor_digest:
-            raise EffectConflict("scope digest does not match descriptor")
-        if result.scope_kind != scope_descriptor.scope_kind:
-            raise EffectConflict("scope result kind does not match descriptor")
-        if (
-            result.outcome == "PASS"
-            and result.runner_selector != scope_descriptor.runner_selector
-        ):
-            raise EffectConflict("scope runner selector does not match descriptor")
-        if (
-            result.outcome == "PASS"
-            and result.runner_binding_digest != current.runner_binding_digest
-        ):
-            raise EffectConflict(
-                "scope runner binding does not match prepared facts"
-            )
-
-    @staticmethod
-    def _validate_prelaunch_seal(
-        current: EffectRecord,
-        target: str,
-        result: EffectResult | ScopeResult | AcceptanceResult | None,
-    ) -> None:
-        if (
-            target == "sealed"
-            and current.phase == "prepared"
-            and isinstance(result, EffectResult)
-            and current.effect_kind != "manual"
-            and (
-                result.outcome != "ERROR"
-                or result.fixed_error_code not in PRELAUNCH_ERROR_CODES
-            )
-        ):
-            raise IllegalEffectTransition(
-                "managed pre-launch seal requires a fixed pre-launch ERROR"
-            )
-
-    @staticmethod
-    def _terminal_transition_replay(
-        current: EffectRecord,
-        target: str,
-        result: EffectResult | ScopeResult | AcceptanceResult | None,
-    ) -> EffectRecord | None:
-        if current.phase in {"sealed", "indeterminate", "delivered"} and result is not None:
-            if current.result == result:
-                return current
-            raise EffectConflict("effect is already sealed with a different result")
-        if current.phase == "delivered" and target == "delivered":
-            return current
-        return None
-
     def _validate_transition_edge(
         self,
         connection,
@@ -795,86 +249,6 @@ class EffectLedger:
             if lease is None:
                 raise StaleEffectLease("a current effect lease is required")
             self._validate_live_lease(connection, effect_id, lease)
-
-    @staticmethod
-    def _validate_transition_facts(
-        current: EffectRecord,
-        *,
-        target: str,
-        runner_binding_digest: str | None,
-        workspace_ref: str | None,
-        launch_commitment_digest: str | None,
-    ) -> tuple[str | None, str | None]:
-        if target == "launching" and (
-            current.request_digest is None
-            or current.grant_digest is None
-            or launch_commitment_digest is None
-        ):
-            raise EffectConflict(
-                "runner launch requires request, grant, and launch commitments"
-            )
-        if (
-            target == "sealed"
-            and current.phase in {"launching", "running"}
-            and runner_binding_digest is None
-        ):
-            raise EffectConflict("active effect seal requires its runner binding")
-        if runner_binding_digest is not None:
-            binding = _binding_digest(runner_binding_digest)
-            if binding != current.runner_binding_digest:
-                raise EffectConflict(
-                    "effect runner binding does not match prepared facts"
-                )
-        normalized_workspace = workspace_ref
-        if workspace_ref is not None:
-            normalized_workspace = _nonempty(workspace_ref, "workspace_ref")
-            if (
-                target == "launching"
-                and current.workspace_ref is not None
-                and current.workspace_ref != normalized_workspace
-            ):
-                raise EffectConflict(
-                    "effect already has a different prepared workspace"
-                )
-        return normalized_workspace, _binding_digest(launch_commitment_digest)
-
-    def _transition_values(
-        self,
-        current: EffectRecord,
-        *,
-        target: str,
-        lease: Lease | None,
-        workspace_ref: str | None,
-        launch_digest: str | None,
-        result: EffectResult | ScopeResult | AcceptanceResult | None,
-    ) -> tuple[dict[str, object], str | None, int, datetime]:
-        revision = current.revision + 1
-        now = self._now()
-        changes: dict[str, object] = {
-            "phase": target,
-            "revision": revision,
-            "updated_at": _dump(now),
-        }
-        if lease is not None:
-            changes["lease_epoch"] = lease.epoch
-        if target == "launching" and workspace_ref is not None:
-            changes["workspace_ref"] = workspace_ref
-        if target == "launching":
-            changes["launch_commitment_digest"] = launch_digest
-        result_json = None
-        if result is not None:
-            changes["result_ref"] = getattr(result, "result_ref", None)
-            changes["fixed_error_code"] = getattr(
-                result, "fixed_error_code", None
-            )
-            result_json = json.dumps(
-                result.to_dict(),
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=False,
-                allow_nan=False,
-            )
-        return changes, result_json, revision, now
 
     def _persist_transition(
         self,
@@ -940,10 +314,10 @@ class EffectLedger:
             if row is None:
                 raise KeyError(effect_id)
             current = self._from_row(connection, row)
-            self._validate_result_kind(current, effect_id, result)
-            self._validate_scope_seal(current, result, scope_descriptor)
-            self._validate_prelaunch_seal(current, target, result)
-            replay = self._terminal_transition_replay(current, target, result)
+            _validate_result_kind(current, effect_id, result)
+            _validate_scope_seal(current, result, scope_descriptor)
+            _validate_prelaunch_seal(current, target, result)
+            replay = _terminal_transition_replay(current, target, result)
             if replay is not None:
                 return replay
             self._validate_transition_edge(
@@ -955,20 +329,22 @@ class EffectLedger:
                 allowed_sources=allowed_sources,
                 lease=lease,
             )
-            workspace_ref, launch_digest = self._validate_transition_facts(
+            workspace_ref, launch_digest = _validate_transition_facts(
                 current,
                 target=target,
                 runner_binding_digest=runner_binding_digest,
                 workspace_ref=workspace_ref,
                 launch_commitment_digest=launch_commitment_digest,
             )
-            changes, result_json, revision, now = self._transition_values(
+            now = _clock_now(self._clock)
+            changes, result_json, revision, now = _transition_values(
                 current,
                 target=target,
                 lease=lease,
                 workspace_ref=workspace_ref,
                 launch_digest=launch_digest,
                 result=result,
+                now=now,
             )
             return self._persist_transition(
                 connection,
@@ -996,7 +372,7 @@ class EffectLedger:
             or row.owner != lease.owner
             or int(row.epoch) != lease.epoch
             or expires_at is None
-            or expires_at <= self._now()
+            or expires_at <= _clock_now(self._clock)
         ):
             raise StaleEffectLease("effect lease is stale, expired, or owned elsewhere")
 
