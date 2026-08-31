@@ -540,7 +540,7 @@ def test_specialization_preserves_topology_and_leaves_standalone_manual_bytes_st
     assert descriptor["runner"]["selector"] == "reviewer"
 
 
-def test_standalone_exported_step_remains_manual_and_declares_exact_artifact(
+def test_standalone_exported_step_remains_manual_and_retains_export_metadata(
     tmp_path: Path,
 ) -> None:
     workflow = _workflow(
@@ -569,14 +569,7 @@ def test_standalone_exported_step_remains_manual_and_declares_exact_artifact(
     assert message["lockstep_effect"]["kind"] == "manual"
     assert message["lockstep_effect"]["runner"] is None
     assert message["lockstep_effect"]["writes"] == ["review.md"]
-    assert message["lockstep_effect"]["artifacts"] == [
-        {
-            "name": "review",
-            "source_path": "review.md",
-            "media_type": "text/markdown",
-            "required": True,
-        }
-    ]
+    assert message["lockstep_effect"]["artifacts"] == []
     assert message["artifact_contract"] == {
         "handle": "review",
         "path": "review.md",
