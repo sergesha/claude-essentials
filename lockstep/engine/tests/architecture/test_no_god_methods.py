@@ -89,7 +89,7 @@ CONFIRMED_GOD_METHODS = (
     ("runtime/providers/workspaces.py", "LocalGitWorkspaceProvider.materialize"),
     ("workflow/lowering.py", "_Builder.block"),
     ("workflow/lowering.py", "_Builder.parallel"),
-    ("runtime/providers/codex.py", "_CodexAttemptDriver.prepare"),
+    ("runtime/providers/_codex_attempt.py", "_CodexAttemptDriver.prepare"),
     ("runtime/effects/coordinator.py", "EffectCoordinator.submit_acceptance"),
     ("runtime/effects/coordinator.py", "EffectCoordinator.deliver_ready"),
     ("runtime/service.py", "LockstepCommandService._drive_engine_owned"),
@@ -5505,12 +5505,12 @@ _PRODUCTION_LIFECYCLE_ROWS = (
         "commitment.commit",
     ),
     _entity_lifecycle_row(
-        "src/lockstep/runtime/providers/codex.py::_CodexAttemptDriver._commit_prepared_launch",
-        "process.prepare",
+        "src/lockstep/runtime/providers/_codex_attempt.py::_CodexAttemptDriver._commit_ready_supervisor",
+        "process.running",
     ),
     _entity_lifecycle_row(
-        "src/lockstep/runtime/providers/codex.py::_CodexAttemptDriver._commit_ready_supervisor",
-        "process.running",
+        "src/lockstep/runtime/providers/_codex_preparation.py::_CodexPreparation._commit_prepared_launch",
+        "process.prepare",
     ),
 )
 
