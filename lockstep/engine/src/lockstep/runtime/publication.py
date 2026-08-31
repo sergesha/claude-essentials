@@ -8,266 +8,52 @@ boundary and every retry decides from the durable journal plus current bytes.
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import secrets
 import stat
 import tempfile
-from collections.abc import Iterable
-from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
-from lockstep.runtime.artifacts import ArtifactRef, ArtifactRegistry
+from lockstep.runtime._publication_queries import _ProjectPublicationQueries
+from lockstep.runtime._publication_values import (
+    PublicationConflict,
+    PublicationEntry,
+    PublicationError,
+    PublicationJournalError,
+    PublicationLimits,
+    PublicationReceipt,
+    PublicationRequest,
+    PreparedPublication,
+    _HEX,
+    _canonical,
+    _coordinate_data,
+    _counter,
+    _digest,
+    _entry_data,
+    _image_data,
+    _image_from_data,
+    _request_data,
+    _same_image,
+    _text,
+)
+from lockstep.runtime.artifacts import ArtifactRegistry
 from lockstep.runtime.blobs import BlobRef, BlobStore
 from lockstep.runtime.locking import file_lock
-from lockstep.runtime.native_models import NativeCoordinate
 from lockstep.runtime.owner_state import (
-    InsecureStatePath,
     StorageLimitExceeded,
     ensure_owner_directory,
     initialize_owner_state,
     seal_owner_file,
-    take_bounded,
-    verify_owner_file,
-)
-from lockstep.runtime.project_paths import (
-    PortableProjectPath,
-    ProjectTreeLimits,
-    validate_portable_project_paths,
 )
 
-_HEX = frozenset("0123456789abcdef")
 _MISSING = object()
-
-
-class PublicationError(RuntimeError):
-    pass
-
-
-class PublicationConflict(PublicationError):
-    pass
-
-
-class PublicationJournalError(PublicationError):
-    pass
-
-
-@dataclass(frozen=True)
-class PublicationLimits:
-    max_entries: int = 32
-    max_journal_bytes: int = 1024 * 1024
-    max_file_bytes: int = 64 * 1024 * 1024
-    max_total_bytes: int = 256 * 1024 * 1024
-
-    def __post_init__(self) -> None:
-        if min(
-            self.max_entries,
-            self.max_journal_bytes,
-            self.max_file_bytes,
-            self.max_total_bytes,
-        ) <= 0:
-            raise ValueError("publication limits must be positive")
-
-
-@dataclass(frozen=True)
-class PublicationEntry:
-    artifact_ref: ArtifactRef
-    destination: str
-    transformation: str = "identity"
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "artifact_ref", ArtifactRef.parse(self.artifact_ref))
-        if (
-            not isinstance(self.destination, str)
-            or len(self.destination.encode("utf-8")) > 4096
-        ):
-            raise ValueError("publication destination must be bounded text")
-        path = PortableProjectPath.parse(self.destination, "file")
-        if self.transformation != "identity":
-            raise ValueError("only identity artifact publication is supported")
-        object.__setattr__(self, "destination", path.value)
-
-
-@dataclass(frozen=True)
-class PublicationRequest:
-    effect_id: str
-    public_run_id: str
-    project_identity: str
-    definition_digest: str
-    coordinate: NativeCoordinate
-    descriptor_digest: str
-    authority_request_digest: str
-    grant_digest: str
-    publisher_binding_digest: str
-    consent_ref: str
-    approval_generation: int
-    policy_epoch: int
-    config_epoch: int
-    parent_capability_generation: int
-    entries: tuple[PublicationEntry, ...]
-    request_digest: str
-
-    @classmethod
-    def build(
-        cls,
-        *,
-        effect_id: str,
-        public_run_id: str,
-        project_identity: str,
-        definition_digest: str,
-        coordinate: NativeCoordinate,
-        descriptor_digest: str,
-        authority_request_digest: str,
-        grant_digest: str,
-        publisher_binding_digest: str,
-        consent_ref: str,
-        approval_generation: int,
-        policy_epoch: int,
-        config_epoch: int,
-        parent_capability_generation: int,
-        entries: Iterable[PublicationEntry],
-    ) -> PublicationRequest:
-        values = take_bounded(entries, 32, "publication entries")
-        if not values:
-            raise ValueError("publication requires at least one entry")
-        if any(not isinstance(item, PublicationEntry) for item in values):
-            raise TypeError("publication entries must be closed values")
-        validate_portable_project_paths(
-            ((item.destination, "file") for item in values),
-            limits=ProjectTreeLimits(max_entries=32),
-            label="publication destinations",
-        )
-        scalar = {
-            "effect_id": _text(effect_id, "effect_id"),
-            "public_run_id": _text(public_run_id, "public_run_id"),
-            "project_identity": _text(project_identity, "project_identity"),
-            "definition_digest": _digest(definition_digest, "definition digest"),
-            "descriptor_digest": _digest(descriptor_digest, "descriptor digest"),
-            "authority_request_digest": _digest(
-                authority_request_digest, "authority request digest"
-            ),
-            "grant_digest": _digest(grant_digest, "grant digest"),
-            "publisher_binding_digest": _digest(
-                publisher_binding_digest, "publisher binding digest"
-            ),
-            "consent_ref": _text(consent_ref, "consent_ref"),
-        }
-        generations = {
-            "approval_generation": _counter(approval_generation, "approval generation"),
-            "policy_epoch": _counter(policy_epoch, "policy epoch"),
-            "config_epoch": _counter(config_epoch, "config epoch"),
-            "parent_capability_generation": _counter(
-                parent_capability_generation, "parent capability generation"
-            ),
-        }
-        coordinate_data = _coordinate_data(coordinate)
-        data = {
-            "schema": "lockstep.publication-request/v1",
-            **scalar,
-            **generations,
-            "coordinate": coordinate_data,
-            "entries": [_entry_data(item) for item in values],
-        }
-        encoded = _canonical(data)
-        if len(encoded) > 1024 * 1024:
-            raise StorageLimitExceeded("publication request exceeds admission limit")
-        request_digest = hashlib.sha256(encoded).hexdigest()
-        return cls(
-            effect_id=scalar["effect_id"],
-            public_run_id=scalar["public_run_id"],
-            project_identity=scalar["project_identity"],
-            definition_digest=scalar["definition_digest"],
-            coordinate=coordinate,
-            descriptor_digest=scalar["descriptor_digest"],
-            authority_request_digest=scalar["authority_request_digest"],
-            grant_digest=scalar["grant_digest"],
-            publisher_binding_digest=scalar["publisher_binding_digest"],
-            consent_ref=scalar["consent_ref"],
-            approval_generation=generations["approval_generation"],
-            policy_epoch=generations["policy_epoch"],
-            config_epoch=generations["config_epoch"],
-            parent_capability_generation=generations[
-                "parent_capability_generation"
-            ],
-            entries=values,
-            request_digest=request_digest,
-        )
-
-
-@dataclass(frozen=True)
-class PreparedPublication:
-    journal_digest: str
-    request_digest: str
-    publisher_binding_digest: str
-
-
-@dataclass(frozen=True)
-class PublicationReceipt:
-    journal_digest: str
-    request_digest: str
-    phase: str
-
-
-def _canonical(value: object) -> bytes:
-    return json.dumps(
-        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
-        allow_nan=False,
-    ).encode("utf-8")
-
-
-def _text(value: object, label: str) -> str:
-    if not isinstance(value, str) or not value or len(value.encode()) > 4096:
-        raise ValueError(f"{label} must be bounded non-empty text")
-    return value
-
-
-def _digest(value: object, label: str) -> str:
-    if (
-        not isinstance(value, str)
-        or len(value) != 64
-        or any(character not in _HEX for character in value)
-    ):
-        raise ValueError(f"{label} must be a lowercase SHA-256 digest")
-    return value
-
-
-def _counter(value: object, label: str) -> int:
-    if type(value) is not int or value < 0:
-        raise ValueError(f"{label} must be a non-negative integer")
-    return value
-
-
-def _coordinate_data(value: NativeCoordinate) -> dict[str, str]:
-    if not isinstance(value, NativeCoordinate):
-        raise TypeError("publication coordinate must be NativeCoordinate")
-    data = {
-        "thread_id": value.thread_id,
-        "checkpoint_ns": value.checkpoint_ns,
-        "checkpoint_id": value.checkpoint_id,
-        "task_id": value.task_id,
-        "interrupt_id": value.interrupt_id,
-    }
-    for field, item in data.items():
-        if not isinstance(item, str) or (field != "checkpoint_ns" and not item):
-            raise ValueError(f"coordinate {field} must be bounded text")
-        if len(item.encode()) > 4096:
-            raise ValueError(f"coordinate {field} must be bounded text")
-    return data
-
-
-def _entry_data(entry: PublicationEntry) -> dict[str, str]:
-    return {
-        "artifact_ref": str(entry.artifact_ref),
-        "destination": entry.destination,
-        "transformation": entry.transformation,
-    }
 
 
 def _after_replacement(_direction: str, _index: int) -> None:
     """Crash-injection seam used to prove recovery after every replacement."""
 
 
-class ProjectPublisher:
+class ProjectPublisher(_ProjectPublicationQueries):
     required_authorities = ("publication",)
 
     def __init__(
@@ -307,60 +93,6 @@ class ProjectPublisher:
             self._owner_state, f"publications/{self.binding_digest}/journals"
         )
         self._active = self._directory / "active.json"
-
-    @property
-    def project_identity(self) -> str:
-        return str(self._project.resolve(strict=True))
-
-    def journal_path(self, handle: PreparedPublication) -> Path:
-        self._validate_handle(handle)
-        return self._journals / f"{handle.journal_digest}.json"
-
-    def commitment_digest(self, handle: PreparedPublication) -> str:
-        journal = self._read_journal(handle)
-        request = journal["request"]
-        if not isinstance(request, dict):  # closed journal validation is defensive
-            raise PublicationJournalError("invalid publication journal request")
-        try:
-            commitment = {
-                "schema": "lockstep.publication-commitment/v1",
-                "request_digest": _digest(
-                    request["authority_request_digest"],
-                    "authority request digest",
-                ),
-                "grant_digest": _digest(request["grant_digest"], "grant digest"),
-                "publication_request_digest": handle.request_digest,
-                "journal_digest": handle.journal_digest,
-                "publisher_binding_digest": self.binding_digest,
-            }
-        except (KeyError, TypeError, ValueError) as exc:
-            raise PublicationJournalError(
-                "publication journal lacks exact commitment fields"
-            ) from exc
-        return hashlib.sha256(_canonical(commitment)).hexdigest()
-
-    def prepared_for(
-        self, effect_id: str, authority_request_digest: str
-    ) -> tuple[PreparedPublication, str] | None:
-        """Return only the one project-active journal for an exact ledger claim."""
-
-        active = self._read_active_optional()
-        if active is None:
-            return None
-        raw = self._read_journal_digest(active)
-        request = raw.get("request")
-        if not isinstance(request, dict):
-            raise PublicationJournalError("invalid publication journal request")
-        if (
-            request.get("effect_id") != effect_id
-            or request.get("authority_request_digest")
-            != authority_request_digest
-        ):
-            return None
-        request_digest = _digest(raw.get("request_digest"), "request digest")
-        handle = PreparedPublication(active, request_digest, self.binding_digest)
-        journal = self._read_journal(handle)
-        return handle, str(journal["phase"])
 
     def prepare(self, request: PublicationRequest) -> PreparedPublication:
         if not isinstance(request, PublicationRequest):
@@ -565,25 +297,6 @@ class ProjectPublisher:
         finally:
             os.close(root_fd)
 
-    def _verify_complete(self, raw_plan: object, *, direction: str) -> None:
-        plan = self._validate_plan(raw_plan)
-        root_fd = self._open_root()
-        try:
-            for item in plan:
-                parent_fd, leaf, _ancestors = self._open_parent(
-                    root_fd, item["destination"], expected=item["ancestors"]
-                )
-                try:
-                    desired = item["after"] if direction == "apply" else item["before"]
-                    if not _same_image(self._current_image(parent_fd, leaf), desired):
-                        raise PublicationConflict(
-                            f"publication destination changed: {item['destination']}"
-                        )
-                finally:
-                    os.close(parent_fd)
-        finally:
-            os.close(root_fd)
-
     def _replace(
         self,
         parent_fd: int,
@@ -630,258 +343,6 @@ class ProjectPublisher:
             except FileNotFoundError:
                 pass
 
-    def _open_root(self) -> int:
-        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-        try:
-            fd = os.open(self._project, flags)
-            info = os.fstat(fd)
-            if (
-                not stat.S_ISDIR(info.st_mode)
-                or info.st_dev != self._root_device
-                or info.st_ino != self._root_inode
-            ):
-                raise PublicationConflict("project root is not a directory")
-            return fd
-        except OSError as exc:
-            raise PublicationConflict("project root cannot be opened safely") from exc
-
-    def _open_parent(
-        self,
-        root_fd: int,
-        destination: str,
-        *,
-        expected: object | None = None,
-    ) -> tuple[int, str, list[dict[str, object]]]:
-        path = PurePosixPath(destination)
-        current = os.dup(root_fd)
-        ancestors: list[dict[str, object]] = []
-        try:
-            for index, part in enumerate(path.parts[:-1]):
-                flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-                next_fd = os.open(part, flags, dir_fd=current)
-                os.close(current)
-                current = next_fd
-                info = os.fstat(current)
-                ancestors.append(
-                    {
-                        "path": "/".join(path.parts[: index + 1]),
-                        "device": info.st_dev,
-                        "inode": info.st_ino,
-                    }
-                )
-            if expected is not None and ancestors != expected:
-                raise PublicationConflict(
-                    f"publication ancestor changed: {destination}"
-                )
-            return current, path.name, ancestors
-        except OSError as exc:
-            os.close(current)
-            raise PublicationConflict(
-                f"publication parent is missing or unsafe: {destination}"
-            ) from exc
-
-    def _current_image_data(
-        self, parent_fd: int, leaf: str
-    ) -> tuple[BlobRef, int, bytes] | None:
-        try:
-            info = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            return None
-        if not stat.S_ISREG(info.st_mode):
-            raise PublicationConflict("publication destination is not a regular file")
-        if info.st_size > self._limits.max_file_bytes:
-            raise StorageLimitExceeded("publication destination exceeds admission limit")
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-        try:
-            fd = os.open(leaf, flags, dir_fd=parent_fd)
-        except OSError as exc:
-            raise PublicationConflict("publication destination cannot be read safely") from exc
-        try:
-            opened = os.fstat(fd)
-            if not stat.S_ISREG(opened.st_mode) or opened.st_size > self._limits.max_file_bytes:
-                raise PublicationConflict("publication destination changed during read")
-            chunks: list[bytes] = []
-            remaining = self._limits.max_file_bytes + 1
-            while remaining:
-                chunk = os.read(fd, min(1024 * 1024, remaining))
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                remaining -= len(chunk)
-            data = b"".join(chunks)
-            if len(data) > self._limits.max_file_bytes:
-                raise StorageLimitExceeded("publication destination exceeds admission limit")
-        finally:
-            os.close(fd)
-        return (
-            BlobRef(hashlib.sha256(data).hexdigest(), len(data)),
-            stat.S_IMODE(opened.st_mode),
-            data,
-        )
-
-    def _current_image(
-        self, parent_fd: int, leaf: str
-    ) -> tuple[BlobRef, int] | None:
-        observed = self._current_image_data(parent_fd, leaf)
-        if observed is None:
-            return None
-        return observed[0], observed[1]
-
-    def _read_active_optional(self) -> str | None:
-        if not self._active.exists() and not self._active.is_symlink():
-            return None
-        data = self._read_json(self._active)
-        if (
-            set(data) != {"schema", "journal_digest"}
-            or data["schema"] != "lockstep.active-publication/v1"
-        ):
-            raise PublicationJournalError("invalid active publication pointer")
-        try:
-            return _digest(data["journal_digest"], "journal digest")
-        except ValueError as exc:
-            raise PublicationJournalError("invalid active publication pointer") from exc
-
-    def _read_journal_digest(self, digest: str) -> dict[str, object]:
-        handle = PreparedPublication(digest, "0" * 64, self.binding_digest)
-        data = self._read_json(self.journal_path(handle))
-        if (
-            set(data) != {
-                "schema", "phase", "request_digest", "publisher_binding_digest",
-                "request", "plan", "cursor",
-            }
-            or data.get("schema") != "lockstep.publication-journal/v1"
-            or data.get("phase") not in {
-                "prepared", "applying", "rollback_pending", "applied", "rolled_back"
-            }
-        ):
-            raise PublicationJournalError("invalid publication journal")
-        return data
-
-    def _read_journal(self, handle: PreparedPublication) -> dict[str, object]:
-        data = self._read_json(self.journal_path(handle))
-        try:
-            if set(data) != {
-                "schema", "phase", "request_digest", "publisher_binding_digest",
-                "request", "plan", "cursor",
-            }:
-                raise ValueError
-            if data["schema"] != "lockstep.publication-journal/v1":
-                raise ValueError
-            if data["phase"] not in {
-                "prepared", "applying", "rollback_pending", "applied", "rolled_back"
-            }:
-                raise ValueError
-            if data["request_digest"] != handle.request_digest:
-                raise ValueError
-            if data["publisher_binding_digest"] != self.binding_digest:
-                raise ValueError
-            expected_key = hashlib.sha256(
-                _canonical(
-                    {
-                        "schema": "lockstep.publication-journal-key/v1",
-                        "request_digest": handle.request_digest,
-                        "publisher_binding_digest": self.binding_digest,
-                    }
-                )
-            ).hexdigest()
-            if expected_key != handle.journal_digest:
-                raise ValueError
-            request = data["request"]
-            if not isinstance(request, dict):
-                raise ValueError
-            if hashlib.sha256(_canonical(request)).hexdigest() != handle.request_digest:
-                raise ValueError
-            plan = self._validate_plan(data["plan"])
-            cursor = data["cursor"]
-            if type(cursor) is not int or cursor < -1 or cursor > len(plan):
-                raise ValueError
-        except (KeyError, TypeError, ValueError) as exc:
-            raise PublicationJournalError("invalid publication journal") from exc
-        return data
-
-    def _validate_plan(self, value: object) -> list[dict[str, object]]:
-        if not isinstance(value, list) or not value or len(value) > self._limits.max_entries:
-            raise PublicationJournalError("invalid publication plan")
-        checked: list[dict[str, object]] = []
-        total_bytes = 0
-        for item in value:
-            if not isinstance(item, dict) or set(item) != {
-                "artifact_ref", "destination", "transformation", "before", "after",
-                "ancestors",
-            }:
-                raise PublicationJournalError("invalid publication plan entry")
-            try:
-                ArtifactRef.parse(item["artifact_ref"])
-                PortableProjectPath.parse(item["destination"], "file")
-                if item["transformation"] != "identity":
-                    raise ValueError
-                before = _image_from_data(item["before"])
-                after = _image_from_data(item["after"])
-                if after is None:
-                    raise ValueError
-                total_bytes += after[0].size
-                if before is not None:
-                    total_bytes += before[0].size
-                if total_bytes > self._limits.max_total_bytes:
-                    raise StorageLimitExceeded(
-                        "publication aggregate bytes exceed admission limit"
-                    )
-                raw_ancestors = item["ancestors"]
-                if not isinstance(raw_ancestors, list):
-                    raise ValueError
-                ancestors: list[dict[str, object]] = []
-                for ancestor in raw_ancestors:
-                    if not isinstance(ancestor, dict) or set(ancestor) != {
-                        "path", "device", "inode"
-                    }:
-                        raise ValueError
-                    path = PortableProjectPath.parse(ancestor["path"], "directory")
-                    if (
-                        type(ancestor["device"]) is not int
-                        or ancestor["device"] < 0
-                        or type(ancestor["inode"]) is not int
-                        or ancestor["inode"] < 0
-                    ):
-                        raise ValueError
-                    ancestors.append(
-                        {
-                            "path": path.value,
-                            "device": ancestor["device"],
-                            "inode": ancestor["inode"],
-                        }
-                    )
-            except (TypeError, ValueError) as exc:
-                raise PublicationJournalError("invalid publication plan entry") from exc
-            checked.append(
-                {
-                    **item,
-                    "before": before,
-                    "after": after,
-                    "ancestors": ancestors,
-                }
-            )
-        return checked
-
-    def _read_json(self, path: Path) -> dict[str, object]:
-        try:
-            verify_owner_file(path)
-            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-            try:
-                info = os.fstat(fd)
-                if not stat.S_ISREG(info.st_mode) or info.st_size > self._limits.max_journal_bytes:
-                    raise PublicationJournalError("publication journal is not bounded")
-                encoded = os.read(fd, self._limits.max_journal_bytes + 1)
-            finally:
-                os.close(fd)
-            value = json.loads(encoded)
-            if not isinstance(value, dict):
-                raise ValueError
-            return value
-        except PublicationJournalError:
-            raise
-        except (OSError, InsecureStatePath, TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise PublicationJournalError(f"cannot read publication journal: {path}") from exc
-
     def _store_journal(self, path: Path, journal: dict[str, object]) -> None:
         encoded = _canonical(journal)
         if len(encoded) > self._limits.max_journal_bytes:
@@ -906,61 +367,3 @@ class ProjectPublisher:
         finally:
             if temporary.exists():
                 temporary.unlink()
-
-    def _validate_handle(self, handle: PreparedPublication) -> None:
-        if not isinstance(handle, PreparedPublication):
-            raise TypeError("publication handle must be a closed value")
-        _digest(handle.journal_digest, "journal digest")
-        _digest(handle.request_digest, "request digest")
-        if handle.publisher_binding_digest != self.binding_digest:
-            raise PublicationConflict("publication handle names another publisher")
-
-    def _receipt(self, handle: PreparedPublication, phase: str) -> PublicationReceipt:
-        return PublicationReceipt(handle.journal_digest, handle.request_digest, phase)
-
-
-def _image_data(value: tuple[BlobRef, int] | None) -> dict[str, object] | None:
-    if value is None:
-        return None
-    ref, mode = value
-    return {"sha256": ref.sha256, "size": ref.size, "mode": mode}
-
-
-def _image_from_data(value: object) -> tuple[BlobRef, int] | None:
-    if value is None:
-        return None
-    if not isinstance(value, dict) or set(value) != {"sha256", "size", "mode"}:
-        raise ValueError("invalid file image")
-    digest = _digest(value["sha256"], "blob digest")
-    if type(value["size"]) is not int or value["size"] < 0:
-        raise ValueError("invalid blob size")
-    if type(value["mode"]) is not int or value["mode"] < 0 or value["mode"] > 0o777:
-        raise ValueError("invalid file mode")
-    return BlobRef(digest, value["size"]), value["mode"]
-
-
-def _same_image(
-    left: tuple[BlobRef, int] | None, right: tuple[BlobRef, int] | None
-) -> bool:
-    return left == right
-
-
-def _request_data(request: PublicationRequest) -> dict[str, object]:
-    return {
-        "schema": "lockstep.publication-request/v1",
-        "effect_id": request.effect_id,
-        "public_run_id": request.public_run_id,
-        "project_identity": request.project_identity,
-        "definition_digest": request.definition_digest,
-        "coordinate": _coordinate_data(request.coordinate),
-        "descriptor_digest": request.descriptor_digest,
-        "authority_request_digest": request.authority_request_digest,
-        "grant_digest": request.grant_digest,
-        "publisher_binding_digest": request.publisher_binding_digest,
-        "consent_ref": request.consent_ref,
-        "approval_generation": request.approval_generation,
-        "policy_epoch": request.policy_epoch,
-        "config_epoch": request.config_epoch,
-        "parent_capability_generation": request.parent_capability_generation,
-        "entries": [_entry_data(item) for item in request.entries],
-    }
