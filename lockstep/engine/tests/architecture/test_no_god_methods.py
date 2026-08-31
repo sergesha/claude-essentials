@@ -7884,6 +7884,42 @@ def test_repository_ratchet_lists_every_unremediated_candidate() -> None:
     assert candidates == [], rendered
 
 
+def test_recovery_driver_remediation_matches_exact_analyzer_projection() -> None:
+    report = _repository_architecture_report()
+    assert report.unresolved_callsites == ()
+    scoped_paths = {
+        "src/lockstep/runtime/recovery_driver.py",
+        "src/lockstep/runtime/_recovery_backfill.py",
+        "src/lockstep/runtime/_recovery_watch_errors.py",
+        "src/lockstep/runtime/_recovery_watch_enumeration.py",
+        "src/lockstep/runtime/_recovery_watch_admission.py",
+        "src/lockstep/runtime/_recovery_watch_drive.py",
+        "src/lockstep/runtime/_recovery_watch_inspection.py",
+        "src/lockstep/runtime/_recovery_watch_settlement.py",
+    }
+    scoped_candidates = sorted(
+        (kind, identity, metric.composite_score, metric.hard_triggers)
+        for kind in ("functions", "one_hops", "classes", "files")
+        for identity, metric in getattr(report, kind).items()
+        if identity.partition("::")[0] in scoped_paths and metric.candidate
+    )
+    assert scoped_candidates == [
+        (
+            "functions",
+            "src/lockstep/runtime/_recovery_backfill.py::_bound_runtime",
+            3,
+            (),
+        )
+    ]
+    assert (
+        "src/lockstep/runtime/recovery_driver.py::"
+        "RecoveryDriver._sweep_run_drive_watches::@one_hop"
+    ) not in report.one_hops
+    assert (
+        "src/lockstep/runtime/recovery_driver.py::RecoveryDriver._drive_run_watch"
+    ) not in report.functions
+
+
 @pytest.mark.parametrize(
     ("mutation", "reason"),
     (
