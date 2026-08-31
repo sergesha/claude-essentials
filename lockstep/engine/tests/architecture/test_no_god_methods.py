@@ -92,9 +92,12 @@ CONFIRMED_GOD_METHODS = (
     ("runtime/providers/_codex_attempt.py", "_CodexAttemptDriver.prepare"),
     ("runtime/effects/_coordinator_admission.py", "_EffectCoordinatorAdmission.submit_acceptance"),
     ("runtime/effects/_coordinator_delivery.py", "_EffectCoordinatorDelivery.deliver_ready"),
-    ("runtime/service.py", "LockstepCommandService._drive_engine_owned"),
+    (
+        "runtime/_service_effect_drive.py",
+        "_ServiceEffectDrive._drive_engine_owned",
+    ),
     ("runtime/status.py", "project_status"),
-    ("runtime/service.py", "LockstepCommandService.start_authorized"),
+    ("runtime/_service_start.py", "_ServiceStart.start_authorized"),
     ("runtime/effects/_coordinator_admission.py", "_EffectCoordinatorAdmission.submit_manual"),
 )
 
@@ -7958,6 +7961,61 @@ def test_hook_decision_remediation_matches_exact_analyzer_projection() -> None:
         ("one_hops", f"{hooks}::hook_posttool::@one_hop"),
     ):
         assert not getattr(report, kind)[identity].candidate
+
+
+def test_command_service_remediation_matches_exact_analyzer_projection() -> None:
+    report = _repository_architecture_report()
+    assert report.unresolved_callsites == ()
+    scoped_paths = {
+        "src/lockstep/runtime/service.py",
+        "src/lockstep/runtime/_service_activation_lifecycle.py",
+        "src/lockstep/runtime/_service_composition.py",
+        "src/lockstep/runtime/_service_effect_drive.py",
+        "src/lockstep/runtime/_service_interrupt_descriptors.py",
+        "src/lockstep/runtime/_service_payloads.py",
+        "src/lockstep/runtime/_service_preflight.py",
+        "src/lockstep/runtime/_service_publication_consent.py",
+        "src/lockstep/runtime/_service_recovery_pump.py",
+        "src/lockstep/runtime/_service_session.py",
+        "src/lockstep/runtime/_service_start.py",
+        "src/lockstep/runtime/_service_values.py",
+        "src/lockstep/runtime/_service_worker.py",
+        "src/lockstep/runtime/_service_writable_core.py",
+    }
+    scoped_candidates = sorted(
+        (kind, identity, metric.composite_score, metric.hard_triggers)
+        for kind in ("functions", "one_hops", "classes", "files")
+        for identity, metric in getattr(report, kind).items()
+        if identity.partition("::")[0] in scoped_paths and metric.candidate
+    )
+    assert scoped_candidates == [
+        (
+            "functions",
+            "src/lockstep/runtime/_service_effect_drive.py::_ServiceEffectDrive._drive_recovered_run",
+            3,
+            (),
+        ),
+        (
+            "functions",
+            "src/lockstep/runtime/_service_preflight.py::preflight_recipe",
+            3,
+            (),
+        ),
+        (
+            "one_hops",
+            "src/lockstep/runtime/_service_effect_drive.py::_ServiceEffectDrive._drive_recovered_run::@one_hop",
+            3,
+            (),
+        ),
+    ]
+    assert not report.files["src/lockstep/runtime/service.py::@file"].candidate
+    assert not report.classes[
+        "src/lockstep/runtime/service.py::LockstepCommandService"
+    ].candidate
+    assert (
+        "src/lockstep/runtime/service.py::LockstepCommandService._completion_pump"
+        not in report.functions
+    )
 
 
 @pytest.mark.parametrize(
