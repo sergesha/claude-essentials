@@ -76,26 +76,26 @@ ANALYZER_ROLE_ENTRYPOINTS = {
 }
 
 CONFIRMED_GOD_METHODS = (
-    ("runtime/effects/coordinator.py", "EffectCoordinator.reconcile"),
+    ("runtime/effects/_coordinator_reconciliation.py", "_EffectCoordinatorReconciliation.reconcile"),
     ("workflow/lowering.py", "_Builder.graph"),
     ("workflow/lowering.py", "_Builder.call"),
     ("workflow/lowering.py", "_Builder._specialize_child"),
-    ("runtime/effects/coordinator.py", "EffectCoordinator._reconcile_publication"),
+    ("runtime/effects/_coordinator_publication.py", "_EffectCoordinatorPublication._reconcile_publication"),
     ("runtime/effects/ledger.py", "EffectLedger._transition"),
-    ("runtime/effects/coordinator.py", "EffectCoordinator._context"),
-    ("runtime/effects/coordinator.py", "EffectCoordinator._publication_intent"),
+    ("runtime/effects/_coordinator_context.py", "_EffectCoordinatorContext._context"),
+    ("runtime/effects/_coordinator_publication_planning.py", "_EffectCoordinatorPublicationPlanning._publication_intent"),
     ("runtime/providers/_codex_supervisor.py", "run"),
     ("runtime/providers/workspaces.py", "LocalGitWorkspaceProvider.quarantine_and_rollover"),
     ("runtime/providers/workspaces.py", "LocalGitWorkspaceProvider.materialize"),
     ("workflow/lowering.py", "_Builder.block"),
     ("workflow/lowering.py", "_Builder.parallel"),
     ("runtime/providers/_codex_attempt.py", "_CodexAttemptDriver.prepare"),
-    ("runtime/effects/coordinator.py", "EffectCoordinator.submit_acceptance"),
-    ("runtime/effects/coordinator.py", "EffectCoordinator.deliver_ready"),
+    ("runtime/effects/_coordinator_admission.py", "_EffectCoordinatorAdmission.submit_acceptance"),
+    ("runtime/effects/_coordinator_delivery.py", "_EffectCoordinatorDelivery.deliver_ready"),
     ("runtime/service.py", "LockstepCommandService._drive_engine_owned"),
     ("runtime/status.py", "project_status"),
     ("runtime/service.py", "LockstepCommandService.start_authorized"),
-    ("runtime/effects/coordinator.py", "EffectCoordinator.submit_manual"),
+    ("runtime/effects/_coordinator_admission.py", "_EffectCoordinatorAdmission.submit_manual"),
 )
 
 AUTHORING_MODULES = frozenset(
@@ -7762,6 +7762,29 @@ def test_candidate_policy_file_subsystems_formula_and_hard_boundary(
         boundary_resolutions).files[f"{boundary_path}::@file"]
     assert boundary.definition_count == 50
     assert boundary.hard_triggers == ()
+
+
+def test_candidate_policy_file_subsystems_exclude_future_directives(
+    tmp_path: Path,
+) -> None:
+    path = "src/lockstep/future_imports.py"
+    index, resolutions, semantics = _propagate_fixture(
+        tmp_path,
+        """
+        from __future__ import annotations
+        from collections.abc import Callable
+        from typing import Any
+        import lockstep.runtime.effects
+        def value(callback: Callable[[Any], Any]): return callback
+        """,
+        path=path,
+    )
+    metric = evaluate_candidates(
+        index, measure_legacy_metrics(index), semantics, resolutions
+    ).files[f"{path}::@file"]
+
+    assert metric.subsystem_imports == ("collections", "runtime", "typing")
+    assert metric.subsystem_import_count == 3
 
 
 def test_candidate_policy_file_composite_rule_without_hard_trigger(

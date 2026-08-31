@@ -508,7 +508,7 @@ def _subsystems(path, index):
             continue
         for target in record.targets:
             parts = target.lstrip(".").split(".")
-            if parts and parts[0]:
+            if parts and parts[0] and parts[0] != "__future__":
                 labels.add(parts[1] if parts[0] == "lockstep" and len(parts) > 1 else parts[0])
     return tuple(sorted(labels))
 
