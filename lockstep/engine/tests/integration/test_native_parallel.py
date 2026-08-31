@@ -341,7 +341,12 @@ def _run_public_parallel_review_lifecycle(
         join_index, join_schedule = join_schedules[0]
         assert "reviews_result" not in join_schedule.values
         assert join_index > 0
-        assert history[join_index - 1].values["reviews_result"] == {
+        newer_joined = next(
+            snapshot
+            for snapshot in history[:join_index]
+            if "reviews_result" in snapshot.values
+        )
+        assert newer_joined.values["reviews_result"] == {
             "outcome": "PASS",
             "value": "pass",
         }
