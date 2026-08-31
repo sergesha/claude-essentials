@@ -491,8 +491,9 @@ def test_reviewed_change_survives_restart_and_publishes_only_with_fresh_consent(
             expected_publication
         )
         binding = reopened.catalog.get(run_id)
-        reopened.runtime.bind(binding)
-        terminal = reopened.runtime.snapshot(run_id, subgraphs=True)
+        with reopened._admission_recovery_lock:
+            reopened.runtime.bind(binding)
+            terminal = reopened.runtime.snapshot(run_id, subgraphs=True)
         assert terminal.pending == ()
         assert terminal.next == ()
         assert reopened._runtime_execution_composition.runners.codex.spawn_count == 0
@@ -911,9 +912,7 @@ def test_public_bearers_are_bound_to_one_complete_cross_project_commitment(
         monkeypatch,
         shared_owner_state=original_owner_state,
     )
-    inventory = RuntimeProvisioningInventory.combine(
-        (original_index, foreign_index)
-    )
+    inventory = RuntimeProvisioningInventory.combine((original_index, foreign_index))
     _provision_reviewed_inventory(
         original_root / "shared-reviewed-runtime",
         owner_state=original_owner_state,
@@ -934,6 +933,7 @@ def test_public_bearers_are_bound_to_one_complete_cross_project_commitment(
         original_step,
         original_artifact_bytes,
     ) = original
+    original_command.close()
     foreign = _open_packaged_review_at_pending_acceptance(
         foreign_root,
         monkeypatch,
@@ -948,6 +948,9 @@ def test_public_bearers_are_bound_to_one_complete_cross_project_commitment(
         foreign_step,
         foreign_artifact_bytes,
     ) = foreign
+    original_command = Engine.command(original_owner_state, _original_recipes)
+    original_command.scenario_recover(str(original_project), limit=128)
+    original_command.runtime.bind(original_command.catalog.get(original_run_id))
     assert foreign_owner_state == original_owner_state
     try:
         original_preview = original_command.preview_publication_consent(
@@ -1053,15 +1056,21 @@ def test_public_bearers_are_bound_to_one_complete_cross_project_commitment(
         original_command.scenario_accept_artifact(
             original_issued.token, project=str(original_project)
         )
-        assert _wait_for_public_terminal(
-            original_command, original_project, original_run_id
-        )["status"] == "completed"
+        assert (
+            _wait_for_public_terminal(
+                original_command, original_project, original_run_id
+            )["status"]
+            == "completed"
+        )
         foreign_command.scenario_accept_artifact(
             foreign_issued.token, project=str(foreign_project)
         )
-        assert _wait_for_public_terminal(
-            foreign_command, foreign_project, foreign_run_id
-        )["status"] == "completed"
+        assert (
+            _wait_for_public_terminal(foreign_command, foreign_project, foreign_run_id)[
+                "status"
+            ]
+            == "completed"
+        )
         assert (original_project / ".lockstep" / "review.md").read_bytes() == (
             original_artifact_bytes
         )
