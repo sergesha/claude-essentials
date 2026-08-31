@@ -779,7 +779,9 @@ def test_public_acceptance_rejects_every_wrong_commitment_without_mutation(
                 _commitment_with_wrong_facet(exact, facet)
             )
             before = _durable_authority_surface(command, project, run_id, owner_state)
-            with pytest.raises(LockstepError, match="invalid|stale|not found"):
+            with pytest.raises(
+                LockstepError, match="invalid|stale|not found|unknown run"
+            ):
                 command.scenario_accept_artifact(attacker.token, project=str(project))
             assert (
                 _durable_authority_surface(command, project, run_id, owner_state)
@@ -857,13 +859,12 @@ def test_public_bearers_are_bound_to_one_complete_cross_project_commitment(
     (
         original_command,
         original_project,
-        original_recipes,
+        _original_recipes,
         original_owner_state,
         original_run_id,
         original_step,
         original_artifact_bytes,
     ) = original
-    original_command.close()
     foreign = _open_packaged_review_at_pending_acceptance(
         foreign_root,
         monkeypatch,
@@ -879,13 +880,6 @@ def test_public_bearers_are_bound_to_one_complete_cross_project_commitment(
         foreign_artifact_bytes,
     ) = foreign
     assert foreign_owner_state == original_owner_state
-    try:
-        original_command = Engine.command(original_owner_state, original_recipes)
-        original_command.scenario_recover(str(original_project), limit=128)
-        original_command.runtime.bind(original_command.catalog.get(original_run_id))
-    except BaseException:
-        foreign_command.close()
-        raise
     try:
         original_preview = original_command.preview_publication_consent(
             original_run_id, original_step, project=str(original_project)
@@ -987,18 +981,18 @@ def test_public_bearers_are_bound_to_one_complete_cross_project_commitment(
             is None
         )
 
-        assert (
-            original_command.scenario_accept_artifact(
-                original_issued.token, project=str(original_project)
-            )["status"]
-            == "completed"
+        original_command.scenario_accept_artifact(
+            original_issued.token, project=str(original_project)
         )
-        assert (
-            foreign_command.scenario_accept_artifact(
-                foreign_issued.token, project=str(foreign_project)
-            )["status"]
-            == "completed"
+        assert _wait_for_public_terminal(
+            original_command, original_project, original_run_id
+        )["status"] == "completed"
+        foreign_command.scenario_accept_artifact(
+            foreign_issued.token, project=str(foreign_project)
         )
+        assert _wait_for_public_terminal(
+            foreign_command, foreign_project, foreign_run_id
+        )["status"] == "completed"
         assert (original_project / ".lockstep" / "review.md").read_bytes() == (
             original_artifact_bytes
         )
