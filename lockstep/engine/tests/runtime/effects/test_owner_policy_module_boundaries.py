@@ -39,6 +39,7 @@ requirements_definitions = {
     "_merge_requirement",
     "_runtime_descriptors",
     "RuntimeRequirementIndex",
+    "RuntimeProvisioningInventory",
     "_BoundRuntimeRequirementIndex",
 }
 admission_definitions = {
@@ -93,6 +94,7 @@ assert admission._RuntimeBindingFacts is values._RuntimeBindingFacts
 assert admission.RuntimeRequirement is requirements.RuntimeRequirement
 assert admission.RuntimeRequirementIndex is requirements.RuntimeRequirementIndex
 assert admission._BoundRuntimeRequirementIndex is requirements._BoundRuntimeRequirementIndex
+assert facade.RuntimeProvisioningInventory is requirements.RuntimeProvisioningInventory
 '''
     completed = subprocess.run(
         [sys.executable, "-c", script],

@@ -16,7 +16,10 @@ from lockstep.runtime import sessions
 from lockstep.runtime.blobs import BlobStore
 from lockstep.runtime.effects.authority import EffectGrant
 from lockstep.runtime.effects.owner_consent import PublicationConsentCommitment
-from lockstep.runtime.effects.owner_policy import RuntimeRequirementIndex
+from lockstep.runtime.effects.owner_policy import (
+    RuntimeProvisioningInventory,
+    RuntimeRequirementIndex,
+)
 from lockstep.runtime.effects.owner_provisioning import provision_runtime_snapshot
 from lockstep.runtime.engine import Engine
 from lockstep.runtime.errors import LockstepError
@@ -133,7 +136,7 @@ def _public_compiled_managed_closure(tmp_path: Path, monkeypatch: pytest.MonkeyP
     return project, recipes, owner_state, compiled
 
 
-def _public_packaged_reviewed_closure(
+def _installed_packaged_reviewed_closure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -156,7 +159,18 @@ def _public_packaged_reviewed_closure(
         sorted(requirement.runner_selector for requirement in index.requirements)
     ) == ("codex", "pinned")
 
-    runtime_root = tmp_path / "reviewed-runtime"
+    owner_state = shared_owner_state or tmp_path / "reviewed-owner-state"
+    monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(owner_state))
+    return project, recipes, owner_state, index
+
+
+def _provision_reviewed_inventory(
+    runtime_root: Path,
+    *,
+    owner_state: Path,
+    index: RuntimeRequirementIndex | RuntimeProvisioningInventory,
+    project: Path,
+) -> None:
     runtime_root.mkdir()
     config = _runtime_config(runtime_root)
     for selector in ("codex", "pinned"):
@@ -167,8 +181,6 @@ def _public_packaged_reviewed_closure(
     pinned = config["pinned"]
     assert isinstance(codex, dict)
     assert isinstance(pinned, dict)
-    owner_state = shared_owner_state or tmp_path / "reviewed-owner-state"
-    monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(owner_state))
     provision_runtime_snapshot(
         state_dir=owner_state,
         codex=codex,
@@ -176,6 +188,25 @@ def _public_packaged_reviewed_closure(
         replacement_keys=tuple(
             requirement.grant_selection_key for requirement in index.requirements
         ),
+        index=index,
+        project=project,
+    )
+
+
+def _public_packaged_reviewed_closure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    shared_owner_state: Path | None = None,
+):
+    project, recipes, owner_state, index = _installed_packaged_reviewed_closure(
+        tmp_path,
+        monkeypatch,
+        shared_owner_state=shared_owner_state,
+    )
+    _provision_reviewed_inventory(
+        tmp_path / "reviewed-runtime",
+        owner_state=owner_state,
         index=index,
         project=project,
     )
@@ -486,11 +517,16 @@ def _open_packaged_review_at_pending_acceptance(
     monkeypatch: pytest.MonkeyPatch,
     *,
     shared_owner_state: Path | None = None,
+    prepared: tuple[Path, Path, Path] | None = None,
 ):
-    project, recipes, owner_state = _public_packaged_reviewed_closure(
-        tmp_path,
-        monkeypatch,
-        shared_owner_state=shared_owner_state,
+    project, recipes, owner_state = (
+        _public_packaged_reviewed_closure(
+            tmp_path,
+            monkeypatch,
+            shared_owner_state=shared_owner_state,
+        )
+        if prepared is None
+        else prepared
     )
     first = Engine.command(owner_state, recipes)
     try:
@@ -855,7 +891,36 @@ def test_public_bearers_are_bound_to_one_complete_cross_project_commitment(
     foreign_root = tmp_path / "foreign"
     original_root.mkdir()
     foreign_root.mkdir()
-    original = _open_packaged_review_at_pending_acceptance(original_root, monkeypatch)
+    (
+        original_project,
+        original_recipes,
+        original_owner_state,
+        original_index,
+    ) = _installed_packaged_reviewed_closure(original_root, monkeypatch)
+    (
+        foreign_project,
+        foreign_recipes,
+        foreign_owner_state,
+        foreign_index,
+    ) = _installed_packaged_reviewed_closure(
+        foreign_root,
+        monkeypatch,
+        shared_owner_state=original_owner_state,
+    )
+    inventory = RuntimeProvisioningInventory.combine(
+        (original_index, foreign_index)
+    )
+    _provision_reviewed_inventory(
+        original_root / "shared-reviewed-runtime",
+        owner_state=original_owner_state,
+        index=inventory,
+        project=original_project,
+    )
+    original = _open_packaged_review_at_pending_acceptance(
+        original_root,
+        monkeypatch,
+        prepared=(original_project, original_recipes, original_owner_state),
+    )
     (
         original_command,
         original_project,
@@ -868,7 +933,7 @@ def test_public_bearers_are_bound_to_one_complete_cross_project_commitment(
     foreign = _open_packaged_review_at_pending_acceptance(
         foreign_root,
         monkeypatch,
-        shared_owner_state=original_owner_state,
+        prepared=(foreign_project, foreign_recipes, foreign_owner_state),
     )
     (
         foreign_command,

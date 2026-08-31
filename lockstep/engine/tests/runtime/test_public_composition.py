@@ -300,6 +300,7 @@ def test_owner_policy_exports_exact_required_types() -> None:
         for name in (
             "RuntimeRequirement",
             "RuntimeRequirementIndex",
+            "RuntimeProvisioningInventory",
             "OwnerRuntimeGrant",
             "OwnerRuntimeSnapshot",
             "OwnerRuntimeAuthority",
@@ -308,6 +309,7 @@ def test_owner_policy_exports_exact_required_types() -> None:
     ) == (
         "RuntimeRequirement",
         "RuntimeRequirementIndex",
+        "RuntimeProvisioningInventory",
         "OwnerRuntimeGrant",
         "OwnerRuntimeSnapshot",
         "OwnerRuntimeAuthority",

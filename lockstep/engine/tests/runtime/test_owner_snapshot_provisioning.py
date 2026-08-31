@@ -17,8 +17,10 @@ from lockstep import cli
 from lockstep.runtime.advisory_lock import advisory_file_lock
 from lockstep.runtime.effects.owner_policy import (
     RuntimeRequirementIndex,
+    RuntimeProvisioningInventory,
     requirement_digest,
 )
+from lockstep.runtime.effects.owner_provisioning import provision_runtime_snapshot
 from lockstep.runtime.service import preflight_recipe
 from lockstep.runtime.owner_state import ensure_owner_directory
 from lockstep.runtime.providers.codex import CodexInstallationBinding
@@ -301,6 +303,93 @@ def test_equal_inputs_are_byte_for_byte_idempotent(tmp_path: Path) -> None:
     assert second["config_generation"] == first["config_generation"] == 1
     assert second["policy_generation"] == first["policy_generation"] == 1
     assert _grants(second)[selected[0]]["grant_generation"] == 1
+
+
+def test_multi_project_inventory_is_one_deterministic_exact_union(
+    tmp_path: Path,
+) -> None:
+    projects = (tmp_path / "z-project", tmp_path / "a-project")
+    indexes = []
+    for project, name in zip(projects, ("z", "a"), strict=True):
+        _write_recipe(project, name, f"{name}-work")
+        indexes.append(
+            RuntimeRequirementIndex.for_authorized_closure(
+                preflight_recipe(project / ".lockstep" / "recipes", name),
+                project_identity=str(project.resolve()),
+            )
+        )
+
+    forward = RuntimeProvisioningInventory.combine(tuple(indexes))
+    reverse = RuntimeProvisioningInventory.combine(tuple(reversed(indexes)))
+    assert forward == reverse
+    assert forward.project_identities == tuple(
+        sorted(str(project.resolve()) for project in projects)
+    )
+    expected_keys = tuple(
+        sorted(
+            requirement.grant_selection_key
+            for index in indexes
+            for requirement in index.requirements
+        )
+    )
+    assert tuple(
+        requirement.grant_selection_key for requirement in forward.requirements
+    ) == expected_keys
+
+    config = _config(tmp_path)
+    snapshot = provision_runtime_snapshot(
+        state_dir=tmp_path / "owner-state",
+        codex=config["codex"],
+        pinned=config["pinned"],
+        replacement_keys=expected_keys,
+        index=forward,
+        project=projects[0],
+    )
+    assert tuple(grant.grant_selection_key for grant in snapshot.grants) == expected_keys
+
+
+def test_multi_project_inventory_checks_every_project_boundary(tmp_path: Path) -> None:
+    projects = (tmp_path / "first", tmp_path / "second")
+    indexes = []
+    for project, name in zip(projects, ("first", "second"), strict=True):
+        _write_recipe(project, name, f"{name}-work")
+        indexes.append(
+            RuntimeRequirementIndex.for_authorized_closure(
+                preflight_recipe(project / ".lockstep" / "recipes", name),
+                project_identity=str(project.resolve()),
+            )
+        )
+    inventory = RuntimeProvisioningInventory.combine(tuple(indexes))
+    keys = tuple(item.grant_selection_key for item in inventory.requirements)
+    config = _config(tmp_path)
+
+    with pytest.raises(ValueError, match="outside project"):
+        provision_runtime_snapshot(
+            state_dir=projects[1] / "owner-state",
+            codex=config["codex"],
+            pinned=config["pinned"],
+            replacement_keys=keys,
+            index=inventory,
+            project=projects[0],
+        )
+
+    inside_second = projects[1] / "runtime-tmp"
+    inside_second.mkdir(mode=0o700)
+    for selector in ("codex", "pinned"):
+        binding = config[selector]
+        assert isinstance(binding, dict)
+        environment = binding["environment"]
+        assert isinstance(environment, dict)
+        environment["TMPDIR"] = str(inside_second)
+    with pytest.raises(ValueError, match="TMPDIR"):
+        provision_runtime_snapshot(
+            state_dir=tmp_path / "owner-state",
+            codex=config["codex"],
+            pinned=config["pinned"],
+            replacement_keys=keys,
+            index=inventory,
+            project=projects[0],
+        )
 
 
 def test_owner_state_inside_project_is_rejected_before_creation(tmp_path: Path) -> None:
