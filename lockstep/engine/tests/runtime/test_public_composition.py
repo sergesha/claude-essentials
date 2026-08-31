@@ -561,13 +561,18 @@ def test_requirement_index_rejects_selection_key_collision(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = importlib.import_module("lockstep.runtime.effects.owner_policy")
+    requirements = importlib.import_module(
+        "lockstep.runtime.effects._owner_policy_requirements"
+    )
     first = _authorized_managed_recipe(
         tmp_path, name="first", logical_id="first-effect"
     )
     second = _authorized_managed_recipe(
         tmp_path, name="second", logical_id="second-effect"
     )
-    monkeypatch.setattr(module, "grant_selection_key", lambda **_values: "0" * 64)
+    monkeypatch.setattr(
+        requirements, "grant_selection_key", lambda **_values: "0" * 64
+    )
 
     with pytest.raises(ValueError, match="selection key collision"):
         module.RuntimeRequirementIndex.for_authorized_closures(
