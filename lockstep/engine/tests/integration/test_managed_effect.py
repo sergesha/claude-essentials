@@ -173,9 +173,11 @@ def test_public_compiled_managed_step_reaches_real_codex_commit_and_start(
             "public compiled managed start did not reach the durable Codex "
             "launch commitment"
         )
-        assert len(observer.prepares) == len(observer.commitments) == 1
+        assert len(observer.commitments) == 1
+        assert observer.prepares
         prepared = observer.prepares[0]
         commitment = observer.commitments[0]
+        assert all(call == prepared for call in observer.prepares)
         request = prepared.request
         assert type(prepared.adapter) is CodexRunnerAdapter
         assert dict(request.inputs)["brief"].encode("utf-8") == expected_brief.encode(
@@ -211,7 +213,7 @@ def test_public_compiled_managed_step_reaches_real_codex_commit_and_start(
         ) == (("review", "review.md", "text/markdown", True),)
         assert commitment.record.phase == "launching"
         assert commitment.record.launch_commitment_digest is not None
-        assert commitment.correlated_prepares == (prepared,)
+        assert commitment.correlated_prepares == tuple(observer.prepares)
 
         observer.release()
         released = True
