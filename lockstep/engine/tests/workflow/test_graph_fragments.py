@@ -10,9 +10,11 @@ import yaml
 
 from lockstep.recipe import yamlgraph_adapter as yg
 from lockstep.recipe.profile import check_recipe_full
+from lockstep.workflow._lowering_contracts import _FragmentNames
 from lockstep.workflow.compiler import compile_workflow
 from lockstep.workflow.diagnostics import DiagnosticError
 from lockstep.workflow.ir import FragmentIR
+from lockstep.workflow.lowering import _Builder
 from lockstep.workflow.schema import load_workflow, parse_workflow
 from lockstep.workflow.semantics import (
     InMemoryWorkflowCatalog,
@@ -44,6 +46,26 @@ def _state(namespace: str, key: str) -> str:
         b"lockstep.fragment-state-namespace/v1\0" + namespace.encode()
     ).hexdigest()
     return f"fragment_{digest}_{key}"
+
+
+def test_fragment_interrupt_validates_descriptor_before_declaring_channels() -> None:
+    builder = object.__new__(_Builder)
+    builder.state = {}
+    builder.generated_state_names = set()
+    copied = {"state_key": "request", "message": {}}
+
+    with pytest.raises(
+        ValueError, match="fragment interrupts must carry a protected descriptor"
+    ):
+        builder._rewrite_fragment_interrupt(
+            copied,
+            {"resume_key": "result"},
+            _FragmentNames("fragment", {}),
+            set(),
+        )
+
+    assert builder.state == {}
+    assert builder.generated_state_names == set()
 
 
 _READ_ONLY_FRAGMENT = """\

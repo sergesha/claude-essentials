@@ -77,9 +77,9 @@ ANALYZER_ROLE_ENTRYPOINTS = {
 
 CONFIRMED_GOD_METHODS = (
     ("runtime/effects/_coordinator_reconciliation.py", "_EffectCoordinatorReconciliation.reconcile"),
-    ("workflow/lowering.py", "_Builder.graph"),
-    ("workflow/lowering.py", "_Builder.call"),
-    ("workflow/lowering.py", "_Builder._specialize_child"),
+    ("workflow/_lowering_graph_driver.py", "_LoweringGraphDriver.graph"),
+    ("workflow/_lowering_call.py", "_LoweringCall.call"),
+    ("workflow/_lowering_call_bundle.py", "_LoweringCallBundle._specialize_child"),
     ("runtime/effects/_coordinator_publication.py", "_EffectCoordinatorPublication._reconcile_publication"),
     ("runtime/effects/ledger.py", "EffectLedger._transition"),
     ("runtime/effects/_coordinator_context.py", "_EffectCoordinatorContext._context"),
@@ -87,8 +87,8 @@ CONFIRMED_GOD_METHODS = (
     ("runtime/providers/_codex_supervisor.py", "run"),
     ("runtime/providers/workspaces.py", "LocalGitWorkspaceProvider.quarantine_and_rollover"),
     ("runtime/providers/workspaces.py", "LocalGitWorkspaceProvider.materialize"),
-    ("workflow/lowering.py", "_Builder.block"),
-    ("workflow/lowering.py", "_Builder.parallel"),
+    ("workflow/_lowering_block_dispatch.py", "_LoweringBlockDispatch.block"),
+    ("workflow/_lowering_parallel.py", "_LoweringParallel.parallel"),
     ("runtime/providers/_codex_attempt.py", "_CodexAttemptDriver.prepare"),
     ("runtime/effects/_coordinator_admission.py", "_EffectCoordinatorAdmission.submit_acceptance"),
     ("runtime/effects/_coordinator_delivery.py", "_EffectCoordinatorDelivery.deliver_ready"),
@@ -8068,6 +8068,39 @@ def test_n1_adapter_remediation_matches_exact_analyzer_projection() -> None:
     ):
         metric = getattr(report, kind).get(identity)
         assert metric is None or not metric.candidate
+
+
+def test_n2_workflow_remediation_matches_exact_analyzer_projection() -> None:
+    report = _repository_architecture_report()
+    assert report.unresolved_callsites == ()
+    scoped_names = {
+        "lowering.py", "semantics.py",
+        "_lowering_artifact_matching.py", "_lowering_artifacts.py",
+        "_lowering_block_dispatch.py", "_lowering_blocks.py",
+        "_lowering_call.py", "_lowering_call_bundle.py",
+        "_lowering_call_planning.py", "_lowering_child_specialization.py",
+        "_lowering_conditions.py", "_lowering_contracts.py",
+        "_lowering_core.py", "_lowering_descriptors.py", "_lowering_flow.py",
+        "_lowering_graph.py", "_lowering_graph_descriptor.py",
+        "_lowering_graph_driver.py", "_lowering_graph_nodes.py",
+        "_lowering_graph_plan.py", "_lowering_graph_rewrite.py",
+        "_lowering_graph_validation.py", "_lowering_identity.py",
+        "_lowering_parallel.py", "_semantics_blocks.py", "_semantics_calls.py",
+        "_semantics_catalog.py", "_semantics_common.py",
+        "_semantics_contracts.py", "_semantics_decisions.py",
+        "_semantics_parallel.py", "_semantics_repeats.py",
+        "_semantics_validation.py",
+    }
+    scoped_paths = {
+        f"src/lockstep/workflow/{name}" for name in scoped_names
+    }
+    candidates = sorted(
+        (kind, identity, metric.composite_score, metric.hard_triggers)
+        for kind in ("functions", "one_hops", "classes", "files")
+        for identity, metric in getattr(report, kind).items()
+        if identity.partition("::")[0] in scoped_paths and metric.candidate
+    )
+    assert candidates == []
 
 
 @pytest.mark.parametrize(
