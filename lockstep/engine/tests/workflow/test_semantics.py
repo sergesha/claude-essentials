@@ -145,14 +145,12 @@ def test_covering_write_remains_non_artifact_and_blocks_managed_specialization(
     assert descriptor["kind"] == "manual"
     assert descriptor["runner"] is None
     assert descriptor["writes"] == ["reports/"]
-    assert descriptor["artifacts"] == [
-        {
-            "name": "review",
-            "source_path": "reports/review.md",
-            "media_type": "text/markdown",
-            "required": True,
-        }
-    ]
+    assert descriptor["artifacts"] == []
+    assert message["artifact_contract"] == {
+        "handle": "review",
+        "path": "reports/review.md",
+        "markdown": {"sections": ["Findings", "Verdict"]},
+    }
     assert message["artifact_contract"] == {
         "handle": "review",
         "path": "reports/review.md",
