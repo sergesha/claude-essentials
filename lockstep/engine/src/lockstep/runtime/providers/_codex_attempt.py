@@ -1,6 +1,7 @@
 """Durable Codex execution, observation, and terminal lifecycle."""
 
 from __future__ import annotations
+
 import fcntl
 import hashlib
 import json
@@ -10,24 +11,29 @@ import sys
 import time
 from pathlib import Path
 from typing import Literal
+
 from lockstep.runtime.effects.descriptors import parse_effect_result
 from lockstep.runtime.locking import file_lock
 from lockstep.runtime.payload_limits import bounded_json
-from lockstep.runtime.providers.base import EffectRequest, PreparedLaunch, RunnerObservation, TerminalSafetyObservation
-from lockstep.runtime.providers.workspaces import WorkspaceError
-from lockstep.runtime.sandbox import SandboxPolicy, verify_attestation
-
+from lockstep.runtime.providers._codex_preparation import (
+    CodexLaunchRecord,
+    _CodexAttemptState,
+    _CodexPreparation,
+)
 from lockstep.runtime.providers._codex_support import (
     CodexInstallationBinding,
     CodexProviderError,
     _attestation_digest,
     _canonical,
 )
-from lockstep.runtime.providers._codex_preparation import (
-    CodexLaunchRecord,
-    _CodexAttemptState,
-    _CodexPreparation,
+from lockstep.runtime.providers.base import (
+    EffectRequest,
+    PreparedLaunch,
+    RunnerObservation,
+    TerminalSafetyObservation,
 )
+from lockstep.runtime.providers.workspaces import WorkspaceError
+from lockstep.runtime.sandbox import SandboxPolicy, verify_attestation
 
 
 class _CodexAttemptDriver(_CodexAttemptState, _CodexPreparation):

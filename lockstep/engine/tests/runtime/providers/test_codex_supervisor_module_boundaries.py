@@ -9,9 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
 from lockstep.runtime.providers import _codex_supervisor as supervisor
-
 
 _HELPERS = {
     "_atomic_json",
@@ -20,6 +18,7 @@ _HELPERS = {
     "_verify_bound_files",
     "_capture",
     "_kill_group",
+    "_terminate_group",
     "_group_is_dead",
     "_wait_group_dead",
     "_finish_capture",
@@ -31,6 +30,7 @@ _HELPERS = {
     "_start_capture",
     "_monitor_process",
     "_terminal_reason",
+    "_contain_spawned_process",
 }
 
 
@@ -121,6 +121,7 @@ def test_supervisor_has_one_transaction_owner_and_thin_run() -> None:
         "_monitor_process",
         "_finish_capture",
         "_publish_terminal",
+        "_contain_spawned_process",
     } <= execute_calls
 
 

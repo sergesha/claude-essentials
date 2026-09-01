@@ -9,9 +9,9 @@ import stat
 from pathlib import Path, PurePosixPath
 
 from lockstep.runtime._publication_values import (
+    PreparedPublication,
     PublicationConflict,
     PublicationJournalError,
-    PreparedPublication,
     PublicationReceipt,
     _canonical,
     _digest,
