@@ -835,15 +835,18 @@ def test_public_acceptance_rejects_every_wrong_commitment_without_mutation(
         command.scenario_accept_artifact(issued.token, project=str(project))
         completed = _wait_for_public_terminal(command, project, run_id)
         assert (project / ".lockstep" / "review.md").read_bytes() == artifact_bytes
-        after_exact = _durable_authority_surface(command, project, run_id, owner_state)
-        assert (
-            command.scenario_accept_artifact(issued.token, project=str(project))
-            == completed
-        )
-        assert (
-            _durable_authority_surface(command, project, run_id, owner_state)
-            == after_exact
-        )
+        with command._admission_recovery_lock:
+            after_exact = _durable_authority_surface(
+                command, project, run_id, owner_state
+            )
+            assert (
+                command.scenario_accept_artifact(issued.token, project=str(project))
+                == completed
+            )
+            assert (
+                _durable_authority_surface(command, project, run_id, owner_state)
+                == after_exact
+            )
     finally:
         command.close()
 

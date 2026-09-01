@@ -18,7 +18,13 @@ from lockstep.runtime.start_service import AuthorizedStartService
 from lockstep.workflow.compiler import canonical_execution_bytes
 from lockstep.template_installation import plan_template_installation
 from lockstep.templates import TemplateCollision, install_template
-from tests._authoring_gate import assert_no_durable_runtime_change, replace_marker, tree_image, write_workflow
+from tests._authoring_gate import (
+    assert_no_durable_runtime_change,
+    provision_controlled_runtime,
+    replace_marker,
+    tree_image,
+    write_workflow,
+)
 
 
 CUT_EXIT = 86
@@ -137,6 +143,8 @@ def _runtime_oracle(scenario: Scenario, monkeypatch, accept: bool, surface: str)
     def stop(_self, recipe, plan, _values, *, canonical_input):
         captured.append((recipe, plan, canonical_input)); return {"status": "captured", "run_id": "probe"}
     monkeypatch.setattr(AuthorizedStartService, "start", stop)
+    if accept and surface == "template":
+        provision_controlled_runtime(scenario.project, scenario.state, scenario.root)
     service = LockstepCommandService(scenario.state, scenario.project / ".lockstep/recipes")
     before = tree_image(scenario.state)
     try:

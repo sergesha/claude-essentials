@@ -139,6 +139,12 @@ _BASES = {'lockstep.runtime.effects._coordinator_validation': ('_EffectCoordinat
                                                       '_pending_acceptance',
                                                       'preview_acceptance',
                                                       'issue_acceptance_consent',
+                                                      '_acceptance_retry_commitment',
+                                                      '_acceptance_retry_state',
+                                                      '_acceptance_retry_expected_result',
+                                                      '_validate_acceptance_retry_record',
+                                                      '_validate_acceptance_retry_producer',
+                                                      '_validate_acceptance_retry_lineage',
                                                       '_redeem_delivered_acceptance_retry',
                                                       '_acceptance_submission_context',
                                                       '_commit_acceptance_submission',
@@ -233,6 +239,7 @@ _IMPORT_ORDER = (
 _ALLOWED_ONE_HOP_CANDIDATES = {
     "_reconcile_launching_effect",
     "deliver_ready",
+    "submit_acceptance",
 }
 _DECOMPOSED_METHODS = {
     "_commit_publication_recovery",
@@ -251,6 +258,12 @@ _NEW_HELPERS = {
     "_validate_publication_authority",
     "_prepared_publication_commitment",
     "_advance_publication_effect",
+    "_acceptance_retry_commitment",
+    "_acceptance_retry_state",
+    "_acceptance_retry_expected_result",
+    "_validate_acceptance_retry_record",
+    "_validate_acceptance_retry_producer",
+    "_validate_acceptance_retry_lineage",
 }
 _TYPE_HINT_IDENTITIES = {
     "_advance_publication_effect": {"return": "ReconcileReport"},
@@ -362,7 +375,7 @@ _EXPECTED_METHOD_DIGESTS = {'__init__': '48266efa798f0c11908e5011c0c264eebcc3926
  '_reconcile_special_descriptor': 'a7f45f16b9598880726fdfce8a4af429e399fd20d14314c91c2c51f0a49cc0e1',
  '_recover_missing_effect': 'c99f7e2adc96dc4a8d2515b008fd264c3a18bd85b841cf019ddac144997ff438',
  '_recover_publication': '9ecd3ffcfc80ad615ef8f49b731c926e1aca3b9833086a3895a0a4997c8547f7',
- '_redeem_delivered_acceptance_retry': 'ca79e31b061d57f299d16217d509a87ef867081a8f7a812da22dc7b955974163',
+ '_redeem_delivered_acceptance_retry': 'ff407722f1a086365525090de83f9eb3c881ea48cf70841e29a2463d1a58f1fd',
  '_report': 'eacbfe8343f8b5f71982b12a933ca485928f66c214b3bc5ab21feaab03a0ca52',
  '_requested_delivery_ids': '94b153389aaaf0b785225b4a8830fa52e76715a7a6f8528e189f482579ed5134',
  '_resolved_effect_context': 'ae64944f07e889a877f28b1ea692e4f5dec0aa077f055d14890680e128e117da',
@@ -1991,7 +2004,7 @@ expected_one_hop_candidates = {
     f"{owner_for_method[name][0]}::{owner_for_method[name][1]}.{name}::@one_hop"
     for name in spec["allowed_one_hop_candidates"]
 }
-assert len(expected_one_hop_candidates) == 2
+assert len(expected_one_hop_candidates) == 3
 actual_one_hop_candidates = {
     identity
     for identity in expected_one_hops

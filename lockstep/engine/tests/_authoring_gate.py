@@ -8,6 +8,12 @@ from types import SimpleNamespace
 
 from lockstep import cli
 from lockstep.mcp import server
+from lockstep.recipe.authority import RecipeAuthorityPolicy, StrictRecipeIngress
+from lockstep.runtime.effects.owner_policy import RuntimeRequirementIndex
+from lockstep.runtime.effects.owner_provisioning import provision_runtime_snapshot
+from tests.runtime._runtime_commitment_harness import _runtime_config
+
+
 @dataclass(frozen=True)
 class TreeEntry:
     kind: str; mode: int; device: int; inode: int; size: int; mtime_ns: int; ctime_ns: int
@@ -78,3 +84,37 @@ def observed_compilation_image(expected: dict[Path, bytes]) -> dict[Path, bytes]
 
 def assert_no_durable_runtime_change(before: dict[str, TreeEntry], state: Path) -> None:
     assert tree_image(state) == before
+
+
+def provision_controlled_runtime(
+    project: Path,
+    state: Path,
+    recipe: str,
+) -> RuntimeRequirementIndex:
+    recipes = project / ".lockstep" / "recipes"
+    authorized = StrictRecipeIngress(recipes).inspect(
+        f"{recipe}.recipe.yaml"
+    ).authorize(RecipeAuthorityPolicy())
+    index = RuntimeRequirementIndex.for_authorized_closure(
+        authorized,
+        project_identity=str(project.resolve()),
+    )
+    assert index.requirements
+    runtime_root = state.parent / f"{state.name}-controlled-runtime"
+    runtime_root.mkdir()
+    config = _runtime_config(runtime_root)
+    codex = config["codex"]
+    pinned = config["pinned"]
+    assert isinstance(codex, dict)
+    assert isinstance(pinned, dict)
+    provision_runtime_snapshot(
+        state_dir=state,
+        codex=codex,
+        pinned=pinned,
+        replacement_keys=tuple(
+            requirement.grant_selection_key for requirement in index.requirements
+        ),
+        index=index,
+        project=project,
+    )
+    return index

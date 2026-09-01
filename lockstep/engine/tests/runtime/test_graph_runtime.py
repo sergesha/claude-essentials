@@ -1,18 +1,19 @@
 from __future__ import annotations
 
+import inspect
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
-import inspect
 from pathlib import Path
-import threading
 
 import pytest
 
 from lockstep.recipe import yamlgraph_adapter as yg
 from lockstep.recipe.authority import RecipeAuthorityPolicy, StrictRecipeIngress
 from lockstep.runtime.catalog import RunBinding
+from lockstep.runtime.engine_drive_service import EngineDriveService
 from lockstep.runtime.graph_runtime import (
     MAX_HISTORY_SNAPSHOTS,
     GraphRuntime,
@@ -213,6 +214,156 @@ def test_ensure_started_serializes_two_recoverers_and_never_replays_input(tmp_pa
     first.close()
     second.close()
     store.close()
+
+
+def test_decision_guard_serializes_snapshot_to_decision_across_runtimes(tmp_path):
+    bundles, binding = _binding(tmp_path, FIXTURES / "parent_direct.recipe.yaml")
+    store = SQLiteStore(tmp_path / "runtime.sqlite")
+    leases = LeaseStore(store)
+    state = {"version": 0}
+    first_entered = threading.Event()
+    second_entered = threading.Event()
+    release_first = threading.Event()
+
+    class App:
+        def snapshot(self, *, thread_id, subgraphs=False):
+            assert thread_id == binding.thread_id
+            return NativeSnapshot(values={"version": state["version"]})
+
+        def close(self):
+            pass
+
+    def runtime():
+        candidate = GraphRuntime(
+            bundle_store=bundles,
+            leases=leases,
+            invocations=InvocationLockStore(tmp_path / "owner-state"),
+            checkpoint_path=tmp_path / "checkpoints.sqlite",
+            app_factory=lambda *_: App(),
+        )
+        candidate.bind(binding)
+        return candidate
+
+    first = runtime()
+    second = runtime()
+
+    def first_decision():
+        with first.decision_guard(binding.public_run_id):
+            observed = first.snapshot(binding.public_run_id)
+            first_entered.set()
+            assert release_first.wait(1)
+            assert observed.values == {"version": 0}
+            state["version"] = 1
+
+    def second_decision():
+        with second.decision_guard(binding.public_run_id):
+            second_entered.set()
+            return second.snapshot(binding.public_run_id)
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first_pending = pool.submit(first_decision)
+            assert first_entered.wait(1)
+            second_pending = pool.submit(second_decision)
+            assert not second_entered.wait(0.1)
+            release_first.set()
+            first_pending.result(timeout=1)
+            observed = second_pending.result(timeout=1)
+        assert observed.values == {"version": 1}
+    finally:
+        release_first.set()
+        first.close()
+        second.close()
+        store.close()
+
+
+def test_engine_drive_serializes_complete_decisions_across_runtimes(tmp_path):
+    bundles, binding = _binding(tmp_path, FIXTURES / "parent_direct.recipe.yaml")
+    store = SQLiteStore(tmp_path / "runtime.sqlite")
+    leases = LeaseStore(store)
+    first_decision = threading.Event()
+    second_snapshot = threading.Event()
+    release_first = threading.Event()
+
+    class App:
+        def __init__(self, entered):
+            self._entered = entered
+
+        def snapshot(self, *, thread_id, subgraphs=False):
+            assert thread_id == binding.thread_id
+            self._entered.set()
+            return NativeSnapshot(values={"lockstep_outcome": "PASS"})
+
+        def close(self):
+            pass
+
+    def runtime(entered):
+        candidate = GraphRuntime(
+            bundle_store=bundles,
+            leases=leases,
+            invocations=InvocationLockStore(tmp_path / "owner-state"),
+            checkpoint_path=tmp_path / "checkpoints.sqlite",
+            app_factory=lambda *_: App(entered),
+        )
+        candidate.bind(binding)
+        return candidate
+
+    first_runtime = runtime(threading.Event())
+    second_runtime = runtime(second_snapshot)
+
+    class Catalog:
+        @staticmethod
+        def get(run_id):
+            assert run_id == binding.public_run_id
+            return binding
+
+    class Coordinator:
+        def __init__(self, *, block=False):
+            self._block = block
+
+        def reconcile_consumed(self, run_id):
+            assert run_id == binding.public_run_id
+            if self._block:
+                first_decision.set()
+                assert release_first.wait(1)
+            return ()
+
+    def drive_service(candidate, coordinator):
+        return EngineDriveService(
+            runtime=candidate,
+            catalog=Catalog(),
+            leases=leases,
+            effects=object(),
+            coordinator=coordinator,
+            max_decisions=1,
+            protected_descriptor=lambda _interrupt: None,
+            reserve_effect_run=lambda _run_id: True,
+            activate_effect_run=lambda _run_id: None,
+            deactivate_effect_run=lambda _run_id: None,
+        )
+
+    first = drive_service(first_runtime, Coordinator(block=True))
+    second = drive_service(second_runtime, Coordinator())
+    stale = NativeSnapshot(values={"lockstep_outcome": "FAIL"})
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first_pending = pool.submit(
+                first.drive, binding.public_run_id, snapshot=stale
+            )
+            assert first_decision.wait(1)
+            second_pending = pool.submit(
+                second.drive, binding.public_run_id, snapshot=stale
+            )
+            assert not second_snapshot.wait(0.1)
+            release_first.set()
+            first_status = first_pending.result(timeout=1)
+            second_status = second_pending.result(timeout=1)
+        assert first_status.status == second_status.status == "completed"
+    finally:
+        release_first.set()
+        first_runtime.close()
+        second_runtime.close()
+        store.close()
 
 
 @pytest.mark.parametrize(

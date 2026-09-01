@@ -41,6 +41,7 @@ _BASES = {
         (
             "_app_guard",
             "_invoke",
+            "decision_guard",
             "start",
             "ensure_started",
             "snapshot",
@@ -70,6 +71,7 @@ _METHOD_DIGESTS = {
     "_app_guard": "f0b025fb4c0efd8d01bd0fdebeb9ff5ebdff4e26b406d76ce4be6f3f6c247a5e",
     "binding": "a5541ea18da53c3d9e090df7e2ea2721d46d37471d64634b6bdf40f197534f72",
     "_invoke": "2e82737e54d0dceb409ab6704b3ff83a2371d69afabbfe898946c9ec39918738",
+    "decision_guard": "7f11f438f6c6fb9e5817964b70bf95f25180e1a8419cf1b2268a07ea8a307a83",
     "start": "6096d9b2eaacda6d3a510d31c893caa0d28a917af79340981e288ea2a0742d66",
     "ensure_started": "020e1d03fd68ca023cf03b463ae28199af3b8f2a1c201b1d4032a7b883a09e51",
     "snapshot": "348a8145162d75f7b72b00d86141ce761f1bc5f180b5589f8c0290e9ecd1ea40",

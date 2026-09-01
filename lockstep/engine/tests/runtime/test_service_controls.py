@@ -874,7 +874,10 @@ def test_effect_recovery_defers_before_reconcile_when_active_batch_is_full() -> 
         get=lambda _effect_id: (_ for _ in ()).throw(KeyError())
     )
     service.leases = ()
-    service.runtime = SimpleNamespace(snapshot=lambda *_args, **_kwargs: snapshot)
+    service.runtime = SimpleNamespace(
+        decision_guard=lambda _run_id: nullcontext(),
+        snapshot=lambda *_args, **_kwargs: snapshot,
+    )
     service.coordinator = SimpleNamespace(
         reconcile=lambda _run_id: pytest.fail("capacity deferral reconciled effect")
     )
@@ -1014,7 +1017,10 @@ def test_engine_progress_prepares_manual_handoff_before_returning_awaiting() -> 
     service.effects = effects
     service.leases = ()
     service.coordinator = Coordinator()
-    service.runtime = SimpleNamespace(snapshot=lambda *_args, **_kwargs: snapshot)
+    service.runtime = SimpleNamespace(
+        decision_guard=lambda _run_id: nullcontext(),
+        snapshot=lambda *_args, **_kwargs: snapshot,
+    )
     service._deactivate_effect_run = lambda _run_id: None
 
     status = service._drive_engine_owned("run-1", binding=binding, snapshot=snapshot)
@@ -1257,6 +1263,7 @@ def test_engine_progress_delivers_scope_result_without_status_mutation() -> None
     service.leases = ()
     service.coordinator = Coordinator()
     service.runtime = SimpleNamespace(
+        decision_guard=lambda _run_id: nullcontext(),
         snapshot=lambda *_args, **_kwargs: state["snapshot"]
     )
     service._deactivate_effect_run = lambda _run_id: None
@@ -1303,7 +1310,10 @@ def test_engine_progress_requeues_a_delivery_held_by_another_owner() -> None:
     service.effects = ()
     service.leases = ()
     service.coordinator = Coordinator()
-    service.runtime = SimpleNamespace(snapshot=lambda *_args, **_kwargs: pending)
+    service.runtime = SimpleNamespace(
+        decision_guard=lambda _run_id: nullcontext(),
+        snapshot=lambda *_args, **_kwargs: pending,
+    )
     service._activate_effect_run = activated.append
 
     status = service._drive_engine_owned("run-1", binding=binding, snapshot=pending)
@@ -1345,6 +1355,7 @@ def test_engine_progress_recovers_capacity_bound_consumed_facts_in_one_sweep() -
     service.leases = ()
     service.coordinator = coordinator
     service.runtime = SimpleNamespace(
+        decision_guard=lambda _run_id: nullcontext(),
         snapshot=lambda *_args, **_kwargs: completed
     )
     service._deactivate_effect_run = deactivated.append

@@ -11,7 +11,16 @@ from pathlib import Path
 from typing import Mapping, get_type_hints  # noqa: UP035 - freezes public hints
 
 SOURCE_ROOT = Path(__file__).parents[2] / "src" / "lockstep" / "workflow"
-STATE_FIELDS = {"workflow", "catalog", "outcomes", "artifacts", "ids"}
+STATE_FIELDS = {
+    "workflow",
+    "catalog",
+    "outcomes",
+    "artifacts",
+    "exports",
+    "export_paths",
+    "export_producers",
+    "ids",
+}
 
 
 def _is_frozen_dataclass(node: ast.ClassDef) -> bool:
@@ -50,7 +59,8 @@ def test_semantics_facade_composes_single_state_owner_and_identity_reexports() -
         assert getattr(facade, name) is getattr(contracts, name)
 
     assert [item.name for item in fields(validation._ValidationState)] == [
-        "workflow", "catalog", "outcomes", "artifacts", "ids",
+        "workflow", "catalog", "outcomes", "artifacts", "exports",
+        "export_paths", "export_producers", "ids",
     ]
     for path in SOURCE_ROOT.glob("_semantics_*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"))

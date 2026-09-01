@@ -14,18 +14,17 @@ import yaml
 from lockstep import cli
 from lockstep.recipe.authority import RecipeAuthorityPolicy, StrictRecipeIngress
 from lockstep.runtime.effects.owner_policy import (
-    RuntimeRequirementIndex,
     _RuntimeAdmissionChanged,
     requirement_digest,
 )
 from lockstep.runtime.effects.owner_snapshot_store import open_runtime_snapshot
 from lockstep.runtime.engine import Engine
 from lockstep.runtime.providers.base import launch_commitment_digest
-from lockstep.runtime.providers.codex import CodexRunnerAdapter
-from lockstep.runtime.providers.pinned import PinnedRunnerAdapter
 from lockstep.runtime.read_resources import RuntimeReadResources
 from lockstep.runtime.recipe_bundles import RecipeBundleRef
+from lockstep.runtime.start_service import AuthorizedStartService
 from lockstep.templates import install_template
+from tests._authoring_gate import provision_controlled_runtime
 
 from ._runtime_commitment_harness import (
     ManagedRestartFifoBarrier,
@@ -101,16 +100,20 @@ def _assert_completed_delivery(command, provisioned, run_id: str):
 
 
 @pytest.mark.parametrize(
-    ("template", "expected_scope_rows"),
-    [("reviewed-change", 1), ("parallel-review", 3)],
+    ("template", "expected_scope_rows", "expected_selectors"),
+    [
+        ("reviewed-change", 1, ("codex", "pinned")),
+        ("parallel-review", 3, ("codex", "codex")),
+    ],
 )
-def test_packaged_template_scope_only_public_start_has_no_runtime_authority(
+def test_packaged_template_public_start_requires_exact_runtime_authority(
     template,
     expected_scope_rows,
+    expected_selectors,
     tmp_path,
     monkeypatch,
 ) -> None:
-    """A5 GREEN: current packaged scope graphs require and launch no runner."""
+    """Real packaged templates enter start only with their exact static grants."""
 
     project = tmp_path / "project"
     project.mkdir()
@@ -124,11 +127,11 @@ def test_packaged_template_scope_only_public_start_has_no_runtime_authority(
     authorized = StrictRecipeIngress(recipes).inspect(
         "release.recipe.yaml"
     ).authorize(RecipeAuthorityPolicy())
-    index = RuntimeRequirementIndex.for_authorized_closure(
-        authorized,
-        project_identity=str(project.resolve()),
+    owner_state = tmp_path / "owner-state"
+    index = provision_controlled_runtime(project, owner_state, "release")
+    assert tuple(sorted(item.runner_selector for item in index.requirements)) == (
+        expected_selectors
     )
-    assert index.requirements == ()
     declared_scopes = 0
     for item in authorized.files:
         document = yaml.safe_load(item.bytes)
@@ -139,45 +142,24 @@ def test_packaged_template_scope_only_public_start_has_no_runtime_authority(
             == "scope"
         )
     assert declared_scopes == expected_scope_rows
-    provider_requests: list[object] = []
-    codex_prepare = CodexRunnerAdapter.prepare
-    pinned_prepare = PinnedRunnerAdapter.prepare
+    admitted: list[tuple[object, ...]] = []
 
-    def observe_codex(adapter, request):
-        provider_requests.append(request)
-        return codex_prepare(adapter, request)
+    def observe_start(service, recipe, plan, values, *, canonical_input):
+        admitted.append((service, recipe, plan, values, canonical_input))
+        return {"status": "captured", "run_id": "captured-run"}
 
-    def observe_pinned(adapter, request):
-        provider_requests.append(request)
-        return pinned_prepare(adapter, request)
-
-    monkeypatch.setattr(CodexRunnerAdapter, "prepare", observe_codex)
-    monkeypatch.setattr(PinnedRunnerAdapter, "prepare", observe_pinned)
-    owner_state = tmp_path / "owner-state"
+    monkeypatch.setattr(AuthorizedStartService, "start", observe_start)
     command = Engine.command(owner_state, recipes)
     try:
-        try:
-            command.start("release", {}, str(project))
-        except Exception:
-            # Completion/availability is not this control's contract.  Before
-            # R1b-E one template stops at unwired composition and the parallel
-            # template can reach an unrelated native topology failure.  The
-            # durable authority-absence oracles below must hold in either case.
-            pass
-        with command.store.read_connection() as connection:
-            rows = connection.execute(command.store.tables.effects.select()).mappings()
-            effects = tuple(rows)
-        bindings = command.catalog.list(str(project.resolve()))
-        assert len(bindings) == 1
-        assert len(effects) <= expected_scope_rows
-        assert {record["effect_kind"] for record in effects} <= {"scope"}
-        assert all(record["effect_kind"] == "scope" for record in effects)
-        assert all(record["runner_binding_digest"] is None for record in effects)
-        assert all(record["request_digest"] is None for record in effects)
-        assert all(record["grant_digest"] is None for record in effects)
-        assert all(record["launch_commitment_digest"] is None for record in effects)
-        assert provider_requests == []
-        assert not (owner_state / "runtime-owner").exists()
+        assert command.start("release", {}, str(project)) == {
+            "status": "captured",
+            "run_id": "captured-run",
+        }
+        assert len(admitted) == 1
+        assert admitted[0][1] == "release"
+        assert admitted[0][3] == {}
+        assert admitted[0][4] == b"{}"
+        assert (owner_state / "runtime-owner" / "snapshot.json").is_file()
     finally:
         command.close()
 

@@ -15,7 +15,13 @@ from lockstep.runtime.start_service import AuthorizedStartService
 from lockstep.recipe._authority_models import RecipeCandidate
 from lockstep.workflow.compiler import canonical_execution_bytes
 from lockstep.templates import install_template
-from tests._authoring_gate import assert_no_durable_runtime_change, mcp_context, tree_image, write_workflow
+from tests._authoring_gate import (
+    assert_no_durable_runtime_change,
+    mcp_context,
+    provision_controlled_runtime,
+    tree_image,
+    write_workflow,
+)
 from tests.test_authoring_legacy_v4_refusal import (
     _create_test_namespace,
     _locate_test_namespace,
@@ -88,6 +94,8 @@ def _assert_dependency_graph(surface: str, authorized) -> None:
 @pytest.mark.parametrize("surface", ("compile", "minimal", "template"))
 def test_public_start_admits_exact_execution_files_provenance_and_dag(tmp_path, monkeypatch, surface) -> None:
     project, state, root = _ready_surface(tmp_path, surface); captured = []
+    if surface == "template":
+        provision_controlled_runtime(project, state, root)
     monkeypatch.setattr(AuthorizedStartService, "start", _stop(captured))
     _start(project, state, root)
     _recipe, plan, canonical_input = captured[0]
