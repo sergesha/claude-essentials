@@ -20,7 +20,6 @@ from jsonschema import Draft202012Validator, FormatChecker
 
 import architecture_call_resolver as call_resolver
 import architecture_candidate_policy as candidate_policy
-import architecture_diagnostics as diagnostics
 import architecture_domain_lifecycle as domain_lifecycle
 import architecture_manifest_verifier as manifest_verifier
 from architecture_candidate_policy import evaluate_candidates
@@ -4335,7 +4334,6 @@ def test_resolver_imported_builtin_effect_requires_exact_coverage(
 
     path = f"src/lockstep/imported_builtin_{case}.py"
     source = f"{statement}\ndef owner():\n    {expression}\n"
-    callsite = f"{path}::owner::call:0001"
     with pytest.raises(
         ValueError,
         match=rf"^external target lacks exact effect coverage: {re.escape(target)}$",
@@ -7347,7 +7345,7 @@ def test_candidate_policy_mutable_field_uncertainty_is_never_ignored(
     path = "src/lockstep/unresolved_fields.py"
     index, resolutions, semantics = _unresolved_candidate_fixture(
         tmp_path,
-        f"class Mutable:\n    def mutate(self, value):\n"
+        "class Mutable:\n    def mutate(self, value):\n"
         + textwrap.indent(body, "        ") + "\n",
         path,
     )

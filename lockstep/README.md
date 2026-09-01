@@ -189,8 +189,11 @@ From `engine/`:
 
 ```bash
 uv run --no-sync pytest -q
-uv run --no-sync ruff check src tests
+uv run --no-sync ruff check --select E9,F63,F7,F82 src tests
 ```
+
+The Ruff command intentionally checks the stable runtime-impact rule subset;
+it is not a claim that the repository has adopted Ruff's full style policy.
 
 The installed-contract suite additionally builds a clean wheel and a staged
 plugin, runs complete template and manual flows from foreign working

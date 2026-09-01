@@ -955,8 +955,8 @@ class _Resolver:
         for identity in self.model.classes:
             attributes = self._class_attributes(identity)
             fields = {node.attr for node in attributes}
-            for field in fields:
-                matching = [node for node in attributes if node.attr == field]
+            for field_name in fields:
+                matching = [node for node in attributes if node.attr == field_name]
                 stores = [node for node in matching if isinstance(node.ctx, ast.Store)]
                 if any(isinstance(node.ctx, ast.Del) for node in matching) or not stores:
                     continue
@@ -972,11 +972,11 @@ class _Resolver:
                     if target.kind == "class" and target.label in self.model.classes
                 ]
                 if len(constructors) == len(stores) and len(set(constructors)) == 1:
-                    self.field_receivers[(identity, field)] = constructors[0]
+                    self.field_receivers[(identity, field_name)] = constructors[0]
                     continue
-                injected = self._injection(identity, field, stores)
+                injected = self._injection(identity, field_name, stores)
                 if injected is not None:
-                    self.field_receivers[(identity, field)] = injected
+                    self.field_receivers[(identity, field_name)] = injected
 
     def _resolve_attribute_call(self, scope: _Scope, expression: ast.Attribute) -> _Target | None:
         class_info = self.model.enclosing_class(scope)

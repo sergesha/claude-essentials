@@ -9,7 +9,7 @@ from pathlib import Path
 from lockstep.runtime.effects._owner_policy_requirements import (
     RuntimeRequirement,
     RuntimeRequirementIndex,
-    _BoundRuntimeRequirementIndex,
+    _BoundRuntimeRequirementIndex as _BoundRuntimeRequirementIndex,
 )
 from lockstep.runtime.effects._owner_policy_values import (
     OwnerRuntimeGrant,

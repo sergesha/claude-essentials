@@ -11,7 +11,7 @@ import fnmatch
 from pathlib import Path
 
 from lockstep.runtime._snapshot_facts import (
-    EffectRuntimeInput,
+    EffectRuntimeInput as EffectRuntimeInput,
     RuntimeSnapshotFacts,
     _CURRENT,
     _RUN_START,
@@ -20,7 +20,7 @@ from lockstep.runtime._snapshot_facts import (
 from lockstep.runtime._snapshot_lineage import (
     RuntimeSnapshotConflict,
     _chain,
-    _read_regular,
+    _read_regular as _read_regular,
     capture_authoritative_snapshot,
     resolve_lineage_snapshot,
     verify_bound_snapshot,

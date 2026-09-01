@@ -15,7 +15,7 @@ from architecture_domain_lifecycle import (
     ResolvedCall, ResolvedDependency, ResolutionIndex, SemanticDigestInputs,
     SemanticIndex, UnresolvedCall, _resolve_and_propagate,
 )
-from architecture_legacy_metrics import LegacyMetrics, measure_legacy_metrics
+from architecture_legacy_metrics import measure_legacy_metrics
 from architecture_source_index import SourceIndex
 
 

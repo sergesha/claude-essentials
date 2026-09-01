@@ -11,14 +11,14 @@ from sqlalchemy.exc import IntegrityError
 from lockstep.runtime.blobs import BlobRef
 from lockstep.runtime.catalog import RunBinding, RunCatalog
 from lockstep.runtime.effects._ledger_policy import (
-    PRELAUNCH_ERROR_CODES,
+    PRELAUNCH_ERROR_CODES as PRELAUNCH_ERROR_CODES,
     EffectConflict,
     IllegalEffectTransition,
     StaleEffectLease,
     StaleEffectRevision,
     _terminal_transition_replay,
     _transition_values,
-    _validate_effect_preparation,
+    _validate_effect_preparation as _validate_effect_preparation,
     _validate_prelaunch_seal,
     _validate_prepare_coordinate,
     _validate_prepare_descriptor,

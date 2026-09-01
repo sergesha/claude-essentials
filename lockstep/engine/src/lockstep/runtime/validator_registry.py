@@ -201,7 +201,7 @@ def _check_file_matches_hash(check: dict, evidence: dict, ctx: dict) -> list[str
             raise ValueError
         coordinate = NativeCoordinate(**coordinate_data)
         record = registry.read(ArtifactRef.parse(selected_ref))
-    except (KeyError, TypeError, ValueError) as exc:
+    except (KeyError, TypeError, ValueError):
         return ["file_matches_hash: artifact provenance is invalid"]
     if (
         record.producer_effect_id != expected["producer_effect_id"]

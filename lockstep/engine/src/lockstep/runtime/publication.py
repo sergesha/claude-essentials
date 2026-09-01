@@ -17,24 +17,24 @@ from pathlib import Path
 from lockstep.runtime._publication_queries import _ProjectPublicationQueries
 from lockstep.runtime._publication_values import (
     PublicationConflict,
-    PublicationEntry,
-    PublicationError,
-    PublicationJournalError,
+    PublicationEntry as PublicationEntry,
+    PublicationError as PublicationError,
+    PublicationJournalError as PublicationJournalError,
     PublicationLimits,
     PublicationReceipt,
     PublicationRequest,
     PreparedPublication,
-    _HEX,
+    _HEX as _HEX,
     _canonical,
-    _coordinate_data,
-    _counter,
-    _digest,
+    _coordinate_data as _coordinate_data,
+    _counter as _counter,
+    _digest as _digest,
     _entry_data,
     _image_data,
-    _image_from_data,
+    _image_from_data as _image_from_data,
     _request_data,
     _same_image,
-    _text,
+    _text as _text,
 )
 from lockstep.runtime.artifacts import ArtifactRegistry
 from lockstep.runtime.blobs import BlobRef, BlobStore

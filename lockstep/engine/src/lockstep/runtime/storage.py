@@ -12,14 +12,17 @@ from sqlalchemy.engine.url import make_url
 
 from lockstep.runtime import _storage_migration
 from lockstep.runtime._storage_migration import (
-    LegacyRunDriveClassification,
-    MigrationProgress,
-    RuntimeSchemaMigrator,
+    LegacyRunDriveClassification as LegacyRunDriveClassification,
+    MigrationProgress as MigrationProgress,
+    RuntimeSchemaMigrator as RuntimeSchemaMigrator,
     _seal_sqlite_family,
     _sqlite_family,
     _verify_sqlite_family,
 )
-from lockstep.runtime._storage_schema import RuntimeTables, _define_tables
+from lockstep.runtime._storage_schema import (
+    RuntimeTables as RuntimeTables,
+    _define_tables,
+)
 from lockstep.runtime.advisory_lock import advisory_file_lock
 from lockstep.runtime.owner_state import initialize_owner_state
 
