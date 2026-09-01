@@ -3,6 +3,51 @@
 Date: 2026-08-07. Status: implemented; Claude/Codex parity updated 2026-08-19.
 Final home: `sergesha/claude-essentials` (this file moves there with the implementation).
 
+## Installed product contract
+
+Lockstep is a **Local unsandboxed single-user** system. It runs with ambient
+OS-user authority; the host, operating system, Python environment, installed
+package, owner state, workflow sources, credentials, and approved executables
+form its TCB (trusted computing base). This is **not security confinement** and
+provides **no constrained-runner, broker, or sandbox guarantee**. No
+configuration or report text grants authority. Text selects behavior or records
+observations; ambient OS capabilities and explicit runtime-validated owner
+consent are the authority sources.
+
+The exact CLI authoring grammar is:
+
+```text
+recipe init NAME
+recipe compile NAME
+recipe check [NAME | --all]
+recipe diff NAME
+recipe render NAME --view workflow|generated
+recipe estimate NAME [--json]
+template list
+template show TEMPLATE NAME
+template init TEMPLATE NAME
+```
+
+The exact MCP authoring surface is:
+
+```text
+recipe_init
+recipe_compile
+recipe_check
+recipe_diff
+recipe_render
+recipe_estimate
+template_list
+template_show
+```
+
+The packaged `reviewed-change` and `parallel-review` templates compile to and
+run through the production runtime. Manual yamlgraph is an equally supported,
+marker-free path: a canonical `.lockstep/recipes/NAME.recipe.yaml` without a
+same-name workflow source is admitted, checked, rendered, estimated, recovered,
+and run without a mode marker. Neither generated nor manual recipe text grants
+effect authority.
+
 ## Problem
 
 Autonomous coding agents (esp. weaker models) drop multi-step processes: skip

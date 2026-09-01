@@ -1,7 +1,7 @@
 version: "1.0"
 name: daily-review-gate
 description: >
-  Fractal child recipe for daily-change-reviewed. The independent reviewer
+  Child review recipe for daily-change-reviewed. The independent reviewer
   may create only .lockstep/review.md plus incidental .pytest_cache/ files;
   source, tests, plan, and test runner configuration remain frozen. A stated
   FAIL is a valid review artifact, but the parent recipe will reject it.

@@ -52,7 +52,7 @@ class StructuralEstimate:
     child_calls: int
     maximum_child_calls: int
     peak_parallel_branches: int
-    peak_parallel_subcalls: int
+    peak_parallel_child_calls: int
     maximum_runner_timeout_seconds: int | None
     generated_node_count: int
     expanded_fragment_count: int
@@ -72,7 +72,7 @@ class StructuralEstimate:
             "child_calls": self.child_calls,
             "maximum_child_calls": self.maximum_child_calls,
             "peak_parallel_branches": self.peak_parallel_branches,
-            "peak_parallel_subcalls": self.peak_parallel_subcalls,
+            "peak_parallel_child_calls": self.peak_parallel_child_calls,
             "maximum_runner_timeout_seconds": self.maximum_runner_timeout_seconds,
             "generated_node_count": self.generated_node_count,
             "expanded_fragment_count": self.expanded_fragment_count,
@@ -94,7 +94,7 @@ class _Metrics:
     child: int = 0
     max_child: int = 0
     peak_branches: int = 0
-    peak_subcalls: int = 0
+    peak_child_calls: int = 0
     max_timeout: int | None = None
     nodes: int = 0
     fragments: int = 0
@@ -109,7 +109,7 @@ class _Metrics:
         self.child += other.child
         self.max_child += other.max_child
         self.peak_branches = max(self.peak_branches, other.peak_branches)
-        self.peak_subcalls = max(self.peak_subcalls, other.peak_subcalls)
+        self.peak_child_calls = max(self.peak_child_calls, other.peak_child_calls)
         values = [
             item
             for item in (self.max_timeout, other.max_timeout)
@@ -193,7 +193,7 @@ def _estimate_choose(
     result.submissions = max(item.submissions for item in branches)
     result.max_child = max(item.max_child for item in branches)
     result.peak_branches = max(item.peak_branches for item in branches)
-    result.peak_subcalls = max(item.peak_subcalls for item in branches)
+    result.peak_child_calls = max(item.peak_child_calls for item in branches)
     timeouts = [item.max_timeout for item in branches if item.max_timeout is not None]
     result.max_timeout = max(timeouts) if timeouts else None
     result.seconds = max(item.seconds for item in branches)
@@ -214,8 +214,8 @@ def _estimate_parallel(
     result.peak_branches = max(
         len(branches), max((item.peak_branches for item in branches), default=0)
     )
-    result.peak_subcalls = sum(
-        max(item.peak_subcalls, int(item.max_child > 0)) for item in branches
+    result.peak_child_calls = sum(
+        max(item.peak_child_calls, int(item.max_child > 0)) for item in branches
     )
     result.user = sum(item.user for item in branches)
     result.submissions = sum(item.submissions for item in branches)
@@ -279,7 +279,7 @@ def _structural(metrics: _Metrics) -> StructuralEstimate:
     )
     return StructuralEstimate(
         metrics.user, metrics.submissions, metrics.pinned, metrics.child,
-        metrics.max_child, metrics.peak_branches, metrics.peak_subcalls,
+        metrics.max_child, metrics.peak_branches, metrics.peak_child_calls,
         metrics.max_timeout, metrics.nodes + 4, metrics.fragments, controlled,
     )
 
@@ -329,7 +329,7 @@ class _ManualGraphAnalysis:
             default=0,
         )
 
-    def peak_parallel_subcalls(self) -> int:
+    def peak_parallel_child_calls(self) -> int:
         return max(
             (
                 sum(
@@ -455,7 +455,7 @@ def _manual_structural_estimate(
         metrics.child,
         metrics.max_child,
         analysis.peak_parallel_branches(),
-        analysis.peak_parallel_subcalls(),
+        analysis.peak_parallel_child_calls(),
         metrics.max_timeout,
         metrics.nodes,
         expanded_fragment_count,

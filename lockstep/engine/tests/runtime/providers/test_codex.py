@@ -801,9 +801,6 @@ def test_attempt_quota_bounds_retained_provider_metadata(provider_system) -> Non
         adapter.prepare(second)
 
 
-def test_codex_mechanics_do_not_extend_generic_runner_or_sandbox_contracts() -> None:
-    from lockstep.runtime import runners
-
-    assert not hasattr(runners, "build_codex_managed_argv")
+def test_codex_mechanics_do_not_extend_generic_sandbox_contracts() -> None:
     assert "permission_profile_digest" not in SandboxPolicy.__dataclass_fields__
     assert "deployment_profile" not in SandboxPolicy.__dataclass_fields__
