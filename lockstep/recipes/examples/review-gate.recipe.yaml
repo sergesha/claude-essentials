@@ -1,0 +1,85 @@
+version: "1.0"
+name: review-gate
+description: >
+  Review graph used as a native direct subgraph by
+  feature-dev-reviewed.recipe.yaml. The review artifact
+  (.lockstep/review.md) and reviewed sources (src/**) are covered by this
+  graph's baseline, so the `unchanged src/** since start` check rejects a
+  concurrent source edit. The loop cap of 1 escalates failure to a human.
+  Reviewing more than src/** requires adding every reviewed glob to both
+  baseline_globs and the `unchanged` check here and in the parent verify
+  step. The verdict regex remains two-valued: this graph validates that a
+  verdict was stated, while the parent requires PASS. Copied from
+  tests/fixtures/recipes/good/child-review.recipe.yaml (the ground-truth shape),
+  with fuller task text. Repo-level example only — copy alongside
+  feature-dev-reviewed.recipe.yaml into <project>/.lockstep/recipes/.
+
+baseline_globs: [".lockstep/**", "src/**"]
+
+state:
+  brief: dict
+  evidence: dict
+  verdict_status: str
+  verdict_reasons: list
+
+tools:
+  run_checks:
+    type: python
+    module: lockstep.runtime.validators
+    function: run_checks
+
+nodes:
+  step_review:
+    type: interrupt
+    idempotent: false
+    state_key: brief
+    resume_key: evidence
+    message:
+      step: review
+      task: "Write the review to .lockstep/review.md; end with Verdict: PASS or FAIL"
+      exit_criterion: "review.md exists and states a verdict"
+      evidence_schema:
+        required: [review_path]
+        properties:
+          review_path:
+            type: string
+            format: project-path
+      checks:
+        - type: file_matches
+          path_from: review_path
+          regex: "(?m)^\\s*Verdict:\\s*(PASS|FAIL)\\s*$"
+        # the source pin: a worker edit landing while this review runs
+        # fails the review itself — clean-code-reviewed, dirty-code-shipped
+        # is closed at the child's own gate first.
+        - type: unchanged
+          glob: "src/**"
+          since: start
+
+  validate_review:
+    type: python
+    tool: run_checks
+
+  escalate_gate:
+    type: passthrough
+    output: {}
+
+  escalate:
+    type: interrupt
+    idempotent: false
+    state_key: brief
+    resume_key: evidence
+    message:
+      step: escalate
+
+edges:
+  - {from: START, to: step_review}
+  - {from: step_review, to: validate_review}
+  - {from: validate_review, to: END, condition: "verdict_status == 'pass'"}
+  - {from: validate_review, to: step_review, condition: "verdict_status == 'fail'"}
+  - {from: escalate_gate, to: escalate}
+
+# cap 1: a failed review attempt (e.g. the source pin tripped) escalates to
+# a human on the next attempt instead of looping — a legitimate FAIL verdict
+# is a PASSING format check and completes normally, so it never meets this cap.
+loop_limits: {validate_review: 1}
+loop_exits:  {validate_review: escalate_gate}

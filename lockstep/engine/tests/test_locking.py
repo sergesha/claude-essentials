@@ -1,7 +1,7 @@
 import json, os, time
 from pathlib import Path
 import pytest
-from lockstep_mcp.locking import file_lock, LockTimeout
+from lockstep.runtime.locking import file_lock, LockTimeout
 
 def test_lock_is_sidecar_and_released(tmp_path):
     target = tmp_path / "runs.json"
@@ -278,7 +278,7 @@ def test_breaker_session_does_not_unlink_foreign_session_in_its_empty_window(tmp
     # session's mutex. Force the exact interleaving deterministically —
     # no repetition, no timing — by making the payload write itself perform
     # the vacate-and-foreign-recreate before returning successfully.
-    import lockstep_mcp.locking as locking
+    import lockstep.runtime.locking as locking
 
     brk = tmp_path / "runs.json.lock.break"
 

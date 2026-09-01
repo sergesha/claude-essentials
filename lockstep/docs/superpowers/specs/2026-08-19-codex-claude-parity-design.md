@@ -408,7 +408,7 @@ the owner protecting state, recipes, and installed engine files.
   propagation.
 - `engine/tests/test_integration_subcalls.py` — fake Codex one-shot and fractal
   paths.
-- `recipes/examples/feature-dev-reviewed.yaml` — adapter-default runner.
+- `recipes/examples/feature-dev-reviewed.recipe.yaml` — adapter-default runner.
 - `skills/lockstep/SKILL.md` — host-neutral worker instructions.
 - `skills/lockstep-author/SKILL.md` — dual driver reference.
 - `README.md` — installation, configuration, trust, security, and smoke tests

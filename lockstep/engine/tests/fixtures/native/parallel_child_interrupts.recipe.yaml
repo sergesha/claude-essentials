@@ -1,0 +1,26 @@
+version: "1.0"
+name: native-parallel-child-interrupts
+state:
+  left_phase: str
+  left_answer: str
+  right_phase: str
+  right_answer: str
+  joined: bool
+nodes:
+  left:
+    type: subgraph
+    graph: left_child_interrupt.recipe.yaml
+    mode: direct
+  right:
+    type: subgraph
+    graph: right_child_interrupt.recipe.yaml
+    mode: direct
+  join:
+    type: passthrough
+    output:
+      joined: true
+edges:
+  - {from: START, to: [left, right]}
+  - {from: left, to: join}
+  - {from: right, to: join}
+  - {from: join, to: END}

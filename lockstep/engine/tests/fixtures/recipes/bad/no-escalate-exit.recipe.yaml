@@ -1,0 +1,73 @@
+version: "1.0"
+name: no-escalate-exit
+description: >
+  Bad fixture: the retry loop is capped (loop_limits present) but
+  loop_exits has no entry for the looping validator, so a blown budget has
+  nowhere defined to go. Expect: "loop_exits must target".
+
+state:
+  brief: dict
+  evidence: dict
+  verdict_status: str
+  verdict_reasons: list
+  task_name: str
+
+tools:
+  run_checks:
+    type: python
+    module: lockstep.runtime.validators
+    function: run_checks
+
+nodes:
+  step_one:
+    type: interrupt
+    state_key: brief
+    resume_key: evidence
+    idempotent: false
+    message:
+      step: one
+      task: "Do the {task_name} thing"
+      exit_criterion: "It is done"
+      evidence_schema:
+        required: [path]
+        properties:
+          path:
+            type: string
+            format: project-path
+      checks:
+        - type: file_exists
+          path_from: path
+
+  validate_one:
+    type: python
+    tool: run_checks
+
+  escalate_gate:
+    type: passthrough
+    output: {}
+
+  escalate:
+    type: interrupt
+    state_key: brief
+    resume_key: evidence
+    idempotent: false
+    message:
+      step: escalate
+
+edges:
+  - from: START
+    to: step_one
+  - from: step_one
+    to: validate_one
+  - from: validate_one
+    to: END
+    condition: "verdict_status == 'pass'"
+  - from: validate_one
+    to: step_one
+    condition: "verdict_status == 'fail'"
+  - from: escalate_gate
+    to: escalate
+
+loop_limits:
+  validate_one: 2
+# violation: loop_exits omitted entirely

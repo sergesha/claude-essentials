@@ -1,0 +1,23 @@
+version: "1.0"
+name: native-wrapped-child
+state:
+  seed: str
+  seen: str
+  answer: str
+  phase: str
+nodes:
+  ask:
+    type: interrupt
+    message: Wrapped answer?
+    state_key: question
+    resume_key: answer
+    idempotent: false
+  finish:
+    type: passthrough
+    output:
+      seen: "{state.seed}"
+      phase: complete
+edges:
+  - {from: START, to: ask}
+  - {from: ask, to: finish}
+  - {from: finish, to: END}

@@ -1,0 +1,20 @@
+version: "1.0"
+name: native-left-child-interrupt
+state:
+  left_phase: str
+  left_answer: str
+nodes:
+  ask:
+    type: interrupt
+    message: Left?
+    state_key: left_question
+    resume_key: left_answer
+    idempotent: false
+  finish:
+    type: passthrough
+    output:
+      left_phase: complete
+edges:
+  - {from: START, to: ask}
+  - {from: ask, to: finish}
+  - {from: finish, to: END}

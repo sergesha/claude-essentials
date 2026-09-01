@@ -15,10 +15,7 @@
       "command": "${CLAUDE_PLUGIN_ROOT}/scripts/lockstep-plugin",
       "args": [
         "serve"
-      ],
-      "env": {
-        "LOCKSTEP_RUNNER": "claude"
-      }
+      ]
     }
   }
 }

@@ -1,0 +1,20 @@
+version: "1.0"
+name: native-right-child-interrupt
+state:
+  right_phase: str
+  right_answer: str
+nodes:
+  ask:
+    type: interrupt
+    message: Right?
+    state_key: right_question
+    resume_key: right_answer
+    idempotent: false
+  finish:
+    type: passthrough
+    output:
+      right_phase: complete
+edges:
+  - {from: START, to: ask}
+  - {from: ask, to: finish}
+  - {from: finish, to: END}

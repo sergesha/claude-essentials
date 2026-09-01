@@ -1,0 +1,9 @@
+template_version: "1"
+outputs:
+  parent: "{name}"
+  security-review: "{name}-security-review"
+  architecture-review: "{name}-architecture-review"
+files:
+  parent: parent.workflow.yaml
+  security-review: security-review.workflow.yaml
+  architecture-review: architecture-review.workflow.yaml

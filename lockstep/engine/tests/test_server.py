@@ -1,36 +1,37 @@
-"""server.py — the MCP tool surface. Delegates to `Engine`
-through a lazy `_eng()` singleton built from `LOCKSTEP_STATE_DIR`/
-`LOCKSTEP_RECIPES` env vars; `_reset_engine()` lets each test rebuild it
-against a fresh tmp state/recipes dir.
-
-Uses the mcp SDK's real `MCPServer` (imported here as `FastMCP` — see
-server.py docstring for why: the 2.0.0 `mcp` package this repo pins under
-`mcp>=2.0,<3` renamed the class, there is no `mcp.server.fastmcp` module).
-Tool registration is introspected via `app._tool_manager.list_tools()`
-(the SDK's real registry).
-"""
-
 from __future__ import annotations
 
+import json
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from lockstep_mcp import server
-from lockstep_mcp.engine import LockstepError
+from lockstep.mcp import server
+from lockstep.runtime import advisory_lock, sessions
+from lockstep.runtime.engine import LockstepError
 
-FIXTURES = Path(__file__).parent / "fixtures" / "recipes"
-GOOD = FIXTURES / "good"
-BAD = FIXTURES / "bad"
-
+FIXTURES = Path(__file__).parent / "fixtures" / "native"
 EXPECTED_TOOLS = {
     "scenario_start",
     "scenario_status",
     "scenario_done",
     "scenario_escalate",
     "scenario_abort",
+    "scenario_accept_artifact",
+    "scenario_wait",
+    "scenario_history",
+    "scenario_events",
+    "scenario_recover",
     "scenario_dryrun",
+    "recipe_init",
+    "recipe_compile",
+    "recipe_check",
+    "recipe_diff",
+    "recipe_render",
+    "recipe_estimate",
+    "template_list",
+    "template_show",
     "list_recipes",
     "validate_recipe",
     "render_flow",
@@ -39,250 +40,603 @@ EXPECTED_TOOLS = {
 }
 
 
-def _configure(monkeypatch, tmp_path, recipes_dir=GOOD):
-    # state dir is a SIBLING of the project cwd, never inside it — a state
-    # dir inside the project tree is refused (runners.assert_state_dir_sane).
-    project = tmp_path / "proj"
-    project.mkdir(exist_ok=True)
+def _configure(monkeypatch, tmp_path):
+    recipes = tmp_path / "recipes"
+    recipes.mkdir()
+    (recipes / "native-parent-direct.recipe.yaml").write_bytes(
+        (FIXTURES / "parent_direct.recipe.yaml").read_bytes()
+    )
+    child = (FIXTURES / "worker_child_interrupt.recipe.yaml").read_text()
+    (recipes / "child_interrupt.recipe.yaml").write_text(
+        child.replace("name: native-child-interrupt", "name: child_interrupt")
+    )
+    project = tmp_path / "project"
+    project.mkdir()
     monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(tmp_path / "state"))
-    monkeypatch.setenv("LOCKSTEP_RECIPES", str(recipes_dir))
+    monkeypatch.setenv("LOCKSTEP_RECIPES", str(recipes))
     monkeypatch.chdir(project)
     server._reset_engine()
-    return project
+    return project, recipes
 
 
-# ---------------------------------------------------------------------------
-# tool registration
-# ---------------------------------------------------------------------------
+def _ctx(project: Path, session_id: str | None = None):
+    meta = {
+        "x-codex-turn-metadata": {"workspaces": {str(project): {}}},
+    }
+    if session_id is not None:
+        meta["session_id"] = session_id
+    return SimpleNamespace(request_context=SimpleNamespace(meta=meta))
 
 
 def test_tools_registered():
-    names = {t.name for t in server.app._tool_manager.list_tools()}
-    assert names == EXPECTED_TOOLS
+    assert {tool.name for tool in server.app._tool_manager.list_tools()} == EXPECTED_TOOLS
 
 
-def test_codex_workspace_metadata_supplies_project_and_default_recipes(tmp_path, monkeypatch):
-    project = tmp_path / "project"
-    recipes = project / ".lockstep" / "recipes"
-    recipes.mkdir(parents=True)
-    (recipes / "minimal.yaml").write_text((GOOD / "minimal.yaml").read_text())
-    plugin_root = tmp_path / "installed-plugin"
-    plugin_root.mkdir()
-    monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(tmp_path / "state"))
-    monkeypatch.delenv("LOCKSTEP_RECIPES", raising=False)
-    monkeypatch.chdir(plugin_root)
-    server._reset_engine()
-    ctx = SimpleNamespace(
-        request_context=SimpleNamespace(
-            meta={
-                "x-codex-turn-metadata": {
-                    "workspaces": {str(project): {"has_changes": False}}
-                }
-            }
-        )
+def test_accept_artifact_is_the_only_token_only_mcp_consent_surface() -> None:
+    tools = {tool.name: tool for tool in server.app._tool_manager.list_tools()}
+    schema = tools["scenario_accept_artifact"].parameters
+    assert set(schema["properties"]) == {"token"}
+    assert schema["required"] == ["token"]
+    assert not any(
+        forbidden in name
+        for name in tools
+        for forbidden in ("issue_consent", "preview_consent", "revoke_consent")
     )
 
-    result = server.scenario_start("minimal", {}, ctx=ctx)
 
-    record = server._eng(project)._runs.get(result["run_id"])  # noqa: SLF001
-    assert record.project == str(project.resolve())
+def test_accept_artifact_forwards_only_token_and_ambient_project_without_session(
+    tmp_path, monkeypatch
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    calls = []
+
+    class FakeEngine:
+        def scenario_accept_artifact(self, token, *, project):
+            calls.append((token, project))
+            return {"run_id": "run-1", "status": "completed"}
+
+    monkeypatch.setattr(server, "_command_for", lambda actual: FakeEngine())
+    monkeypatch.setattr(
+        server,
+        "_assert_origin",
+        lambda *_args, **_kwargs: pytest.fail("token acceptance used session origin"),
+    )
+    monkeypatch.setattr(
+        server,
+        "_session_for_context",
+        lambda *_args, **_kwargs: pytest.fail("token acceptance read a session"),
+    )
+    token = "secret-publication-token"
+    result = server.scenario_accept_artifact(token, ctx=_ctx(project, "foreign"))
+
+    assert calls == [(token, str(project.resolve()))]
+    assert token not in json.dumps(result)
 
 
-def test_project_context_falls_back_to_process_cwd(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
+def test_accept_artifact_error_does_not_echo_token(tmp_path, monkeypatch) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
 
-    assert server._project_for_context(None) == tmp_path.resolve()
-    assert server._project_for_context(
-        SimpleNamespace(request_context=SimpleNamespace(meta={}))
-    ) == tmp_path.resolve()
+    class FakeEngine:
+        def scenario_accept_artifact(self, token, *, project):
+            del token, project
+            raise LockstepError("invalid or stale publication consent")
+
+    monkeypatch.setattr(server, "_command_for", lambda actual: FakeEngine())
+    token = "secret-publication-token"
+    with pytest.raises(LockstepError) as caught:
+        server.scenario_accept_artifact(token, ctx=_ctx(project))
+    assert token not in str(caught.value)
 
 
-# ---------------------------------------------------------------------------
-# scenario_start / scenario_done roundtrip
-# ---------------------------------------------------------------------------
+def test_native_start_status_list_and_history_use_immutable_catalog(tmp_path, monkeypatch):
+    project, _recipes = _configure(monkeypatch, tmp_path)
+    started = server.scenario_start("native-parent-direct", {}, ctx=_ctx(project))
+    run_id = started["run_id"]
+    assert started["status"] == "awaiting"
+    assert started[sessions.BINDING_MARKER_KEY] == sessions.BINDING_MARKER_VALUE
+    assert server.scenario_status(run_id, ctx=_ctx(project))["status"] == "awaiting"
+    assert [item["run_id"] for item in server.list_runs(ctx=_ctx(project))] == [run_id]
+    assert "checkpoint_id" in server.run_trace(run_id, ctx=_ctx(project))
 
 
-def test_start_and_done_roundtrip(tmp_path, monkeypatch):
-    project = _configure(monkeypatch, tmp_path)
+def test_scenario_done_uses_current_native_session_binding(tmp_path, monkeypatch):
+    project, _recipes = _configure(monkeypatch, tmp_path)
+    run_id = server.scenario_start("native-parent-direct", {}, ctx=_ctx(project))["run_id"]
+    sessions.touch(tmp_path / "state", run_id, "session-1", 30)
 
-    res = server.scenario_start("minimal", {})
-    run_id = res["run_id"]
-    assert res["step"] == "one"
-    assert res["evidence_schema"] is not None
+    with pytest.raises(LockstepError, match="session binding"):
+        server.scenario_done(run_id, "answer", {}, ctx=_ctx(project, "foreign"))
+    completed = server.scenario_done(
+        run_id, "answer", {"answer": "yes"}, ctx=_ctx(project, "session-1")
+    )
+    assert completed["status"] == "completed"
 
-    status = server.scenario_status(run_id)
+
+def test_service_rechecks_session_after_mcp_edge_guard(tmp_path, monkeypatch):
+    project, _recipes = _configure(monkeypatch, tmp_path)
+    run_id = server.scenario_start("native-parent-direct", {}, ctx=_ctx(project))["run_id"]
+    state = tmp_path / "state"
+    sessions.touch(state, run_id, "session-1", 30)
+    service = server._command_for(project)
+    original = service.require_session
+
+    def swap_owner_after_edge_check(checked_run_id, session_id, checked_project):
+        original(checked_run_id, session_id, checked_project)
+        binding = sessions.read_binding(state, checked_run_id)
+        assert binding is not None
+        binding["session_id"] = "foreign"
+        sessions.binding_path(state, checked_run_id).write_text(json.dumps(binding))
+
+    monkeypatch.setattr(service, "require_session", swap_owner_after_edge_check)
+    with pytest.raises(LockstepError, match="session binding"):
+        server.scenario_done(
+            run_id, "answer", {"answer": "yes"}, ctx=_ctx(project, "session-1")
+        )
+    assert server.scenario_status(run_id, ctx=_ctx(project))["status"] == "awaiting"
+
+
+def test_session_rebinding_waits_for_verified_native_resume_commit(tmp_path, monkeypatch):
+    project, _recipes = _configure(monkeypatch, tmp_path)
+    run_id = server.scenario_start("native-parent-direct", {}, ctx=_ctx(project))["run_id"]
+    state = tmp_path / "state"
+    sessions.touch(state, run_id, "owner", 30)
+    service = server._command_for(project)
+    original_resume = service.runtime.resume
+    entered = threading.Event()
+    release = threading.Event()
+    adopted = threading.Event()
+    errors = []
+
+    def blocked_resume(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        return original_resume(*args, **kwargs)
+
+    def complete():
+        try:
+            service.scenario_done(
+                run_id,
+                "answer",
+                {"answer": "yes"},
+                session_id="owner",
+                project=str(project),
+            )
+        except Exception as exc:  # noqa: BLE001  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    def replace_owner():
+        sessions.touch(state, run_id, "replacement", -1)
+        adopted.set()
+
+    monkeypatch.setattr(service.runtime, "resume", blocked_resume)
+    completing = threading.Thread(target=complete)
+    completing.start()
+    assert entered.wait(5)
+    real_monotonic = advisory_lock.time.monotonic
+    monkeypatch.setattr(
+        advisory_lock.time, "monotonic", lambda: real_monotonic() + 61
+    )
+    replacing = threading.Thread(target=replace_owner)
+    replacing.start()
+    assert not adopted.wait(0.1)
+    release.set()
+    completing.join(5)
+    replacing.join(5)
+    assert errors == []
+    assert adopted.is_set()
+    assert sessions.read_binding(state, run_id)["session_id"] == "replacement"
+
+
+def test_cross_project_status_and_resume_are_indistinguishable_and_read_only(
+    tmp_path, monkeypatch
+):
+    project, _recipes = _configure(monkeypatch, tmp_path)
+    run_id = server.scenario_start("native-parent-direct", {}, ctx=_ctx(project))["run_id"]
+    state = tmp_path / "state"
+    sessions.touch(state, run_id, "owner", 30)
+    foreign = tmp_path / "foreign-project"
+    foreign.mkdir()
+    server._reset_engine()
+    before = {
+        path.relative_to(state): path.read_bytes()
+        for path in state.rglob("*")
+        if path.is_file()
+    }
+
+    for operation in (
+        lambda: server.scenario_status(run_id, ctx=_ctx(foreign)),
+        lambda: server.scenario_done(
+            run_id,
+            "answer",
+            {"answer": "yes"},
+            ctx=_ctx(foreign, "owner"),
+        ),
+    ):
+        with pytest.raises(LockstepError, match=f"unknown run {run_id!r}"):
+            operation()
+        assert {
+            path.relative_to(state): path.read_bytes()
+            for path in state.rglob("*")
+            if path.is_file()
+        } == before
+    after = {
+        path.relative_to(state): path.read_bytes()
+        for path in state.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+
+
+def test_cold_unknown_run_never_traverses_session_sidecar_namespace(
+    tmp_path, monkeypatch
+):
+    project, _recipes = _configure(monkeypatch, tmp_path)
+    run_id = server.scenario_start("native-parent-direct", {}, ctx=_ctx(project))["run_id"]
+    state = tmp_path / "state"
+    sessions.touch(state, run_id, "owner", 30)
+    sessions.binding_path(state, run_id).write_text("{malformed")
+    foreign = tmp_path / "foreign-project"
+    foreign.mkdir()
+    server._reset_engine()
+    before = {
+        path.relative_to(state): path.read_bytes()
+        for path in state.rglob("*")
+        if path.is_file()
+    }
+
+    for requested_run_id, requested_project in (
+        (run_id, foreign),
+        ("../runtime.sqlite", project),
+    ):
+        with pytest.raises(
+            LockstepError, match=f"unknown run {requested_run_id!r}"
+        ):
+            server.scenario_done(
+                requested_run_id,
+                "answer",
+                {"answer": "yes"},
+                ctx=_ctx(requested_project, "owner"),
+            )
+
+    after = {
+        path.relative_to(state): path.read_bytes()
+        for path in state.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+
+
+def test_cold_mcp_resume_preflights_read_only_then_activates(tmp_path, monkeypatch):
+    project, _recipes = _configure(monkeypatch, tmp_path)
+    run_id = server.scenario_start("native-parent-direct", {}, ctx=_ctx(project))["run_id"]
+    sessions.touch(tmp_path / "state", run_id, "owner", 30)
+    server._reset_engine()
+
+    result = server.scenario_done(
+        run_id,
+        "answer",
+        {"answer": "yes"},
+        ctx=_ctx(project, "owner"),
+    )
+
+    assert result["run_id"] == run_id
+
+
+@pytest.mark.parametrize("bound_session", [None, "owner"])
+def test_cold_mcp_session_rejection_is_read_only(
+    tmp_path, monkeypatch, bound_session
+):
+    project, _recipes = _configure(monkeypatch, tmp_path)
+    run_id = server.scenario_start("native-parent-direct", {}, ctx=_ctx(project))["run_id"]
+    state = tmp_path / "state"
+    if bound_session is not None:
+        sessions.touch(state, run_id, bound_session, 30)
+    server._reset_engine()
+    before = {
+        path.relative_to(state): path.read_bytes()
+        for path in state.rglob("*")
+        if path.is_file()
+    }
+
+    with pytest.raises(LockstepError, match="missing, stale, or mismatched"):
+        server.scenario_done(
+            run_id,
+            "answer",
+            {"answer": "yes"},
+            ctx=_ctx(project, "intruder"),
+        )
+
+    after = {
+        path.relative_to(state): path.read_bytes()
+        for path in state.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+
+
+def test_scenario_start_rejects_python_before_import_run_or_checkpoint_mutation(
+    tmp_path, monkeypatch
+):
+    project, recipes = _configure(monkeypatch, tmp_path)
+    sentinel = project / "START-IMPORTED"
+    (project / "attacker_module.py").write_text(
+        f"from pathlib import Path\nPath({str(sentinel)!r}).write_text('ran')\n"
+        "def run(state): return state\n"
+    )
+    (recipes / "attacker.recipe.yaml").write_text(
+        "name: attacker\n"
+        "tools:\n"
+        "  code: {type: python, module: attacker_module, function: run}\n"
+        "nodes: {code: {type: python, tool: code}}\n"
+        "edges: [{from: START, to: code}, {from: code, to: END}]\n"
+    )
+    with pytest.raises(LockstepError, match="executable authority denied"):
+        server.scenario_start("attacker", {}, ctx=_ctx(project))
+    assert not sentinel.exists()
+    assert not (tmp_path / "state").exists()
+
+
+@pytest.mark.parametrize("reserved", ["lockstep_outcome", "namespace", "_checkpoint"])
+def test_scenario_start_rejects_engine_owned_input_before_state_mutation(
+    tmp_path, monkeypatch, reserved
+):
+    project, _recipes = _configure(monkeypatch, tmp_path)
+    with pytest.raises(LockstepError, match="reserved scenario input"):
+        server.scenario_start(
+            "native-parent-direct", {reserved: "PASS"}, ctx=_ctx(project)
+        )
+    assert not (tmp_path / "state").exists()
+
+
+@pytest.mark.parametrize("invalid", [[], "", 0, False])
+def test_scenario_start_rejects_non_object_and_oversized_input_before_state(
+    tmp_path, monkeypatch, invalid
+):
+    project, _recipes = _configure(monkeypatch, tmp_path)
+    with pytest.raises(LockstepError, match="JSON object"):
+        server.scenario_start("native-parent-direct", invalid, ctx=_ctx(project))
+    assert not (tmp_path / "state").exists()
+
+
+def test_scenario_start_rejects_oversized_input_before_state(tmp_path, monkeypatch):
+    project, _recipes = _configure(monkeypatch, tmp_path)
+    with pytest.raises(LockstepError, match="byte limit"):
+        server.scenario_start(
+            "native-parent-direct", {"huge": "x" * 70_000}, ctx=_ctx(project)
+        )
+    assert not (tmp_path / "state").exists()
+
+
+def test_oversized_result_controls_leave_native_state_byte_identical(tmp_path, monkeypatch):
+    project, _recipes = _configure(monkeypatch, tmp_path)
+    run_id = server.scenario_start("native-parent-direct", {}, ctx=_ctx(project))["run_id"]
+    state = tmp_path / "state"
+    sessions.touch(state, run_id, "owner", 30)
+    before = {
+        path.relative_to(state): path.read_bytes()
+        for path in state.rglob("*")
+        if path.is_file()
+    }
+    operations = (
+        lambda: server.scenario_done(
+            run_id, "answer", {"huge": "x" * 70_000}, ctx=_ctx(project, "owner")
+        ),
+        lambda: server.scenario_escalate(
+            run_id, "x" * 70_000, ctx=_ctx(project, "owner")
+        ),
+    )
+    for operation in operations:
+        with pytest.raises(LockstepError, match="byte limit"):
+            operation()
+    after = {
+        path.relative_to(state): path.read_bytes()
+        for path in state.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+
+
+def test_stale_binding_is_visible_and_cannot_resume_or_adopt_on_status(
+    tmp_path, monkeypatch
+):
+    project, _recipes = _configure(monkeypatch, tmp_path)
+    run_id = server.scenario_start("native-parent-direct", {}, ctx=_ctx(project))["run_id"]
+    state = tmp_path / "state"
+    sessions.touch(state, run_id, "expired-owner", 30)
+    sidecar = sessions.binding_path(state, run_id)
+    binding = json.loads(sidecar.read_text())
+    binding["last_seen"] = "2000-01-01T00:00:00+00:00"
+    sidecar.write_text(json.dumps(binding, sort_keys=True))
+    before_binding = sidecar.read_bytes()
+
+    status = server.scenario_status(run_id, ctx=_ctx(project, "expired-owner"))
     assert status["status"] == "awaiting"
-    assert status["step"] == "one"
+    assert status["binding_integrity"] == "missing_or_stale"
+    assert "expired-owner" not in json.dumps(status)
+    assert sidecar.read_bytes() == before_binding
 
-    artifact_dir = project / ".lockstep"
-    artifact_dir.mkdir()
-    (artifact_dir / "a.md").write_text("hi")
-
-    result = server.scenario_done(run_id, "one", {"path": ".lockstep/a.md"})
-    assert result["accepted"] is True
-    assert result["passed"] is True
-    assert result["done"] is True
-
-    final_status = server.scenario_status(run_id)
-    assert final_status["status"] == "done"
-
-
-def test_run_naming_responses_carry_the_binding_marker(tmp_path, monkeypatch):
-    # The PostToolUse hook's name-agnostic recognition signal: every
-    # response that names a run_id is stamped with the binding marker, so
-    # binding survives ANY tool-name spelling the platform matcher lets
-    # through. Responses without a run_id stay unstamped.
-    from lockstep_mcp import sessions
-
-    _configure(monkeypatch, tmp_path)
-
-    res = server.scenario_start("minimal", {})
-    assert res[sessions.BINDING_MARKER_KEY] == sessions.BINDING_MARKER_VALUE
-
-    status = server.scenario_status(res["run_id"])
-    assert status["run_id"] == res["run_id"]
-    assert status[sessions.BINDING_MARKER_KEY] == sessions.BINDING_MARKER_VALUE
-
-    aborted = server.scenario_abort(res["run_id"])
-    assert aborted[sessions.BINDING_MARKER_KEY] == sessions.BINDING_MARKER_VALUE
-
-    terminal = server.scenario_status(res["run_id"])   # terminal shape has no run_id
-    assert "run_id" not in terminal
-    assert sessions.BINDING_MARKER_KEY not in terminal
+    before = {
+        path.relative_to(state): path.read_bytes()
+        for path in state.rglob("*")
+        if path.is_file()
+    }
+    operations = (
+        lambda: server.scenario_done(
+            run_id, "answer", {"answer": "yes"}, ctx=_ctx(project, "expired-owner")
+        ),
+        lambda: server.scenario_escalate(
+            run_id, "expired", ctx=_ctx(project, "expired-owner")
+        ),
+        lambda: server.scenario_abort(run_id, ctx=_ctx(project, "expired-owner")),
+    )
+    for operation in operations:
+        with pytest.raises(LockstepError, match="stale"):
+            operation()
+    after = {
+        path.relative_to(state): path.read_bytes()
+        for path in state.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
 
 
-# ---------------------------------------------------------------------------
-# validate_recipe
-# ---------------------------------------------------------------------------
-
-
-def test_validate_recipe_reports_profile(tmp_path, monkeypatch):
-    _configure(monkeypatch, tmp_path)
-
-    good = server.validate_recipe(str(GOOD / "minimal.yaml"))
-    assert good["ok"] is True
-    assert good["errors"] == []
-    assert good["yamlgraph"]["ok"] is True
-
-    bad = server.validate_recipe(str(BAD / "llm-node.yaml"))
-    assert bad["ok"] is False
-    assert any("forbidden node type" in e for e in bad["errors"])
-
-
-# ---------------------------------------------------------------------------
-# scenario_dryrun — SHAPE-ONLY
-# ---------------------------------------------------------------------------
-
-
-def test_scenario_dryrun_is_shape_only_and_leaves_nothing_durable(tmp_path, monkeypatch):
-    project = _configure(monkeypatch, tmp_path)
-
-    # the recipe's command is relative (`touch DRYRUN-...`), so if dryrun
-    # ever DID execute it, the file would land in the server cwd — the
-    # project dir. The sentinel must watch exactly there.
-    sentinel = project / "DRYRUN-SENTINEL-SHOULD-NOT-EXIST"
-    artifact_dir = project / ".lockstep"
-    artifact_dir.mkdir()
-    (artifact_dir / "a.md").write_text("hi")
-
-    result = server.scenario_dryrun("mixed-checks", "one", {"path": ".lockstep/a.md"})
-
-    assert result["accepted"] is True
-    verdicts = {r["type"]: r["verdict"] for r in result["results"]}
-    assert verdicts["file_exists"] == "pass"
-    assert verdicts["cmd_ok"] == "skipped (dryrun)"
-
-    # the sentinel command was never actually run
+def test_validate_recipe_rejects_python_before_import_or_owner_state_mutation(
+    tmp_path, monkeypatch
+):
+    project, _recipes = _configure(monkeypatch, tmp_path)
+    sentinel = project / "IMPORTED"
+    (project / "attacker_module.py").write_text(
+        f"from pathlib import Path\nPath({str(sentinel)!r}).write_text('ran')\n"
+        "def run(state): return state\n"
+    )
+    recipe = project / "attacker.recipe.yaml"
+    recipe.write_text(
+        "name: attacker\n"
+        "tools:\n  code: {type: python, module: attacker_module, function: run}\n"
+        "nodes: {code: {type: python, tool: code}}\n"
+        "edges: [{from: START, to: code}, {from: code, to: END}]\n"
+    )
+    result = server.validate_recipe(str(recipe), ctx=_ctx(project))
+    assert result["ok"] is False
+    assert any("executable authority denied" in error for error in result["errors"])
     assert not sentinel.exists()
 
-    # nothing durable: no run was ever created
-    assert server.list_runs() == []
 
+def test_list_and_rejected_render_do_not_initialize_runtime_state(tmp_path, monkeypatch):
+    project, recipes = _configure(monkeypatch, tmp_path)
+    assert "native-parent-direct" in server.list_recipes(ctx=_ctx(project))
+    assert not (tmp_path / "state").exists()
 
-def test_scenario_dryrun_reports_shape_failure(tmp_path, monkeypatch):
-    _configure(monkeypatch, tmp_path)
-
-    result = server.scenario_dryrun("mixed-checks", "one", {"path": ".lockstep/missing.md"})
-
-    assert result["accepted"] is True
-    verdicts = {r["type"]: r["verdict"] for r in result["results"]}
-    assert verdicts["file_exists"] == "fail"
-    assert verdicts["cmd_ok"] == "skipped (dryrun)"
-    assert server.list_runs() == []
-
-
-def test_scenario_dryrun_reports_clean_error_on_recipe_pinned_path_escape(tmp_path, monkeypatch):
-    """A shape check's `path:` is recipe-PINNED (not evidence-
-    sourced), so `_containment_errors` — which only resolves/contains
-    evidence keys annotated `format: project-path` — never sees it. The
-    literal `../outside.md` in `dryrun-path-escape.yaml` reaches
-    `validators._resolve_path` raw and raises ValueError; `scenario_dryrun`
-    must turn that into a clean per-check error result, not an uncaught
-    crash."""
-    _configure(monkeypatch, tmp_path)
-
-    result = server.scenario_dryrun("dryrun-path-escape", "one", {"note": "x"})
-
-    assert result["accepted"] is True
-    entry = next(r for r in result["results"] if r["type"] == "file_exists")
-    assert entry["verdict"] == "error"
-    assert any("escape" in reason.lower() for reason in entry["reasons"])
-
-
-def test_scenario_dryrun_rejects_forged_verdict(tmp_path, monkeypatch):
-    _configure(monkeypatch, tmp_path)
-
-    result = server.scenario_dryrun(
-        "mixed-checks", "one", {"path": ".lockstep/a.md", "_verdict_status": "pass"}
+    (recipes / "unsafe-render.recipe.yaml").write_text(
+        "name: unsafe-render\n"
+        "tools:\n  code: {type: python, module: attacker, function: run}\n"
+        "nodes: {code: {type: python, tool: code}}\n"
+        "edges: [{from: START, to: code}, {from: code, to: END}]\n"
     )
-    assert result["accepted"] is False
+    with pytest.raises(LockstepError, match="executable authority denied"):
+        server.render_flow("unsafe-render", ctx=_ctx(project))
+    assert not (tmp_path / "state").exists()
 
 
-# ---------------------------------------------------------------------------
-# scenario_abort
-# ---------------------------------------------------------------------------
+def test_dryrun_reads_only_an_authorized_immutable_recipe(tmp_path, monkeypatch):
+    project, recipes = _configure(monkeypatch, tmp_path)
+    (recipes / "unsafe.recipe.yaml").write_text(
+        "name: unsafe\n"
+        "tools:\n  validate: {type: python, module: attacker, function: run}\n"
+        "nodes:\n"
+        "  work:\n"
+        "    type: interrupt\n"
+        "    idempotent: false\n"
+        "    message: {step: work, task: x, exit_criterion: y, checks: [{type: equals, key: answer, value: 'yes'}]}\n"
+        "  validate: {type: python, tool: validate}\n"
+        "edges: [{from: START, to: work}, {from: work, to: validate}, {from: validate, to: END}]\n"
+    )
+    with pytest.raises(LockstepError, match="executable authority denied"):
+        server.scenario_dryrun("unsafe", "work", {"answer": "yes"}, ctx=_ctx(project))
+    assert not (tmp_path / "state").exists()
 
 
-def test_scenario_abort_excludes_run_from_active_list(tmp_path, monkeypatch):
-    _configure(monkeypatch, tmp_path)
+def test_dryrun_bounds_evidence_before_recipe_preflight_or_state(tmp_path, monkeypatch):
+    project, _recipes = _configure(monkeypatch, tmp_path)
+    too_deep = {}
+    cursor = too_deep
+    for _ in range(18):
+        child = {}
+        cursor["next"] = child
+        cursor = child
 
-    res = server.scenario_start("minimal", {})
-    run_id = res["run_id"]
-
-    result = server.scenario_abort(run_id)
-    assert result["status"] == "aborted"
-
-    status = server.scenario_status(run_id)
-    assert status["status"] == "aborted"
-
-    active = server.list_runs(active_only=True)
-    assert all(r["run_id"] != run_id for r in active)
-
-    with pytest.raises(LockstepError):
-        server.scenario_done(run_id, "one", {"path": "x"})
+    for evidence in ({"huge": "x" * 70_000}, too_deep):
+        with pytest.raises(LockstepError):
+            server.scenario_dryrun("missing", "work", evidence, ctx=_ctx(project))
+        assert not (tmp_path / "state").exists()
 
 
-# ---------------------------------------------------------------------------
-# list_recipes / render_flow / run_trace
-# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("invalid", [[], "", 0, False])
+def test_dryrun_rejects_falsey_non_object_before_recipe_preflight(
+    tmp_path, monkeypatch, invalid
+):
+    project, _recipes = _configure(monkeypatch, tmp_path)
+    with pytest.raises(LockstepError, match="JSON object"):
+        server.scenario_dryrun("missing", "work", invalid, ctx=_ctx(project))
+    assert not (tmp_path / "state").exists()
 
 
-def test_list_recipes_render_flow_and_run_trace(tmp_path, monkeypatch):
-    _configure(monkeypatch, tmp_path)
+def test_dryrun_preserves_reserved_evidence_response_contract(tmp_path, monkeypatch):
+    project, _recipes = _configure(monkeypatch, tmp_path)
+    result = server.scenario_dryrun(
+        "missing", "one", {"_forged": True}, ctx=_ctx(project)
+    )
+    assert result == {
+        "accepted": False,
+        "errors": ["reserved evidence key(s) rejected: ['_forged']"],
+    }
 
-    names = server.list_recipes()
-    assert "minimal" in names
-    assert "two-steps" in names
 
-    mermaid = server.render_flow("minimal")
-    assert "step_one" in mermaid
+def test_engine_singleton_closes_old_instance_before_reconfiguration(tmp_path, monkeypatch):
+    project, _recipes = _configure(monkeypatch, tmp_path)
+    first = server._command_for(project)
+    monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(tmp_path / "other-state"))
+    second = server._command_for(project)
+    assert second is not first
+    assert first._closed is True
 
-    res = server.scenario_start("minimal", {})
-    run_id = res["run_id"]
 
-    # nothing populates route_log_path yet in v1 — empty string is the
-    # honest answer, not a bug (see yamlgraph_api.py route-log probe note).
-    assert server.run_trace(run_id) == ""
+def test_dryrun_runs_profile_before_any_persistent_service_init(tmp_path, monkeypatch):
+    project, _recipes = _configure(monkeypatch, tmp_path)
+    called = []
 
-    mermaid_with_run = server.render_flow("minimal", run_id)
-    assert "step_one" in mermaid_with_run
+    def reject(_path):
+        called.append(True)
+        return ["profile rejected"], []
+
+    monkeypatch.setattr(server.profile, "check_recipe_full", reject)
+    with pytest.raises(LockstepError, match="profile rejected"):
+        server.scenario_dryrun(
+            "native-parent-direct", "answer", {"answer": "yes"}, ctx=_ctx(project)
+        )
+    assert called == [True]
+    assert not (tmp_path / "state").exists()
+
+
+@pytest.mark.parametrize(
+    "operation",
+    (
+        lambda ctx: server.recipe_compile("release", ctx=ctx),
+        lambda ctx: server.recipe_check("release", ctx=ctx),
+        lambda ctx: server.recipe_diff("release", ctx=ctx),
+        lambda ctx: server.recipe_render("release", ctx=ctx),
+        lambda ctx: server.recipe_estimate("release", ctx=ctx),
+    ),
+    ids=("compile", "check", "diff", "render", "estimate"),
+)
+def test_installed_mcp_refuses_legacy_authoring_evidence(
+    tmp_path, monkeypatch, operation
+) -> None:
+    from lockstep import authoring
+    from tests._authoring_gate import tree_image, write_workflow
+    from tests.test_authoring_legacy_v4_refusal import (
+        _locate_test_namespace,
+        _retain,
+        live_v4_bytes,
+    )
+
+    project = tmp_path / "project"
+    project.mkdir()
+    state = (tmp_path / "state").resolve()
+    write_workflow(project, "release")
+    authoring.publish_project_compilation(project, "release", state_dir=state)
+    namespace, _identity = _locate_test_namespace(state, project)
+    transaction = _retain(namespace, live_v4_bytes(project))
+    monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(state))
+    before = transaction.read_bytes(); project_before, owner_before = tree_image(project), tree_image(state)
+
+    with pytest.raises(Exception) as raised:
+        operation(_ctx(project))
+    error = str(raised.value)
+    assert "pre-simplification" in error
+    assert str(project.resolve()) in error and str(state) in error
+    assert "Do not delete transaction.json manually" in error
+    assert transaction.read_bytes() == before
+    assert tree_image(project) == project_before and tree_image(state) == owner_before

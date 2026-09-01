@@ -1,0 +1,20 @@
+version: "1.0"
+name: native-parent-invoke
+state:
+  child_phase: str
+nodes:
+  child:
+    type: subgraph
+    graph: child_interrupt.recipe.yaml
+    mode: invoke
+    input_mapping: {}
+    output_mapping:
+      child_phase: phase
+    interrupt_output_mapping:
+      child_phase: phase
+  done:
+    type: passthrough
+edges:
+  - {from: START, to: child}
+  - {from: child, to: done}
+  - {from: done, to: END}

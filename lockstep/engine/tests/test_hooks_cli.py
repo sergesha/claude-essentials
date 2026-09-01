@@ -1,633 +1,274 @@
-"""hook handlers in cli.py — Stop / SessionStart / PreToolUse, plus
-the `policy` and `doctor` CLI verbs.
-
-All path matching is `Path.resolve()`
-equality-or-parent-prefix: a run whose `project` is an ancestor of (or equal
-to) the hook's `cwd` matches. Stop blocks with a `decision: block` JSON on
-stdout naming the run_id, step, and all three exits. SessionStart returns
-plain text (no block capability). PreToolUse is opt-in via
-policy files and fails closed on any internal exception; its worker
-predicate is SESSION BINDING — the deep matrix for that (ownership,
-adoption, theft-resistance, PostToolUse) lives in
-`tests/test_session_binding.py`.
-"""
-
-from __future__ import annotations
-
 import json
 from pathlib import Path
 
-import yaml
+import pytest
 
-import lockstep_mcp.cli as cli
-from lockstep_mcp import sessions, validators
-from lockstep_mcp.engine import Engine
-from lockstep_mcp.runs import RunIndex
+from lockstep import authoring
+from lockstep.authoring_publisher import AuthoringPublisher
+from lockstep.runtime import sessions
+from lockstep.runtime.hooks import (
+    doctor,
+    hook_pretool,
+    hook_session_start,
+    hook_stop,
+    policy_require,
+)
+from lockstep.runtime.service import LockstepCommandService
+from lockstep.runtime.start_service import AuthorizedStartService
+from tests._authoring_gate import replace_marker, tree_image, write_workflow
+from tests.test_authoring_legacy_v4_refusal import (
+    _locate_test_namespace,
+    _retain,
+    live_v4_bytes,
+)
 
-GOOD_RECIPES = Path(__file__).parent / "fixtures" / "recipes" / "good"
-SESSION = "session-under-test"
-
-
-def _mk_run(state_dir: Path, project: str, step: str = "one", recipe: str = "feature-dev") -> str:
-    idx = RunIndex(state_dir)
-    record = idx.create(recipe, project)
-    idx.update(record.run_id, step=step, brief={"step": step, "task": "t", "exit_criterion": "x"})
-    return record.run_id
-
-
-def _write_policy(state_dir: Path, project: str, recipe: str) -> Path:
-    policy_dir = state_dir / "policy.d"
-    policy_dir.mkdir(parents=True, exist_ok=True)
-    slug = cli._policy_slug(project)
-    path = policy_dir / f"{slug}.yaml"
-    path.write_text(yaml.safe_dump({"project": str(Path(project).resolve()), "recipe": recipe}))
-    return path
+FIXTURES = Path(__file__).parent / "fixtures" / "native"
 
 
-def test_pretool_matcher_covers_claude_and_codex_mutations():
-    import re
+def _parked(tmp_path):
+    recipes = tmp_path / "recipes"
+    recipes.mkdir()
+    (recipes / "native-parent-direct.recipe.yaml").write_bytes(
+        (FIXTURES / "parent_direct.recipe.yaml").read_bytes()
+    )
+    (recipes / "child_interrupt.recipe.yaml").write_bytes(
+        (FIXTURES / "worker_child_interrupt.recipe.yaml").read_bytes()
+    )
+    project = tmp_path / "project"
+    project.mkdir()
+    state = tmp_path / "state"
+    service = LockstepCommandService(state, recipes)
+    run_id = service.start("native-parent-direct", {}, str(project))["run_id"]
+    service.close()
+    return state, recipes, project, run_id
 
-    hooks = json.loads((Path(__file__).parents[2] / "hooks" / "hooks.json").read_text())
-    (entry,) = hooks["hooks"]["PreToolUse"]
-    matcher = entry["matcher"]
-    for tool in ("Write", "Edit", "NotebookEdit", "apply_patch", "Bash", "Task", "Agent"):
-        assert re.fullmatch(matcher, tool), tool
-    for tool in ("Read", "Glob", "Grep", "WebSearch"):
-        assert re.fullmatch(matcher, tool) is None, tool
 
-
-def test_every_hook_uses_the_shared_launcher_with_pinned_verb_and_timeout():
-    hooks = json.loads(
-        (Path(__file__).parents[2] / "hooks" / "hooks.json").read_text()
-    )["hooks"]
-    expected = {
-        "Stop": ("hook-stop", 30),
-        "SessionStart": ("hook-session-start", 30),
-        "PreToolUse": ("hook-pretool", 300),
-        "PostToolUse": ("hook-posttool", 60),
+def test_stop_and_session_start_are_read_only_native_projections(tmp_path):
+    state, _recipes, project, run_id = _parked(tmp_path)
+    before = {
+        path: path.stat().st_mtime_ns
+        for path in state.rglob("*")
+        if path.is_file()
+        and not path.name.endswith(("-wal", "-shm", "-journal"))
     }
-    for event, (verb, timeout) in expected.items():
-        (entry,) = hooks[event]
-        (handler,) = entry["hooks"]
-        assert handler["command"] == f"${{CLAUDE_PLUGIN_ROOT}}/scripts/lockstep-plugin {verb}"
-        assert handler["timeout"] == timeout
-        assert "uv run --project" not in handler["command"]
-
-
-# ---------------------------------------------------------------------------
-# base four
-# ---------------------------------------------------------------------------
-
-
-def test_stop_blocks_on_active_run(tmp_path):
-    project = tmp_path / "proj"
-    project.mkdir()
-    state_dir = tmp_path / "state"
-    run_id = _mk_run(state_dir, str(project.resolve()))
-
-    exit_code, out = cli.hook_stop({"stop_hook_active": False}, state_dir, str(project))
-
-    assert exit_code == 0
-    data = json.loads(out)
-    assert data["decision"] == "block"
-    assert run_id in data["reason"]
-    assert "one" in data["reason"]
-    assert "scenario_done" in data["reason"]
-    assert "scenario_escalate" in data["reason"]
-    assert "scenario_abort" in data["reason"]
-
-
-def test_stop_allows_when_hook_active(tmp_path):
-    project = tmp_path / "proj"
-    project.mkdir()
-    state_dir = tmp_path / "state"
-    _mk_run(state_dir, str(project.resolve()))
-
-    exit_code, out = cli.hook_stop({"stop_hook_active": True}, state_dir, str(project))
-
-    assert exit_code == 0
-    assert out == ""
-
-
-def test_stop_allows_no_runs(tmp_path):
-    exit_code, out = cli.hook_stop({"stop_hook_active": False}, tmp_path / "state", str(tmp_path))
-
-    assert exit_code == 0
-    assert out == ""
-
-
-def test_session_start_lists_active_runs(tmp_path):
-    project = tmp_path / "proj"
-    project.mkdir()
-    state_dir = tmp_path / "state"
-    run_id = _mk_run(state_dir, str(project.resolve()))
-
-    text = cli.hook_session_start(state_dir, str(project))
-
-    assert run_id in text
-    assert "one" in text
-    assert "scenario_status" in text
-
-
-# ---------------------------------------------------------------------------
-# path normalization + staleness
-# ---------------------------------------------------------------------------
-
-
-def test_stop_ignores_other_projects(tmp_path):
-    other = tmp_path / "other"
-    other.mkdir()
-    proj = tmp_path / "proj"
-    proj.mkdir()
-    state_dir = tmp_path / "state"
-    _mk_run(state_dir, str(other.resolve()))
-
-    exit_code, out = cli.hook_stop({"stop_hook_active": False}, state_dir, str(proj))
-
-    assert exit_code == 0
-    assert out == ""
-
-
-def test_stop_matches_subdirectory_cwd(tmp_path):
-    proj = tmp_path / "proj"
-    proj.mkdir()
-    sub = proj / "sub"
-    sub.mkdir()
-    state_dir = tmp_path / "state"
-    run_id = _mk_run(state_dir, str(proj.resolve()))
-
-    exit_code, out = cli.hook_stop({"stop_hook_active": False}, state_dir, str(sub))
-
-    assert exit_code == 0
-    data = json.loads(out)
-    assert data["decision"] == "block"
-    assert run_id in data["reason"]
-
-
-def test_session_start_flags_runs_with_no_live_driver(tmp_path):
-    # The liveness signal is the binding sidecar, never RunRecord.updated
-    # (which does not tick during real work). An unbound run — typically
-    # the aftermath of a crash — is flagged with its adoption door.
-    proj = tmp_path / "proj"
-    proj.mkdir()
-    state_dir = tmp_path / "state"
-    _mk_run(state_dir, str(proj.resolve()))
-
-    text = cli.hook_session_start(state_dir, str(proj))
-
-    assert "no live driving session" in text
-    assert "scenario_status" in text
-
-
-def test_session_start_does_not_flag_a_driven_run(tmp_path):
-    proj = tmp_path / "proj"
-    proj.mkdir()
-    state_dir = tmp_path / "state"
-    run_id = _mk_run(state_dir, str(proj.resolve()))
-    sessions.touch(state_dir, run_id, SESSION, 30.0)
-
-    text = cli.hook_session_start(state_dir, str(proj))
-
-    assert "no live driving session" not in text
-
-
-# ---------------------------------------------------------------------------
-# PreToolUse gate — branch matrix
-# ---------------------------------------------------------------------------
-
-
-def test_pretool_no_policy_allows(tmp_path):
-    exit_code, out = cli.hook_pretool({"cwd": str(tmp_path)}, tmp_path / "state")
-
-    assert exit_code == 0
-    assert out == ""
-
-
-def test_pretool_matching_policy_and_run_allows(tmp_path):
-    # The happy path: a run of the policy recipe, bound to the session
-    # asking (normally by hook_posttool at scenario_start), unlocks it.
-    proj = tmp_path / "proj"
-    proj.mkdir()
-    state_dir = tmp_path / "state"
-    _write_policy(state_dir, str(proj), "feature-dev")
-    run_id = _mk_run(state_dir, str(proj.resolve()), recipe="feature-dev")
-    sessions.touch(state_dir, run_id, SESSION, 30.0)
-
-    exit_code, out = cli.hook_pretool({"cwd": str(proj), "session_id": SESSION}, state_dir)
-
-    assert exit_code == 0
-    assert out == ""
-
-
-def test_pretool_policy_no_run_denies(tmp_path):
-    proj = tmp_path / "proj"
-    proj.mkdir()
-    state_dir = tmp_path / "state"
-    _write_policy(state_dir, str(proj), "feature-dev")
-
-    exit_code, out = cli.hook_pretool({"cwd": str(proj)}, state_dir)
-
-    assert exit_code == 0
-    data = json.loads(out)
-    assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
-    assert "feature-dev" in data["hookSpecificOutput"]["permissionDecisionReason"]
-    # mirrors the SessionStart wrapper's convention of naming the
-    # hook event inside hookSpecificOutput.
-    assert data["hookSpecificOutput"]["hookEventName"] == "PreToolUse"
-
-
-def test_pretool_recipe_mismatch_stays_denied(tmp_path):
-    proj = tmp_path / "proj"
-    proj.mkdir()
-    state_dir = tmp_path / "state"
-    _write_policy(state_dir, str(proj), "feature-dev")
-    _mk_run(state_dir, str(proj.resolve()), recipe="other-recipe")
-
-    exit_code, out = cli.hook_pretool({"cwd": str(proj)}, state_dir)
-
-    assert exit_code == 0
-    data = json.loads(out)
-    assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
-
-
-def test_pretool_cross_project_run_stays_denied(tmp_path):
-    proj = tmp_path / "proj"
-    proj.mkdir()
-    other = tmp_path / "other"
-    other.mkdir()
-    state_dir = tmp_path / "state"
-    _write_policy(state_dir, str(proj), "feature-dev")
-    _mk_run(state_dir, str(other.resolve()), recipe="feature-dev")
-
-    exit_code, out = cli.hook_pretool({"cwd": str(proj)}, state_dir)
-
-    assert exit_code == 0
-    data = json.loads(out)
-    assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
-
-
-def test_pretool_child_session_unlock_narrowed_to_its_own_chain(tmp_path, monkeypatch):
-    # a spawned child session (LOCKSTEP_CHILD_RUN in its env) is
-    # unlocked ONLY while its own ancestry chain terminates in an AWAITING
-    # run of the policy recipe. The v1 predicate unlocked the whole project
-    # for anyone whenever ANY awaiting policy run existed — so `other`
-    # below would keep this child unlocked after its own ancestor died.
-    # This test FAILS against the v1 hook code (which ignores the env).
-    proj = tmp_path / "proj"
-    proj.mkdir()
-    state_dir = tmp_path / "state"
-    _write_policy(state_dir, str(proj), "feature-dev")
-    idx = RunIndex(state_dir)
-    parent = idx.create("feature-dev", str(proj.resolve()))
-    child = idx.create("child-review", str(proj.resolve()), parent_run=parent.run_id, nonce="n")
-    idx.create("feature-dev", str(proj.resolve()))         # unrelated awaiting policy run
-    monkeypatch.setenv("LOCKSTEP_CHILD_RUN", child.run_id)
-    monkeypatch.setenv("LOCKSTEP_CHILD_NONCE", "n")
-
-    exit_code, out = cli.hook_pretool({"cwd": str(proj)}, state_dir)
-    assert exit_code == 0 and out == ""        # own chain awaiting: unlocked
-
-    idx.update(parent.run_id, status="escalated")
-    exit_code, out = cli.hook_pretool({"cwd": str(proj)}, state_dir)
-    assert exit_code == 0
-    data = json.loads(out)
-    # denied although the unrelated awaiting policy run still exists —
-    # the child's own dead chain decides, not the project.
-    assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
-
-
-def test_pretool_child_env_with_unknown_run_fails_closed(tmp_path, monkeypatch):
-    proj = tmp_path / "proj"
-    proj.mkdir()
-    state_dir = tmp_path / "state"
-    _write_policy(state_dir, str(proj), "feature-dev")
-    idx = RunIndex(state_dir)
-    idx.create("feature-dev", str(proj.resolve()))         # would unlock a plain worker
-    monkeypatch.setenv("LOCKSTEP_CHILD_RUN", "no-such-run")
-
-    exit_code, out = cli.hook_pretool({"cwd": str(proj)}, state_dir)
-    assert exit_code == 0
-    assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
-
-
-def test_pretool_worker_predicate_is_session_binding(tmp_path, monkeypatch):
-    # The worker session (no LOCKSTEP_CHILD_RUN) is unlocked by owning a
-    # run of the POLICY recipe: a bound run of another recipe (the child
-    # below) never satisfies the gate, and once the policy run is terminal
-    # the project locks again.
-    monkeypatch.delenv("LOCKSTEP_CHILD_RUN", raising=False)
-    proj = tmp_path / "proj"
-    proj.mkdir()
-    state_dir = tmp_path / "state"
-    _write_policy(state_dir, str(proj), "feature-dev")
-    idx = RunIndex(state_dir)
-    parent = idx.create("feature-dev", str(proj.resolve()))
-    child = idx.create("child-review", str(proj.resolve()), parent_run=parent.run_id, nonce="n")
-    sessions.touch(state_dir, parent.run_id, SESSION, 30.0)
-    sessions.touch(state_dir, child.run_id, SESSION, 30.0)
-
-    exit_code, out = cli.hook_pretool({"cwd": str(proj), "session_id": SESSION}, state_dir)
-    assert exit_code == 0 and out == ""
-
-    idx.update(parent.run_id, status="escalated")
-    exit_code, out = cli.hook_pretool({"cwd": str(proj), "session_id": SESSION}, state_dir)
-    assert exit_code == 0
-    data = json.loads(out)
-    assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
-
-
-def test_pretool_deny_advice_works_end_to_end(tmp_path, monkeypatch):
-    # The deny message's own advice must actually open the gate. A session
-    # facing a run with no live driver is told scenario_status (adoption) —
-    # simulate the full round: MCP call + its PostToolUse fire — and also
-    # the abort + fresh-start road. Driven through the real engine.
-    monkeypatch.delenv("LOCKSTEP_CHILD_RUN", raising=False)
-    proj = tmp_path / "proj"
-    proj.mkdir()
-    state_dir = tmp_path / "state"
-    _write_policy(state_dir, str(proj), "minimal")
-    eng = Engine(state_dir, GOOD_RECIPES)
-    run_id = eng.start("minimal", {}, str(proj.resolve()))["run_id"]  # crashed owner: no binding
-
-    exit_code, out = cli.hook_pretool({"cwd": str(proj), "session_id": SESSION}, state_dir)
-    assert exit_code == 0
-    data = json.loads(out)
-    assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
-    reason = data["hookSpecificOutput"]["permissionDecisionReason"]
-    assert "scenario_status" in reason and run_id in reason
-
-    status = eng.status(run_id)                          # advice road 1: touch the run…
-    cli.hook_posttool({"cwd": str(proj), "session_id": SESSION,   # …and the hook that fire brings
-                       "tool_name": "mcp__lockstep__scenario_status",
-                       "tool_input": {"run_id": run_id}, "tool_response": status},
-                      state_dir)
-    exit_code, out = cli.hook_pretool({"cwd": str(proj), "session_id": SESSION}, state_dir)
-    assert exit_code == 0 and out == ""                  # adopted: gate open
-
-    eng.abort(run_id)                                    # advice road 2: abort…
-    out2 = eng.start("minimal", {}, str(proj.resolve()))  # …fresh start…
-    cli.hook_posttool({"cwd": str(proj), "session_id": SESSION,
-                       "tool_name": "mcp__lockstep__scenario_start",
-                       "tool_input": {"recipe": "minimal"}, "tool_response": out2},
-                      state_dir)                         # …bound at birth
-    exit_code, out = cli.hook_pretool({"cwd": str(proj), "session_id": SESSION}, state_dir)
-    assert exit_code == 0 and out == ""
-
-
-def test_pretool_engine_calls_alone_never_open_the_gate(tmp_path, monkeypatch):
-    # Anti-fix pin: the ENGINE never writes bindings — a bare status call
-    # (e.g. _nudge_ancestors' internal poll, or an MCP status whose
-    # PostToolUse hook never fired) must not bind the run to anyone or
-    # open the gate for a non-owner. Only the hook-mediated touch does.
-    monkeypatch.delenv("LOCKSTEP_CHILD_RUN", raising=False)
-    proj = tmp_path / "proj"
-    proj.mkdir()
-    state_dir = tmp_path / "state"
-    _write_policy(state_dir, str(proj), "minimal")
-    eng = Engine(state_dir, GOOD_RECIPES)
-    run_id = eng.start("minimal", {}, str(proj.resolve()))["run_id"]
-
-    eng.status(run_id)                                   # the tempting "recovery" step
-
-    assert sessions.read_binding(state_dir, run_id) is None
-    exit_code, out = cli.hook_pretool({"cwd": str(proj), "session_id": SESSION}, state_dir)
-    assert exit_code == 0
-    assert json.loads(out)["hookSpecificOutput"]["permissionDecision"] == "deny"
-
-
-def test_pretool_exception_denies(tmp_path, monkeypatch):
-    proj = tmp_path / "proj"
-    proj.mkdir()
-    state_dir = tmp_path / "state"
-    _write_policy(state_dir, str(proj), "feature-dev")
-
-    class _Boom:
-        def __init__(self, *a, **k):
-            raise RuntimeError("boom")
-
-    monkeypatch.setattr(cli, "RunIndex", _Boom)
-
-    exit_code, out = cli.hook_pretool({"cwd": str(proj)}, state_dir)
-
-    assert exit_code == 0
-    data = json.loads(out)
-    assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
-
-
-# ---------------------------------------------------------------------------
-# policy CLI round-trip
-# ---------------------------------------------------------------------------
-
-
-def test_policy_require_then_clear_roundtrip(tmp_path, monkeypatch):
-    proj = tmp_path / "proj"
-    proj.mkdir()
-    state_dir = tmp_path / "state"
-    monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(state_dir))
-
-    assert cli.main(["policy", "require", "--project", str(proj), "--recipe", "feature-dev"]) == 0
-    slug = cli._policy_slug(str(proj))
-    policy_file = state_dir / "policy.d" / f"{slug}.yaml"
-    assert policy_file.exists()
-    doc = yaml.safe_load(policy_file.read_text())
-    assert doc["recipe"] == "feature-dev"
-    assert doc["project"] == str(proj.resolve())
-
-    assert cli.main(["policy", "clear", "--project", str(proj)]) == 0
-    assert not policy_file.exists()
-
-
-def test_policy_bare_verb_is_noop(tmp_path, monkeypatch):
-    monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(tmp_path / "state"))
-    assert cli.main(["policy"]) == 0
-    assert not (tmp_path / "state").exists()
-
-
-# ---------------------------------------------------------------------------
-# doctor
-# ---------------------------------------------------------------------------
-
-
-def test_doctor_all_green(tmp_path):
-    state_dir = tmp_path / "state"
-    recipes_dir = tmp_path / "recipes"
-    state_dir.mkdir()
-    recipes_dir.mkdir()
-
-    ok, report = cli.doctor(state_dir, recipes_dir)
+    _code, raw = hook_stop({}, state, str(project))
+    assert run_id in json.loads(raw)["reason"]
+    assert run_id in hook_session_start(state, str(project))
+    after = {
+        path: path.stat().st_mtime_ns
+        for path in state.rglob("*")
+        if path.is_file()
+        and not path.name.endswith(("-wal", "-shm", "-journal"))
+    }
+    assert after == before
+
+
+def test_doctor_reports_missing_native_session_binding_without_mutation(tmp_path):
+    state, recipes, _project, run_id = _parked(tmp_path)
+    ok, report = doctor(state, recipes)
+    assert ok is False
+    assert run_id in report and "session binding" in report
+
+
+def _assert_hook_integrity_failure(state, recipes, project):
+    assert hook_stop({}, state, str(project)) == (0, "")
+    assert hook_session_start(state, str(project)) == ""
+    _code, raw = hook_pretool(
+        {"cwd": str(project), "session_id": "owner-session"}, state
+    )
+    assert json.loads(raw)["hookSpecificOutput"]["permissionDecision"] == "deny"
+    ok, report = doctor(state, recipes)
+    assert ok is False
+    assert "native run projection readable" in report
+    assert "trusted native state failed read-only verification" in report
+    return report
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [
+        "runtime.sqlite",
+        "runtime.sqlite-wal",
+        "runtime.sqlite-shm",
+        "checkpoints/native.sqlite",
+        "checkpoints/native.sqlite-wal",
+        "checkpoints/native.sqlite-shm",
+    ],
+)
+def test_hooks_reject_insecure_native_storage_files_with_documented_failure_modes(
+    tmp_path, monkeypatch, relative
+):
+    state, recipes, project, run_id = _parked(tmp_path)
+    monkeypatch.setenv("LOCKSTEP_RECIPES", str(recipes))
+    sessions.touch(state, run_id, "owner-session", 30)
+    policy_require(state, str(project), "native-parent-direct")
+
+    target = state / relative
+    if not target.exists():
+        target.touch(mode=0o600)
+    target.chmod(0o644)
+
+    report = _assert_hook_integrity_failure(state, recipes, project)
+    assert target.name not in report
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [".", "checkpoints", "recipe-bundles", "recipe-materializations"],
+)
+def test_hooks_reject_insecure_native_state_directories(
+    tmp_path, monkeypatch, relative
+):
+    state, recipes, project, run_id = _parked(tmp_path)
+    monkeypatch.setenv("LOCKSTEP_RECIPES", str(recipes))
+    sessions.touch(state, run_id, "owner-session", 30)
+    policy_require(state, str(project), "native-parent-direct")
+
+    (state / relative).chmod(0o755)
+
+    _assert_hook_integrity_failure(state, recipes, project)
+
+
+def test_hooks_verify_complete_immutable_recipe_materialization(tmp_path, monkeypatch):
+    state, recipes, project, run_id = _parked(tmp_path)
+    monkeypatch.setenv("LOCKSTEP_RECIPES", str(recipes))
+    sessions.touch(state, run_id, "owner-session", 30)
+    policy_require(state, str(project), "native-parent-direct")
+
+    materialized_source = next(
+        (state / "recipe-materializations").glob("*/native-parent-direct.recipe.yaml")
+    )
+    materialized_source.chmod(0o600)
+    materialized_source.write_text(materialized_source.read_text() + "\n# tampered\n")
+
+    report = _assert_hook_integrity_failure(state, recipes, project)
+    assert materialized_source.name not in report
+
+
+def test_doctor_redacts_live_session_identity(tmp_path):
+    state, recipes, _project, run_id = _parked(tmp_path)
+    secret_session = "secret-session-identity"
+    sessions.touch(state, run_id, secret_session, 30)
+
+    ok, report = doctor(state, recipes)
 
     assert ok is True
-    assert "all green" in report
-    assert "installed version:" in report
+    assert secret_session not in report
+    assert "present and live" in report
 
 
-def test_doctor_flags_missing_dirs(tmp_path):
-    ok, report = cli.doctor(tmp_path / "nope", tmp_path / "also-nope")
+def test_doctor_reports_stale_session_binding_as_failure(tmp_path, monkeypatch):
+    state, recipes, _project, run_id = _parked(tmp_path)
+    secret_session = "stale-secret-session-identity"
+    sessions.touch(state, run_id, secret_session, 30)
+    monkeypatch.setattr("lockstep.runtime.hooks._session_stale_minutes", lambda: -1)
+
+    ok, report = doctor(state, recipes)
 
     assert ok is False
-    assert "issues found" in report
+    assert secret_session not in report
+    assert "stale" in report
+    assert "start a fresh run" in report
 
 
-def test_doctor_screams_on_active_run_without_binding(tmp_path):
-    # THE silent-lockout detector: an active run whose binding sidecar was
-    # never written means the PostToolUse hook never fired for it — the
-    # installed matcher does not match this installation's tool names.
-    # Doctor must fail loudly and hand the user the exact matcher to fix.
-    state_dir = tmp_path / "state"
-    recipes_dir = tmp_path / "recipes"
-    recipes_dir.mkdir()
-    proj = tmp_path / "proj"
-    proj.mkdir()
-    run_id = _mk_run(state_dir, str(proj.resolve()))
+def test_legacy_evidence_blocks_only_its_exact_project_namespace(
+    tmp_path, monkeypatch
+) -> None:
+    state = (tmp_path / "state").resolve()
+    projects = {name: tmp_path / name for name in ("project-a", "project-b")}
+    for project in projects.values():
+        project.mkdir()
+        write_workflow(project, "release")
+        authoring.publish_project_compilation(project, "release", state_dir=state)
+    namespace, _identity = _locate_test_namespace(state, projects["project-a"])
+    evidence = _retain(namespace, live_v4_bytes(projects["project-a"]))
+    evidence_before = (evidence.read_bytes(), evidence.stat().st_ino)
+    source_b = projects["project-b"] / ".lockstep/workflows/release.workflow.yaml"
+    replace_marker(source_b, "initial", "updated")
 
-    ok, report = cli.doctor(state_dir, recipes_dir)
+    assert AuthoringPublisher(state).observe(
+        projects["project-b"], lambda: "observed"
+    ) == "observed"
+    authoring.publish_project_compilation(
+        projects["project-b"], "release", state_dir=state
+    )
+    started = []
+    monkeypatch.setattr(
+        AuthorizedStartService,
+        "start",
+        lambda _self, *_args, **_kwargs: started.append(True)
+        or {"status": "captured", "run_id": "probe"},
+    )
+    service = LockstepCommandService(
+        state, projects["project-b"] / ".lockstep/recipes"
+    )
+    try:
+        assert service.start("release", {}, str(projects["project-b"]))["run_id"] == "probe"
+    finally:
+        service.close()
+    assert started == [True]
+    with pytest.raises(Exception, match=str(projects["project-a"].resolve())):
+        AuthoringPublisher(state).observe(projects["project-a"], lambda: None)
+    assert (evidence.read_bytes(), evidence.stat().st_ino) == evidence_before
+
+
+def test_replaced_project_uses_distinct_namespace_and_doctor_reports_orphan_read_only(
+    tmp_path
+) -> None:
+    state = (tmp_path / "state").resolve()
+    project = tmp_path / "project"
+    project.mkdir()
+    write_workflow(project, "release")
+    authoring.publish_project_compilation(project, "release", state_dir=state)
+    old_namespace, _identity = _locate_test_namespace(state, project)
+    evidence = _retain(old_namespace, live_v4_bytes(project))
+    retired = tmp_path / "retired"
+    project.rename(retired)
+    project.mkdir()
+    write_workflow(project, "release")
+    retired_before = tree_image(retired)
+    evidence_before = (evidence.read_bytes(), evidence.stat().st_ino)
+
+    authoring.publish_project_compilation(project, "release", state_dir=state)
+
+    new_namespace, _identity = _locate_test_namespace(state, project)
+    assert new_namespace != old_namespace
+    assert tree_image(retired) == retired_before
+    assert (evidence.read_bytes(), evidence.stat().st_ino) == evidence_before
+    before = tree_image(state)
+    ok, report = doctor(state, project / ".lockstep/recipes")
+    legacy_line = next(line for line in report.splitlines() if "legacy authoring" in line)
+    assert ok is False
+    assert "original exact project directory identity" in legacy_line
+    assert "pre-simplification" in legacy_line
+    assert "Do not delete transaction.json manually" in legacy_line
+    assert str(project.resolve()) not in legacy_line
+    assert tree_image(state) == before
+
+
+def test_doctor_bounds_namespace_discovery_without_blocking_normal_project_observation(
+    tmp_path
+) -> None:
+    state = tmp_path / "state"
+    authoring_root = state / "authoring"
+    authoring_root.mkdir(parents=True, mode=0o700)
+    state.chmod(0o700)
+    authoring_root.chmod(0o700)
+    for index in range(257):
+        namespace = authoring_root / f"{index:064x}"
+        namespace.mkdir(mode=0o700)
+    project = tmp_path / "project"
+    project.mkdir()
+    recipes = tmp_path / "recipes"
+    recipes.mkdir()
+
+    assert AuthoringPublisher(state.resolve()).observe(project, lambda: "ok") == "ok"
+    before = tree_image(state)
+    ok, report = doctor(state, recipes)
 
     assert ok is False
-    assert run_id in report
-    assert "PostToolUse" in report
-    assert cli.LOCKSTEP_TOOL_MATCHER in report         # the exact matcher, verbatim
-    assert "scenario_status" in report                 # ...and the recovery touch
-
-
-def test_doctor_green_when_active_run_is_bound(tmp_path):
-    state_dir = tmp_path / "state"
-    recipes_dir = tmp_path / "recipes"
-    recipes_dir.mkdir()
-    proj = tmp_path / "proj"
-    proj.mkdir()
-    run_id = _mk_run(state_dir, str(proj.resolve()))
-    assert sessions.touch(state_dir, run_id, SESSION, 30.0) == "bound"
-
-    ok, report = cli.doctor(state_dir, recipes_dir)
-
-    assert ok is True
-    assert run_id in report and SESSION in report
-
-
-def test_doctor_ignores_terminal_runs_without_bindings(tmp_path):
-    # Only ACTIVE runs prove the hook should have fired; terminal runs
-    # (their sidecars GC'd or never made) are not a finding.
-    state_dir = tmp_path / "state"
-    recipes_dir = tmp_path / "recipes"
-    recipes_dir.mkdir()
-    proj = tmp_path / "proj"
-    proj.mkdir()
-    run_id = _mk_run(state_dir, str(proj.resolve()))
-    RunIndex(state_dir).update(run_id, status="aborted")
-
-    ok, report = cli.doctor(state_dir, recipes_dir)
-
-    assert ok is True
-
-
-def test_hooks_write_nothing_to_the_state_dir(tmp_path):
-    # Hooks are read-only on ENGINE-owned state by contract; their one own
-    # write is the bindings/ sidecar tree, and even that only for a live
-    # policy-relevant run. A hook fire against an empty state dir — the
-    # posttool observer included — leaves it absent.
-    state_dir = tmp_path / "state"
-
-    cli.hook_stop({"stop_hook_active": False}, state_dir, str(tmp_path))
-    cli.hook_session_start(state_dir, str(tmp_path))
-    cli.hook_pretool({"cwd": str(tmp_path)}, state_dir)
-    cli.hook_posttool({"cwd": str(tmp_path), "session_id": SESSION,
-                       "tool_name": "mcp__lockstep__scenario_status",
-                       "tool_input": {"run_id": "no-such-run"}, "tool_response": {}},
-                      state_dir)
-
-    assert not state_dir.exists()
-
-
-# ---------------------------------------------------------------------------
-# subcall-aware hook surfaces
-# ---------------------------------------------------------------------------
-
-
-def test_stop_text_is_subcall_aware_per_run(tmp_path):
-    idx = RunIndex(tmp_path)
-    parked = idx.create("rec", "/proj")
-    idx.update(parked.run_id, step="_subcall",
-               brief={"step": "_subcall", "node": "review", "runner": "claude"})
-    working = idx.create("rec2", "/proj")
-    idx.update(working.run_id, step="one", brief={"step": "one"})
-    code, out = cli.hook_stop({"stop_hook_active": False, "cwd": "/proj"}, tmp_path, cwd="/proj")
-    payload = json.loads(out)["reason"]
-    # the parked run's line must NOT say scenario_done; the working
-    # run's line still must — per-run rendering, not one joined sentence.
-    parked_line = next(l for l in payload.split("lockstep:") if parked.run_id in l)
-    working_line = next(l for l in payload.split("lockstep:") if working.run_id in l)
-    assert "subcall in progress" in parked_line and "scenario_done" not in parked_line
-    assert "scenario_done" in working_line
-
-
-def test_session_start_marks_the_sessions_own_child_run(tmp_path, monkeypatch):
-    # a spawned child session inherits LOCKSTEP_CHILD_RUN; the listing
-    # must single out that run as the session's own, not leave the child to
-    # guess between its parent's line and its own.
-    idx = RunIndex(tmp_path)
-    parent = idx.create("feature-dev", "/proj")
-    idx.update(parent.run_id, step="_subcall",
-               brief={"step": "_subcall", "node": "review", "runner": "claude"})
-    child = idx.create("child-review", "/proj", parent_run=parent.run_id, nonce="n")
-    idx.update(child.run_id, step="review", brief={"step": "review"})
-    monkeypatch.setenv("LOCKSTEP_CHILD_RUN", child.run_id)
-    monkeypatch.setenv("LOCKSTEP_CHILD_NONCE", "n")
-    ctx = cli.hook_session_start(tmp_path, cwd="/proj")
-    child_line = next(l for l in ctx.splitlines() if child.run_id in l)
-    parent_line = next(l for l in ctx.splitlines() if parent.run_id in l)
-    assert "OWN child run" in child_line
-    assert "OWN child run" not in parent_line
-
-
-def test_session_start_names_the_subcall_not_the_raw_marker(tmp_path):
-    idx = RunIndex(tmp_path)
-    r = idx.create("rec", "/proj")
-    idx.update(r.run_id, step="_subcall",
-               brief={"step": "_subcall", "node": "review", "runner": "claude"})
-    ctx = cli.hook_session_start(tmp_path, cwd="/proj")
-    # v1 renders the step repr-quoted: awaiting step '_subcall' — that
-    # exact token must be gone. Asserted on the token itself: a
-    # replace()-based assertion here is tautological.
-    assert "subcall in progress" in ctx and "'_subcall'" not in ctx
-
-
-def test_empty_state_dir_env_reads_as_absent(monkeypatch, tmp_path):
-    # The plugin manifest forwards LOCKSTEP_STATE_DIR unconditionally, so an
-    # unset variable arrives PRESENT AND EMPTY — and `Path("")` is the cwd,
-    # which would put policy files, bindings and run state inside the very
-    # project tree the gate is guarding.
-    monkeypatch.setenv("LOCKSTEP_STATE_DIR", "")
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.chdir(tmp_path / "..")
-    assert cli._state_dir() == Path(tmp_path) / ".lockstep"
-    assert validators._state_dir() == Path(tmp_path) / ".lockstep"
-
-
-def test_pretool_child_run_without_its_nonce_is_denied(tmp_path, monkeypatch):
-    # A run id is not a secret — SessionStart broadcasts every active run's
-    # id into every session in the project. The spawn credential is the
-    # NONCE, so an ungated session that re-exports a known child id gets
-    # nothing.
-    proj = tmp_path / "proj"
-    proj.mkdir()
-    state_dir = tmp_path / "state"
-    _write_policy(state_dir, str(proj), "feature-dev")
-    idx = RunIndex(state_dir)
-    parent = idx.create("feature-dev", str(proj.resolve()))
-    child = idx.create("child-review", str(proj.resolve()),
-                       parent_run=parent.run_id, nonce="the-real-nonce")
-    monkeypatch.setenv("LOCKSTEP_CHILD_RUN", child.run_id)
-
-    for wrong in (None, "", "guessed"):
-        if wrong is None:
-            monkeypatch.delenv("LOCKSTEP_CHILD_NONCE", raising=False)
-        else:
-            monkeypatch.setenv("LOCKSTEP_CHILD_NONCE", wrong)
-        exit_code, out = cli.hook_pretool({"cwd": str(proj)}, state_dir)
-        assert exit_code == 0
-        data = json.loads(out)
-        assert data["hookSpecificOutput"]["permissionDecision"] == "deny"
-        assert "credential" in data["hookSpecificOutput"]["permissionDecisionReason"]
-
-    monkeypatch.setenv("LOCKSTEP_CHILD_NONCE", "the-real-nonce")
-    assert cli.hook_pretool({"cwd": str(proj)}, state_dir) == (0, "")
+    assert "256" in report and "may remain undiscovered" in report
+    assert "pre-simplification" in report
+    assert "original exact project directory identity" in report
+    assert "Do not delete transaction.json manually" in report
+    assert tree_image(state) == before
