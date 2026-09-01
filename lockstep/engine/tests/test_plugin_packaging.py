@@ -61,6 +61,7 @@ def test_codex_mcp_contract_is_pinned_to_plugin_root():
         "default_tools_approval_mode": "approve",
         "startup_timeout_sec": 300,
         "tool_timeout_sec": 900,
+        "env": {"LOCKSTEP_PLUGIN_HOST": "codex"},
     }
 
 
@@ -136,7 +137,7 @@ def test_launcher_derives_codex_home_from_installed_plugin_path(tmp_path):
     fake_uv.chmod(fake_uv.stat().st_mode | stat.S_IXUSR)
     env = {
         **os.environ,
-        "LOCKSTEP_RUNNER": "codex",
+        "LOCKSTEP_PLUGIN_HOST": "codex",
         "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
     }
     env.pop("CODEX_HOME", None)
@@ -150,6 +151,16 @@ def test_launcher_derives_codex_home_from_installed_plugin_path(tmp_path):
     )
 
     assert set(result.stdout.splitlines()) == {str(codex_home)}
+
+
+def test_runtime_never_reads_the_non_authoritative_plugin_host_marker():
+    runtime = ROOT / "engine/src/lockstep"
+    readers = [
+        str(path.relative_to(ROOT))
+        for path in sorted(runtime.rglob("*.py"))
+        if "LOCKSTEP_PLUGIN_HOST" in path.read_text()
+    ]
+    assert readers == []
 
 
 def test_install_build_and_plugin_enforce_sync_patch_no_sync_order(tmp_path):

@@ -7,7 +7,6 @@ import stat
 import subprocess
 import sys
 import textwrap
-import time
 import zipfile
 from pathlib import Path
 
@@ -24,6 +23,7 @@ ACTIVE_ROOT_PATHS = (
     "README.md",
     "docs/DESIGN.md",
     "hooks",
+    "recipes",
     "scripts",
     "skills",
     "engine/pyproject.toml",
@@ -36,6 +36,7 @@ STAGED_DELIVERY_PATHS = (
     "README.md",
     "docs/DESIGN.md",
     "hooks",
+    "recipes",
     "scripts",
     "skills",
     "engine/pyproject.toml",
@@ -107,25 +108,30 @@ def _assert_active_guidance(root: Path) -> None:
         "skills/lockstep/SKILL.md",
         "skills/lockstep-author/SKILL.md",
     ):
-        text = (root / relative).read_text().lower()
-        assert "local unsandboxed" in text, relative
-        assert "single-user" in text, relative
+        text = " ".join((root / relative).read_text().lower().split())
+        assert "local unsandboxed single-user" in text, relative
+        assert "ambient os-user authority" in text, relative
+        assert "tcb" in text or "trusted computing base" in text, relative
+        assert "not security confinement" in text, relative
+        assert "no constrained-runner, broker, or sandbox guarantee" in text, relative
         assert "marker-free" in text and "manual yamlgraph" in text, relative
         assert "reviewed-change" in text and "parallel-review" in text, relative
-        assert "configuration" in text and "not authority" in text, relative
-        assert "report" in text and "not authority" in text, relative
+        assert "no configuration" in text and "grants authority" in text, relative
+        assert "report text" in text and "grants authority" in text, relative
 
 
 def _clean_env(**updates: str) -> dict[str, str]:
     env = dict(os.environ)
-    for name in (
-        "PYTHONPATH",
-        "PYTHONHOME",
-        "PYTHONUSERBASE",
-        "VIRTUAL_ENV",
-        "UV_PROJECT_ENVIRONMENT",
-    ):
-        env.pop(name, None)
+    for name in tuple(env):
+        if name.startswith("LOCKSTEP_") or name in {
+            "CODEX_HOME",
+            "PYTHONPATH",
+            "PYTHONHOME",
+            "PYTHONUSERBASE",
+            "VIRTUAL_ENV",
+            "UV_PROJECT_ENVIRONMENT",
+        }:
+            env.pop(name)
     env.update(updates)
     return env
 
@@ -133,10 +139,14 @@ def _clean_env(**updates: str) -> dict[str, str]:
 _FLOW_PROBE = textwrap.dedent(
     r"""
     import hashlib
+    import importlib.metadata
+    import importlib.resources
     import importlib.util
     import json
     import logging
     import os
+    import subprocess
+    import sys
     import time
     from pathlib import Path
 
@@ -152,6 +162,7 @@ _FLOW_PROBE = textwrap.dedent(
 
     root = Path(os.environ["LOCKSTEP_PROBE_ROOT"])
     controlled = Path(os.environ["LOCKSTEP_CONTROLLED_EFFECT"]).resolve(strict=True)
+    expected_environment = Path(os.environ["LOCKSTEP_EXPECTED_ENV_ROOT"]).resolve(strict=True)
     logging.disable(logging.CRITICAL)
 
     def wait(command, project, run_id, predicate, timeout=30.0):
@@ -182,7 +193,7 @@ _FLOW_PROBE = textwrap.dedent(
         if parallel:
             (private_tmp / "lockstep-controlled-two-process-barrier").mkdir()
         environment = {
-            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "PATH": os.environ["PATH"],
             "LANG": "C.UTF-8",
             "LC_ALL": "C.UTF-8",
             "TMPDIR": str(private_tmp),
@@ -210,7 +221,27 @@ _FLOW_PROBE = textwrap.dedent(
             (authorized,), project_identity=str(project.resolve())
         )
         bindings = config(runtime_root, parallel=parallel)
-        provision_runtime_snapshot(
+        refusal_owner = owner.parent / f"{owner.name}-configuration-only"
+        configuration_only = provision_runtime_snapshot(
+            state_dir=refusal_owner,
+            codex=bindings["codex"],
+            pinned=bindings["pinned"],
+            replacement_keys=(),
+            index=index,
+            project=project,
+        )
+        assert configuration_only.grants == ()
+        refusal = Engine.command(refusal_owner, recipes)
+        try:
+            try:
+                refusal.start(recipe, {}, str(project))
+            except LockstepError:
+                pass
+            else:
+                raise AssertionError("configuration alone granted runtime authority")
+        finally:
+            refusal.close()
+        granted = provision_runtime_snapshot(
             state_dir=owner,
             codex=bindings["codex"],
             pinned=bindings["pinned"],
@@ -218,7 +249,32 @@ _FLOW_PROBE = textwrap.dedent(
             index=index,
             project=project,
         )
+        assert {grant.grant_selection_key for grant in granted.grants} == {
+            item.grant_selection_key for item in index.requirements
+        }
+        assert len(granted.grants) == len(index.requirements)
         return index
+
+    def assert_manual_cli(project):
+        checked = subprocess.run(
+            [sys.executable, "-m", "lockstep", "recipe", "check", "manual"],
+            cwd=project,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert checked.returncode == 0, checked.stdout + checked.stderr
+        estimated = subprocess.run(
+            [sys.executable, "-m", "lockstep", "recipe", "estimate", "manual", "--json"],
+            cwd=project,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert estimated.returncode == 0, estimated.stdout + estimated.stderr
+        payload = json.loads(estimated.stdout)
+        assert payload["schema"] == "lockstep.structural-estimate/v1"
+        return payload
 
     def pending_accept(command, project, run_id):
         deadline = time.monotonic() + 30
@@ -247,10 +303,32 @@ _FLOW_PROBE = textwrap.dedent(
         issued = command.issue_publication_consent(
             run_id, step, preview["digest"], project=str(project)
         )
-        assert command.authority.inspect_token(issued.token).receipt_digest is None
+        stored = command.authority.inspect_token(issued.token)
+        assert stored.commitment.to_dict() == preview
+        assert issued.commitment_digest == preview["digest"] == stored.commitment.digest
+        assert issued.consent_ref == stored.consent_ref
+        assert stored.receipt_digest is None
         command.scenario_accept_artifact(issued.token, project=str(project))
-        assert command.authority.inspect_token(issued.token).receipt_digest is not None
-        return issued.token
+        redeemed = command.authority.inspect_token(issued.token)
+        assert redeemed.commitment == stored.commitment
+        assert redeemed.receipt_digest is not None
+        binding = command.catalog.get(run_id)
+        acceptances = [
+            record
+            for record in command.effects.list_for_thread(binding.thread_id)
+            if record.effect_kind == "accept"
+            and record.result is not None
+            and record.result.consent_ref == issued.consent_ref
+        ]
+        assert len(acceptances) == 1
+        result = acceptances[0].result
+        assert result is not None
+        assert result.receipt_digest == redeemed.receipt_digest
+        assert result.artifact_ref == stored.commitment.artifact_ref
+        assert result.artifact_digest == stored.commitment.artifact_digest
+        assert result.destination == stored.commitment.destination
+        assert acceptances[0].descriptor_digest == stored.commitment.descriptor_digest
+        return issued, stored.commitment, result
 
     def assert_observations(owner, recipes, project, run_id, terminal=False):
         deadline = time.monotonic() + 10
@@ -300,9 +378,9 @@ _FLOW_PROBE = textwrap.dedent(
             tests = project / "tests"
             tests.mkdir()
             (tests / "test_installed.py").write_text(
-                "from pathlib import Path\n\n"
+                "import sys\nfrom pathlib import Path\n\n"
                 "def test_installed_pinned():\n"
-                f"    Path({str(pinned_marker)!r}).write_bytes(b'pinned verified\\n')\n"
+                f"    Path({str(pinned_marker)!r}).write_text(sys.executable)\n"
             )
             wait(
                 command,
@@ -330,7 +408,9 @@ _FLOW_PROBE = textwrap.dedent(
             pinned = [record for record in records if record.effect_kind == "verify"]
             assert len(managed) == len(pinned) == 1
             assert managed[0].phase == pinned[0].phase == "delivered"
-            assert pinned_marker.read_bytes() == b"pinned verified\n"
+            assert Path(pinned_marker.read_text()).absolute().is_relative_to(
+                expected_environment
+            )
             artifact = command.artifacts.read(managed[0].result.artifact_refs[0])
             expected = command.blobs.read(artifact.blob)
             assert expected.startswith(b"# Findings\nControlled evidence-backed review.\n")
@@ -344,7 +424,7 @@ _FLOW_PROBE = textwrap.dedent(
         reopened = Engine.command(base / "owner", recipes)
         try:
             reopened.scenario_recover(str(project), limit=128)
-            accept(reopened, project, run_id, step)
+            issued, commitment, accepted = accept(reopened, project, run_id, step)
             wait(reopened, project, run_id, lambda item: item.get("status") == "completed")
             assert (project / ".lockstep/review.md").read_bytes() == expected
             assert reopened._runtime_execution_composition.runners.codex.spawn_count == 0
@@ -354,7 +434,12 @@ _FLOW_PROBE = textwrap.dedent(
                 if record.effect_kind == "accept"
             ]
             assert len(acceptance) == 1 and acceptance[0].result is not None
-            assert acceptance[0].result.receipt_digest is not None
+            assert acceptance[0].result == accepted
+            assert commitment.producer_effect_id == managed[0].effect_id
+            assert commitment.artifact_ref == str(artifact.ref)
+            assert commitment.artifact_digest == artifact.blob.digest
+            assert commitment.destination == ".lockstep/review.md"
+            assert issued.consent_ref == accepted.consent_ref
             assert_observations(base / "owner", recipes, project, run_id, terminal=True)
         finally:
             reopened.close()
@@ -387,7 +472,9 @@ _FLOW_PROBE = textwrap.dedent(
                 lines = content.decode().splitlines()
                 intervals.append((int(next(line for line in lines if line.startswith("started_ns: ")).split()[1]), int(next(line for line in lines if line.startswith("ended_ns: ")).split()[1])))
             assert max(start for start, _ in intervals) < min(end for _, end in intervals)
-            first_token = accept(command, project, run_id, first_step)
+            first_issued, first_commitment, first_result = accept(
+                command, project, run_id, first_step
+            )
             second_step = pending_accept(command, project, run_id)
             assert second_step != first_step
         finally:
@@ -395,11 +482,33 @@ _FLOW_PROBE = textwrap.dedent(
         reopened = Engine.command(base / "owner", recipes)
         try:
             reopened.scenario_recover(str(project), limit=128)
-            second_token = accept(reopened, project, run_id, second_step)
-            assert first_token != second_token
+            second_issued, second_commitment, second_result = accept(
+                reopened, project, run_id, second_step
+            )
+            assert first_issued.token != second_issued.token
+            assert first_issued.consent_ref != second_issued.consent_ref
+            assert first_result.receipt_digest != second_result.receipt_digest
             wait(reopened, project, run_id, lambda item: item.get("status") == "completed")
             for source_path, content in expected.items():
                 assert (project / ".lockstep" / source_path).read_bytes() == content
+            artifacts_by_ref = {str(item.ref): item for item in artifacts}
+            commitments = (first_commitment, second_commitment)
+            results = (first_result, second_result)
+            assert {item.artifact_ref for item in commitments} == set(artifacts_by_ref)
+            assert {item.consent_ref for item in results} == {
+                first_issued.consent_ref,
+                second_issued.consent_ref,
+            }
+            for commitment, result in zip(commitments, results, strict=True):
+                artifact = artifacts_by_ref[commitment.artifact_ref]
+                assert commitment.producer_effect_id in {item.effect_id for item in managed}
+                assert commitment.artifact_digest == artifact.blob.digest
+                assert result.artifact_ref == str(artifact.ref)
+                assert result.artifact_digest == artifact.blob.digest
+                assert result.destination == commitment.destination
+                assert (project / result.destination).read_bytes() == expected[
+                    artifact.source_path
+                ]
             assert reopened._runtime_execution_composition.runners.codex.spawn_count == 0
             with reopened._admission_recovery_lock:
                 reopened.runtime.bind(reopened.catalog.get(run_id))
@@ -431,9 +540,9 @@ _FLOW_PROBE = textwrap.dedent(
         tests = project / "tests"
         tests.mkdir()
         (tests / "test_manual.py").write_text(
-            "from pathlib import Path\n\n"
+            "import sys\nfrom pathlib import Path\n\n"
             "def test_manual_pinned():\n"
-            f"    Path({str(pinned_marker)!r}).write_bytes(b'manual pinned verified\\n')\n"
+            f"    Path({str(pinned_marker)!r}).write_text(sys.executable)\n"
         )
         recipe = recipes / "manual.recipe.yaml"
         recipe.write_text(
@@ -465,6 +574,7 @@ _FLOW_PROBE = textwrap.dedent(
             "  - {from: done, to: END}\n"
         )
         assert b"x-lockstep-generated" not in recipe.read_bytes()
+        manual_estimate = assert_manual_cli(project)
         index = provision(project, "manual", base / "owner", base / "runtime")
         assert len(index.requirements) == 1
         assert index.requirements[0].runner_selector == "pinned"
@@ -487,30 +597,71 @@ _FLOW_PROBE = textwrap.dedent(
                 session_id=session, project=str(project),
             )
             wait(reopened, project, run_id, lambda item: item.get("status") == "completed")
-            assert pinned_marker.read_bytes() == b"manual pinned verified\n"
+            assert Path(pinned_marker.read_text()).absolute().is_relative_to(
+                expected_environment
+            )
             assert reopened._runtime_execution_composition.runners.pinned.spawn_count == 1
             assert_observations(base / "owner", recipes, project, run_id, terminal=True)
         finally:
             reopened.close()
+        return manual_estimate
 
     reviewed()
     parallel()
-    manual()
+    manual_estimate = manual()
     import lockstep
     import lockstep.templates
     from lockstep.mcp import server
     assert {"reviewed-change", "parallel-review"} == set(__import__("lockstep.templates", fromlist=["list_templates"]).list_templates())
     assert {"scenario_start", "scenario_wait", "scenario_events", "scenario_accept_artifact"} <= {tool.name for tool in server.app._tool_manager.list_tools()}
+    loaded_modules = sorted({
+        str(Path(module.__file__).resolve())
+        for name, module in sys.modules.items()
+        if (name == "lockstep" or name.startswith("lockstep."))
+        and getattr(module, "__file__", None)
+    })
+    package_root = importlib.resources.files("lockstep")
+    template_root = importlib.resources.files("lockstep.templates")
+    def resource_files(root):
+        pending = [root]
+        found = []
+        while pending:
+            item = pending.pop()
+            if item.is_file():
+                found.append(str(Path(str(item)).resolve()))
+            elif item.is_dir():
+                pending.extend(item.iterdir())
+        return sorted(found)
+    distribution = importlib.metadata.distribution("lockstep")
+    distribution_files = tuple(distribution.files or ())
+    record_files = [
+        str(Path(distribution.locate_file(item)).resolve())
+        for item in distribution_files
+        if str(item).endswith(".dist-info/RECORD")
+    ]
+    assert len(record_files) == 1 and Path(record_files[0]).is_file()
     print(json.dumps({
+        "executable": str(Path(sys.executable).absolute()),
         "lockstep": str(Path(lockstep.__file__).resolve()),
         "templates": str(Path(lockstep.templates.__file__).resolve()),
+        "loaded_modules": loaded_modules,
+        "package_resource_root": str(Path(str(package_root)).resolve()),
+        "package_resource_files": resource_files(package_root),
+        "template_resource_root": str(Path(str(template_root)).resolve()),
+        "template_resource_files": resource_files(template_root),
+        "distribution_root": str(Path(distribution.locate_file("")).resolve()),
+        "distribution_record": record_files[0],
+        "sys_path": [str(Path(item).resolve()) for item in sys.path if item],
+        "manual_estimate": manual_estimate,
         "legacy_runner_importable": importlib.util.find_spec("lockstep.runtime.runners") is not None,
     }, sort_keys=True))
     """
 )
 
 
-def _run_probe(python: Path, foreign: Path, controlled: Path) -> dict[str, object]:
+def _run_probe(
+    python: Path, foreign: Path, controlled: Path, environment_root: Path
+) -> dict[str, object]:
     foreign.mkdir(parents=True)
     probe_root = foreign / "probe"
     result = subprocess.run(
@@ -519,7 +670,9 @@ def _run_probe(python: Path, foreign: Path, controlled: Path) -> dict[str, objec
         env=_clean_env(
             LOCKSTEP_PROBE_ROOT=str(probe_root),
             LOCKSTEP_CONTROLLED_EFFECT=str(controlled),
+            LOCKSTEP_EXPECTED_ENV_ROOT=str(environment_root),
             LOCKSTEP_STATE_DIR=str(probe_root / "ambient-owner"),
+            PATH=f"{python.parent}:/usr/bin:/bin",
         ),
         text=True,
         capture_output=True,
@@ -534,16 +687,105 @@ def _assert_cli_resource_contract(
     executable: Path, project: Path, env: dict[str, str]
 ) -> None:
     project.mkdir(parents=True, exist_ok=True)
-    commands = (
-        (("template", "list"), "parallel-review\nreviewed-change\n"),
-        (("template", "show", "reviewed-change", "release"), None),
-        (("template", "init", "reviewed-change", "release"), "initialized release\n"),
-        (("recipe", "check", "release"), None),
-        (("recipe", "estimate", "release", "--json"), None),
+    listed = subprocess.run(
+        [str(executable), "template", "list"],
+        cwd=project,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=120,
+        check=False,
     )
-    for args, exact_stdout in commands:
+    assert listed.returncode == 0, listed.stdout + listed.stderr
+    assert listed.stdout == "parallel-review\nreviewed-change\n"
+    estimates: list[dict[str, object]] = []
+    for template, name in (
+        ("reviewed-change", "reviewed"),
+        ("parallel-review", "parallel"),
+    ):
+        template_project = project / template
+        template_project.mkdir()
+        shown_result = subprocess.run(
+            [str(executable), "template", "show", template, name],
+            cwd=template_project,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=120,
+            check=False,
+        )
+        assert shown_result.returncode == 0, shown_result.stdout + shown_result.stderr
+        shown = json.loads(shown_result.stdout)
+        assert shown["template"] == template
+        initialized = subprocess.run(
+            [str(executable), "template", "init", template, name],
+            cwd=template_project,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=120,
+            check=False,
+        )
+        assert initialized.returncode == 0, initialized.stdout + initialized.stderr
+        assert initialized.stdout == f"initialized {name}\n"
+        for workflow in shown["compile_order"]:
+            compiled = subprocess.run(
+                [str(executable), "recipe", "compile", workflow],
+                cwd=template_project,
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=120,
+                check=False,
+            )
+            assert compiled.returncode == 0, compiled.stdout + compiled.stderr
+        for args in (
+            ("recipe", "check", name),
+            ("recipe", "estimate", name, "--json"),
+        ):
+            result = subprocess.run(
+                [str(executable), *args],
+                cwd=template_project,
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=120,
+                check=False,
+            )
+            assert result.returncode == 0, result.stdout + result.stderr
+            if args[1] == "estimate":
+                estimate = json.loads(result.stdout)
+                assert estimate["schema"] == "lockstep.structural-estimate/v1"
+                estimates.append(estimate)
+    assert len(estimates) == 2
+    assert all("peak_parallel_child_calls" in estimate for estimate in estimates)
+    assert all("peak_parallel_subcalls" not in estimate for estimate in estimates)
+
+
+def _assert_active_examples_compile(
+    executable: Path, source_root: Path, project: Path, env: dict[str, str]
+) -> None:
+    recipes = project / ".lockstep/recipes"
+    recipes.mkdir(parents=True)
+    examples = tuple(sorted((source_root / "recipes/examples").glob("*.recipe.yaml")))
+    assert examples
+    for example in examples:
+        shutil.copy2(example, recipes / example.name)
+    checked = subprocess.run(
+        [str(executable), "recipe", "check", "--all"],
+        cwd=project,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=120,
+        check=False,
+    )
+    assert checked.returncode == 0, checked.stdout + checked.stderr
+    estimates: list[dict[str, object]] = []
+    for example in examples:
+        name = example.name.removesuffix(".recipe.yaml")
         result = subprocess.run(
-            [str(executable), *args],
+            [str(executable), "recipe", "estimate", name, "--json"],
             cwd=project,
             env=env,
             text=True,
@@ -552,21 +794,52 @@ def _assert_cli_resource_contract(
             check=False,
         )
         assert result.returncode == 0, result.stdout + result.stderr
-        if exact_stdout is not None:
-            assert result.stdout == exact_stdout
-    shown = json.loads(
-        subprocess.run(
-            [str(executable), "template", "show", "parallel-review", "parallel"],
-            cwd=project,
-            env=env,
-            text=True,
-            capture_output=True,
-            timeout=120,
-            check=True,
-        ).stdout
+        estimate = json.loads(result.stdout)
+        assert estimate["schema"] == "lockstep.structural-estimate/v1"
+        estimates.append(estimate)
+    assert len(estimates) == len(examples)
+    assert all("peak_parallel_child_calls" in estimate for estimate in estimates)
+    assert all("peak_parallel_subcalls" not in estimate for estimate in estimates)
+
+
+def _assert_surface_isolation(
+    observed: dict[str, object],
+    *,
+    package_root: Path,
+    environment_root: Path,
+    exclude_checkout: bool,
+) -> None:
+    package_root = package_root.resolve(strict=True)
+    environment_root = environment_root.resolve(strict=True)
+    assert Path(str(observed["executable"])).is_relative_to(environment_root)
+    module_paths = tuple(Path(item) for item in observed["loaded_modules"])
+    assert module_paths and all(path.is_relative_to(package_root) for path in module_paths)
+    for key in ("lockstep", "templates", "package_resource_root", "template_resource_root"):
+        assert Path(str(observed[key])).is_relative_to(package_root)
+    resource_files = tuple(
+        Path(item)
+        for key in ("package_resource_files", "template_resource_files")
+        for item in observed[key]
     )
-    assert shown["template"] == "parallel-review"
-    assert len(shown["compile_order"]) == 3
+    assert resource_files and all(path.is_relative_to(package_root) for path in resource_files)
+    assert any(path.name == "template.yaml" for path in resource_files)
+    for key in ("distribution_root", "distribution_record"):
+        assert Path(str(observed[key])).is_relative_to(environment_root)
+    if exclude_checkout:
+        leaked = [
+            path
+            for path in (*module_paths, *resource_files, *(Path(item) for item in observed["sys_path"]))
+            if path.is_relative_to(ROOT)
+        ]
+        assert leaked == []
+
+
+def _assert_manual_estimate(observed: dict[str, object]) -> None:
+    estimate = observed["manual_estimate"]
+    assert isinstance(estimate, dict)
+    assert estimate["schema"] == "lockstep.structural-estimate/v1"
+    assert "peak_parallel_child_calls" in estimate
+    assert "peak_parallel_subcalls" not in estimate
 
 
 @pytest.fixture(scope="module")
@@ -590,11 +863,36 @@ def test_source_checkout_active_guidance_describes_the_installed_contract() -> N
 def test_source_checkout_runs_all_complete_public_flows_from_foreign_cwd(
     tmp_path: Path,
 ) -> None:
-    observed = _run_probe(
-        Path(sys.executable), tmp_path / "foreign-source", CONTROLLED_EFFECT
+    source_environment = Path(sys.executable).absolute().parents[1]
+    source_env = _clean_env(
+        LOCKSTEP_STATE_DIR=str(tmp_path / "source-cli-state"),
+        PATH=f"{source_environment / 'bin'}:/usr/bin:/bin",
     )
-    assert Path(str(observed["lockstep"])).is_relative_to(ENGINE)
+    observed = _run_probe(
+        Path(sys.executable),
+        tmp_path / "foreign-source",
+        CONTROLLED_EFFECT,
+        source_environment,
+    )
+    _assert_surface_isolation(
+        observed,
+        package_root=ENGINE / "src/lockstep",
+        environment_root=source_environment,
+        exclude_checkout=False,
+    )
     assert observed["legacy_runner_importable"] is False
+    _assert_manual_estimate(observed)
+    _assert_cli_resource_contract(
+        source_environment / "bin/lockstep",
+        tmp_path / "foreign-source-cli",
+        source_env,
+    )
+    _assert_active_examples_compile(
+        source_environment / "bin/lockstep",
+        ROOT,
+        tmp_path / "foreign-source-examples",
+        source_env,
+    )
 
 
 def test_clean_wheel_isolated_install_contains_only_current_runtime_and_runs_full_flows(
@@ -614,7 +912,23 @@ def test_clean_wheel_isolated_install_contains_only_current_runtime_and_runs_ful
             str(built_wheel),
         ],
         cwd=tmp_path,
-        env=_clean_env(),
+        env=_clean_env(PATH="/usr/local/bin:/usr/bin:/bin"),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        [
+            "uv",
+            "pip",
+            "install",
+            "--offline",
+            "--python",
+            str(python),
+            "pytest==9.1.1",
+        ],
+        cwd=tmp_path,
+        env=_clean_env(PATH="/usr/local/bin:/usr/bin:/bin"),
         check=True,
         capture_output=True,
         text=True,
@@ -630,15 +944,13 @@ def test_clean_wheel_isolated_install_contains_only_current_runtime_and_runs_ful
     controlled = tmp_path / "controlled-effect"
     shutil.copy2(CONTROLLED_EFFECT, controlled)
     controlled.chmod(controlled.stat().st_mode | stat.S_IXUSR)
-    _assert_cli_resource_contract(
-        venv / "bin/lockstep",
-        tmp_path / "foreign-wheel-cli",
-        _clean_env(LOCKSTEP_STATE_DIR=str(tmp_path / "wheel-cli-state")),
+    observed = _run_probe(python, tmp_path / "foreign-wheel", controlled, venv)
+    _assert_surface_isolation(
+        observed,
+        package_root=Path(str(observed["lockstep"])).parent,
+        environment_root=venv,
+        exclude_checkout=True,
     )
-    observed = _run_probe(python, tmp_path / "foreign-wheel", controlled)
-    for key in ("lockstep", "templates"):
-        assert Path(str(observed[key])).is_relative_to(venv)
-        assert not Path(str(observed[key])).is_relative_to(ROOT)
     with zipfile.ZipFile(built_wheel) as archive:
         names = archive.namelist()
         assert not any(name.endswith("lockstep/runtime/runners.py") for name in names)
@@ -647,6 +959,15 @@ def test_clean_wheel_isolated_install_contains_only_current_runtime_and_runs_ful
                 content = archive.read(name)
                 assert all(term not in content for term in RETIRED_BYTES), name
     assert observed["legacy_runner_importable"] is False
+    _assert_manual_estimate(observed)
+    _assert_cli_resource_contract(
+        venv / "bin/lockstep",
+        tmp_path / "foreign-wheel-cli",
+        _clean_env(
+            LOCKSTEP_STATE_DIR=str(tmp_path / "wheel-cli-state"),
+            PATH=f"{venv / 'bin'}:/usr/bin:/bin",
+        ),
+    )
 
 
 def _stage_plugin(destination: Path) -> None:
@@ -680,7 +1001,11 @@ def test_staged_plugin_uses_only_tracked_delivery_paths_and_runs_full_flows(
     foreign = tmp_path / "foreign-plugin"
     foreign.mkdir()
     doctor_state = tmp_path / "doctor-state"
-    env = _clean_env(UV_OFFLINE="1", LOCKSTEP_STATE_DIR=str(doctor_state))
+    env = _clean_env(
+        UV_OFFLINE="1",
+        LOCKSTEP_STATE_DIR=str(doctor_state),
+        PATH="/usr/local/bin:/usr/bin:/bin",
+    )
     initialized = subprocess.run(
         [str(stage / "scripts/lockstep-plugin"), "recipe", "init", "doctor-probe"],
         cwd=foreign,
@@ -691,6 +1016,7 @@ def test_staged_plugin_uses_only_tracked_delivery_paths_and_runs_full_flows(
         check=False,
     )
     assert initialized.returncode == 0, initialized.stdout + initialized.stderr
+    env["PATH"] = f"{stage / 'engine/.venv/bin'}:/usr/local/bin:/usr/bin:/bin"
     doctor = subprocess.run(
         [str(stage / "scripts/lockstep-plugin"), "doctor"],
         cwd=foreign,
@@ -701,9 +1027,6 @@ def test_staged_plugin_uses_only_tracked_delivery_paths_and_runs_full_flows(
         check=False,
     )
     assert doctor.returncode == 0, doctor.stdout + doctor.stderr
-    _assert_cli_resource_contract(
-        stage / "engine/.venv/bin/lockstep", foreign / "resource-contract", env
-    )
     server = subprocess.Popen(
         [str(stage / "scripts/lockstep-plugin"), "serve"],
         cwd=foreign,
@@ -713,17 +1036,36 @@ def test_staged_plugin_uses_only_tracked_delivery_paths_and_runs_full_flows(
         stderr=subprocess.PIPE,
         text=True,
     )
-    try:
-        time.sleep(0.5)
-        assert server.poll() is None
-    finally:
-        server.terminate()
-        server.communicate(timeout=10)
+    initialize = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "gate-d", "version": "1"},
+            },
+        },
+        separators=(",", ":"),
+    )
+    stdout, stderr = server.communicate(initialize + "\n", timeout=30)
+    assert server.returncode == 0, stdout + stderr
+    initialized = json.loads(stdout.splitlines()[-1])
+    assert initialized["jsonrpc"] == "2.0"
+    assert initialized["id"] == 1
+    assert initialized["result"]["protocolVersion"] == "2025-06-18"
+    assert initialized["result"]["serverInfo"]["name"] == "lockstep"
     python = stage / "engine/.venv/bin/python"
     controlled = tmp_path / "staged-controlled-effect"
     shutil.copy2(CONTROLLED_EFFECT, controlled)
     controlled.chmod(controlled.stat().st_mode | stat.S_IXUSR)
-    observed = _run_probe(python, tmp_path / "foreign-staged-flow", controlled)
+    observed = _run_probe(
+        python,
+        tmp_path / "foreign-staged-flow",
+        controlled,
+        stage / "engine/.venv",
+    )
     assert (
         json.loads((stage / ".codex-plugin/plugin.json").read_text())["name"]
         == "lockstep"
@@ -732,9 +1074,22 @@ def test_staged_plugin_uses_only_tracked_delivery_paths_and_runs_full_flows(
         json.loads((stage / ".claude-plugin/plugin.json").read_text())["name"]
         == "lockstep"
     )
-    for key in ("lockstep", "templates"):
-        assert Path(str(observed[key])).is_relative_to(stage)
-        assert not Path(str(observed[key])).is_relative_to(ROOT)
+    _assert_surface_isolation(
+        observed,
+        package_root=stage / "engine/src/lockstep",
+        environment_root=stage / "engine/.venv",
+        exclude_checkout=True,
+    )
     _assert_active_bytes_are_retired(stage, ACTIVE_ROOT_PATHS)
     _assert_active_guidance(stage)
     assert observed["legacy_runner_importable"] is False
+    _assert_manual_estimate(observed)
+    _assert_cli_resource_contract(
+        stage / "engine/.venv/bin/lockstep", foreign / "resource-contract", env
+    )
+    _assert_active_examples_compile(
+        stage / "engine/.venv/bin/lockstep",
+        stage,
+        foreign / "active-examples",
+        env,
+    )
