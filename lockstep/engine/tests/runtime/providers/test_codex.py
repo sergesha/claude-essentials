@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Event
 
 import pytest
 from lockstep.runtime.blobs import BlobStore
@@ -278,6 +279,90 @@ def test_prepare_binds_exact_argv_profile_environment_and_no_shell(provider_syst
     assert not attestation.denies_symlink_escape
 
 
+@pytest.mark.parametrize(
+    "fault_stage",
+    ("private-started", "capture-start", "terminal-publication"),
+)
+def test_private_post_popen_failure_is_contained_and_never_replaced(
+    provider_system,
+    monkeypatch: pytest.MonkeyPatch,
+    fault_stage: str,
+) -> None:
+    from lockstep.runtime.providers import _codex_supervisor as supervisor
+
+    adapter, request, _current, _gate, _workspaces, _snapshots, _blobs = provider_system
+    record = adapter.launch_record(adapter.prepare(request).effect_id)
+    body_path, body_digest = adapter._launch_body(record)
+    directory = adapter._directory(request.effect_id)
+    (directory / "go").write_bytes(b"start\n")
+    popen_count = {"value": 0}
+    containment_events: list[str] = []
+
+    class Spawned:
+        pid = 424242
+        stdin = io.BytesIO()
+        stdout = io.BytesIO(b"bounded")
+        stderr = io.BytesIO()
+
+        @staticmethod
+        def poll():
+            return 0
+
+        @staticmethod
+        def wait():
+            containment_events.append("waited")
+            return 0
+
+    def popen(*_args, **_kwargs):
+        popen_count["value"] += 1
+        return Spawned()
+
+    monkeypatch.setattr(supervisor, "_verify_bound_files", lambda _spec, _argv: None)
+    monkeypatch.setattr(supervisor.subprocess, "Popen", popen)
+    monkeypatch.setattr(
+        supervisor,
+        "_terminate_group",
+        lambda *_args: containment_events.append("term"),
+    )
+    monkeypatch.setattr(supervisor, "_kill_group", lambda *_args: None)
+    monkeypatch.setattr(supervisor, "_group_is_dead", lambda *_args: True)
+
+    if fault_stage == "private-started":
+        atomic = supervisor._atomic_json
+
+        def fail_started(path: Path, value: object) -> None:
+            if path.name == "started.json":
+                raise OSError("injected private-started failure")
+            atomic(path, value)
+
+        monkeypatch.setattr(supervisor, "_atomic_json", fail_started)
+    elif fault_stage == "capture-start":
+        monkeypatch.setattr(
+            supervisor,
+            "_start_capture",
+            lambda *_args: (_ for _ in ()).throw(OSError("injected capture start")),
+        )
+    else:
+        publish_terminal = supervisor._publish_terminal
+        terminal_calls = {"value": 0}
+
+        def fail_terminal_once(*args, **kwargs):
+            terminal_calls["value"] += 1
+            if terminal_calls["value"] == 1:
+                raise OSError("injected terminal publication")
+            return publish_terminal(*args, **kwargs)
+
+        monkeypatch.setattr(supervisor, "_publish_terminal", fail_terminal_once)
+
+    assert supervisor.run(body_path, body_digest) == 0
+    assert popen_count["value"] == 1
+    assert containment_events[-2:] == ["term", "waited"]
+    assert Spawned.stdin.closed
+    assert Spawned.stdout.closed and Spawned.stderr.closed
+    terminal = json.loads((directory / "terminal.json").read_bytes())
+    assert terminal["quiescent"] is True
+
+
 def test_prepare_rejects_executable_or_permission_profile_drift(provider_system) -> None:
     adapter, request, current, _gate, _workspaces, _snapshots, _blobs = provider_system
     adapter.prepare(request)
@@ -488,6 +573,30 @@ def test_supervisor_waits_for_group_death_before_final_capture_join(
 
     supervisor._finish_capture(42, (Reader(),))
     assert events == ["group-dead", "reader-joined"]
+
+
+def test_capture_drains_stream_after_output_limit(tmp_path: Path) -> None:
+    from lockstep.runtime.providers import _codex_supervisor as supervisor
+
+    class TrackedStream(io.BytesIO):
+        bytes_read = 0
+
+        def read(self, size: int = -1) -> bytes:
+            chunk = super().read(size)
+            self.bytes_read += len(chunk)
+            return chunk
+
+    payload = b"x" * (3 * 64 * 1024)
+    stream = TrackedStream(payload)
+    output = tmp_path / "stdout.bin"
+    overflow = Event()
+
+    supervisor._capture(stream, output, 17, overflow)
+
+    assert output.read_bytes() == b"x" * 17
+    assert overflow.is_set()
+    assert stream.bytes_read == len(payload)
+    assert stream.closed
 
 
 def test_supervisor_publishes_terminal_when_child_closes_stdin_immediately(

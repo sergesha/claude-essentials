@@ -1,6 +1,7 @@
 """Durable Codex attempt state and launch preparation."""
 
 from __future__ import annotations
+
 import hashlib
 import json
 import os
@@ -9,12 +10,17 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
-from lockstep.runtime.blobs import BlobStore
-from lockstep.runtime.owner_state import ensure_owner_directory, initialize_owner_state, verify_owner_file
-from lockstep.runtime.providers.base import DefinitiveProviderFailure, EffectRequest, PreparedLaunch
-from lockstep.runtime.providers.workspaces import LocalGitWorkspaceProvider, WorkspaceError
-from lockstep.runtime.sandbox import SandboxAttestor, verify_attestation
 
+from lockstep.runtime.blobs import BlobStore
+from lockstep.runtime.owner_state import (
+    ensure_owner_directory,
+    initialize_owner_state,
+    verify_owner_file,
+)
+from lockstep.runtime.providers._codex_services import (
+    _CodexAttemptServices,
+    _ServiceAlias,
+)
 from lockstep.runtime.providers._codex_support import (
     CodexCaptureLimits,
     CodexInstallationBinding,
@@ -24,10 +30,16 @@ from lockstep.runtime.providers._codex_support import (
     _canonical,
     _managed_argv,
 )
-from lockstep.runtime.providers._codex_services import (
-    _CodexAttemptServices,
-    _ServiceAlias,
+from lockstep.runtime.providers.base import (
+    DefinitiveProviderFailure,
+    EffectRequest,
+    PreparedLaunch,
 )
+from lockstep.runtime.providers.workspaces import (
+    LocalGitWorkspaceProvider,
+    WorkspaceError,
+)
+from lockstep.runtime.sandbox import SandboxAttestor, verify_attestation
 
 
 @dataclass(frozen=True)

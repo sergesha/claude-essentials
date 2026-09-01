@@ -245,6 +245,11 @@ def test_consent_issue_parser_has_no_noninteractive_or_caller_authority_escape(
         )
 
 
+def test_scenario_parser_rejects_removed_evidence_action() -> None:
+    with pytest.raises(SystemExit):
+        cli._build_parser().parse_args(["scenario", "evidence"])
+
+
 def test_consent_accept_reads_hidden_token_and_forwards_only_token_and_cwd(
     tmp_path, monkeypatch, capsys
 ) -> None:

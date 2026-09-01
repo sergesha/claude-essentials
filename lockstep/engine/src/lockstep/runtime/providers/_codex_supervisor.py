@@ -168,15 +168,22 @@ def _capture(stream, path: Path, limit: int, overflow: Event) -> None:
                 written += min(len(chunk), remaining)
             if len(chunk) > remaining:
                 overflow.set()
-                break
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+        stream.close()
 
 
 def _kill_group(process_group: int) -> None:
     try:
         os.killpg(process_group, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def _terminate_group(process_group: int) -> None:
+    try:
+        os.killpg(process_group, signal.SIGTERM)
     except ProcessLookupError:
         pass
 
@@ -399,6 +406,47 @@ def _terminal_reason(
     return "exited"
 
 
+def _contain_spawned_process(
+    spec: dict[str, object],
+    process: subprocess.Popen[bytes],
+    capture: tuple[bool, Event, tuple[Thread, Thread]] | None,
+) -> None:
+    """Retain ownership after Popen and prevent a replacement attempt."""
+
+    if capture is None:
+        try:
+            capture = _start_capture(spec, process, b"")
+        except BaseException:  # noqa: BLE001 - the spawned child remains owned
+            capture = None
+    _terminate_group(process.pid)
+    _kill_group(process.pid)
+    returncode = process.wait()
+    if capture is not None:
+        _stdin_failed, overflow, readers = capture
+        _finish_capture(process.pid, readers)
+    else:
+        overflow = Event()
+        _wait_group_dead(process.pid)
+    for stream in (process.stdin, process.stdout, process.stderr):
+        if stream is None or stream.closed:
+            continue
+        try:
+            stream.close()
+        except OSError:
+            pass
+    try:
+        _publish_terminal(
+            spec,
+            returncode=127 if returncode == 0 else returncode,
+            overflow=overflow.is_set(),
+            timed_out=False,
+            quiescent=True,
+            termination_reason="stdin_failed",
+        )
+    except (OSError, ValueError):
+        pass
+
+
 class _CodexSupervisorTransaction:
     def __init__(
         self,
@@ -436,38 +484,41 @@ class _CodexSupervisorTransaction:
                 _publish_prelaunch_terminal(spec, prelaunch_reason)
                 return 0
             assert process is not None
-            _atomic_json(
-                Path(str(spec["started"])),
-                {
-                    "schema": "lockstep.codex-started/v1",
-                    "pid": process.pid,
-                    "pgid": process.pid,
-                },
-            )
-            stdin_failed, overflow, readers = _start_capture(
-                spec, process, stdin_bytes
-            )
-            if stdin_failed:
+            capture: tuple[bool, Event, tuple[Thread, Thread]] | None = None
+            try:
+                _atomic_json(
+                    Path(str(spec["started"])),
+                    {
+                        "schema": "lockstep.codex-started/v1",
+                        "pid": process.pid,
+                        "pgid": process.pid,
+                    },
+                )
+                capture = _start_capture(spec, process, stdin_bytes)
+                stdin_failed, overflow, readers = capture
+                if stdin_failed:
+                    _kill_group(process.pid)
+                timed_out = _monitor_process(spec, process, overflow, cancel)
+                returncode = process.wait()
+                if stdin_failed:
+                    returncode = 127
                 _kill_group(process.pid)
-            timed_out = _monitor_process(spec, process, overflow, cancel)
-            returncode = process.wait()
-            if stdin_failed:
-                returncode = 127
-            _kill_group(process.pid)
-            _finish_capture(process.pid, readers)
-            _publish_terminal(
-                spec,
-                returncode=returncode,
-                overflow=overflow.is_set(),
-                timed_out=timed_out,
-                quiescent=True,
-                termination_reason=_terminal_reason(
-                    stdin_failed=stdin_failed,
+                _finish_capture(process.pid, readers)
+                _publish_terminal(
+                    spec,
+                    returncode=returncode,
                     overflow=overflow.is_set(),
-                    cancelled=cancel.is_file(),
                     timed_out=timed_out,
-                ),
-            )
+                    quiescent=True,
+                    termination_reason=_terminal_reason(
+                        stdin_failed=stdin_failed,
+                        overflow=overflow.is_set(),
+                        cancelled=cancel.is_file(),
+                        timed_out=timed_out,
+                    ),
+                )
+            except BaseException:  # noqa: BLE001 - the spawned child remains owned
+                _contain_spawned_process(spec, process, capture)
             return 0
         finally:
             os.close(alive_descriptor)
