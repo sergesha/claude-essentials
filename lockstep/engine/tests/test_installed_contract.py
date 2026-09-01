@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -37,7 +38,6 @@ STAGED_DELIVERY_PATHS = (
     "README.md",
     "docs/DESIGN.md",
     "hooks",
-    "recipes",
     "scripts",
     "skills",
     "engine/pyproject.toml",
@@ -60,6 +60,27 @@ RETIRED_BYTES = (
 HISTORICAL_ONLY = (
     "CHANGELOG.md",
     "docs/superpowers/specs/2026-08-19-codex-claude-parity-design.md",
+)
+EXACT_DOCUMENTED_CLI = (
+    "recipe init NAME",
+    "recipe compile NAME",
+    "recipe check [NAME | --all]",
+    "recipe diff NAME",
+    "recipe render NAME --view workflow|generated",
+    "recipe estimate NAME [--json]",
+    "template list",
+    "template show TEMPLATE NAME",
+    "template init TEMPLATE NAME",
+)
+EXACT_DOCUMENTED_MCP = (
+    "recipe_init",
+    "recipe_compile",
+    "recipe_check",
+    "recipe_diff",
+    "recipe_render",
+    "recipe_estimate",
+    "template_list",
+    "template_show",
 )
 
 
@@ -167,8 +188,41 @@ def _assert_active_guidance(root: Path) -> None:
         assert "no constrained-runner, broker, or sandbox guarantee" in text, relative
         assert "marker-free" in text and "manual yamlgraph" in text, relative
         assert "reviewed-change" in text and "parallel-review" in text, relative
-        assert "no configuration" in text and "grants authority" in text, relative
-        assert "report text" in text and "grants authority" in text, relative
+        assert "no configuration or report text grants authority" in text, relative
+        assert "configuration is authority" not in text, relative
+        assert "report text is authority" not in text, relative
+        assert "configuration can grant authority" not in text, relative
+        assert "report text can grant authority" not in text, relative
+
+
+def _assert_documented_authoring_grammar(root: Path) -> None:
+    for relative in (
+        "README.md",
+        "docs/DESIGN.md",
+        "skills/lockstep/SKILL.md",
+        "skills/lockstep-author/SKILL.md",
+    ):
+        text = (root / relative).read_text()
+        assert all(item in text for item in EXACT_DOCUMENTED_CLI), relative
+        assert all(item in text for item in EXACT_DOCUMENTED_MCP), relative
+        assert "template_init" not in text, relative
+        assert "recipe init --template" not in text, relative
+        assert not re.search(
+            r"(?:lockstep\s+)?(?:recipe|template)\s+\w+[^\n`]*--format",
+            text,
+        ), relative
+        assert not re.search(
+            r"(?:lockstep\s+)?recipe\s+(?:init|compile|check|diff|render|estimate)"
+            r"\s+(?:[^\s`]*[/\\][^\s`]*|[^\s`]+\.ya?ml)(?:\s|`|$)",
+            text,
+        ), relative
+        for line in text.splitlines():
+            match = re.search(r"\blockstep\s+(?:recipe|template)\s+[^`\n]+", line)
+            if match is None:
+                continue
+            command = " ".join(match.group(0).split())
+            assert "recipe init --template" not in command, relative
+            assert "--format" not in command, relative
 
 
 def _clean_env(**updates: str) -> dict[str, str]:
@@ -664,7 +718,14 @@ _FLOW_PROBE = textwrap.dedent(
     import lockstep.templates
     from lockstep.mcp import server
     assert {"reviewed-change", "parallel-review"} == set(__import__("lockstep.templates", fromlist=["list_templates"]).list_templates())
-    assert {"scenario_start", "scenario_wait", "scenario_events", "scenario_accept_artifact"} <= {tool.name for tool in server.app._tool_manager.list_tools()}
+    tool_names = {tool.name for tool in server.app._tool_manager.list_tools()}
+    assert {
+        "recipe_init", "recipe_compile", "recipe_check", "recipe_diff",
+        "recipe_render", "recipe_estimate", "template_list", "template_show",
+        "scenario_start", "scenario_wait", "scenario_events",
+        "scenario_accept_artifact",
+    } <= tool_names
+    assert "template_init" not in tool_names
     loaded_modules = sorted({
         str(Path(module.__file__).resolve())
         for name, module in sys.modules.items()
@@ -750,6 +811,31 @@ def _assert_cli_resource_contract(
     assert listed.returncode == 0, listed.stdout + listed.stderr
     assert listed.stdout == "parallel-review\nreviewed-change\n"
     estimates: list[dict[str, object]] = []
+    authored_project = project / "authored"
+    authored_project.mkdir()
+    for args in (
+        ("recipe", "init", "documented"),
+        ("recipe", "compile", "documented"),
+        ("recipe", "check", "documented"),
+        ("recipe", "diff", "documented"),
+        ("recipe", "render", "documented", "--view", "workflow"),
+        ("recipe", "render", "documented", "--view", "generated"),
+        ("recipe", "estimate", "documented", "--json"),
+    ):
+        result = subprocess.run(
+            [str(executable), *args],
+            cwd=authored_project,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=120,
+            check=False,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        if args[1] == "estimate":
+            estimate = json.loads(result.stdout)
+            assert estimate["schema"] == "lockstep.structural-estimate/v1"
+            estimates.append(estimate)
     for template, name in (
         ("reviewed-change", "reviewed"),
         ("parallel-review", "parallel"),
@@ -808,7 +894,7 @@ def _assert_cli_resource_contract(
                 estimate = json.loads(result.stdout)
                 assert estimate["schema"] == "lockstep.structural-estimate/v1"
                 estimates.append(estimate)
-    assert len(estimates) == 2
+    assert len(estimates) == 3
     assert all("peak_parallel_child_calls" in estimate for estimate in estimates)
     assert all("peak_parallel_subcalls" not in estimate for estimate in estimates)
 
@@ -927,6 +1013,36 @@ def test_legacy_runner_import_oracle_catches_absolute_and_relative_imports(
 
 def test_source_checkout_active_guidance_describes_the_installed_contract() -> None:
     _assert_active_guidance(ROOT)
+    _assert_documented_authoring_grammar(ROOT)
+
+
+@pytest.mark.parametrize(
+    "obsolete",
+    (
+        "`lockstep recipe init --template reviewed-change demo`",
+        "- Run `lockstep recipe compile path/demo.workflow.yaml`.",
+        "Inline `lockstep recipe estimate demo --format json` is stale.",
+        "MCP: template_init",
+    ),
+)
+def test_documented_grammar_oracle_rejects_inline_and_fenced_legacy_forms(
+    tmp_path: Path, obsolete: str
+) -> None:
+    valid = "\n".join((*EXACT_DOCUMENTED_CLI, *EXACT_DOCUMENTED_MCP))
+    paths = (
+        "README.md",
+        "docs/DESIGN.md",
+        "skills/lockstep/SKILL.md",
+        "skills/lockstep-author/SKILL.md",
+    )
+    for relative in paths:
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(valid)
+    _assert_documented_authoring_grammar(tmp_path)
+    (tmp_path / "README.md").write_text(f"{valid}\n{obsolete}\n")
+    with pytest.raises(AssertionError):
+        _assert_documented_authoring_grammar(tmp_path)
 
 
 def test_source_checkout_runs_all_complete_public_flows_from_foreign_cwd(
@@ -1161,14 +1277,9 @@ def test_staged_plugin_uses_only_tracked_delivery_paths_and_runs_full_flows(
     )
     _assert_active_bytes_are_retired(stage, ACTIVE_ROOT_PATHS)
     _assert_active_guidance(stage)
+    _assert_documented_authoring_grammar(stage)
     assert observed["legacy_runner_importable"] is False
     _assert_manual_estimate(observed)
     _assert_cli_resource_contract(
         stage / "engine/.venv/bin/lockstep", foreign / "resource-contract", env
-    )
-    _assert_active_examples_compile(
-        stage / "engine/.venv/bin/lockstep",
-        stage,
-        foreign / "active-examples",
-        env,
     )
