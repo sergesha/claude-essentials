@@ -71,7 +71,8 @@ def _escape(pointer_part: str) -> str:
 
 
 class _SchemaValidation:
-    document: MarkedDocument
+    def __init__(self, document: MarkedDocument) -> None:
+        self.document = document
 
     def fail(self, code: str, message: str, pointer: str, hint: str) -> NoReturn:
         mark = self.document.mark_for(pointer)

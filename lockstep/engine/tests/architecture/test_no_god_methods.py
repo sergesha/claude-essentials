@@ -8101,6 +8101,16 @@ def test_n2_workflow_remediation_matches_exact_analyzer_projection() -> None:
     assert candidates == []
 
 
+def test_workflow_schema_parser_decomposition_does_not_worsen_cohesion() -> None:
+    report = _repository_architecture_report()
+    assert report.unresolved_callsites == ()
+    metric = report.classes["src/lockstep/workflow/schema.py::_Parser"]
+
+    assert metric.cohesion_components < 3
+    assert metric.signals["cohesion_components"] is False
+    assert metric.composite_score <= 2
+
+
 @pytest.mark.parametrize(
     ("mutation", "reason"),
     (
