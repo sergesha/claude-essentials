@@ -69,8 +69,10 @@ def _verify_sqlite_family(database: Path) -> None:
     verify_owner_file(database)
     for suffix in ("-journal", "-wal", "-shm"):
         sidecar = Path(f"{database}{suffix}")
-        if sidecar.exists() or sidecar.is_symlink():
+        try:
             verify_owner_file(sidecar)
+        except FileNotFoundError:
+            pass
 
 
 def _timestamp(value: str) -> datetime:

@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import replace
 from pathlib import Path
-import time
 
 from lockstep.runtime import config, sessions
 from lockstep.runtime.errors import LockstepError
+from lockstep.runtime.native_models import NativeHistoryLimitExceeded
 from lockstep.runtime.observation import (
     project_events,
     project_history,
@@ -15,7 +16,6 @@ from lockstep.runtime.observation import (
     status_revision,
 )
 from lockstep.runtime.read_resources import RuntimeReadResources
-from lockstep.runtime.native_models import NativeHistoryLimitExceeded
 from lockstep.runtime.status import ScenarioStatus, project_status
 
 
