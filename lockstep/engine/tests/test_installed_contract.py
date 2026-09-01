@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 import os
 import shutil
@@ -52,6 +53,8 @@ RETIRED_BYTES = (
     b"LOCKSTEP_RUNNER",
     b"RunnerSpec",
     b"load_runners",
+    b"build_argv",
+    b"lockstep.runtime.runners",
     b"peak_parallel_subcalls",
 )
 HISTORICAL_ONLY = (
@@ -99,6 +102,54 @@ def _assert_active_bytes_are_retired(root: Path, paths: tuple[str, ...]) -> None
                     f"{path.relative_to(root)} links historical-only {historical}"
                 )
     assert violations == []
+
+
+def _assert_no_legacy_runner_importers(files: dict[str, bytes]) -> None:
+    legacy = "lockstep.runtime.runners"
+    violations: list[str] = []
+    for name, content in sorted(files.items()):
+        if not name.endswith(".py"):
+            continue
+        tree = ast.parse(content, filename=name)
+        parts = Path(name).parts
+        try:
+            lockstep_index = parts.index("lockstep")
+        except ValueError:
+            package: tuple[str, ...] = ()
+        else:
+            package = tuple(parts[lockstep_index:-1])
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported = tuple(alias.name for alias in node.names)
+                if any(item == legacy or item.startswith(f"{legacy}.") for item in imported):
+                    violations.append(f"{name}:{node.lineno}: import {', '.join(imported)}")
+            elif isinstance(node, ast.ImportFrom):
+                if node.level:
+                    if not package or node.level > len(package):
+                        resolved = ()
+                    else:
+                        resolved = package[: len(package) - node.level + 1]
+                    if node.module:
+                        resolved = (*resolved, *node.module.split("."))
+                    module = ".".join(resolved)
+                else:
+                    module = node.module or ""
+                imported = tuple(alias.name for alias in node.names)
+                if module == legacy or (
+                    module == "lockstep.runtime" and "runners" in imported
+                ):
+                    violations.append(
+                        f"{name}:{node.lineno}: from {'.' * node.level}{node.module or ''} "
+                        f"import {', '.join(imported)}"
+                    )
+    assert violations == []
+
+
+def _active_file_bytes(root: Path, paths: tuple[str, ...]) -> dict[str, bytes]:
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in _files(root, paths)
+    }
 
 
 def _assert_active_guidance(root: Path) -> None:
@@ -852,8 +903,26 @@ def built_wheel(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 def test_source_checkout_active_bytes_are_current() -> None:
+    _assert_no_legacy_runner_importers(_active_file_bytes(ROOT, ACTIVE_ROOT_PATHS))
     _assert_active_bytes_are_retired(ROOT, ACTIVE_ROOT_PATHS)
     assert not (ENGINE / "src/lockstep/runtime/runners.py").exists()
+
+
+@pytest.mark.parametrize(
+    ("name", "source"),
+    (
+        ("lockstep/client.py", b"import lockstep.runtime.runners\n"),
+        ("lockstep/client.py", b"from lockstep.runtime import runners\n"),
+        ("lockstep/runtime/__init__.py", b"from . import runners\n"),
+        ("lockstep/feature/client.py", b"from ..runtime import runners\n"),
+        ("lockstep/runtime/client.py", b"from .runners import build_argv\n"),
+    ),
+)
+def test_legacy_runner_import_oracle_catches_absolute_and_relative_imports(
+    name: str, source: bytes
+) -> None:
+    with pytest.raises(AssertionError):
+        _assert_no_legacy_runner_importers({name: source})
 
 
 def test_source_checkout_active_guidance_describes_the_installed_contract() -> None:
@@ -953,6 +1022,13 @@ def test_clean_wheel_isolated_install_contains_only_current_runtime_and_runs_ful
     )
     with zipfile.ZipFile(built_wheel) as archive:
         names = archive.namelist()
+        _assert_no_legacy_runner_importers(
+            {
+                name: archive.read(name)
+                for name in names
+                if name.endswith(".py")
+            }
+        )
         assert not any(name.endswith("lockstep/runtime/runners.py") for name in names)
         for name in names:
             if name.endswith((".py", ".md", ".yaml", ".json")):
@@ -1079,6 +1155,9 @@ def test_staged_plugin_uses_only_tracked_delivery_paths_and_runs_full_flows(
         package_root=stage / "engine/src/lockstep",
         environment_root=stage / "engine/.venv",
         exclude_checkout=True,
+    )
+    _assert_no_legacy_runner_importers(
+        _active_file_bytes(stage, ACTIVE_ROOT_PATHS)
     )
     _assert_active_bytes_are_retired(stage, ACTIVE_ROOT_PATHS)
     _assert_active_guidance(stage)
