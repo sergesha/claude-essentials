@@ -193,6 +193,37 @@ def _assert_active_guidance(root: Path) -> None:
         assert "report text is authority" not in text, relative
         assert "configuration can grant authority" not in text, relative
         assert "report text can grant authority" not in text, relative
+        assert (
+            "configuration, manifests, templates, recipes, reports, artifact "
+            "digests, run ids, pass strings, and host markers are non-authoritative"
+            in text
+        ), relative
+        assert (
+            "ambient os-user authority describes process power and tcb exposure, "
+            "not an authorization source"
+            in text
+        ), relative
+        assert (
+            "managed and pinned os-user execution requires an exact owner-selected "
+            "runtime grant, resolved and revalidated at commitment"
+            in text
+        ), relative
+        assert (
+            "publication separately requires a fresh exact bearer bound to the "
+            "named commitment"
+            in text
+        ), relative
+        assert "actual authority comes only from ambient os capabilities" not in text, relative
+        assert (
+            "ambient os capabilities and explicit runtime-validated owner consent "
+            "are the authority sources"
+            not in text
+        ), relative
+        assert (
+            "only ambient os capabilities and explicit runtime-validated owner "
+            "consent authorize effects"
+            not in text
+        ), relative
 
     operator_skill = " ".join(
         (root / "skills/lockstep/SKILL.md").read_text().lower().split()

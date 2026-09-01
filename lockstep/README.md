@@ -52,19 +52,22 @@ The runtime never reads that marker.
 
 ## Authority and threat model
 
-Lockstep is a **Local unsandboxed single-user** product. Its authority boundary
-is the ambient OS-user authority of the process and the owner-controlled state,
-plugin, workflow source, credentials, and executable paths. Those components,
-together with Python, uv, yamlgraph/LangGraph, the host, and the operating
-system, are the TCB (trusted computing base).
+Lockstep is a **Local unsandboxed single-user** product. Its process has ambient
+OS-user authority. The owner-controlled state, plugin, workflow source,
+credentials, and executable paths, together with Python, uv,
+yamlgraph/LangGraph, the host, and the operating system, are the TCB (trusted
+computing base). Ambient OS-user authority describes process power and TCB
+exposure, not an authorization source.
 
 Lockstep is **not security confinement** and provides **no constrained-runner,
 broker, or sandbox guarantee**. A hostile process with the same OS-user rights
 can read or alter anything that user can access. Host permissions and operating
 system isolation remain the owner's responsibility. No configuration or report
-text grants authority. Configuration selects behavior; reports describe
-observations. Actual authority comes only from ambient OS capabilities and
-explicit, runtime-validated owner consent.
+text grants authority. Configuration, manifests, templates, recipes, reports,
+artifact digests, run IDs, PASS strings, and host markers are non-authoritative.
+Managed and pinned OS-user execution requires an exact owner-selected runtime
+grant, resolved and revalidated at commitment. Publication separately requires
+a fresh exact bearer bound to the named commitment.
 
 ## Authoring workflows
 

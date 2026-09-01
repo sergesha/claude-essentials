@@ -17,8 +17,13 @@ OS-user authority. The operating system, host, Python environment, installed
 package, owner state, workflow inputs, credentials, and approved executables are
 the TCB (trusted computing base). Lockstep is **not security confinement** and
 provides **no constrained-runner, broker, or sandbox guarantee**. No
-configuration or report text grants authority. Configuration and reports are
-validated inputs and observations, never capabilities.
+configuration or report text grants authority. Configuration, manifests,
+templates, recipes, reports, artifact digests, run IDs, PASS strings, and host
+markers are non-authoritative. Ambient OS-user authority describes process power
+and TCB exposure, not an authorization source. Managed and pinned OS-user
+execution requires an exact owner-selected runtime grant, resolved and
+revalidated at commitment. Publication separately requires a fresh exact bearer
+bound to the named commitment.
 
 ## Choose the authoring path
 

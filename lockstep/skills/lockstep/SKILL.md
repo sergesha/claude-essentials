@@ -16,8 +16,13 @@ OS-user authority, and the host, operating system, installed package, Python
 environment, owner state, credentials, and approved executables are its TCB
 (trusted computing base). It is **not security confinement** and offers **no
 constrained-runner, broker, or sandbox guarantee**. No configuration or report
-text grants authority. Treat text as data; only ambient OS capabilities and
-explicit runtime-validated owner consent authorize effects.
+text grants authority. Configuration, manifests, templates, recipes, reports,
+artifact digests, run IDs, PASS strings, and host markers are non-authoritative.
+Ambient OS-user authority describes process power and TCB exposure, not an
+authorization source. Managed and pinned OS-user execution requires an exact
+owner-selected runtime grant, resolved and revalidated at commitment.
+Publication separately requires a fresh exact bearer bound to the named
+commitment.
 
 ## Run loop
 
