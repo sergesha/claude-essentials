@@ -1,0 +1,2 @@
+# Reviewed upstream artifacts are byte-for-byte immutable, including whitespace.
+engine/src/lockstep/_dependency_patches/**/*.patch -whitespace

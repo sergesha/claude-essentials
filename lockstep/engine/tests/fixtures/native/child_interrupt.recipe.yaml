@@ -1,0 +1,25 @@
+version: "1.0"
+name: native-child-interrupt
+state:
+  phase: str
+  answer: str
+nodes:
+  prepare:
+    type: passthrough
+    output:
+      phase: waiting
+  ask:
+    type: interrupt
+    message: Answer?
+    state_key: question
+    resume_key: answer
+    idempotent: false
+  finish:
+    type: passthrough
+    output:
+      phase: complete
+edges:
+  - {from: START, to: prepare}
+  - {from: prepare, to: ask}
+  - {from: ask, to: finish}
+  - {from: finish, to: END}

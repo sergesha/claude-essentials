@@ -1,0 +1,163 @@
+version: "1.0"
+name: daily-change-reviewed
+description: >
+  A practical test-first workflow for ordinary Python feature and bug-fix
+  work: plan, encode the acceptance criteria in tests, implement without
+  weakening them, run the full suite, then execute an independent native
+  direct-child review before acceptance.
+
+baseline_globs: ["**"]
+
+state:
+  brief: dict
+  evidence: dict
+  verdict_status: str
+  verdict_reasons: list
+
+tools:
+  run_checks:
+    type: python
+    module: lockstep.runtime.validators
+    function: run_checks
+
+nodes:
+  step_plan:
+    type: interrupt
+    idempotent: false
+    state_key: brief
+    resume_key: evidence
+    message:
+      step: plan
+      task: "Write the change plan to .lockstep/plan.md."
+      exit_criterion: "The fresh plan defines the goal, acceptance criteria, and implementation steps."
+      evidence_schema:
+        required: [plan_path]
+        properties:
+          plan_path: {type: string, format: project-path, const: .lockstep/plan.md}
+      checks:
+        - type: md_has_sections
+          path_from: plan_path
+          sections: [Goal, Acceptance Criteria, Steps]
+        - {type: fresh, path_from: plan_path}
+        - {type: diff_only, paths: [.lockstep/plan.md]}
+  validate_plan: {type: python, tool: run_checks}
+
+  step_tests:
+    type: interrupt
+    idempotent: false
+    state_key: brief
+    resume_key: evidence
+    message:
+      step: tests
+      task: "Add or update tests that encode the acceptance criteria. Do not change src/ yet."
+      exit_criterion: "tests/ changed, src/ did not, and no other project surface changed."
+      evidence_schema:
+        required: [summary]
+        properties: {summary: {type: string}}
+      checks:
+        - {type: changed_in, paths: [tests/], since: previous}
+        - {type: unchanged, glob: src/**, since: previous}
+        - {type: diff_only, paths: [tests/, .pytest_cache/]}
+  validate_tests: {type: python, tool: run_checks}
+
+  step_implement:
+    type: interrupt
+    idempotent: false
+    state_key: brief
+    resume_key: evidence
+    message:
+      step: implement
+      task: "Implement the planned change in src/. The tests are now frozen."
+      exit_criterion: "src/ changed, tests/ did not, and no other project surface changed."
+      evidence_schema:
+        required: [summary]
+        properties: {summary: {type: string}}
+      checks:
+        - {type: changed_in, paths: [src/], since: previous}
+        - {type: unchanged, glob: tests/**, since: previous}
+        - {type: diff_only, paths: [src/, .pytest_cache/]}
+  validate_implement: {type: python, tool: run_checks}
+
+  step_verify:
+    type: interrupt
+    idempotent: false
+    state_key: brief
+    resume_key: evidence
+    message:
+      step: verify
+      task: "Run the full pytest suite and report the result."
+      exit_criterion: "At least one test passes with no failures, errors, or skips; source and tests remain frozen."
+      evidence_schema:
+        required: [summary]
+        properties: {summary: {type: string}}
+      checks:
+        - type: junit_gate
+          command: "pytest -q -p no:cacheprovider"
+          min_tests: 1
+          max_skipped: 0
+        - {type: diff_only, paths: [.pytest_cache/]}
+  validate_verify: {type: python, tool: run_checks}
+
+  review:
+    type: subgraph
+    graph: daily-review-gate.recipe.yaml
+    mode: direct
+
+  step_accept:
+    type: interrupt
+    idempotent: false
+    state_key: brief
+    resume_key: evidence
+    message:
+      step: accept
+      task: "Confirm that the independent review passed and the reviewed code and tests are unchanged."
+      exit_criterion: "The review states PASS and the reviewed files still match the pre-review baseline."
+      evidence_schema:
+        required: [review_path]
+        properties:
+          review_path: {type: string, format: project-path, const: .lockstep/review.md}
+      checks:
+        - {type: review_verdict, path_from: review_path, expected: PASS}
+        - {type: diff_only, paths: [.lockstep/review.md, .pytest_cache/]}
+  validate_accept: {type: python, tool: run_checks}
+
+  escalate_gate: {type: passthrough, output: {}}
+  escalate:
+    type: interrupt
+    idempotent: false
+    state_key: brief
+    resume_key: evidence
+    message: {step: escalate}
+
+edges:
+  - {from: START, to: step_plan}
+  - {from: step_plan, to: validate_plan}
+  - {from: validate_plan, to: step_tests, condition: "verdict_status == 'pass'"}
+  - {from: validate_plan, to: step_plan, condition: "verdict_status == 'fail'"}
+  - {from: step_tests, to: validate_tests}
+  - {from: validate_tests, to: step_implement, condition: "verdict_status == 'pass'"}
+  - {from: validate_tests, to: step_tests, condition: "verdict_status == 'fail'"}
+  - {from: step_implement, to: validate_implement}
+  - {from: validate_implement, to: step_verify, condition: "verdict_status == 'pass'"}
+  - {from: validate_implement, to: step_implement, condition: "verdict_status == 'fail'"}
+  - {from: step_verify, to: validate_verify}
+  - {from: validate_verify, to: review, condition: "verdict_status == 'pass'"}
+  - {from: validate_verify, to: step_verify, condition: "verdict_status == 'fail'"}
+  - {from: review, to: step_accept}
+  - {from: step_accept, to: validate_accept}
+  - {from: validate_accept, to: END, condition: "verdict_status == 'pass'"}
+  - {from: validate_accept, to: step_accept, condition: "verdict_status == 'fail'"}
+  - {from: escalate_gate, to: escalate}
+
+loop_limits:
+  validate_plan: 2
+  validate_tests: 2
+  validate_implement: 2
+  validate_verify: 2
+  validate_accept: 2
+loop_exits:
+  validate_plan: escalate_gate
+  validate_tests: escalate_gate
+  validate_implement: escalate_gate
+  validate_verify: escalate_gate
+  validate_accept: escalate_gate

@@ -1,0 +1,161 @@
+version: '1.0'
+name: control-flow
+description: Canonical Task 8 control-flow golden
+x-lockstep-generated:
+  schema: lockstep.generated/v1
+  compiler_version: '1'
+  workflow_version: '1'
+  source: ../workflows/control-flow.workflow.yaml
+  source_sha256: b28dd3786a1a74c5be076ea3e138cf1164c4b46392c3c3fb60f63b31d5faa7f1
+state:
+  lockstep_outcome: str
+  lockstep_continue: bool
+  risk_request: dict
+  risk_result: dict
+  focused_command: dict
+  focused_request: dict
+  focused_result: dict
+nodes:
+  terminal-terminal-pass-b07216031d29:
+    type: passthrough
+    output:
+      lockstep_outcome: PASS
+  terminal-terminal-fail-ff22462b60dd:
+    type: passthrough
+    output:
+      lockstep_outcome: FAIL
+  terminal-terminal-error-1354afecb591:
+    type: passthrough
+    output:
+      lockstep_outcome: ERROR
+  terminal-terminal-aborted-8460524bbd87:
+    type: passthrough
+    output:
+      lockstep_outcome: ABORTED
+  decide-0-effect-3af507171050:
+    type: interrupt
+    message:
+      step: risk
+      lockstep_effect:
+        schema: lockstep.effect/v1
+        kind: decide
+        logical_id: risk
+        decision:
+          type: changed-paths
+          since: start
+          cases:
+          - label: high
+            paths:
+            - auth/**
+          default: low
+        inputs:
+          start_snapshot:
+            runtime_key: run_start_project_snapshot
+          current_snapshot:
+            runtime_key: current_project_snapshot
+        result_schema: lockstep.decision-result/v1
+    state_key: risk_request
+    resume_key: risk_result
+    idempotent: false
+  choose-1-route-13129f5a658c:
+    type: passthrough
+  choose-1-join-49333d064521:
+    type: passthrough
+  repeat-0-attempt-1f2e2871c94b:
+    type: passthrough
+    output:
+      lockstep_continue: true
+  repeat-0-exhausted-16fe5102adce:
+    type: passthrough
+  verify-0-command-4cb0de40c6c8:
+    type: passthrough
+    output:
+      focused_command:
+        schema: lockstep.pinned-command/v1
+        logical_argv:
+        - pytest
+        - -q
+        - tests/auth
+        logical_cwd: .
+        result_source: exit
+  verify-0-effect-b3efe45123ad:
+    type: interrupt
+    message:
+      step: focused
+      lockstep_effect:
+        schema: lockstep.effect/v1
+        kind: verify
+        logical_id: focused
+        runner:
+          selector: pinned
+          required_capabilities:
+          - workspace
+          - bounded_result
+          - sandbox
+        inputs:
+          command:
+            state_key: focused_command
+          snapshot:
+            runtime_key: current_project_snapshot
+        writes: []
+        artifacts: []
+        deadline_seconds: 20
+        scope_state_keys: []
+        result_schema: lockstep.effect-result/v1
+    state_key: focused_request
+    resume_key: focused_result
+    idempotent: false
+edges:
+- from: decide-0-effect-3af507171050
+  to: terminal-terminal-aborted-8460524bbd87
+  condition: risk_result.fixed_error_code == 'cancelled'
+- from: decide-0-effect-3af507171050
+  to: terminal-terminal-error-1354afecb591
+  condition: risk_result.outcome == 'ERROR'
+- from: decide-0-effect-3af507171050
+  to: terminal-terminal-fail-ff22462b60dd
+  condition: risk_result.outcome == 'FAIL'
+- from: repeat-0-exhausted-16fe5102adce
+  to: terminal-terminal-fail-ff22462b60dd
+- from: verify-0-effect-b3efe45123ad
+  to: terminal-terminal-aborted-8460524bbd87
+  condition: focused_result.fixed_error_code == 'cancelled'
+- from: verify-0-effect-b3efe45123ad
+  to: terminal-terminal-error-1354afecb591
+  condition: focused_result.outcome == 'ERROR'
+- from: verify-0-effect-b3efe45123ad
+  to: repeat-0-attempt-1f2e2871c94b
+  condition: focused_result.outcome == 'FAIL'
+- from: verify-0-command-4cb0de40c6c8
+  to: verify-0-effect-b3efe45123ad
+- from: repeat-0-attempt-1f2e2871c94b
+  to: verify-0-command-4cb0de40c6c8
+  condition: lockstep_continue == true
+- from: choose-1-route-13129f5a658c
+  to: repeat-0-attempt-1f2e2871c94b
+  condition: risk_result.value == 'high'
+- from: verify-0-effect-b3efe45123ad
+  to: choose-1-join-49333d064521
+  condition: focused_result.outcome == 'PASS'
+- from: choose-1-route-13129f5a658c
+  to: terminal-terminal-fail-ff22462b60dd
+  condition: risk_result.value != 'high'
+- from: decide-0-effect-3af507171050
+  to: choose-1-route-13129f5a658c
+  condition: risk_result.outcome == 'PASS'
+- from: START
+  to: decide-0-effect-3af507171050
+- from: choose-1-join-49333d064521
+  to: terminal-terminal-pass-b07216031d29
+- from: terminal-terminal-pass-b07216031d29
+  to: END
+- from: terminal-terminal-fail-ff22462b60dd
+  to: END
+- from: terminal-terminal-error-1354afecb591
+  to: END
+- from: terminal-terminal-aborted-8460524bbd87
+  to: END
+loop_limits:
+  repeat-0-attempt-1f2e2871c94b: 2
+loop_exits:
+  repeat-0-attempt-1f2e2871c94b: repeat-0-exhausted-16fe5102adce

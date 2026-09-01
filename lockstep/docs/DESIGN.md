@@ -3,6 +3,55 @@
 Date: 2026-08-07. Status: implemented; Claude/Codex parity updated 2026-08-19.
 Final home: `sergesha/claude-essentials` (this file moves there with the implementation).
 
+## Installed product contract
+
+Lockstep is a **Local unsandboxed single-user** system. It runs with ambient
+OS-user authority; the host, operating system, Python environment, installed
+package, owner state, workflow sources, credentials, and approved executables
+form its TCB (trusted computing base). This is **not security confinement** and
+provides **no constrained-runner, broker, or sandbox guarantee**. No
+configuration or report text grants authority. Configuration, manifests,
+templates, recipes, reports, artifact digests, run IDs, PASS strings, and host
+markers are non-authoritative. Ambient OS-user authority describes process power
+and TCB exposure, not an authorization source. Managed and pinned OS-user
+execution requires an exact owner-selected runtime grant, resolved and
+revalidated at commitment. Publication separately requires a fresh exact bearer
+bound to the named commitment.
+
+The exact CLI authoring grammar is:
+
+```text
+recipe init NAME
+recipe compile NAME
+recipe check [NAME | --all]
+recipe diff NAME
+recipe render NAME --view workflow|generated
+recipe estimate NAME [--json]
+template list
+template show TEMPLATE NAME
+template init TEMPLATE NAME
+```
+
+The exact MCP authoring surface is:
+
+```text
+recipe_init
+recipe_compile
+recipe_check
+recipe_diff
+recipe_render
+recipe_estimate
+template_list
+template_show
+```
+
+The packaged `reviewed-change` and `parallel-review` templates compile to and
+run through the production runtime. Manual yamlgraph is an equally supported,
+marker-free path: a canonical `.lockstep/recipes/NAME.recipe.yaml` without a
+same-name workflow source is admitted, checked, rendered, estimated, recovered,
+and run without a mode marker. Neither generated nor manual recipe text grants
+effect authority.
+
 ## Problem
 
 Autonomous coding agents (esp. weaker models) drop multi-step processes: skip
@@ -30,8 +79,8 @@ Build **lockstep**: a self-sufficient flow-enforcement plugin.
   and Codex manifests both route MCP and hook verbs through the shared
   `scripts/lockstep-plugin` launcher, which resolves the adjacent engine; no
   PyPI dependency. A PyPI
-  package `lockstep-mcp` (name verified free 2026-08-07), installable via `uvx
-  lockstep-mcp==X.Y.Z`, is optional future distribution. No Docker required
+  package `lockstep` (name verified free 2026-08-07), installable via `uvx
+  lockstep==X.Y.Z`, is optional future distribution. No Docker required
   (optional image later if wanted). Releases via release-please, tag
   `lockstep-vX.Y.Z`.
 - **Standalone**: zero knowledge of ours-fleet or any other consumer. Vocabulary
@@ -99,7 +148,7 @@ Abridged example (only the `plan` step shown; further steps follow the same
 triple pattern, chained the way `validate_plan`'s pass edge below would
 target `step_implement` instead of `END`). This is copied verbatim in shape
 from the fixture the engine's own tests compile and run
-(`lockstep/engine/tests/fixtures/recipes/good/two-steps.yaml`) — not an abridged sketch of a different, easier dialect.
+(`lockstep/engine/tests/fixtures/recipes/good/two-steps.recipe.yaml`) — not an abridged sketch of a different, easier dialect.
 Conventions — ONE dialect, this one: reused state keys
 `brief`/`evidence`/`verdict_status`/`verdict_reasons` across all steps
 (sequential graphs make reuse safe; one generic validator serves every
@@ -129,7 +178,7 @@ state:
 tools:
   run_checks:
     type: python
-    module: lockstep_mcp.validators
+    module: lockstep.validators
     function: run_checks
 
 nodes:
@@ -334,8 +383,8 @@ all three need real design of their own, not a side-effect of v1.
 | 2. Stop-hook | active run + turn ends without done/escalate → block + remind (blocks ONCE per stop chain — our handler allows on `stop_hook_active`; the harness itself caps chains at 8 — a DELAY, never the guarantee) | model "forgot" the scenario |
 | 3. SessionStart-hook | after restart/compaction: "active run X, step N, criterion Y" | amnesia after restarts |
 | 4. Consumer permissions | deny writes to state dir / recipes / settings / hook scripts (README guidance, consumer-side) | gate self-modification; .db + recipe tampering via Bash |
-| 5. PreToolUse no-run gate (opt-in per project) | owner marks a project via `lockstep-mcp policy require --recipe <X>` (policy file in the agent-unwritable state dir); Write/Edit/NotebookEdit/Bash/Task are DENIED unless an active run of THE POLICY'S RECIPE exists in THIS project (any-recipe unlock would let the cheapest lying-around recipe open the gate); no Bash parsing, so heredoc bypasses are moot (Read/Grep stay open) | "agent never starts a run / works outside the mechanism" — in policy-marked projects, the path of least resistance IS `scenario_start` of the required recipe |
-| 6. Observability | `list_runs` shows stalled runs; `lockstep-mcp doctor` checks dirs + installed version, and fails loudly on an active run with no binding sidecar — the signature of a PostToolUse matcher that does not match this install's tool names (handler self-exec is still v2). Hook death is silent — nothing observes hook liveness; the engine's evidence gate is the load-bearing layer and does not depend on hooks. Known caveat: write-capable MCP tools from OTHER servers are outside the PreToolUse matcher — README lists it | silent ignoring |
+| 5. PreToolUse no-run gate (opt-in per project) | owner marks a project via `lockstep policy require --recipe <X>` (policy file in the agent-unwritable state dir); Write/Edit/NotebookEdit/Bash/Task are DENIED unless an active run of THE POLICY'S RECIPE exists in THIS project (any-recipe unlock would let the cheapest lying-around recipe open the gate); no Bash parsing, so heredoc bypasses are moot (Read/Grep stay open) | "agent never starts a run / works outside the mechanism" — in policy-marked projects, the path of least resistance IS `scenario_start` of the required recipe |
+| 6. Observability | `list_runs` shows stalled runs; `lockstep doctor` checks dirs + installed version, and fails loudly on an active run with no binding sidecar — the signature of a PostToolUse matcher that does not match this install's tool names (handler self-exec is still v2). Hook death is silent — nothing observes hook liveness; the engine's evidence gate is the load-bearing layer and does not depend on hooks. Known caveat: write-capable MCP tools from OTHER servers are outside the PreToolUse matcher — README lists it | silent ignoring |
 
 Hook handler discipline: only PreToolUse is internally fail-closed (it is
 the one hook that can actually block an action — any internal exception
@@ -374,12 +423,49 @@ status signal", not "process compliance".
   the project — not in git, easy to deny), `LOCKSTEP_RECIPES` (default
   `<project>/.lockstep/recipes`). Runs: `$LOCKSTEP_STATE_DIR/runs/<run-id>.db`
   + `runs.json` index. Evidence artifacts live in the project (`.lockstep/`).
-- Pins: langgraph + yamlgraph pinned in the package; dependency bumps are
-  plugin releases, never silent.
+- Pins: `langgraph==1.2.10` and official `yamlgraph==0.5.22`. Until upstream
+  issue #474 ships in a release, `scripts/lockstep-install` applies the reviewed
+  four-source-file patch and all later execution uses `uv run --no-sync`.
+  Bootstrap is a read-only, fail-closed verifier; dependency bumps run the
+  native capability probe and require owner review, never silent acceptance.
 - yamlgraph risk: single author, fast pace, no documented schema-versioning —
   hard pin + our own recipe-compilation tests in CI.
 
 ## Testing
+
+### Native runtime inputs and authoring (Task 12)
+
+- Runtime project inputs are immutable external facts in the neutral
+  `run_start_inputs` and `effect_runtime_inputs` tables. They are neither
+  LangGraph state nor external-effect ledger fields. Start, current-lineage
+  GCA, manual, publication, and runner-rollover snapshots are resolved from
+  exact run/native-coordinate bindings; a trusted `Decision` evaluates those
+  facts without a runner.
+- `scenario_status`, `scenario_wait`, `scenario_history`, and
+  `scenario_events` are bounded, redacted observations. They never poll,
+  reconcile, recover, or resume. Recovery is an explicit bounded
+  `scenario_recover` operation.
+- `.lockstep/workflows/*.workflow.yaml` is the authoring source. A generated
+  recipe marker is accepted from disk only when strict parse/catalog/compile
+  reproduces its root recipe, specialized children, and dependency manifest
+  byte-for-byte. Missing, stale, or foreign source fails before durable run
+  admission. Marker-free yamlgraph recipes remain manual inputs.
+- The package template catalog is closed to `parallel-review` and
+  `reviewed-change`. Installation rejects custom paths, preflights the whole
+  destination set, compiles children before their parent, and serializes
+  cooperating writers. Each generated destination is replaced atomically and
+  durably after descriptor-relative identity/currentness checks; this is not a
+  multi-file atomic transaction and has no authoring journal or automatic
+  rollback/recovery. A crash may therefore leave old, new, or mixed generated
+  files. Runtime start accepts generated output only after fresh observation
+  confirms a complete canonical closure and exact DAG. Repeating first
+  initialization or packaged-template installation completes only a strict
+  proper prefix whose existing files have the exact planned bytes and modes;
+  full, holed, or mismatched sets remain collisions. Normal operations inspect
+  legacy evidence only in the current exact project namespace. `lockstep doctor`
+  adds a bounded read-only cross-namespace audit. A legacy v4 marker requires a
+  pre-simplification recovery build against the original exact project identity
+  and must not be manually deleted.
 
 - Unit: MemorySaver runs of fixture recipes; profile_check on a corpus of
   good/broken recipes; evidence schema accept/reject; example recipes pass
@@ -393,11 +479,11 @@ status signal", not "process compliance".
 
 - **Dogfooded authoring scenario**: packaged `author.yaml` + builtin recipe
   search path in the wheel + owner-approval channel (e.g.
-  `lockstep-mcp approve <run>` nonce) — v2, designed together.
+  `lockstep approve <run>` nonce) — v2, designed together.
 - Gemini and other runner/plugin adapters.
 - Time-travel/fork, streaming.
 - Resumable escalation: in v1 `escalated` is TERMINAL. v2 design SETTLED
-  (2026-08-07): `lockstep-mcp approve <run>` run by the owner writes a
+  (2026-08-07): `lockstep approve <run>` run by the owner writes a
   nonce file into the agent-unwritable state dir; agent-callable
   `scenario_resume(run)` requires + consumes it (file existence in the
   denied dir IS the authentication — no new trust channel);

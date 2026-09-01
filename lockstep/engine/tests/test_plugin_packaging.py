@@ -6,7 +6,6 @@ import subprocess
 import tomllib
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -28,16 +27,26 @@ def test_host_manifests_share_identity_version_and_components():
     assert claude["hooks"] == "./hooks/hooks.json"
     assert codex["interface"] == {
         "displayName": "Lockstep",
-        "shortDescription": "Evidence-gated workflows for coding agents",
+        "shortDescription": "Native durable workflows for coding agents",
         "longDescription": (
-            "Run declarative engineering workflows with durable state, "
-            "policy hooks, and deterministic artifact-backed evidence gates."
+            "Author and run deterministic yamlgraph/LangGraph workflows with "
+            "evidence-gated external effects, native recovery, and artifact "
+            "publication."
         ),
         "developerName": "sergesha",
         "category": "Developer Tools",
-        "capabilities": ["Skills", "MCP server", "Policy hooks", "Runner subcalls"],
+        "capabilities": [
+            "Skills",
+            "MCP server",
+            "Policy hooks",
+            "Native durable workflows",
+            "External-effect bridging",
+        ],
         "defaultPrompt": [
-            "Use lockstep to run the requested workflow and validate its evidence."
+            (
+                "Use lockstep to author or run the requested native workflow and "
+                "validate its evidence."
+            )
         ],
     }
 
@@ -47,20 +56,20 @@ def test_codex_mcp_contract_is_pinned_to_plugin_root():
     assert server == {
         "command": "./scripts/lockstep-plugin",
         "args": ["serve"],
-        "env": {"LOCKSTEP_RUNNER": "codex"},
         "cwd": "./",
         "required": True,
         "default_tools_approval_mode": "approve",
         "startup_timeout_sec": 300,
         "tool_timeout_sec": 900,
+        "env": {"LOCKSTEP_PLUGIN_HOST": "codex"},
     }
 
 
-def test_claude_mcp_uses_launcher_and_literal_runner_default():
+def test_claude_mcp_uses_launcher_without_legacy_runner_default():
     server = _json(".claude-plugin/plugin.json")["mcpServers"]["lockstep"]
     assert server["command"] == "${CLAUDE_PLUGIN_ROOT}/scripts/lockstep-plugin"
     assert server["args"] == ["serve"]
-    assert server["env"] == {"LOCKSTEP_RUNNER": "claude"}
+    assert "env" not in server
 
 
 def test_launcher_is_executable_and_does_not_change_directory():
@@ -69,7 +78,9 @@ def test_launcher_is_executable_and_does_not_change_directory():
     source = launcher.read_text()
     assert source.startswith("#!/bin/sh\n")
     assert "cd " not in source
+    assert '"$lockstep_plugin_root/scripts/lockstep-install"' in source
     assert "exec uv run --project" in source
+    assert "--no-sync lockstep" in source
 
 
 def test_launcher_resolves_engine_but_preserves_caller_cwd(tmp_path):
@@ -98,7 +109,12 @@ def test_launcher_resolves_engine_but_preserves_caller_cwd(tmp_path):
     lines = result.stdout.splitlines()
     assert lines[0] == str(project)
     assert lines[1:] == [
-        "run", "--project", str(ROOT / "engine"), "lockstep-mcp", "doctor",
+        "sync", "--project", str(ROOT / "engine"), "--frozen",
+        str(project),
+        "run", "--project", str(ROOT / "engine"), "--no-sync",
+        "lockstep-dependency-install",
+        str(project),
+        "run", "--project", str(ROOT / "engine"), "--no-sync", "lockstep", "doctor",
     ]
 
 
@@ -112,6 +128,7 @@ def test_launcher_derives_codex_home_from_installed_plugin_path(tmp_path):
     (plugin_root / "engine").mkdir()
     launcher = scripts_dir / "lockstep-plugin"
     shutil.copy2(ROOT / "scripts/lockstep-plugin", launcher)
+    shutil.copy2(ROOT / "scripts/lockstep-install", scripts_dir / "lockstep-install")
 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -120,7 +137,7 @@ def test_launcher_derives_codex_home_from_installed_plugin_path(tmp_path):
     fake_uv.chmod(fake_uv.stat().st_mode | stat.S_IXUSR)
     env = {
         **os.environ,
-        "LOCKSTEP_RUNNER": "codex",
+        "LOCKSTEP_PLUGIN_HOST": "codex",
         "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
     }
     env.pop("CODEX_HOME", None)
@@ -133,13 +150,62 @@ def test_launcher_derives_codex_home_from_installed_plugin_path(tmp_path):
         check=True,
     )
 
-    assert result.stdout.strip() == str(codex_home)
+    assert set(result.stdout.splitlines()) == {str(codex_home)}
 
 
-def test_distributed_default_recipe_does_not_pin_a_host_runner():
-    recipe = (ROOT / "recipes/examples/feature-dev-reviewed.yaml").read_text()
-    assert "runner: claude" not in recipe
-    assert "runner: codex" not in recipe
+def test_runtime_never_reads_the_non_authoritative_plugin_host_marker():
+    runtime = ROOT / "engine/src/lockstep"
+    readers = [
+        str(path.relative_to(ROOT))
+        for path in sorted(runtime.rglob("*.py"))
+        if "LOCKSTEP_PLUGIN_HOST" in path.read_text()
+    ]
+    assert readers == []
+
+
+def test_install_build_and_plugin_enforce_sync_patch_no_sync_order(tmp_path):
+    """An implicit sync after patching would restore the vulnerable wheel."""
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_uv = fake_bin / "uv"
+    fake_uv.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$*\" >> \"$LOCKSTEP_TEST_LOG\"\n"
+    )
+    fake_uv.chmod(fake_uv.stat().st_mode | stat.S_IXUSR)
+    log = tmp_path / "uv.log"
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+        "LOCKSTEP_TEST_LOG": str(log),
+    }
+
+    subprocess.run([str(ROOT / "scripts/lockstep-install")], env=env, check=True)
+    assert log.read_text().splitlines() == [
+        f"sync --project {ROOT / 'engine'} --frozen",
+        f"run --project {ROOT / 'engine'} --no-sync lockstep-dependency-install",
+    ]
+
+    log.write_text("")
+    subprocess.run([str(ROOT / "scripts/lockstep-build")], env=env, check=True)
+    assert log.read_text().splitlines() == [
+        f"sync --project {ROOT / 'engine'} --frozen",
+        f"run --project {ROOT / 'engine'} --no-sync lockstep-dependency-install",
+        f"build --project {ROOT / 'engine'}",
+    ]
+
+    log.write_text("")
+    subprocess.run(
+        [str(ROOT / "scripts/lockstep-plugin"), "doctor"],
+        cwd=tmp_path,
+        env=env,
+        check=True,
+    )
+    assert log.read_text().splitlines() == [
+        f"sync --project {ROOT / 'engine'} --frozen",
+        f"run --project {ROOT / 'engine'} --no-sync lockstep-dependency-install",
+        f"run --project {ROOT / 'engine'} --no-sync lockstep doctor",
+    ]
 
 
 def test_runtime_skill_uses_host_neutral_worker_language():
@@ -148,9 +214,9 @@ def test_runtime_skill_uses_host_neutral_worker_language():
     assert "host's subagent capability" in skill
 
 
-def test_author_skill_documents_both_runner_drivers_and_defaulting():
+def test_author_skill_does_not_document_retired_runner_configuration():
     skill = (ROOT / "skills/lockstep-author/SKILL.md").read_text()
-    assert "driver: claude" in skill
-    assert "driver: codex" in skill
-    assert "LOCKSTEP_RUNNER" in skill
-    assert "Runner names" in skill and "driver" in skill
+    assert "driver: claude" not in skill
+    assert "driver: codex" not in skill
+    assert "LOCKSTEP_RUNNER" not in skill
+    assert "Runner names" not in skill

@@ -6,7 +6,7 @@
         "serve"
       ],
       "env": {
-        "LOCKSTEP_RUNNER": "codex"
+        "LOCKSTEP_PLUGIN_HOST": "codex"
       },
       "cwd": "./",
       "required": true,

@@ -1,0 +1,22 @@
+version: "1.0"
+name: native-sequential-interrupts
+state:
+  first_answer: str
+  second_answer: str
+nodes:
+  first:
+    type: interrupt
+    message: First?
+    state_key: first_question
+    resume_key: first_answer
+    idempotent: false
+  second:
+    type: interrupt
+    message: Second?
+    state_key: second_question
+    resume_key: second_answer
+    idempotent: false
+edges:
+  - {from: START, to: first}
+  - {from: first, to: second}
+  - {from: second, to: END}

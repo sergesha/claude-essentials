@@ -1,0 +1,30 @@
+workflow_version: "1"
+name: "{name}"
+description: Parallel review workflow
+protect: ["**"]
+flow:
+  - parallel:
+      id: reviews
+      join: all
+      timeout_minutes: 5
+      branches:
+        security:
+          - call:
+              id: security
+              workflow: "{name}-security-review"
+              runner: codex
+              timeout_minutes: 5
+              artifacts: {review: .lockstep/security-review.md}
+        architecture:
+          - call:
+              id: architecture
+              workflow: "{name}-architecture-review"
+              runner: codex
+              timeout_minutes: 5
+              artifacts: {review: .lockstep/architecture-review.md}
+  - accept:
+      artifact_from: reviews.security.security.review
+      verdict: PASS
+  - accept:
+      artifact_from: reviews.architecture.architecture.review
+      verdict: PASS

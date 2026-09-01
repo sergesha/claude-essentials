@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+
+case "$0" in
+  /*) lockstep_script=$0 ;;
+  *) lockstep_script=$PWD/$0 ;;
+esac
+lockstep_scripts_dir=${lockstep_script%/*}
+lockstep_plugin_root=${lockstep_scripts_dir%/*}
+
+"$lockstep_plugin_root/scripts/lockstep-install"
+uv build --project "$lockstep_plugin_root/engine"

@@ -11,8 +11,8 @@ lockstep_plugin_root=${lockstep_scripts_dir%/*}
 # Codex deliberately gives bundled stdio MCP servers only the manifest's
 # explicit environment. Recover its profile root from the installed plugin
 # cache path so spawned Codex children use the same auth/plugin configuration.
-# Claude installs do not set LOCKSTEP_RUNNER=codex and never enter this branch.
-if [ "${LOCKSTEP_RUNNER:-}" = codex ] && [ -z "${CODEX_HOME:-}" ]; then
+# Claude installs do not set LOCKSTEP_PLUGIN_HOST=codex and never enter this branch.
+if [ "${LOCKSTEP_PLUGIN_HOST:-}" = codex ] && [ -z "${CODEX_HOME:-}" ]; then
   case "$lockstep_plugin_root" in
     */plugins/cache/*)
       lockstep_codex_home=${lockstep_plugin_root%%/plugins/cache/*}
@@ -23,4 +23,5 @@ if [ "${LOCKSTEP_RUNNER:-}" = codex ] && [ -z "${CODEX_HOME:-}" ]; then
   esac
 fi
 
-exec uv run --project "$lockstep_plugin_root/engine" lockstep-mcp "$@"
+"$lockstep_plugin_root/scripts/lockstep-install"
+exec uv run --project "$lockstep_plugin_root/engine" --no-sync lockstep "$@"

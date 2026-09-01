@@ -12,18 +12,19 @@
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Lockstep",
-    "shortDescription": "Evidence-gated workflows for coding agents",
-    "longDescription": "Run declarative engineering workflows with durable state, policy hooks, and deterministic artifact-backed evidence gates.",
+    "shortDescription": "Native durable workflows for coding agents",
+    "longDescription": "Author and run deterministic yamlgraph/LangGraph workflows with evidence-gated external effects, native recovery, and artifact publication.",
     "developerName": "sergesha",
     "category": "Developer Tools",
     "capabilities": [
       "Skills",
       "MCP server",
       "Policy hooks",
-      "Runner subcalls"
+      "Native durable workflows",
+      "External-effect bridging"
     ],
     "defaultPrompt": [
-      "Use lockstep to run the requested workflow and validate its evidence."
+      "Use lockstep to author or run the requested native workflow and validate its evidence."
     ]
   }
 }

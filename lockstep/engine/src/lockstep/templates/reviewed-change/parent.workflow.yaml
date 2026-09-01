@@ -1,0 +1,40 @@
+workflow_version: "1"
+name: "{name}"
+description: Reviewed change workflow
+protect: ["**"]
+flow:
+  - step: plan
+    task: Write the change plan with Goal, Acceptance Criteria, and Steps.
+    exit: The plan is complete.
+    writes: [.lockstep/plan.md]
+    artifact:
+      handle: plan
+      path: .lockstep/plan.md
+      markdown:
+        sections: [Goal, Acceptance Criteria, Steps]
+    retry: {limit: 2, exhausted: escalate}
+  - step: tests
+    task: Write acceptance tests before source implementation.
+    exit: The acceptance tests are frozen.
+    writes: [tests/]
+    retry: {limit: 2, exhausted: escalate}
+  - step: implement
+    task: Complete the implementation without weakening the frozen tests.
+    exit: The implementation satisfies the frozen tests.
+    writes: [src/]
+    retry: {limit: 2, exhausted: escalate}
+  - verify:
+      id: tests
+      command: pytest -q -p no:cacheprovider
+      cwd: .
+      timeout: 900
+      retry: {limit: 2, exhausted: escalate}
+  - call:
+      id: review
+      workflow: "{name}-review"
+      runner: codex
+      timeout_minutes: 5
+      artifacts: {review: .lockstep/review.md}
+  - accept:
+      artifact_from: review.review
+      verdict: PASS

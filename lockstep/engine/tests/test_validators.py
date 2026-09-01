@@ -6,7 +6,7 @@ r["verdict_status"] / r["verdict_reasons"], never nested.
 import json
 import subprocess
 
-from lockstep_mcp.validators import _path_covered, build_manifest, run_checks
+from lockstep.runtime.validators import _path_covered, build_manifest, run_checks
 
 
 def _state(checks, evidence, **ctx):
@@ -527,46 +527,198 @@ def test_republish_absent_verdict_is_error():
 
 
 # ---------------------------------------------------------------------------
-# file_matches_hash — pin from the denied-side state, bytes from
-# the contained project path
+# file_matches_hash — resolve an immutable ArtifactRef through the trusted
+# registry, prove its producer, then compare its blob with the project path.
 # ---------------------------------------------------------------------------
 
-import hashlib
+def _coordinate_data(coordinate):
+    return {
+        "thread_id": coordinate.thread_id,
+        "checkpoint_id": coordinate.checkpoint_id,
+        "checkpoint_ns": coordinate.checkpoint_ns,
+        "task_id": coordinate.task_id,
+        "interrupt_id": coordinate.interrupt_id,
+    }
 
 
-def _hash_state(art, digest):
-    return {"brief": {"checks": [{"type": "file_matches_hash", "path_from": "p",
-                                  "hash_from": "_subcall_envelope.artifact_hashes.review"}]},
-            "evidence": {"p": art.name}, "_project": str(art.parent),
-            "_state": {"_subcall_envelope": {"artifact_hashes": {"review": digest}}}}
+def _register_validator_artifact(
+    registry, snapshots, blobs, *, suffix, content=b"Verdict: PASS\n"
+):
+    from lockstep.runtime.artifacts import ArtifactDeclaration
+    from lockstep.runtime.native_models import NativeCoordinate
+
+    coordinate = NativeCoordinate(
+        "thread-1", f"checkpoint-{suffix}", "", f"task-{suffix}", f"interrupt-{suffix}"
+    )
+    request_digest = suffix * 64
+    descriptor_digest = chr(ord(suffix) + 2) * 64
+    workspace_ref = f"workspace:{suffix}"
+    snapshot = snapshots.capture(
+        {"review.md": blobs.put(content)},
+        declared_paths=("review.md",),
+        provenance={
+            "source": "managed-workspace-rollover",
+            "request_digest": request_digest,
+            "workspace_ref": workspace_ref,
+        },
+    )
+    declaration = ArtifactDeclaration(
+        "review", "review.md", "text/markdown", True
+    )
+    ref = registry.register_set(
+        public_run_id="run-1",
+        project_identity="project-1",
+        definition_digest="d" * 64,
+        producer_effect_id=f"producer-{suffix}",
+        producer_request_digest=request_digest,
+        workspace_ref=workspace_ref,
+        producer_coordinate=coordinate,
+        descriptor_digest=descriptor_digest,
+        snapshot_ref=snapshot,
+        declarations=(declaration,),
+    )[0]
+    return ref, coordinate, descriptor_digest
 
 
-def test_file_matches_hash_pass_and_fail(tmp_path):
-    art = tmp_path / "review.md"; art.write_text("Verdict: PASS\n")
-    digest = hashlib.sha256(art.read_bytes()).hexdigest()
-    state = _hash_state(art, digest)
+def _artifact_state(art, registry, ref, coordinate, descriptor_digest):
+    return {
+        "brief": {
+            "checks": [
+                {
+                    "type": "file_matches_hash",
+                    "path_from": "p",
+                    "artifact_binding": "review-call.review",
+                    "artifact_ref_from": "accepted.review.artifact_ref",
+                    "producer_effect_id_from": "accepted.review.producer_effect_id",
+                    "producer_coordinate_from": "accepted.review.producer_coordinate",
+                    "producer_descriptor_digest_from": (
+                        "accepted.review.producer_descriptor_digest"
+                    ),
+                }
+            ]
+        },
+        "evidence": {"p": art.name},
+        "_project": str(art.parent),
+        "_artifact_registry": registry,
+        "_artifact_provenance_bindings": {
+            "review-call.review": {
+                "schema": "lockstep.validator-artifact-binding/v1",
+                "qualified_handle": "review-call.review",
+                "declared_name": "review",
+                "producer_effect_id": "producer-a",
+                "producer_coordinate": _coordinate_data(coordinate),
+                "producer_descriptor_digest": descriptor_digest,
+            }
+        },
+        "_state": {
+            "accepted": {
+                "review": {
+                    "artifact_ref": str(ref),
+                    "producer_effect_id": "producer-a",
+                    "producer_coordinate": _coordinate_data(coordinate),
+                    "producer_descriptor_digest": descriptor_digest,
+                }
+            }
+        },
+    }
+
+
+def test_file_matches_hash_resolves_exact_artifact_provenance_then_content(tmp_path):
+    from lockstep.runtime.artifacts import ArtifactRegistry
+    from lockstep.runtime.blobs import BlobStore
+    from lockstep.runtime.project_snapshots import ProjectSnapshotStore
+
+    owner = tmp_path / "owner"
+    blobs = BlobStore(owner)
+    snapshots = ProjectSnapshotStore(owner, blobs)
+    registry = ArtifactRegistry(owner, blobs, snapshots)
+    ref, coordinate, descriptor_digest = _register_validator_artifact(
+        registry, snapshots, blobs, suffix="a"
+    )
+    artifact = tmp_path / "review.md"
+    artifact.write_bytes(b"Verdict: PASS\n")
+    state = _artifact_state(
+        artifact, registry, ref, coordinate, descriptor_digest
+    )
+
     assert run_checks(state, execute=True)["verdict_status"] == "pass"
-    art.write_text("Verdict: FAIL\n")                      # tampered after the pin
-    out = run_checks(state, execute=True)
-    assert out["verdict_status"] == "fail"
-    assert any("hash" in r for r in out["verdict_reasons"])
+
+    artifact.write_bytes(b"Verdict: FAIL\n")
+    result = run_checks(state, execute=True)
+    assert result["verdict_status"] == "fail"
+    assert any("content" in reason for reason in result["verdict_reasons"])
 
 
-def test_file_matches_hash_errors_when_pin_absent(tmp_path):
-    art = tmp_path / "review.md"; art.write_text("x")
-    state = _hash_state(art, "unused"); state["_state"] = {}
-    out = run_checks(state, execute=True)
-    assert out["verdict_status"] == "error"
-    assert any("not present" in r for r in out["verdict_reasons"])
+def test_file_matches_hash_rejects_same_bytes_from_wrong_producer(tmp_path):
+    from lockstep.runtime.artifacts import ArtifactRegistry
+    from lockstep.runtime.blobs import BlobStore
+    from lockstep.runtime.project_snapshots import ProjectSnapshotStore
+
+    owner = tmp_path / "owner"
+    blobs = BlobStore(owner)
+    snapshots = ProjectSnapshotStore(owner, blobs)
+    registry = ArtifactRegistry(owner, blobs, snapshots)
+    _right_ref, right_coordinate, right_descriptor = _register_validator_artifact(
+        registry, snapshots, blobs, suffix="a"
+    )
+    wrong_ref, _wrong_coordinate, _wrong_descriptor = _register_validator_artifact(
+        registry, snapshots, blobs, suffix="b"
+    )
+    artifact = tmp_path / "review.md"
+    artifact.write_bytes(b"Verdict: PASS\n")
+    state = _artifact_state(
+        artifact, registry, wrong_ref, right_coordinate, right_descriptor
+    )
+
+    result = run_checks(state, execute=True)
+
+    assert result["verdict_status"] == "fail"
+    assert any("provenance" in reason for reason in result["verdict_reasons"])
 
 
-def test_file_matches_hash_errors_when_pin_present_but_empty(tmp_path):
-    # absent and present-but-falsy are DIFFERENT failures — both
-    # error (fail-closed), but the message must say which.
-    art = tmp_path / "review.md"; art.write_text("x")
-    out = run_checks(_hash_state(art, ""), execute=True)
-    assert out["verdict_status"] == "error"
-    assert any("not a" in r or "empty" in r for r in out["verdict_reasons"])
+def test_file_matches_hash_rejects_replaced_ref_and_matching_wrong_state_claims(
+    tmp_path,
+):
+    """State may select a ref, but cannot redefine its trusted producer binding."""
+    from lockstep.runtime.artifacts import ArtifactRegistry
+    from lockstep.runtime.blobs import BlobStore
+    from lockstep.runtime.project_snapshots import ProjectSnapshotStore
+
+    owner = tmp_path / "owner"
+    blobs = BlobStore(owner)
+    snapshots = ProjectSnapshotStore(owner, blobs)
+    registry = ArtifactRegistry(owner, blobs, snapshots)
+    _right_ref, right_coordinate, right_descriptor = _register_validator_artifact(
+        registry, snapshots, blobs, suffix="a"
+    )
+    wrong_ref, wrong_coordinate, wrong_descriptor = _register_validator_artifact(
+        registry, snapshots, blobs, suffix="b"
+    )
+    artifact = tmp_path / "review.md"
+    artifact.write_bytes(b"Verdict: PASS\n")
+    state = _artifact_state(
+        artifact, registry, wrong_ref, wrong_coordinate, wrong_descriptor
+    )
+    state["_state"]["accepted"]["review"]["producer_effect_id"] = "producer-b"
+    state["brief"]["checks"][0]["artifact_binding"] = "review-call.review"
+    state["_artifact_provenance_bindings"] = {
+        "review-call.review": {
+            "schema": "lockstep.validator-artifact-binding/v1",
+            "qualified_handle": "review-call.review",
+            "declared_name": "review",
+            "producer_effect_id": "producer-a",
+            "producer_coordinate": _coordinate_data(right_coordinate),
+            "producer_descriptor_digest": right_descriptor,
+        }
+    }
+
+    result = run_checks(state, execute=True)
+
+    assert result["verdict_status"] == "fail"
+    assert any(
+        "binding" in reason or "provenance" in reason
+        for reason in result["verdict_reasons"]
+    )
 
 
 def test_manifest_skips_files_reached_through_a_symlinked_directory(tmp_path):

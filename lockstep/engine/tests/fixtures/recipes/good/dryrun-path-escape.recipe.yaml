@@ -1,0 +1,77 @@
+version: "1.0"
+name: dryrun-path-escape
+description: >
+  A SHAPE check (`file_exists`) with a recipe-PINNED
+  `path` (not `path_from`) that escapes the project root. `server.py`'s
+  `_containment_errors` only resolves+contains evidence-sourced paths
+  annotated `format: project-path`; a literal `path:` pinned directly in
+  the recipe never goes through that gate, so it reaches
+  `validators._resolve_path` raw — which raises ValueError on an
+  escaping path. `scenario_dryrun` must catch that, not crash. Dialect
+  mirrors tests/fixtures/recipes/good/mixed-checks.recipe.yaml.
+
+state:
+  brief: dict
+  evidence: dict
+  verdict_status: str
+  verdict_reasons: list
+
+tools:
+  run_checks:
+    type: python
+    module: lockstep.runtime.validators
+    function: run_checks
+
+nodes:
+  step_one:
+    type: interrupt
+    state_key: brief
+    resume_key: evidence
+    idempotent: false
+    message:
+      step: one
+      task: "Do the thing"
+      exit_criterion: "It is done"
+      evidence_schema:
+        required: [note]
+        properties:
+          note:
+            type: string
+      checks:
+        - type: file_exists
+          path: "../outside.md"
+
+  validate_one:
+    type: python
+    tool: run_checks
+
+  escalate_gate:
+    type: passthrough
+    output: {}
+
+  escalate:
+    type: interrupt
+    state_key: brief
+    resume_key: evidence
+    idempotent: false
+    message:
+      step: escalate
+
+edges:
+  - from: START
+    to: step_one
+  - from: step_one
+    to: validate_one
+  - from: validate_one
+    to: END
+    condition: "verdict_status == 'pass'"
+  - from: validate_one
+    to: step_one
+    condition: "verdict_status == 'fail'"
+  - from: escalate_gate
+    to: escalate
+
+loop_limits:
+  validate_one: 2
+loop_exits:
+  validate_one: escalate_gate

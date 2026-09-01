@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "distribution": "yamlgraph",
+  "version": "0.5.22",
+  "upstream_repository": "https://github.com/sheikkinen/yamlgraph",
+  "upstream_issue": "https://github.com/sheikkinen/yamlgraph/issues/474",
+  "upstream_patch_comment": "https://github.com/sheikkinen/yamlgraph/issues/474#issuecomment-5354688575",
+  "upstream_issue_body_sha256": "c4ba42b9fd178dc56fad8d736e16b3dd58705112cfd2e31e5d9e3355c58dcc69",
+  "upstream_patch_sha256": "dbae9dfa437adcef6d3d60d6a7bb9be44336ba6ca92fd5f568b99412f9b3fec0",
+  "patch_sha256": "2af7f84c2663be4d8416e3a6e0f648b823a89d3b0ae15ee9daaf0c8e4d32d2d6",
+  "files": [
+    {
+      "path": "yamlgraph/compile/node_otel.py",
+      "before_sha256": "a78a744ade6b5e3cdb3e3e9d7060b2cd20916f6e304ac64d695c273651ba0325",
+      "after_sha256": "3ed1ed1fdbf4512e177c2a842213b2652aa6d37da245ceafb029c12d1b7eb990"
+    },
+    {
+      "path": "yamlgraph/compile/subgraph_relay.py",
+      "before_sha256": "5593749424c04369bc24ea96dd75dc39adf3d0d3e2e23901ef4c88c720a36611",
+      "after_sha256": "a780fa918f8c29829b4c9ef7f8cb3597c54f43cc528c150449e97331404b3e59"
+    },
+    {
+      "path": "yamlgraph/node_factory/subgraph_nodes.py",
+      "before_sha256": "92c8238350d1b74ae3e66c9111f54e0a8801970075835db200212a8df1946e3d",
+      "after_sha256": "9ed26bb2d02985907d28c9c066769297de6b84c84ba93717e8dafa292384a977"
+    },
+    {
+      "path": "yamlgraph/node_timeout.py",
+      "before_sha256": "35793f972886976580a71cad3bbe2b7923f6c544f05b9c9e8243efb8b4854920",
+      "after_sha256": "965edca60af036cc96b5118cfae45e9d5784a0112e2ebbf16e30fe13f14bc374"
+    }
+  ]
+}

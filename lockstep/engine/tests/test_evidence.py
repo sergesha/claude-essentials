@@ -7,7 +7,7 @@ schema, not a blanket "empty dict always fails": a schema that declares no
 `required` fields tolerates an empty dict just fine.
 """
 
-from lockstep_mcp.evidence import validate_evidence
+from lockstep.runtime.evidence import validate_evidence
 
 
 def test_no_schema_empty_dict_rejected():
