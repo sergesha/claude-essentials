@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ._semantics_catalog import WorkflowCatalog
+from ._semantics_catalog import ChildArtifactContract, WorkflowCatalog
 from ._semantics_contracts import ArtifactContract, OutcomeSymbol, ValidatedWorkflow
 from .diagnostics import Diagnostic, DiagnosticError
 from .ir import WorkflowIR
@@ -18,6 +18,9 @@ class _ValidationState:
     catalog: WorkflowCatalog
     outcomes: dict[str, OutcomeSymbol] = field(default_factory=dict)
     artifacts: dict[str, ArtifactContract] = field(default_factory=dict)
+    exports: dict[str, ChildArtifactContract] = field(default_factory=dict)
+    export_paths: set[str] = field(default_factory=set)
+    export_producers: set[str] = field(default_factory=set)
     ids: set[str] = field(default_factory=set)
 
 
@@ -40,4 +43,11 @@ def validate(
     if state.workflow.protect != ("**",):
         fail(state, "LSW301", "v1 workflows must protect the complete project", "/protect", 'use protect: ["**"]')
     flow_contract = flow(state, state.workflow.flow, "/flow", {}, parallel=False)
-    return ValidatedWorkflow(state.workflow, flow_contract, state.outcomes, state.artifacts)
+    return ValidatedWorkflow(
+        state.workflow,
+        flow_contract,
+        state.outcomes,
+        state.artifacts,
+        state.exports,
+        flow_contract.effects.writes,
+    )

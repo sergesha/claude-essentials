@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hashlib
-from pathlib import Path
 import re
-from typing import Any, Iterable, Mapping, NoReturn
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, ClassVar, NoReturn
 
 import yaml
 from yaml.events import (
@@ -21,10 +22,24 @@ from yaml.nodes import MappingNode, Node, SequenceNode
 
 from .diagnostics import Diagnostic, DiagnosticError
 from .ir import (
-    AcceptIR, BlockIR, CallIR, ChooseIR, DecideIR, EscalateIR, GraphIR,
-    ParallelIR, RepeatIR, RetryIR, SourceLocation, StepIR, VerifyIR, WorkflowDefaultsIR, WorkflowIR,
+    AcceptIR,
+    BlockIR,
+    CallIR,
+    ChooseIR,
+    DecideIR,
+    EscalateIR,
+    ExportedArtifactIR,
+    GraphIR,
+    MarkdownArtifactIR,
+    ParallelIR,
+    RepeatIR,
+    RetryIR,
+    SourceLocation,
+    StepIR,
+    VerifyIR,
+    WorkflowDefaultsIR,
+    WorkflowIR,
 )
-
 
 _ID = re.compile(r"^[a-z][a-z0-9-]*$")
 _WORKFLOW_SUFFIX = ".workflow.yaml"
@@ -66,7 +81,7 @@ class _MarkedYamlError(Exception):
 
 
 class _MarkedSafeLoader(yaml.SafeLoader):
-    yaml_implicit_resolvers = {
+    yaml_implicit_resolvers: ClassVar[dict] = {
         initial: [entry for entry in entries if entry[0] != "tag:yaml.org,2002:bool"]
         for initial, entries in yaml.SafeLoader.yaml_implicit_resolvers.items()
     }
@@ -367,7 +382,29 @@ class _Parser:
     def block_step(self, item: dict[str, Any], pointer: str) -> StepIR:
         self.keys(item, pointer, {"step", "id", "task", "exit", "writes", "evidence", "artifact", "retry", "on_failure", "on_error"}, {"step", "task", "exit"})
         step = self.identifier(item["step"], f"{pointer}/step", "step")
-        return StepIR(self.identifier(item.get("id"), f"{pointer}/id", optional=True), step, self.string(item["task"], f"{pointer}/task", "task"), self.string(item["exit"], f"{pointer}/exit", "exit"), self.strings(item.get("writes", []), f"{pointer}/writes", "writes"), self.optional_mapping(item, "evidence", pointer), self.optional_mapping(item, "artifact", pointer), self.retry(item["retry"], f"{pointer}/retry") if "retry" in item else None, self.handler(item.get("on_failure"), f"{pointer}/on_failure"), self.handler(item.get("on_error"), f"{pointer}/on_error"))
+        artifact = self.exported_artifact(item["artifact"], f"{pointer}/artifact") if "artifact" in item else None
+        return StepIR(self.identifier(item.get("id"), f"{pointer}/id", optional=True), step, self.string(item["task"], f"{pointer}/task", "task"), self.string(item["exit"], f"{pointer}/exit", "exit"), self.strings(item.get("writes", []), f"{pointer}/writes", "writes"), self.optional_mapping(item, "evidence", pointer), artifact, self.retry(item["retry"], f"{pointer}/retry") if "retry" in item else None, self.handler(item.get("on_failure"), f"{pointer}/on_failure"), self.handler(item.get("on_error"), f"{pointer}/on_error"))
+
+    def exported_artifact(self, value: Any, pointer: str) -> ExportedArtifactIR:
+        artifact = self.mapping(value, pointer, "artifact")
+        self.keys(artifact, pointer, {"handle", "path", "markdown"}, {"handle", "path", "markdown"})
+        markdown_pointer = f"{pointer}/markdown"
+        markdown = self.mapping(artifact["markdown"], markdown_pointer, "artifact markdown")
+        self.keys(markdown, markdown_pointer, {"sections"}, {"sections"})
+        sections_pointer = f"{markdown_pointer}/sections"
+        sections = self.strings(markdown["sections"], sections_pointer, "sections")
+        if not sections:
+            self.fail("LSW108", "artifact Markdown sections must not be empty", sections_pointer, "declare at least one requested heading")
+        seen: set[str] = set()
+        for index, section in enumerate(sections):
+            if section in seen:
+                self.fail("LSW108", "artifact Markdown sections must be unique", f"{sections_pointer}/{index}", "remove the duplicate heading")
+            seen.add(section)
+        return ExportedArtifactIR(
+            self.identifier(artifact["handle"], f"{pointer}/handle", "artifact handle") or "",
+            self.string(artifact["path"], f"{pointer}/path", "artifact path"),
+            MarkdownArtifactIR(sections),
+        )
 
     def block_verify(self, item: dict[str, Any], pointer: str) -> VerifyIR:
         self.keys(item, pointer, {"verify"})

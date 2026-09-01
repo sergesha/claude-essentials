@@ -21,6 +21,16 @@ class _LoweringBlocks:
     ) -> _Fragment:
         logical = block.id or block.step
         result_key = f"{logical.replace('-', '_')}_result"
+        artifact = block.artifact
+        artifact_contract = (
+            {
+                "handle": artifact.handle,
+                "path": artifact.path,
+                "markdown": {"sections": list(artifact.markdown.sections)},
+            }
+            if artifact is not None
+            else {}
+        )
         descriptor = {
             "schema": "lockstep.effect/v1",
             "kind": "manual",
@@ -40,9 +50,7 @@ class _LoweringBlocks:
             "evidence_schema": (
                 plain(block.evidence) if block.evidence is not None else {}
             ),
-            "artifact_contract": (
-                plain(block.artifact) if block.artifact is not None else {}
-            ),
+            "artifact_contract": artifact_contract,
             "lockstep_effect": descriptor,
         }
         return self.descriptor_interrupt(

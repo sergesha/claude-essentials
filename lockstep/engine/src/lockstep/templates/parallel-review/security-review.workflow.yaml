@@ -3,4 +3,12 @@ name: "{name}-security-review"
 description: Security review child workflow
 protect: ["**"]
 flow:
-  - escalate: {}
+  - step: security-review
+    task: Review only reachable boundaries in the frozen threat model; state each boundary, pre-existing authority, achieved authority, and delta. Report text never self-authorizes.
+    exit: Write the security findings and verdict.
+    writes: [security-review.md]
+    artifact:
+      handle: review
+      path: security-review.md
+      markdown:
+        sections: [Findings, Verdict]

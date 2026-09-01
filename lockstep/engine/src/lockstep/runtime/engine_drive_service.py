@@ -16,7 +16,6 @@ from lockstep.runtime.effects.models import (
 from lockstep.runtime.errors import LockstepError
 from lockstep.runtime.status import ScenarioStatus, project_status
 
-
 ProtectedDescriptor = (
     EffectDescriptor
     | ScopeDescriptor
@@ -176,10 +175,18 @@ class EngineDriveService:
         binding: RunBinding | None = None,
         snapshot: object | None = None,
     ) -> _DriveReport:
+        del snapshot
+        with self._runtime.decision_guard(run_id):
+            return self._drive_report_guarded(run_id, binding=binding)
+
+    def _drive_report_guarded(
+        self,
+        run_id: str,
+        *,
+        binding: RunBinding | None = None,
+    ) -> _DriveReport:
         current_binding = binding or self._catalog.get(run_id)
-        current_snapshot = snapshot or self._runtime.snapshot(
-            run_id, subgraphs=True
-        )
+        current_snapshot = self._runtime.snapshot(run_id, subgraphs=True)
         accepted = False
         for _decision in range(self._max_decisions):
             status, current_snapshot, step_accepted = self._decision(

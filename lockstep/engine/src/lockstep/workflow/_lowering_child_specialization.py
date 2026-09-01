@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from typing import Any
 
 from lockstep.runtime.effects.descriptors import parse_effect_descriptor
@@ -11,6 +12,7 @@ from ._lowering_conditions import _rewrite_condition_references
 from ._lowering_identity import (
     _fragment_state_namespace,
     _specialized_state_key,
+    _stable_id,
 )
 from .canonical import canonical_yaml, plain
 
@@ -199,7 +201,13 @@ def _specialize_descriptor_runner(
         descriptor["kind"] = "managed"
         descriptor["runner"] = {
             "selector": runner,
-            "required_capabilities": ["workspace", "bounded_result", "sandbox"],
+            "required_capabilities": [
+                "bounded_result",
+                "credentials",
+                "network",
+                "sandbox",
+                "workspace",
+            ],
         }
         descriptor["scope_state_keys"] = [scope_key]
     elif isinstance(descriptor.get("scope_state_keys"), list):
@@ -258,7 +266,7 @@ def _specialize_child_descriptor(
     node_resume_key: object,
     artifact_bindings: tuple[tuple[str, str, str, str, str, str], ...],
     inside_parallel_branch: bool,
-) -> tuple[dict[str, Any], bool]:
+) -> tuple[dict[str, Any], bool, str | None]:
     descriptor = plain(raw_descriptor)
     if inside_parallel_branch and descriptor.get("kind") == "decide":
         raise ValueError("parallel child may not hide a decision descriptor")
@@ -268,6 +276,28 @@ def _specialize_child_descriptor(
         namespace=namespace,
         key_map=key_map,
         artifact_bindings=artifact_bindings,
+    )
+    if matching_artifact and descriptor.get("artifacts") == []:
+        bindings = [
+            item
+            for item in artifact_bindings
+            if key_map.get(item[4], _specialized_state_key(namespace, item[4]))
+            == node_resume_key
+            and descriptor.get("logical_id") == item[5]
+        ]
+        descriptor["artifacts"] = [
+            {
+                "name": binding[1],
+                "source_path": binding[2],
+                "media_type": binding[3],
+                "required": True,
+            }
+            for binding in bindings
+        ]
+    managed_logical_id = (
+        descriptor.get("logical_id")
+        if descriptor.get("kind") == "manual" and descriptor.get("runner") is None
+        else None
     )
     _specialize_descriptor_logical_id(descriptor, namespace)
     _specialize_descriptor_runner(
@@ -280,13 +310,13 @@ def _specialize_child_descriptor(
         scope_key=scope_key,
         key_map=key_map,
     )
-    parse_effect_descriptor(descriptor, known_state_keys=set(new_state))
-    return descriptor, matching_artifact
+    return descriptor, matching_artifact, managed_logical_id
 
 
 def _specialize_child_node(
     raw_node: object,
     *,
+    original_name: str,
     namespace: str,
     runner: str,
     scope_key: str,
@@ -294,7 +324,7 @@ def _specialize_child_node(
     new_state: dict[str, Any],
     artifact_bindings: tuple[tuple[str, str, str, str, str, str], ...],
     inside_parallel_branch: bool,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], tuple[str, str, str] | None]:
     if not isinstance(raw_node, dict):
         raise ValueError("resolved child node must be a mapping")  # noqa: TRY004
     node = plain(raw_node)
@@ -312,7 +342,7 @@ def _specialize_child_node(
     message = node.get("message")
     descriptor = message.get("lockstep_effect") if isinstance(message, dict) else None
     if isinstance(descriptor, dict):
-        rewritten, matching_artifact = _specialize_child_descriptor(
+        rewritten, matching_artifact, managed_logical_id = _specialize_child_descriptor(
             descriptor,
             namespace=namespace,
             runner=runner,
@@ -323,16 +353,64 @@ def _specialize_child_node(
             artifact_bindings=artifact_bindings,
             inside_parallel_branch=inside_parallel_branch,
         )
-        if matching_artifact:
-            message["artifact_contract"] = {}
+        if not isinstance(message.get("task"), str) or not isinstance(
+            message.get("exit_criterion"), str
+        ):
+            managed_logical_id = None
+        brief = None
+        if managed_logical_id is not None:
+            state_key = "managed_brief_" + hashlib.sha256(
+                b"lockstep.managed-brief/v1\0"
+                + namespace.encode("utf-8")
+                + b"\0"
+                + managed_logical_id.encode("utf-8")
+            ).hexdigest()
+            task = message["task"]
+            exit_criterion = message["exit_criterion"]
+            content = f"Task:\n{task}\n\nExit criterion:\n{exit_criterion}\n"
+            artifact = message.get("artifact_contract")
+            if matching_artifact and isinstance(artifact, dict):
+                markdown = artifact.get("markdown")
+                sections = (
+                    markdown.get("sections") if isinstance(markdown, dict) else None
+                )
+                if isinstance(artifact.get("path"), str) and isinstance(
+                    sections, list
+                ):
+                    content += (
+                        f"\nArtifact path: {artifact['path']}\n"
+                        "Requested Markdown headings: "
+                        + ", ".join(str(section) for section in sections)
+                        + "\n"
+                    )
+            new_state[state_key] = "str"
+            rewritten["inputs"] = {
+                "brief": {"state_key": state_key},
+                "snapshot": {"runtime_key": "current_project_snapshot"},
+            }
+            match = re.fullmatch(r"step-(.+)-effect-[0-9a-f]{12}", original_name)
+            if match is not None:
+                stable = _stable_id(
+                    f"/flow/{match.group(1)}", "step", "managed-brief"
+                )
+            else:
+                digest = hashlib.sha256(
+                    b"lockstep.managed-brief-node/v1\0"
+                    + original_name.encode("utf-8")
+                ).hexdigest()[:12]
+                stable = f"step-{original_name}-managed-brief-{digest}"
+            brief = (f"{namespace}.{stable}", state_key, content)
+        parse_effect_descriptor(rewritten, known_state_keys=set(new_state))
         message["lockstep_effect"] = rewritten
+    else:
+        brief = None
     if isinstance(message, dict):
         for message_key, message_value in tuple(message.items()):
             if message_key != "lockstep_effect":
                 message[message_key] = _rewrite_child_state_template(
                     message_value, key_map
                 )
-    return node
+    return node, brief
 
 
 def _specialize_child_edges(
@@ -340,6 +418,7 @@ def _specialize_child_edges(
     *,
     node_map: dict[str, str],
     key_map: dict[str, str],
+    managed_briefs: dict[str, str],
 ) -> list[dict[str, Any]]:
     rewritten_edges: list[dict[str, Any]] = []
     for raw_edge in raw_edges:
@@ -350,16 +429,25 @@ def _specialize_child_edges(
         targets = edge.get("to")
         if isinstance(targets, list):
             edge["to"] = [
-                target if target in {"START", "END"} else node_map[target]
+                (
+                    target
+                    if target in {"START", "END"}
+                    else managed_briefs.get(node_map[target], node_map[target])
+                )
                 for target in targets
             ]
         elif targets not in {"START", "END"}:
-            edge["to"] = node_map[targets]
+            mapped_target = node_map[targets]
+            edge["to"] = managed_briefs.get(mapped_target, mapped_target)
         if "condition" in edge:
             edge["condition"] = _rewrite_condition_references(
                 edge["condition"], key_map
             )
         rewritten_edges.append(edge)
+    rewritten_edges.extend(
+        {"from": brief, "to": effect}
+        for effect, brief in managed_briefs.items()
+    )
     return rewritten_edges
 
 

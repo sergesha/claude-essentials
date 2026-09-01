@@ -419,9 +419,13 @@ class _LoweringCallBundle:
         if not isinstance(nodes, dict):
             raise ValueError("resolved child nodes must be a mapping")  # noqa: TRY004
         node_map = {name: f"{namespace}.{name}" for name in nodes}
-        document["nodes"] = {
-            node_map[name]: _specialize_child_node(
+        specialized_nodes: dict[str, Any] = {}
+        managed_briefs: dict[str, str] = {}
+        for name, raw_node in nodes.items():
+            specialized_name = node_map[name]
+            specialized_node, brief = _specialize_child_node(
                 raw_node,
+                original_name=name,
                 namespace=namespace,
                 runner=runner,
                 scope_key=scope_key,
@@ -430,12 +434,22 @@ class _LoweringCallBundle:
                 artifact_bindings=artifact_bindings,
                 inside_parallel_branch=self.inside_parallel_branch,
             )
-            for name, raw_node in nodes.items()
-        }
+            specialized_nodes[specialized_name] = specialized_node
+            if brief is not None:
+                brief_name, state_key, content = brief
+                if brief_name in specialized_nodes or brief_name in managed_briefs.values():
+                    raise ValueError("managed brief node identity collides")
+                managed_briefs[specialized_name] = brief_name
+                specialized_nodes[brief_name] = {
+                    "type": "passthrough",
+                    "output": {state_key: content},
+                }
+        document["nodes"] = specialized_nodes
         document["edges"] = _specialize_child_edges(
             document.get("edges", []),
             node_map=node_map,
             key_map=key_map,
+            managed_briefs=managed_briefs,
         )
         _specialize_child_loops(document, node_map)
         document["name"] = f"{document.get('name', resolved.logical_name)}-{namespace}"

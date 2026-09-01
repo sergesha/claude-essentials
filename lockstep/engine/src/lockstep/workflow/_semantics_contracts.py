@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Mapping  # noqa: UP035
 
+from ._semantics_catalog import ChildArtifactContract
 from .ir import BlockIR, WorkflowIR, freeze
 
 _ID = re.compile(r"^[a-z][a-z0-9-]*$")
@@ -120,7 +121,11 @@ class ValidatedWorkflow:
     flow: FlowContract
     outcomes: Mapping[str, OutcomeSymbol]
     artifacts: Mapping[str, ArtifactContract]
+    exports: Mapping[str, ChildArtifactContract]
+    non_artifact_writes: tuple[str, ...]
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "outcomes", freeze(self.outcomes))
         object.__setattr__(self, "artifacts", freeze(self.artifacts))
+        object.__setattr__(self, "exports", freeze(self.exports))
+        object.__setattr__(self, "non_artifact_writes", tuple(self.non_artifact_writes))

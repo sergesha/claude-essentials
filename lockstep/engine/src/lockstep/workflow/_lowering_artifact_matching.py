@@ -30,10 +30,19 @@ def _artifact_producer_candidate(
         "media_type": media_type,
         "required": True,
     }
-    if (
-        not isinstance(declarations, list)
-        or sum(item == expected for item in declarations) != 1
-    ):
+    artifact_contract = message.get("artifact_contract")
+    metadata_matches = (
+        isinstance(artifact_contract, dict)
+        and artifact_contract.get("handle") == declared_name
+        and artifact_contract.get("path") == source
+        and isinstance(artifact_contract.get("markdown"), dict)
+        and isinstance(artifact_contract["markdown"].get("sections"), list)
+    )
+    declarations_match = (
+        isinstance(declarations, list)
+        and sum(item == expected for item in declarations) == 1
+    )
+    if not declarations_match and not (declarations == [] and metadata_matches):
         raise ValueError("child artifact contract differs from producer declaration")
     return source_file.relative_path, (
         qualified,

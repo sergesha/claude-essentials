@@ -81,9 +81,15 @@ class _LoweringCallPlanning:
         saved_context: dict[str, str],
     ) -> None:
         self.declare_generated_state(child_outcome, "str")
-        self.declare_generated_state("current_step", "str")
-        self.declare_generated_state("_loop_counts", "dict")
-        self.declare_generated_state("_loop_limit_reached", "bool")
+        self.declare_generated_state(
+            "current_step", {"type": "str", "reducer": "last_value"}
+        )
+        self.declare_generated_state(
+            "_loop_counts", {"type": "dict", "reducer": "last_value"}
+        )
+        self.declare_generated_state(
+            "_loop_limit_reached", {"type": "bool", "reducer": "last_value"}
+        )
         self.declare_generated_state(saved_context["current_step"], "any")
         self.declare_generated_state(saved_context["_loop_counts"], "dict")
         self.declare_generated_state(saved_context["_loop_limit_reached"], "any")

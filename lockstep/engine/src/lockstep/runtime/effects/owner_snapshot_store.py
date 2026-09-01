@@ -5,16 +5,17 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-import tempfile
 
 from lockstep.runtime.advisory_lock import advisory_file_lock
 from lockstep.runtime.bounded_files import read_bounded_regular_file
 from lockstep.runtime.effects.owner_policy import (
     OwnerRuntimeGrant,
     OwnerRuntimeSnapshot,
+    RuntimeProvisioningInventory,
     RuntimeRequirementIndex,
     _RuntimeAdmissionChanged,
     _RuntimeBindingFacts,
@@ -28,7 +29,6 @@ from lockstep.runtime.owner_state import (
     fsync_owner_directory,
     verify_owner_directory,
 )
-
 
 _SNAPSHOT_SCHEMA = "lockstep.runtime-owner/v1"
 def _binding_document(binding: _RuntimeBindingFacts) -> dict[str, object]:
@@ -82,7 +82,9 @@ def _canonical_snapshot_bytes(snapshot: OwnerRuntimeSnapshot) -> bytes:
 
 def _pairs(value: object, *, label: str) -> tuple[tuple[str, str], ...]:
     if not isinstance(value, list):
-        raise ValueError(f"owner runtime snapshot {label} must be an array")
+        raise ValueError(  # noqa: TRY004 - malformed persisted data, not API misuse
+            f"owner runtime snapshot {label} must be an array"
+        )
     pairs: list[tuple[str, str]] = []
     for item in value:
         if (
@@ -241,7 +243,7 @@ def _assert_snapshot_grants_consistent(snapshot: OwnerRuntimeSnapshot) -> None:
 
 def _assert_predecessor_consistent(
     snapshot: OwnerRuntimeSnapshot,
-    index: RuntimeRequirementIndex,
+    index: RuntimeRequirementIndex | RuntimeProvisioningInventory,
 ) -> None:
     _assert_snapshot_grants_consistent(snapshot)
     requirements = {
@@ -272,7 +274,7 @@ def _next_snapshot(
     codex: _RuntimeBindingFacts,
     pinned: _RuntimeBindingFacts,
     replacement_keys: tuple[str, ...],
-    index: RuntimeRequirementIndex,
+    index: RuntimeRequirementIndex | RuntimeProvisioningInventory,
 ) -> OwnerRuntimeSnapshot:
     previous_keys = (
         tuple(grant.grant_selection_key for grant in predecessor.grants)
@@ -364,7 +366,7 @@ def replace_runtime_snapshot(
     codex: _RuntimeBindingFacts,
     pinned: _RuntimeBindingFacts,
     replacement_keys: tuple[str, ...],
-    index: RuntimeRequirementIndex,
+    index: RuntimeRequirementIndex | RuntimeProvisioningInventory,
 ) -> OwnerRuntimeSnapshot:
     """Serialize one complete snapshot transition under the owner lock."""
 

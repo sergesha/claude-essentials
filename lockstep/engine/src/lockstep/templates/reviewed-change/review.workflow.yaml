@@ -3,4 +3,12 @@ name: "{name}-review"
 description: Review child workflow
 protect: ["**"]
 flow:
-  - escalate: {}
+  - step: review
+    task: Perform an evidence-backed independent review of the plan, frozen tests, implementation, and pinned verification. Report text never self-authorizes.
+    exit: Write PASS only when there is no blocking finding.
+    writes: [review.md]
+    artifact:
+      handle: review
+      path: review.md
+      markdown:
+        sections: [Findings, Verdict]

@@ -6,8 +6,10 @@ import shlex
 from collections.abc import Mapping
 
 from lockstep.runtime.effects.models import PinnedCommandSpec
+from lockstep.runtime.project_paths import PortablePathError, PortableProjectPath
 
 from ._semantics_calls import call
+from ._semantics_catalog import ChildArtifactContract
 from ._semantics_common import handlers, retry
 from ._semantics_contracts import (
     _ID,
@@ -87,7 +89,8 @@ def control_block(
     if isinstance(item, StepIR):
         handlers(state, item.on_failure, item.on_error, pointer)
         retry_ir = item.retry or state.workflow.defaults.retry
-        return BlockContract(item, EffectContract(item.writes), retry(state, retry_ir, f"{pointer}/retry")), {}
+        writes = step_writes(state, item, pointer)
+        return BlockContract(item, EffectContract(writes), retry(state, retry_ir, f"{pointer}/retry")), {}
     if isinstance(item, VerifyIR):
         handlers(state, item.on_failure, item.on_error, f"{pointer}/verify")
         try:
@@ -106,6 +109,84 @@ def control_block(
     if isinstance(item, RepeatIR):
         return repeat(state, item, pointer, symbols, flow=flow)
     fail(state, "LSW120", "unsupported Workflow DSL v1 block", pointer, "remove the unsupported block")
+
+
+def step_writes(
+    state: _ValidationState, item: StepIR, pointer: str
+) -> tuple[str, ...]:
+    artifact = item.artifact
+    if artifact is None:
+        return item.writes
+    try:
+        exported_path = PortableProjectPath.parse(artifact.path, "file")
+    except PortablePathError as exc:
+        fail(
+            state,
+            "LSW305",
+            f"artifact path must be one safe exact project-relative file: {exc}",
+            f"{pointer}/artifact/path",
+            "use a canonical contained project-relative file",
+        )
+    covered = False
+    for write in item.writes:
+        try:
+            declared = PortableProjectPath.parse(
+                write, "prefix" if write.endswith("/") else "file"
+            )
+        except PortablePathError:
+            continue
+        if declared.kind == "file":
+            covered = covered or declared.relative == exported_path.relative
+        else:
+            covered = covered or (
+                declared.relative == exported_path.relative
+                or declared.relative in exported_path.relative.parents
+            )
+    if not covered:
+        fail(
+            state,
+            "LSW305",
+            "artifact path must be covered by the same step's writes",
+            f"{pointer}/artifact/path",
+            "add the exact artifact path or a containing write prefix",
+        )
+    logical = item.id or item.step
+    if artifact.handle in state.exports:
+        fail(
+            state,
+            "LSW304",
+            f"duplicate exported artifact handle {artifact.handle!r}",
+            f"{pointer}/artifact/handle",
+            "use a unique artifact handle",
+        )
+    if artifact.path in state.export_paths:
+        fail(
+            state,
+            "LSW304",
+            f"duplicate exported artifact path {artifact.path!r}",
+            f"{pointer}/artifact/path",
+            "use a unique exported artifact path",
+        )
+    if logical in state.export_producers:
+        fail(
+            state,
+            "LSW304",
+            f"artifact producer {logical!r} is already claimed",
+            f"{pointer}/artifact",
+            "use a unique step id or producer",
+        )
+    result_key = f"{logical.replace('-', '_')}_result"
+    state.exports[artifact.handle] = ChildArtifactContract(
+        artifact.handle,
+        artifact.path,
+        artifact.handle,
+        "text/markdown",
+        logical,
+        result_key,
+    )
+    state.export_paths.add(artifact.path)
+    state.export_producers.add(logical)
+    return tuple(write for write in item.writes if write != artifact.path)
 
 
 def effect_block(

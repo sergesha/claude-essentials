@@ -67,6 +67,13 @@ class _GraphRuntimeGuard:
             finally:
                 self._leases.release(lease)
 
+    @contextmanager
+    def decision_guard(self, run_id: str) -> Iterator[None]:
+        """Serialize one complete snapshot-to-decision cycle for a run."""
+
+        with self._app_guard(run_id):
+            yield
+
     def start(self, run_id: str, input: dict) -> NativeSnapshot:
         return self.ensure_started(run_id, input)
 

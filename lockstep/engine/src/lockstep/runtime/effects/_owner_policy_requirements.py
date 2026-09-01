@@ -1,16 +1,18 @@
 """Static runtime requirements derived from authorized recipe closures."""
 
+# ruff: noqa: F401 - the owner-policy identity boundary re-exports this module.
+
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
 import hashlib
 import json
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from lockstep.runtime.effects._owner_policy_values import (
     OwnerRuntimeSnapshot,
-    _RuntimeBindingFacts,
     _lower_hex,
+    _RuntimeBindingFacts,
 )
 from lockstep.runtime.effects.descriptors import parse_effect_descriptor
 from lockstep.runtime.effects.models import EffectDescriptor
@@ -338,6 +340,44 @@ class RuntimeRequirementIndex:
                 for requirement in self.requirements
             ],
         }
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeProvisioningInventory:
+    """Closed union of exact per-project indexes for one owner snapshot."""
+
+    project_identities: tuple[str, ...]
+    requirements: tuple[RuntimeRequirement, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            not self.project_identities
+            or self.project_identities != tuple(sorted(set(self.project_identities)))
+        ):
+            raise ValueError("runtime provisioning projects must be sorted and unique")
+        keys = tuple(item.grant_selection_key for item in self.requirements)
+        if keys != tuple(sorted(keys)) or len(set(keys)) != len(keys):
+            raise ValueError("runtime provisioning requirements must be sorted and unique")
+        projects = set(self.project_identities)
+        if any(item.project_identity not in projects for item in self.requirements):
+            raise ValueError("runtime provisioning requirement project is absent")
+
+    @classmethod
+    def combine(
+        cls, indexes: tuple[RuntimeRequirementIndex, ...]
+    ) -> RuntimeProvisioningInventory:
+        if not indexes or any(
+            not isinstance(index, RuntimeRequirementIndex) for index in indexes
+        ):
+            raise TypeError("runtime provisioning requires per-project indexes")
+        requirements: dict[str, RuntimeRequirement] = {}
+        for index in indexes:
+            for requirement in index.requirements:
+                _merge_requirement(requirements, requirement)
+        return cls(
+            tuple(sorted({index.project_identity for index in indexes})),
+            tuple(requirements[key] for key in sorted(requirements)),
+        )
 
 
 @dataclass(frozen=True, slots=True)

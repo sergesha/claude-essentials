@@ -4,21 +4,36 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Mapping
 
 from lockstep.authoring_bundle import (
-    AuthoredRecipe, AuthoringPlan, DirectoryIdentity, PlannedTarget,
-    ProjectCompilation, SourceSnapshot, _workflow_project_and_source,
+    AuthoredRecipe,
+    AuthoringPlan,
+    DirectoryIdentity,
+    PlannedTarget,
+    ProjectCompilation,
+    SourceSnapshot,
+    _workflow_project_and_source,
     canonical_recipe_bytes_for_children,
 )
-from lockstep.authoring_capture import capture_directory, capture_optional_regular_file, capture_regular_file, validate_directory
-from lockstep.authoring_capture import _AuthoringBudget
+from lockstep.authoring_capture import (
+    _AuthoringBudget,
+    capture_directory,
+    capture_optional_regular_file,
+    capture_regular_file,
+    validate_directory,
+)
 from lockstep.errors import AuthoringError
 from lockstep.workflow.compiler import CompilationResult, compile_workflow_document
 from lockstep.workflow.ir import BlockIR, CallIR, ChooseIR, ParallelIR, RepeatIR
 from lockstep.workflow.schema import MarkedDocument, load_workflow_bytes, parse_workflow
-from lockstep.workflow.semantics import ChildArtifactContract, ChildWorkflowContract, ResolvedCatalog, ResolvedChild, ValidatedWorkflow
+from lockstep.workflow.semantics import (
+    ChildWorkflowContract,
+    ResolvedCatalog,
+    ResolvedChild,
+    ValidatedWorkflow,
+)
 
 _WORKFLOW_NAME_RE = re.compile(r"^[a-z][a-z0-9-]*$")
 _CompiledWorkflow = tuple[ValidatedWorkflow, CompilationResult]
@@ -61,18 +76,10 @@ def workflow_call_names(document: MarkedDocument) -> tuple[str, ...]:
 
 
 def _child_contract(validated: ValidatedWorkflow) -> ChildWorkflowContract:
-    exports = {
-        handle.rsplit(".", 1)[-1]: ChildArtifactContract(
-            handle.rsplit(".", 1)[-1], artifact.source,
-            handle.rsplit(".", 1)[-1], "application/octet-stream",
-            handle.split(".", 1)[0], handle.replace(".", "_") + "_result",
-        )
-        for handle, artifact in validated.artifacts.items()
-    }
     return ChildWorkflowContract(
         ("pass", "fail", "error"),
-        exports=exports,
-        non_artifact_writes=validated.flow.effects.writes,
+        exports=validated.exports,
+        non_artifact_writes=validated.non_artifact_writes,
     )
 
 

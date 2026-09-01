@@ -4,6 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from lockstep.runtime.owner_state import StorageLimitExceeded
+from lockstep.runtime.project_paths import (
+    PortablePathError,
+    ProjectTreeLimits,
+    validate_portable_project_paths,
+)
+
 from ._semantics_common import handlers, retry
 from ._semantics_contracts import (
     _ID,
@@ -44,6 +51,9 @@ def call(
             fail(state, "LSW304", f"child {block.workflow!r} does not export artifact {handle!r}", f"{pointer}/call/artifacts/{_escape(handle)}", "select a declared child export handle")
         if parallel:
             parallel_destination(state, destination, f"{pointer}/call/artifacts/{_escape(handle)}")
+        validate_destination(
+            state, destination, f"{pointer}/call/artifacts/{_escape(handle)}"
+        )
         qualified = qualified_handle(state, block.id or "", handle, pointer, parallel)
         if qualified in state.artifacts:
             fail(state, "LSW304", f"duplicate qualified artifact handle {qualified!r}", f"{pointer}/call/artifacts/{_escape(handle)}", "use a unique call and artifact handle")
@@ -54,6 +64,26 @@ def call(
     if block.id is not None:
         outcomes = {block.id: OutcomeSymbol(block.id, tuple(contract.outcomes), OutcomeProvenance.CHILD)}
     return BlockContract(block, effect, retry(state, None, f"{pointer}/call/retry")), outcomes
+
+
+def validate_destination(
+    state: _ValidationState, destination: str, pointer: str
+) -> None:
+    existing = [artifact.destination for artifact in state.artifacts.values()]
+    try:
+        validate_portable_project_paths(
+            ((path, "file") for path in (*existing, destination)),
+            limits=ProjectTreeLimits(),
+            label="artifact destinations",
+        )
+    except (PortablePathError, StorageLimitExceeded) as exc:
+        fail(
+            state,
+            "LSW304",
+            f"artifact destination overlaps or aliases another destination: {exc}",
+            pointer,
+            "use one unique safe project-relative destination",
+        )
 
 
 def qualified_handle(

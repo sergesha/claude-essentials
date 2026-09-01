@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from lockstep.runtime.artifacts import ArtifactRecord
 from lockstep.runtime.catalog import RunBinding
 from lockstep.runtime.effects._coordinator_values import (
     CoordinatorLineageError,
@@ -23,13 +24,16 @@ from lockstep.runtime.effects.ledger import (
     StaleEffectRevision,
 )
 from lockstep.runtime.effects.models import (
+    AcceptanceResult,
     AcceptDescriptor,
     EffectDescriptor,
+    EffectResult,
 )
 from lockstep.runtime.effects.owner_consent import (
     IssuedPublicationConsent,
     OwnerConsentAuthority,
     PublicationConsentCommitment,
+    StoredPublicationConsent,
 )
 from lockstep.runtime.native_models import NativeInterrupt, NativeSnapshot
 from lockstep.runtime.providers.manual import (
@@ -329,6 +333,114 @@ class _EffectCoordinatorAdmission:
         finally:
             self._leases.release(lease)
 
+    @staticmethod
+    def _acceptance_retry_commitment(
+        stored: StoredPublicationConsent,
+        binding: RunBinding,
+        source: Any,
+    ) -> PublicationConsentCommitment:
+        commitment = stored.commitment
+        if (
+            commitment.public_run_id != binding.public_run_id
+            or commitment.project_identity != binding.project_identity
+            or commitment.definition_digest != binding.recipe_digest
+            or commitment.source != source
+        ):
+            raise EffectAuthorityDenied("invalid or stale publication consent")
+        return commitment
+
+    def _acceptance_retry_state(
+        self,
+        commitment: PublicationConsentCommitment,
+    ) -> tuple[EffectRecord, EffectRecord, ArtifactRecord]:
+        try:
+            record = self._ledger.get(commitment.effect_id)
+            producer = self._ledger.get(commitment.producer_effect_id)
+            if self._artifacts is None:
+                raise ProviderContractViolation(
+                    "acceptance retry requires ArtifactRegistry"
+                )
+            artifact = self._artifacts.read(commitment.artifact_ref)
+        except (KeyError, TypeError, ValueError, RuntimeError) as exc:
+            raise EffectAuthorityDenied(
+                "invalid or stale publication consent"
+            ) from exc
+        return record, producer, artifact
+
+    @staticmethod
+    def _acceptance_retry_expected_result(
+        stored: StoredPublicationConsent,
+        commitment: PublicationConsentCommitment,
+    ) -> AcceptanceResult:
+        if stored.redeemed_at is None or stored.receipt_digest is None:
+            raise EffectAuthorityDenied("invalid or stale publication consent")
+        return AcceptanceResult(
+            "lockstep.acceptance-result/v1",
+            commitment.effect_id,
+            "PASS",
+            commitment.artifact_ref,
+            commitment.artifact_digest,
+            commitment.destination,
+            commitment.transformation,
+            commitment.audience,
+            stored.consent_ref,
+            stored.consent_epoch,
+            stored.receipt_digest,
+        )
+
+    @staticmethod
+    def _validate_acceptance_retry_record(
+        record: EffectRecord,
+        commitment: PublicationConsentCommitment,
+        expected_result: AcceptanceResult,
+    ) -> None:
+        if (
+            record.phase != "delivered"
+            or record.effect_kind != "accept"
+            or record.effect_id != commitment.effect_id
+            or not isinstance(record.result, AcceptanceResult)
+            or record.result != expected_result
+            or record.coordinate != commitment.source
+            or record.descriptor_digest != commitment.descriptor_digest
+        ):
+            raise EffectAuthorityDenied("invalid or stale publication consent")
+
+    @staticmethod
+    def _validate_acceptance_retry_producer(
+        producer: EffectRecord,
+        artifact: ArtifactRecord,
+        commitment: PublicationConsentCommitment,
+        binding: RunBinding,
+    ) -> None:
+        producer_result = producer.result
+        if (
+            producer.phase != "delivered"
+            or not isinstance(producer_result, EffectResult)
+            or producer.effect_id != commitment.producer_effect_id
+            or commitment.artifact_ref not in producer_result.artifact_refs
+            or artifact.producer_effect_id != producer.effect_id
+            or artifact.producer_coordinate != producer.coordinate
+            or artifact.descriptor_digest != producer.descriptor_digest
+            or artifact.public_run_id != binding.public_run_id
+            or artifact.project_identity != binding.project_identity
+            or artifact.definition_digest != binding.recipe_digest
+            or artifact.blob.sha256 != commitment.artifact_digest
+        ):
+            raise EffectAuthorityDenied("invalid or stale publication consent")
+
+    def _validate_acceptance_retry_lineage(
+        self,
+        run_id: str,
+        record: EffectRecord,
+    ) -> None:
+        if (
+            self._protected_lineage(
+                run_id, record.coordinate, record.descriptor_digest
+            )
+            != "descended"
+        ):
+            raise EffectAuthorityDenied("invalid or stale publication consent")
+
     def _redeem_delivered_acceptance_retry(
         self,
         *,
@@ -340,31 +452,18 @@ class _EffectCoordinatorAdmission:
     ) -> ScenarioStatus:
         assert isinstance(self._authority, OwnerConsentAuthority)
         stored = self._authority.inspect_token(token)
-        commitment = stored.commitment
-        if (
-            commitment.public_run_id != binding.public_run_id
-            or commitment.project_identity != binding.project_identity
-            or commitment.definition_digest != binding.recipe_digest
-            or commitment.source != source
-        ):
-            raise EffectAuthorityDenied("invalid or stale publication consent")
+        commitment = self._acceptance_retry_commitment(stored, binding, source)
+        record, producer, artifact = self._acceptance_retry_state(commitment)
+        expected_result = self._acceptance_retry_expected_result(stored, commitment)
+        self._validate_acceptance_retry_record(record, commitment, expected_result)
+        self._validate_acceptance_retry_producer(
+            producer, artifact, commitment, binding
+        )
+        self._validate_acceptance_retry_lineage(run_id, record)
         result = self._authority.redeem(token, commitment)
-        try:
-            record = self._ledger.get(commitment.effect_id)
-        except KeyError as exc:
+        if result != expected_result:
             raise CoordinatorLineageError(
-                "accepted consent lacks a durable effect record"
-            ) from exc
-        if (
-            record.phase != "delivered"
-            or record.result != result
-            or self._protected_lineage(
-                run_id, record.coordinate, record.descriptor_digest
-            )
-            != "descended"
-        ):
-            raise CoordinatorLineageError(
-                "delivered acceptance retry differs from durable lineage"
+                "redeemed acceptance retry differs from durable result"
             )
         return project_status(binding, snapshot, self._leases, self._ledger)
 

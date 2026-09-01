@@ -6,12 +6,12 @@ effect, fragment, and runtime rules are compiler responsibilities.
 
 from __future__ import annotations
 
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-import re
 from types import MappingProxyType
-from typing import Any, Literal, Mapping, TypeAlias
-
+from typing import Any, Literal, TypeAlias
 
 FrozenMapping: TypeAlias = Mapping[str, Any]
 
@@ -45,6 +45,18 @@ class WorkflowDefaultsIR:
 
 
 @dataclass(frozen=True)
+class MarkdownArtifactIR:
+    sections: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ExportedArtifactIR:
+    handle: str
+    path: str
+    markdown: MarkdownArtifactIR
+
+
+@dataclass(frozen=True)
 class StepIR:
     id: str | None
     step: str
@@ -52,14 +64,13 @@ class StepIR:
     exit: str
     writes: tuple[str, ...] = ()
     evidence: FrozenMapping | None = None
-    artifact: FrozenMapping | None = None
+    artifact: ExportedArtifactIR | None = None
     retry: RetryIR | None = None
     on_failure: str | None = None
     on_error: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "evidence", freeze(self.evidence) if self.evidence is not None else None)
-        object.__setattr__(self, "artifact", freeze(self.artifact) if self.artifact is not None else None)
 
 
 @dataclass(frozen=True)
@@ -394,7 +405,7 @@ class FragmentIR:
         object.__setattr__(self, "document", freeze(document))
 
     @classmethod
-    def parse(cls, document: Mapping[str, Any]) -> "FragmentIR":
+    def parse(cls, document: Mapping[str, Any]) -> FragmentIR:
         _validate_fragment_document(document)
         return cls(document, _token=_FRAGMENT_IR_TOKEN)
 

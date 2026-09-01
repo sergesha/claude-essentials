@@ -8,6 +8,7 @@ from pathlib import Path
 
 from lockstep.runtime.effects.owner_policy import (
     OwnerRuntimeSnapshot,
+    RuntimeProvisioningInventory,
     RuntimeRequirementIndex,
     _RuntimeBindingFacts,
 )
@@ -27,21 +28,38 @@ class CapturedRuntimeBindings:
     pinned_facts: _RuntimeBindingFacts
 
 
-def _validated_owner_state_root(state_dir: Path, *, project: Path) -> Path:
+def _provision_projects(
+    index: RuntimeRequirementIndex | RuntimeProvisioningInventory,
+    project: Path,
+) -> tuple[Path, ...]:
+    requested = project.resolve(strict=True)
+    if isinstance(index, RuntimeRequirementIndex):
+        if index.project_identity != str(requested):
+            raise ValueError("runtime requirement project identity mismatch")
+        return (requested,)
+    projects = tuple(Path(value).resolve(strict=True) for value in index.project_identities)
+    if requested not in projects:
+        raise ValueError("provisioning project is absent from runtime inventory")
+    return projects
+
+
+def _validated_owner_state_root(
+    state_dir: Path, *, projects: tuple[Path, ...]
+) -> Path:
     error = "owner runtime state must be outside project"
     supplied = Path(state_dir)
     if not supplied.is_absolute():
         raise ValueError(error)
-    project = project.resolve(strict=True)
     lexical = Path(os.path.abspath(supplied))
     resolved = supplied.resolve(strict=False)
-    if (
-        lexical == project
-        or project in lexical.parents
-        or resolved == project
-        or project in resolved.parents
-    ):
-        raise ValueError(error)
+    for project in projects:
+        if (
+            lexical == project
+            or project in lexical.parents
+            or resolved == project
+            or project in resolved.parents
+        ):
+            raise ValueError(error)
     return supplied
 
 
@@ -59,7 +77,9 @@ def _capture_provision_binding(member: dict[str, object]):
         raise ValueError(str(exc)) from exc
 
 
-def _validate_provision_tmpdir(binding: object, *, project: Path) -> None:
+def _validate_provision_tmpdir(
+    binding: object, *, projects: tuple[Path, ...]
+) -> None:
     error = "TMPDIR must be an absolute non-symlink owner-only directory outside project"
     environment = dict(binding.environment)  # type: ignore[attr-defined]
     supplied = Path(environment["TMPDIR"])
@@ -70,7 +90,9 @@ def _validate_provision_tmpdir(binding: object, *, project: Path) -> None:
         verify_owner_directory(resolved)
     except (OSError, ValueError, RuntimeError) as exc:
         raise ValueError(error) from exc
-    if supplied != resolved or resolved == project or project in resolved.parents:
+    if supplied != resolved or any(
+        resolved == project or project in resolved.parents for project in projects
+    ):
         raise ValueError(error)
 
 
@@ -102,11 +124,12 @@ def validate_runtime_provision_inputs(
     codex: dict[str, object],
     pinned: dict[str, object],
     replacement_keys: tuple[str, ...],
-    index: RuntimeRequirementIndex,
+    index: RuntimeRequirementIndex | RuntimeProvisioningInventory,
     project: Path,
 ) -> tuple[_RuntimeBindingFacts, _RuntimeBindingFacts]:
     """Capture and normalize both bindings after closed input validation."""
 
+    projects = _provision_projects(index, project)
     codex_binding = _capture_provision_binding(codex)
     pinned_binding = _capture_provision_binding(pinned)
     if codex_binding.codex_home == pinned_binding.codex_home:
@@ -115,8 +138,8 @@ def validate_runtime_provision_inputs(
         raise ValueError("runtime codex binding requires an owner credential auth.json")
     if pinned_binding.credential_identity_digest is not None:
         raise ValueError("runtime pinned binding must be credential-free")
-    _validate_provision_tmpdir(codex_binding, project=project)
-    _validate_provision_tmpdir(pinned_binding, project=project)
+    _validate_provision_tmpdir(codex_binding, projects=projects)
+    _validate_provision_tmpdir(pinned_binding, projects=projects)
     inventory_keys = {
         requirement.grant_selection_key for requirement in index.requirements
     }
@@ -167,8 +190,9 @@ def capture_runtime_execution_bindings(
 
     codex_binding = _capture_provision_binding(member(snapshot.codex))
     pinned_binding = _capture_provision_binding(member(snapshot.pinned))
-    _validate_provision_tmpdir(codex_binding, project=project)
-    _validate_provision_tmpdir(pinned_binding, project=project)
+    projects = (project.resolve(strict=True),)
+    _validate_provision_tmpdir(codex_binding, projects=projects)
+    _validate_provision_tmpdir(pinned_binding, projects=projects)
     codex = _runtime_binding_facts(codex_binding, pinned_permission_profile=None)
     pinned = _runtime_binding_facts(
         pinned_binding,
@@ -194,12 +218,13 @@ def provision_runtime_snapshot(
     codex: dict[str, object],
     pinned: dict[str, object],
     replacement_keys: tuple[str, ...],
-    index: RuntimeRequirementIndex,
+    index: RuntimeRequirementIndex | RuntimeProvisioningInventory,
     project: Path,
 ) -> OwnerRuntimeSnapshot:
     """Atomically replace the complete owner runtime configuration and grants."""
 
-    state_root = _validated_owner_state_root(Path(state_dir), project=project)
+    projects = _provision_projects(index, project)
+    state_root = _validated_owner_state_root(Path(state_dir), projects=projects)
     codex_facts, pinned_facts = validate_runtime_provision_inputs(
         codex=codex,
         pinned=pinned,
