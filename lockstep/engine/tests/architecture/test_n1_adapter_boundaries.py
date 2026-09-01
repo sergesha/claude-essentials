@@ -18,7 +18,7 @@ import pytest
 from lockstep.errors import AuthoringError
 from lockstep.runtime.errors import LockstepError
 
-_PARSER_SCHEMA_SHA256 = "f77e4a7a0f29a060d434087670fa78d70c91247d286c2a9fe6d7a285ee1da4d9"
+_PARSER_SCHEMA_SHA256 = "c0926be268390aebe05503553995de1fc7bd76517695790de815651e0677a601"
 _DRYRUN_PARAMETERS = {
     "properties": {
         "evidence": {"additionalProperties": True, "title": "Evidence", "type": "object"},
@@ -42,6 +42,7 @@ _MODULE_FUNCTIONS = {
         "current_project",
         "decode_object",
         "write_json",
+        "write_canonical_json",
         "require_owner_tty",
         "read_consent_token",
     },

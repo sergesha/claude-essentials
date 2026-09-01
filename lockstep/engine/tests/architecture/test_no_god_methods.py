@@ -5449,7 +5449,7 @@ def _entity_lifecycle_row(binding: str, transition_id: str) -> Mapping[str, obje
 _PRODUCTION_LIFECYCLE_ROWS = (
     {
         "binding_kind": "callsite",
-        "binding": "src/lockstep/runtime/providers/_codex_supervisor.py::_CodexSupervisorTransaction.execute::call:0026",
+        "binding": "src/lockstep/runtime/providers/_codex_supervisor.py::_execute_spawned::call:0015",
         "target": "src/lockstep/runtime/providers/_codex_supervisor.py::_publish_terminal",
         "discriminant": {
             "kind": "literal-arguments",

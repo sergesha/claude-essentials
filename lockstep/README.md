@@ -153,6 +153,15 @@ transitions. A terminal status is complete only when returned by the engine.
 runtime effects; their acceptance, lineage, and receipts are durable and
 machine-checked.
 
+Use `lockstep scenario evidence [RUN_ID]` (or MCP `scenario_evidence`) for the
+closed read-only `lockstep.execution-evidence/v1` projection. Omitting the run
+ID returns project scope, including the exact empty projection when no state
+exists. The projection includes every durable ledger effect, native lineage,
+safe acceptance/publication facts, and public managed-start receipts. It never
+returns credentials, request/grant/runner digests, raw workspaces or argv,
+prompts, process IDs, or captured output. Like status, history, and events,
+evidence does not recover, advance, retry, spawn, accept, or publish.
+
 ## Artifact publication and consent
 
 Publication stops at an accept step. From the project directory, the owner can

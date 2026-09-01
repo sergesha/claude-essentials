@@ -323,6 +323,16 @@ def scenario_events(run_id: str, ctx: Context | None = None) -> list[dict]:
 
 
 @app.tool()
+def scenario_evidence(
+    run_id: str | None = None, ctx: Context | None = None
+) -> dict:
+    """Return the closed read-only public execution-evidence projection."""
+
+    project = _project_for_context(ctx)
+    return _projection_for(project).evidence(run_id, str(project))
+
+
+@app.tool()
 def scenario_recover(limit: int = 128, ctx: Context | None = None) -> dict:
     """Explicitly perform one bounded durable-recovery sweep."""
 

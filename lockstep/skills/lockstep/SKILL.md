@@ -57,6 +57,14 @@ read-only waiting. Use `scenario_history` for redacted checkpoint history and
 not advancing. Those observation tools do not advance the run or replace
 recovery.
 
+Use the `scenario_evidence` MCP tool (with an optional `run_id`) when durable
+effect completeness, native
+lineage, safe acceptance/publication facts, or the one managed-start receipt is
+required. MCP accepts an omitted run id for a project-scope projection; the CLI
+form is `lockstep scenario evidence [RUN_ID]`. This is a closed read-only safe
+projection: never substitute private state, PID/output receipt hashes, raw
+workspace/argv values, or credential/request/grant/runner facts for it.
+
 ## Evidence discipline
 
 - Submit the exact closed payload requested by the current step.

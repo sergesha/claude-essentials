@@ -44,6 +44,8 @@ query_methods = {
     "project_identity",
     "journal_path",
     "commitment_digest",
+    "validated_journal",
+    "validated_journal_digest",
     "prepared_for",
     "_verify_complete",
     "_open_root",
@@ -98,7 +100,11 @@ for name in value_definitions:
     assert definition.__module__ == values_name
     assert getattr(facade, name) is definition
 
-assert top_level_definitions(queries) == {"_ProjectPublicationQueries"}
+assert top_level_definitions(queries) == {
+    "_ProjectPublicationQueries",
+    "open_project_publication_queries",
+}
+assert queries.open_project_publication_queries.__module__ == queries_name
 assert queries._ProjectPublicationQueries in facade.ProjectPublisher.__mro__
 assert "__init__" not in queries._ProjectPublicationQueries.__dict__
 assert {

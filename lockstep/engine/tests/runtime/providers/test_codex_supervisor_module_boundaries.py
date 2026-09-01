@@ -12,12 +12,22 @@ import pytest
 
 from lockstep.runtime.providers import _codex_supervisor as supervisor
 
-
 _HELPERS = {
     "_atomic_json",
+    "_canonical",
+    "_canonical_document",
+    "_write_all",
+    "_verify_public_final",
+    "_publish_public_record",
+    "_public_record_matches",
+    "_public_start_value",
     "_read_spec",
     "_read_identity",
     "_verify_bound_files",
+    "_verify_private_joins",
+    "_capture_chunks",
+    "_close_descriptor",
+    "_close_stream",
     "_capture",
     "_kill_group",
     "_group_is_dead",
@@ -28,9 +38,20 @@ _HELPERS = {
     "_publish_prelaunch_terminal",
     "_await_launch_permission",
     "_spawn_inner_process",
+    "_send_stdin",
+    "_capture_threads",
+    "_start_readers",
     "_start_capture",
+    "_close_stdin",
+    "_terminate_group",
+    "_containment_capture",
+    "_termination_grace",
+    "_containment_finish",
+    "_publish_containment_terminal",
+    "_contain_receipt_publication_failure",
     "_monitor_process",
     "_terminal_reason",
+    "_execute_spawned",
 }
 
 
@@ -117,10 +138,8 @@ def test_supervisor_has_one_transaction_owner_and_thin_run() -> None:
     assert {
         "_await_launch_permission",
         "_spawn_inner_process",
-        "_start_capture",
-        "_monitor_process",
-        "_finish_capture",
-        "_publish_terminal",
+        "_execute_spawned",
+        "_publish_prelaunch_terminal",
     } <= execute_calls
 
 

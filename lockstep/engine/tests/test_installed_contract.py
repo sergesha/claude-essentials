@@ -237,6 +237,7 @@ def _assert_active_guidance(root: Path) -> None:
             "`scenario_wait`",
             "`scenario_history`",
             "`scenario_events`",
+            "`scenario_evidence`",
         )
     )
     assert "`scenario_status` does not return artifact references" in operator_skill
@@ -496,7 +497,17 @@ _FLOW_PROBE = textwrap.dedent(
         assert acceptances[0].descriptor_digest == stored.commitment.descriptor_digest
         return issued, stored.commitment, result
 
-    def assert_observations(owner, recipes, project, run_id, terminal=False):
+    start_receipts = {}
+
+    def assert_observations(
+        owner,
+        recipes,
+        project,
+        run_id,
+        terminal=False,
+        expect_scope=False,
+        expected_publication_items=None,
+    ):
         deadline = time.monotonic() + 10
         last_error = None
         while time.monotonic() < deadline:
@@ -507,6 +518,91 @@ _FLOW_PROBE = textwrap.dedent(
                 assert projection.events(run_id, str(project))
                 waited = projection.wait(run_id, 1, str(project))
                 assert isinstance(waited["changed"], bool) and waited["revision"]
+                evidence = projection.evidence(run_id, str(project))
+                assert evidence["schema"] == "lockstep.execution-evidence/v1"
+                assert evidence["selected_run_id"] == run_id
+                assert [item["public_run_id"] for item in evidence["runs"]] == [run_id]
+                body = {key: value for key, value in evidence.items() if key != "projection_digest"}
+                canonical = json.dumps(
+                    body,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=False,
+                    allow_nan=False,
+                ).encode("utf-8")
+                assert evidence["projection_digest"] == hashlib.sha256(canonical).hexdigest()
+                assert json.loads(canonical + b"\n") == body
+                scopes = [
+                    effect
+                    for effect in evidence["runs"][0]["effects"]
+                    if effect["effect_kind"] == "scope"
+                ]
+                if expect_scope:
+                    assert scopes
+                    assert all(
+                        effect["launch"] is None
+                        and effect["acceptance"] is None
+                        and effect["publication"] is None
+                        for effect in scopes
+                    )
+                launches = [
+                    effect["launch"]
+                    for effect in evidence["runs"][0]["effects"]
+                    if effect["launch"] is not None
+                ]
+                for launch in launches:
+                    argv = launch["normalized_argv"]
+                    assert launch["normalized_argv_ref"] == hashlib.sha256(
+                        b"lockstep-public-managed-argv-v1\0"
+                        + json.dumps(
+                            argv, sort_keys=True, separators=(",", ":")
+                        ).encode()
+                    ).hexdigest()
+                    spawn = launch["spawn"]
+                    assert spawn["process_start_count"] == 1
+                    safe_start = {
+                        "schema": "lockstep.codex-public-start/v1",
+                        "effect_id": spawn["effect_id"],
+                        "public_launch_ref": spawn["public_launch_ref"],
+                        "start_ref": spawn["start_ref"],
+                    }
+                    expected_start = json.dumps(
+                        safe_start,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode() + b"\n"
+                    attempt = (
+                        owner
+                        / "codex-attempts"
+                        / hashlib.sha256(spawn["effect_id"].encode()).hexdigest()
+                    )
+                    assert (attempt / "spawn-fence.json").read_bytes() == expected_start
+                    assert (attempt / "public-start.json").read_bytes() == expected_start
+                    assert not list(attempt.glob("public-start.json.*"))
+                    previous = start_receipts.setdefault(spawn["effect_id"], expected_start)
+                    assert previous == expected_start
+                    if launch["terminal"] is not None:
+                        assert json.loads(
+                            (attempt / "public-terminal.json").read_bytes()
+                        ) == launch["terminal"]
+                publications = [
+                    effect["publication"]
+                    for effect in evidence["runs"][0]["effects"]
+                    if effect["publication"] is not None
+                ]
+                items = [item for publication in publications for item in publication["items"]]
+                if expected_publication_items is not None:
+                    assert len(items) == expected_publication_items
+                    assert all(
+                        [item["ordinal"] for item in publication["items"]]
+                        == list(range(len(publication["items"])))
+                        for publication in publications
+                    )
+                    for item in items:
+                        commitment = item["commitment"]
+                        assert hashlib.sha256(
+                            (project / commitment["destination"]).read_bytes()
+                        ).hexdigest() == commitment["artifact_digest"]
                 if terminal:
                     assert status["status"] == "completed"
                 return
@@ -584,7 +680,9 @@ _FLOW_PROBE = textwrap.dedent(
             assert type(command._runtime_execution_composition.runners.codex) is CodexRunnerAdapter
             assert command._runtime_execution_composition.runners.codex.spawn_count == 1
             assert command._runtime_execution_composition.runners.pinned.spawn_count == 1
-            assert_observations(base / "owner", recipes, project, run_id)
+            assert_observations(
+                base / "owner", recipes, project, run_id, expect_scope=True
+            )
         finally:
             command.close()
         reopened = Engine.command(base / "owner", recipes)
@@ -606,7 +704,15 @@ _FLOW_PROBE = textwrap.dedent(
             assert commitment.artifact_digest == artifact.blob.digest
             assert commitment.destination == ".lockstep/review.md"
             assert issued.consent_ref == accepted.consent_ref
-            assert_observations(base / "owner", recipes, project, run_id, terminal=True)
+            assert_observations(
+                base / "owner",
+                recipes,
+                project,
+                run_id,
+                terminal=True,
+                expect_scope=True,
+                expected_publication_items=1,
+            )
         finally:
             reopened.close()
 
@@ -690,7 +796,15 @@ _FLOW_PROBE = textwrap.dedent(
                 for snapshot in history if "reviews_result" in snapshot.values
             }
             assert joined_values == {'{"outcome": "PASS", "value": "pass"}'}
-            assert_observations(base / "owner", recipes, project, run_id, terminal=True)
+            assert_observations(
+                base / "owner",
+                recipes,
+                project,
+                run_id,
+                terminal=True,
+                expect_scope=True,
+                expected_publication_items=2,
+            )
         finally:
             reopened.close()
 
@@ -783,7 +897,7 @@ _FLOW_PROBE = textwrap.dedent(
     assert {
         "recipe_init", "recipe_compile", "recipe_check", "recipe_diff",
         "recipe_render", "recipe_estimate", "template_list", "template_show",
-        "scenario_start", "scenario_wait", "scenario_events",
+        "scenario_start", "scenario_wait", "scenario_events", "scenario_evidence",
         "scenario_accept_artifact",
     } <= tool_names
     assert "template_init" not in tool_names

@@ -74,6 +74,8 @@ def _add_scenario_parser(sub: argparse._SubParsersAction) -> None:
     history.add_argument("run_id")
     events = scenario.add_parser("events")
     events.add_argument("run_id")
+    evidence = scenario.add_parser("evidence")
+    evidence.add_argument("run_id", nargs="?")
     recover = scenario.add_parser("recover")
     recover.add_argument("--limit", type=int, default=128)
 

@@ -9,9 +9,10 @@ import stat
 from pathlib import Path, PurePosixPath
 
 from lockstep.runtime._publication_values import (
+    PreparedPublication,
     PublicationConflict,
     PublicationJournalError,
-    PreparedPublication,
+    PublicationLimits,
     PublicationReceipt,
     _canonical,
     _digest,
@@ -23,6 +24,7 @@ from lockstep.runtime.blobs import BlobRef
 from lockstep.runtime.owner_state import (
     InsecureStatePath,
     StorageLimitExceeded,
+    verify_owner_directory,
     verify_owner_file,
 )
 from lockstep.runtime.project_paths import PortableProjectPath
@@ -61,6 +63,38 @@ class _ProjectPublicationQueries:
                 "publication journal lacks exact commitment fields"
             ) from exc
         return hashlib.sha256(_canonical(commitment)).hexdigest()
+
+    def validated_journal(self, handle: PreparedPublication) -> dict[str, object]:
+        """Return one native-valid journal without initializing or mutating state."""
+
+        journal = self._read_journal(handle)
+        path = self.journal_path(handle)
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        try:
+            encoded = os.read(descriptor, self._limits.max_journal_bytes + 1)
+        finally:
+            os.close(descriptor)
+        if encoded != _canonical(journal):
+            raise PublicationJournalError("publication journal is not canonical")
+        if journal["phase"] == "applied":
+            self._verify_complete(journal["plan"], direction="apply")
+        elif journal["phase"] == "rolled_back":
+            self._verify_complete(journal["plan"], direction="rollback")
+        return journal
+
+    def validated_journal_digest(
+        self, journal_digest: str
+    ) -> tuple[PreparedPublication, dict[str, object]]:
+        """Recover and validate a handle from its public journal identity."""
+
+        digest = _digest(journal_digest, "journal digest")
+        raw = self._read_journal_digest(digest)
+        handle = PreparedPublication(
+            digest,
+            _digest(raw.get("request_digest"), "publication request digest"),
+            self.binding_digest,
+        )
+        return handle, self.validated_journal(handle)
 
     def prepared_for(
         self, effect_id: str, authority_request_digest: str
@@ -366,3 +400,37 @@ class _ProjectPublicationQueries:
 
     def _receipt(self, handle: PreparedPublication, phase: str) -> PublicationReceipt:
         return PublicationReceipt(handle.journal_digest, handle.request_digest, phase)
+
+
+def open_project_publication_queries(
+    owner_state_dir: str | Path, project_root: str | Path
+) -> _ProjectPublicationQueries:
+    """Open the native publication validator without any initialization writes."""
+
+    owner_state = Path(owner_state_dir).absolute()
+    verify_owner_directory(owner_state)
+    root = Path(project_root)
+    root_info = root.lstat()
+    if stat.S_ISLNK(root_info.st_mode) or not stat.S_ISDIR(root_info.st_mode):
+        raise PublicationConflict("project root must be a real directory")
+    binding = {
+        "schema": "lockstep.project-publisher-binding/v1",
+        "root": str(root.resolve(strict=True)),
+        "device": root_info.st_dev,
+        "inode": root_info.st_ino,
+    }
+    binding_digest = hashlib.sha256(_canonical(binding)).hexdigest()
+    directory = owner_state / "publications" / binding_digest
+    journals = directory / "journals"
+    verify_owner_directory(directory)
+    verify_owner_directory(journals)
+    queries = _ProjectPublicationQueries()
+    queries._project = root
+    queries._root_device = root_info.st_dev
+    queries._root_inode = root_info.st_ino
+    queries.binding_digest = binding_digest
+    queries._directory = directory
+    queries._journals = journals
+    queries._active = directory / "active.json"
+    queries._limits = PublicationLimits()
+    return queries

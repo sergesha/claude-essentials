@@ -21,6 +21,8 @@ def _observation_result(engine: object, args: argparse.Namespace, project: str) 
         return engine.history(args.run_id, project)
     if args.action == "events":
         return engine.events(args.run_id, project)
+    if args.action == "evidence":
+        return engine.evidence(args.run_id, project)
     raise support.AuthoringError("unknown scenario action")
 
 
@@ -58,7 +60,7 @@ def run_scenario_command(args: argparse.Namespace) -> int:
 
     project = support.current_project()
     recipes = project / ".lockstep" / "recipes"
-    observing = args.action in {"status", "wait", "history", "events"}
+    observing = args.action in {"status", "wait", "history", "events", "evidence"}
     engine = (
         engine_module.Engine.observe(state_dir(), recipes)
         if observing
@@ -70,7 +72,10 @@ def run_scenario_command(args: argparse.Namespace) -> int:
             if observing
             else _command_result(engine, args, str(project))
         )
-        support.write_json(result)
+        if args.action == "evidence":
+            support.write_canonical_json(result)
+        else:
+            support.write_json(result)
         return 0
     finally:
         engine.close()

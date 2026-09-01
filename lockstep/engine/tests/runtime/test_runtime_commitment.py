@@ -261,6 +261,19 @@ def test_public_managed_codex_binds_requirement_through_durable_commitment(
             assert launching_record.grant_digest == reference_grant.digest
             assert call.owner_digest == _snapshot_digest
             assert call.owner_snapshot == snapshot
+        projected = Engine.observe(
+            provisioned.owner_state,
+            provisioned.project / ".lockstep" / "recipes",
+        ).evidence(started["run_id"], str(provisioned.project))
+        managed = [
+            effect
+            for effect in projected["runs"][0]["effects"]
+            if effect["effect_kind"] == "managed"
+        ]
+        assert len(managed) == 1
+        assert managed[0]["phase"] == "launching"
+        assert managed[0]["launch"]["spawn"] is None
+        assert managed[0]["launch"]["public_launch_ref"]
     finally:
         observer.release()
         command.close()
