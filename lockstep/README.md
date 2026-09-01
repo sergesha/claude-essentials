@@ -25,8 +25,26 @@ by authored workflows; they are not illustrative-only files.
 
 The repository ships Claude and Codex plugin manifests. Both start
 `scripts/lockstep-plugin`, which installs the pinned environment and then runs
-the same Python package. Run `scripts/lockstep-install` for a local checkout and
-`lockstep doctor` after installation.
+the same Python package. From a local checkout root, run
+`scripts/lockstep-install`, then verify that installed environment with
+`uv run --project engine --no-sync lockstep doctor`.
+
+Claude Code, through the existing marketplace:
+
+```text
+/plugin marketplace add sergesha/claude-essentials
+/plugin install lockstep@claude-essentials
+```
+
+Codex, from a local checkout of the repository root:
+
+```bash
+codex plugin marketplace add /absolute/path/to/claude-essentials --json
+codex plugin add lockstep@claude-essentials --json
+```
+
+Start Codex interactively once and approve the installed hooks when prompted.
+Do not use hook-trust or approval bypass flags for normal operation.
 
 Codex receives a non-authoritative `LOCKSTEP_PLUGIN_HOST=codex` launcher marker.
 The launcher uses it only to recover `CODEX_HOME` from the installed plugin path.

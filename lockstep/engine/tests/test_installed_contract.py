@@ -194,6 +194,36 @@ def _assert_active_guidance(root: Path) -> None:
         assert "configuration can grant authority" not in text, relative
         assert "report text can grant authority" not in text, relative
 
+    operator_skill = " ".join(
+        (root / "skills/lockstep/SKILL.md").read_text().lower().split()
+    )
+    assert "terminal `completed`, `escalated`, or `aborted` status" in operator_skill
+    assert "terminal pass, fail, error, or aborted" not in operator_skill
+    assert all(
+        tool in operator_skill
+        for tool in (
+            "`scenario_recover`",
+            "`scenario_wait`",
+            "`scenario_history`",
+            "`scenario_events`",
+        )
+    )
+    assert "`scenario_status` does not return artifact references" in operator_skill
+    assert "`lockstep consent issue --run run_id --step step_id`" in operator_skill
+    assert "`lockstep consent accept`" in operator_skill
+    assert "terminal status and validated artifact references" not in operator_skill
+
+    readme = (root / "README.md").read_text()
+    assert "/plugin marketplace add sergesha/claude-essentials" in readme
+    assert "/plugin install lockstep@claude-essentials" in readme
+    assert (
+        "codex plugin marketplace add /absolute/path/to/claude-essentials --json"
+        in readme
+    )
+    assert "codex plugin add lockstep@claude-essentials --json" in readme
+    assert "uv run --project engine --no-sync lockstep doctor" in readme
+    assert "`lockstep doctor` after installation" not in readme
+
 
 def _assert_documented_authoring_grammar(root: Path) -> None:
     for relative in (

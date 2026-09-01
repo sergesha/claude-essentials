@@ -30,8 +30,9 @@ explicit runtime-validated owner consent authorize effects.
    declared schema. Evidence paths are project-relative.
 5. On a failed verdict, fix the reported cause and resubmit the same step. On a
    passed verdict, call `scenario_status` again.
-6. Continue until the engine returns a terminal PASS, FAIL, ERROR, or ABORTED
-   state. Never infer terminal state from an agent message or report file.
+6. Continue until the engine returns a terminal `completed`, `escalated`, or
+   `aborted` status. Never infer terminal state from an agent message or report
+   file.
 
 Native child workflow calls can make a parent wait. Observe the parent with
 `scenario_status`; do not forge child output, acceptance, lineage, or receipts.
@@ -39,6 +40,17 @@ The packaged `reviewed-change` and `parallel-review` workflows use this same
 runtime path and durable evidence model. When a workflow requests an independent
 agent, use the host's subagent capability and keep its evidence bound to the
 declared child workflow and artifacts.
+
+## Restart and recovery
+
+After a host or engine restart, do not create a replacement run. Call
+`scenario_recover` once for the current project, then call `scenario_status`
+with the existing run id. While the status is `running`, owned by the engine,
+and names `scenario_wait` as its next action, use `scenario_wait` for bounded
+read-only waiting. Use `scenario_history` for redacted checkpoint history and
+`scenario_events` for native/effect observations when diagnosing a run that is
+not advancing. Those observation tools do not advance the run or replace
+recovery.
 
 ## Evidence discipline
 
@@ -92,5 +104,10 @@ starting points for change and independent-review flows.
 
 Before ending a turn with a non-terminal run, report the run id, current step,
 last engine verdict, and the next required action. Before claiming completion,
-call `scenario_status` once more and quote the engine's terminal status and
-validated artifact references.
+call `scenario_status` once more and quote the engine's terminal status.
+`scenario_status` does not return artifact references. When a workflow stops for
+publication consent, the owner runs
+`lockstep consent issue --run RUN_ID --step STEP_ID` and then
+`lockstep consent accept`; report the `artifact_ref` from the successful
+acceptance result or durable receipt, never from status. Never ask the owner to
+paste the bearer token into chat, argv, logs, source, or report files.
