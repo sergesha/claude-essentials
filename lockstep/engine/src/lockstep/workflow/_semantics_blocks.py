@@ -32,12 +32,103 @@ from .ir import (
     ChooseIR,
     DecideIR,
     EscalateIR,
+    ExportedArtifactIR,
     GraphIR,
     ParallelIR,
     RepeatIR,
     StepIR,
     VerifyIR,
 )
+
+
+def _artifact_path(
+    state: _ValidationState, artifact: ExportedArtifactIR, pointer: str
+) -> PortableProjectPath:
+    try:
+        return PortableProjectPath.parse(artifact.path, "file")
+    except PortablePathError as exc:
+        fail(
+            state,
+            "LSW305",
+            f"artifact path must be one safe exact project-relative file: {exc}",
+            f"{pointer}/artifact/path",
+            "use a canonical contained project-relative file",
+        )
+
+
+def _write_covers_artifact(write: str, exported_path: PortableProjectPath) -> bool:
+    try:
+        declared = PortableProjectPath.parse(
+            write, "prefix" if write.endswith("/") else "file"
+        )
+    except PortablePathError:
+        return False
+    if declared.kind == "file":
+        return declared.relative == exported_path.relative
+    return (
+        declared.relative == exported_path.relative
+        or declared.relative in exported_path.relative.parents
+    )
+
+
+def _require_artifact_write(
+    state: _ValidationState,
+    item: StepIR,
+    exported_path: PortableProjectPath,
+    pointer: str,
+) -> None:
+    if any(_write_covers_artifact(write, exported_path) for write in item.writes):
+        return
+    fail(
+        state,
+        "LSW305",
+        "artifact path must be covered by the same step's writes",
+        f"{pointer}/artifact/path",
+        "add the exact artifact path or a containing write prefix",
+    )
+
+
+def _register_artifact_export(
+    state: _ValidationState,
+    item: StepIR,
+    artifact: ExportedArtifactIR,
+    pointer: str,
+) -> None:
+    logical = item.id or item.step
+    collisions = (
+        (
+            artifact.handle in state.exports,
+            f"duplicate exported artifact handle {artifact.handle!r}",
+            f"{pointer}/artifact/handle",
+            "use a unique artifact handle",
+        ),
+        (
+            artifact.path in state.export_paths,
+            f"duplicate exported artifact path {artifact.path!r}",
+            f"{pointer}/artifact/path",
+            "use a unique exported artifact path",
+        ),
+        (
+            logical in state.export_producers,
+            f"artifact producer {logical!r} is already claimed",
+            f"{pointer}/artifact",
+            "use a unique step id or producer",
+        ),
+    )
+    for collided, message, location, remedy in collisions:
+        if collided:
+            fail(state, "LSW304", message, location, remedy)
+    result_key = f"{logical.replace('-', '_')}_result"
+    state.exports[artifact.handle] = ChildArtifactContract(
+        artifact.handle,
+        artifact.path,
+        artifact.handle,
+        "text/markdown",
+        logical,
+        result_key,
+    )
+    state.export_paths.add(artifact.path)
+    state.export_producers.add(logical)
 
 
 def flow(
@@ -117,75 +208,9 @@ def step_writes(
     artifact = item.artifact
     if artifact is None:
         return item.writes
-    try:
-        exported_path = PortableProjectPath.parse(artifact.path, "file")
-    except PortablePathError as exc:
-        fail(
-            state,
-            "LSW305",
-            f"artifact path must be one safe exact project-relative file: {exc}",
-            f"{pointer}/artifact/path",
-            "use a canonical contained project-relative file",
-        )
-    covered = False
-    for write in item.writes:
-        try:
-            declared = PortableProjectPath.parse(
-                write, "prefix" if write.endswith("/") else "file"
-            )
-        except PortablePathError:
-            continue
-        if declared.kind == "file":
-            covered = covered or declared.relative == exported_path.relative
-        else:
-            covered = covered or (
-                declared.relative == exported_path.relative
-                or declared.relative in exported_path.relative.parents
-            )
-    if not covered:
-        fail(
-            state,
-            "LSW305",
-            "artifact path must be covered by the same step's writes",
-            f"{pointer}/artifact/path",
-            "add the exact artifact path or a containing write prefix",
-        )
-    logical = item.id or item.step
-    if artifact.handle in state.exports:
-        fail(
-            state,
-            "LSW304",
-            f"duplicate exported artifact handle {artifact.handle!r}",
-            f"{pointer}/artifact/handle",
-            "use a unique artifact handle",
-        )
-    if artifact.path in state.export_paths:
-        fail(
-            state,
-            "LSW304",
-            f"duplicate exported artifact path {artifact.path!r}",
-            f"{pointer}/artifact/path",
-            "use a unique exported artifact path",
-        )
-    if logical in state.export_producers:
-        fail(
-            state,
-            "LSW304",
-            f"artifact producer {logical!r} is already claimed",
-            f"{pointer}/artifact",
-            "use a unique step id or producer",
-        )
-    result_key = f"{logical.replace('-', '_')}_result"
-    state.exports[artifact.handle] = ChildArtifactContract(
-        artifact.handle,
-        artifact.path,
-        artifact.handle,
-        "text/markdown",
-        logical,
-        result_key,
-    )
-    state.export_paths.add(artifact.path)
-    state.export_producers.add(logical)
+    exported_path = _artifact_path(state, artifact, pointer)
+    _require_artifact_write(state, item, exported_path, pointer)
+    _register_artifact_export(state, item, artifact, pointer)
     return tuple(write for write in item.writes if write != artifact.path)
 
 

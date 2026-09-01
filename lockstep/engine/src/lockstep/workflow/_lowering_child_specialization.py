@@ -313,6 +313,89 @@ def _specialize_child_descriptor(
     return descriptor, matching_artifact, managed_logical_id
 
 
+def _specialize_child_node_state(
+    node: dict[str, Any],
+    *,
+    namespace: str,
+    key_map: dict[str, str],
+    new_state: dict[str, Any],
+) -> None:
+    output = node.get("output")
+    if isinstance(output, dict):
+        node["output"] = {
+            key_map.get(key, key): _rewrite_child_state_template(value, key_map)
+            for key, value in output.items()
+        }
+    for field in ("state_key", "resume_key"):
+        value = node.get(field)
+        if isinstance(value, str):
+            node[field] = key_map.get(
+                value, _specialized_state_key(namespace, value)
+            )
+            new_state.setdefault(node[field], "dict")
+
+
+def _managed_brief_content(message: dict[str, Any], matching_artifact: bool) -> str:
+    content = (
+        f"Task:\n{message['task']}\n\n"
+        f"Exit criterion:\n{message['exit_criterion']}\n"
+    )
+    artifact = message.get("artifact_contract")
+    if not matching_artifact or not isinstance(artifact, dict):
+        return content
+    markdown = artifact.get("markdown")
+    sections = markdown.get("sections") if isinstance(markdown, dict) else None
+    if not isinstance(artifact.get("path"), str) or not isinstance(sections, list):
+        return content
+    return (
+        content
+        + f"\nArtifact path: {artifact['path']}\n"
+        + "Requested Markdown headings: "
+        + ", ".join(str(section) for section in sections)
+        + "\n"
+    )
+
+
+def _managed_brief_identity(
+    original_name: str, namespace: str, managed_logical_id: str
+) -> tuple[str, str]:
+    state_key = "managed_brief_" + hashlib.sha256(
+        b"lockstep.managed-brief/v1\0"
+        + namespace.encode("utf-8")
+        + b"\0"
+        + managed_logical_id.encode("utf-8")
+    ).hexdigest()
+    match = re.fullmatch(r"step-(.+)-effect-[0-9a-f]{12}", original_name)
+    if match is not None:
+        stable = _stable_id(f"/flow/{match.group(1)}", "step", "managed-brief")
+    else:
+        digest = hashlib.sha256(
+            b"lockstep.managed-brief-node/v1\0" + original_name.encode("utf-8")
+        ).hexdigest()[:12]
+        stable = f"step-{original_name}-managed-brief-{digest}"
+    return state_key, f"{namespace}.{stable}"
+
+
+def _managed_brief(
+    message: dict[str, Any],
+    *,
+    original_name: str,
+    namespace: str,
+    managed_logical_id: str | None,
+    matching_artifact: bool,
+) -> tuple[str, str, str] | None:
+    if managed_logical_id is None:
+        return None
+    if not isinstance(message.get("task"), str) or not isinstance(
+        message.get("exit_criterion"), str
+    ):
+        return None
+    state_key, node_name = _managed_brief_identity(
+        original_name, namespace, managed_logical_id
+    )
+    return node_name, state_key, _managed_brief_content(message, matching_artifact)
+
+
 def _specialize_child_node(
     raw_node: object,
     *,
@@ -328,17 +411,9 @@ def _specialize_child_node(
     if not isinstance(raw_node, dict):
         raise ValueError("resolved child node must be a mapping")  # noqa: TRY004
     node = plain(raw_node)
-    output = node.get("output")
-    if isinstance(output, dict):
-        node["output"] = {
-            key_map.get(key, key): _rewrite_child_state_template(value, key_map)
-            for key, value in output.items()
-        }
-    for field in ("state_key", "resume_key"):
-        value = node.get(field)
-        if isinstance(value, str):
-            node[field] = key_map.get(value, _specialized_state_key(namespace, value))
-            new_state.setdefault(node[field], "dict")
+    _specialize_child_node_state(
+        node, namespace=namespace, key_map=key_map, new_state=new_state
+    )
     message = node.get("message")
     descriptor = message.get("lockstep_effect") if isinstance(message, dict) else None
     if isinstance(descriptor, dict):
@@ -353,53 +428,20 @@ def _specialize_child_node(
             artifact_bindings=artifact_bindings,
             inside_parallel_branch=inside_parallel_branch,
         )
-        if not isinstance(message.get("task"), str) or not isinstance(
-            message.get("exit_criterion"), str
-        ):
-            managed_logical_id = None
-        brief = None
-        if managed_logical_id is not None:
-            state_key = "managed_brief_" + hashlib.sha256(
-                b"lockstep.managed-brief/v1\0"
-                + namespace.encode("utf-8")
-                + b"\0"
-                + managed_logical_id.encode("utf-8")
-            ).hexdigest()
-            task = message["task"]
-            exit_criterion = message["exit_criterion"]
-            content = f"Task:\n{task}\n\nExit criterion:\n{exit_criterion}\n"
-            artifact = message.get("artifact_contract")
-            if matching_artifact and isinstance(artifact, dict):
-                markdown = artifact.get("markdown")
-                sections = (
-                    markdown.get("sections") if isinstance(markdown, dict) else None
-                )
-                if isinstance(artifact.get("path"), str) and isinstance(
-                    sections, list
-                ):
-                    content += (
-                        f"\nArtifact path: {artifact['path']}\n"
-                        "Requested Markdown headings: "
-                        + ", ".join(str(section) for section in sections)
-                        + "\n"
-                    )
+        brief = _managed_brief(
+            message,
+            original_name=original_name,
+            namespace=namespace,
+            managed_logical_id=managed_logical_id,
+            matching_artifact=matching_artifact,
+        )
+        if brief is not None:
+            _brief_name, state_key, _content = brief
             new_state[state_key] = "str"
             rewritten["inputs"] = {
                 "brief": {"state_key": state_key},
                 "snapshot": {"runtime_key": "current_project_snapshot"},
             }
-            match = re.fullmatch(r"step-(.+)-effect-[0-9a-f]{12}", original_name)
-            if match is not None:
-                stable = _stable_id(
-                    f"/flow/{match.group(1)}", "step", "managed-brief"
-                )
-            else:
-                digest = hashlib.sha256(
-                    b"lockstep.managed-brief-node/v1\0"
-                    + original_name.encode("utf-8")
-                ).hexdigest()[:12]
-                stable = f"step-{original_name}-managed-brief-{digest}"
-            brief = (f"{namespace}.{stable}", state_key, content)
         parse_effect_descriptor(rewritten, known_state_keys=set(new_state))
         message["lockstep_effect"] = rewritten
     else:

@@ -757,7 +757,7 @@ def test_public_acceptance_rejects_every_wrong_commitment_without_mutation(
     (
         command,
         project,
-        _recipes,
+        recipes,
         owner_state,
         run_id,
         accept_step,
@@ -829,15 +829,33 @@ def test_public_acceptance_rejects_every_wrong_commitment_without_mutation(
                 == before
             )
 
+        delivered_retry_attacker = command.authority.issue(
+            _commitment_with_wrong_facet(
+                _commitment_with_wrong_facet(exact, "coordinate"), "audience"
+            )
+        )
+
         issued = command.issue_publication_consent(
             run_id, accept_step, preview["digest"], project=str(project)
         )
         command.scenario_accept_artifact(issued.token, project=str(project))
         completed = _wait_for_public_terminal(command, project, run_id)
         assert (project / ".lockstep" / "review.md").read_bytes() == artifact_bytes
+        command.close()
+        command = Engine.command(owner_state, recipes)
+        command.scenario_recover(str(project), limit=128)
+        command.runtime.bind(command.catalog.get(run_id))
         with command._admission_recovery_lock:
             after_exact = _durable_authority_surface(
                 command, project, run_id, owner_state
+            )
+            with pytest.raises(LockstepError, match="invalid|stale"):
+                command.scenario_accept_artifact(
+                    delivered_retry_attacker.token, project=str(project)
+                )
+            assert (
+                _durable_authority_surface(command, project, run_id, owner_state)
+                == after_exact
             )
             assert (
                 command.scenario_accept_artifact(issued.token, project=str(project))

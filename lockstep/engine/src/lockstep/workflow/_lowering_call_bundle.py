@@ -27,6 +27,47 @@ from .ir import CallIR
 
 
 class _LoweringCallBundle:
+    @staticmethod
+    def _load_child_document(
+        resolved: Any, source_file: Any | None
+    ) -> tuple[Any, dict[str, Any], dict[str, Any]]:
+        selected_file = source_file or next(
+            item
+            for item in resolved.standalone.files
+            if item.relative_path == resolved.standalone.root_relative_path
+        )
+        document = yaml.safe_load(selected_file.content)
+        if not isinstance(document, dict):
+            raise ValueError(  # noqa: TRY004
+                "resolved child root must be a YAML mapping"
+            )
+        state = document.setdefault("state", {})
+        if not isinstance(state, dict):
+            raise ValueError("resolved child state must be a mapping")  # noqa: TRY004
+        return selected_file, document, state
+
+    @staticmethod
+    def _validate_root_child_state(
+        resolved: Any, selected_file: Any, state: dict[str, Any]
+    ) -> None:
+        if selected_file.relative_path != resolved.standalone.root_relative_path:
+            return
+        child_contract = resolved.contract
+        for key, state_type in {
+            **dict(child_contract.state_inputs),
+            **dict(child_contract.state_exports),
+        }.items():
+            if key not in state:
+                raise ValueError(
+                    f"child state contract key {key!r} is missing from "
+                    "standalone schema"
+                )
+            if state[key] != state_type:
+                raise ValueError(
+                    f"child state contract type mismatch for {key!r}: "
+                    f"expected {state_type!r}, got {state[key]!r}"
+                )
+
     def _register_specialized_child_channels(
         self,
         specialized: dict[str, Any],
@@ -379,33 +420,11 @@ class _LoweringCallBundle:
         source_file: Any | None = None,
         artifact_bindings: tuple[tuple[str, str, str, str, str, str], ...] = (),
     ) -> dict[str, Any]:
-        selected_file = source_file or next(
-            item
-            for item in resolved.standalone.files
-            if item.relative_path == resolved.standalone.root_relative_path
+        selected_file, document, state = self._load_child_document(
+            resolved, source_file
         )
-        document = yaml.safe_load(selected_file.content)
-        if not isinstance(document, dict):
-            raise ValueError("resolved child root must be a YAML mapping")  # noqa: TRY004
-        state = document.setdefault("state", {})
-        if not isinstance(state, dict):
-            raise ValueError("resolved child state must be a mapping")  # noqa: TRY004
         child_contract = resolved.contract
-        if selected_file.relative_path == resolved.standalone.root_relative_path:
-            for key, state_type in {
-                **dict(child_contract.state_inputs),
-                **dict(child_contract.state_exports),
-            }.items():
-                if key not in state:
-                    raise ValueError(
-                        f"child state contract key {key!r} is missing from "
-                        "standalone schema"
-                    )
-                if state[key] != state_type:
-                    raise ValueError(
-                        f"child state contract type mismatch for {key!r}: "
-                        f"expected {state_type!r}, got {state[key]!r}"
-                    )
+        self._validate_root_child_state(resolved, selected_file, state)
         key_map, new_state = _specialized_child_state(
             state,
             child_contract=child_contract,
