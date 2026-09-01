@@ -289,49 +289,50 @@ class _EffectCoordinatorAdmission:
             raise ProviderContractViolation(
                 "acceptance requires the owner consent authority"
             )
-        binding, _snapshot, _interrupt, _descriptor, effect_id = (
-            self._pending_acceptance(run_id, source)
-        )
-        lease = self._acquire(effect_id)
-        try:
-            with self._runtime.commitment_guard(run_id, source) as guarded:
-                guarded_descriptor = parse_effect_descriptor(
-                    self._raw_descriptor(guarded.interrupt)
-                )
-                if (
-                    guarded.binding != binding
-                    or guarded.interrupt.coordinate != source
-                    or not isinstance(guarded_descriptor, AcceptDescriptor)
-                ):
-                    raise CoordinatorLineageError(
-                        "acceptance changed before owner consent issuance"
+        with self._runtime.decision_guard(run_id):
+            binding, _snapshot, _interrupt, _descriptor, effect_id = (
+                self._pending_acceptance(run_id, source)
+            )
+            lease = self._acquire(effect_id)
+            try:
+                with self._runtime.commitment_guard(run_id, source) as guarded:
+                    guarded_descriptor = parse_effect_descriptor(
+                        self._raw_descriptor(guarded.interrupt)
                     )
-                guarded_effect_id = derive_effect_id(
-                    source, guarded_descriptor.digest
-                )
-                if guarded_effect_id != effect_id:
-                    raise CoordinatorLineageError(
-                        "acceptance changed before owner consent issuance"
+                    if (
+                        guarded.binding != binding
+                        or guarded.interrupt.coordinate != source
+                        or not isinstance(guarded_descriptor, AcceptDescriptor)
+                    ):
+                        raise CoordinatorLineageError(
+                            "acceptance changed before owner consent issuance"
+                        )
+                    guarded_effect_id = derive_effect_id(
+                        source, guarded_descriptor.digest
                     )
-                commitment, current = self._acceptance_commitment(
-                    run_id,
-                    binding,
-                    guarded.snapshot,
-                    guarded.interrupt,
-                    guarded_descriptor,
-                    effect_id,
-                )
-                if (
-                    current.phase != "prepared"
-                    or not self._leases.is_current(lease)
-                    or commitment.digest != expected_commitment_digest
-                ):
-                    raise StaleEffectRevision(
-                        "acceptance changed after owner consent preview"
+                    if guarded_effect_id != effect_id:
+                        raise CoordinatorLineageError(
+                            "acceptance changed before owner consent issuance"
+                        )
+                    commitment, current = self._acceptance_commitment(
+                        run_id,
+                        binding,
+                        guarded.snapshot,
+                        guarded.interrupt,
+                        guarded_descriptor,
+                        effect_id,
                     )
-                return self._authority.issue(commitment)
-        finally:
-            self._leases.release(lease)
+                    if (
+                        current.phase != "prepared"
+                        or not self._leases.is_current(lease)
+                        or commitment.digest != expected_commitment_digest
+                    ):
+                        raise StaleEffectRevision(
+                            "acceptance changed after owner consent preview"
+                        )
+                    return self._authority.issue(commitment)
+            finally:
+                self._leases.release(lease)
 
     @staticmethod
     def _acceptance_retry_commitment(

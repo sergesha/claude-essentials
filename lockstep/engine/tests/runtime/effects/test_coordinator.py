@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from itertools import count
+import threading
 from threading import RLock
 
 import pytest
@@ -157,6 +159,7 @@ class FakeRuntime:
         self.commitment_callbacks = []
         self._decision_lock = RLock()
         self.decision_guard_depth = 0
+        self.decision_guard_entries = 0
 
     def binding(self, run_id: str) -> RunBinding:
         assert run_id == self._binding.public_run_id
@@ -219,6 +222,7 @@ class FakeRuntime:
     def decision_guard(self, run_id):
         assert run_id == self._binding.public_run_id
         with self._decision_lock:
+            self.decision_guard_entries += 1
             self.decision_guard_depth += 1
             try:
                 yield
@@ -1420,12 +1424,24 @@ def test_acceptance_submission_serializes_redeem_through_exact_delivery(
         "run-1", coordinate, preview.digest
     )
     deliver_ready = coordinator.deliver_ready
+    commit_acceptance = coordinator._commit_acceptance_submission
+    guarded_phases = []
+
+    def commit_inside_transaction(**kwargs):
+        result = commit_acceptance(**kwargs)
+        guarded_phases.append(("sealed", runtime.decision_guard_depth))
+        return result
 
     def deliver_with_competing_recovery(run_id, interrupt_ids=None):
+        guarded_phases.append(("delivery", runtime.decision_guard_depth))
         if interrupt_ids is not None and runtime.decision_guard_depth == 0:
             deliver_ready(run_id)
         return deliver_ready(run_id, interrupt_ids)
 
+    before_entries = runtime.decision_guard_entries
+    monkeypatch.setattr(
+        coordinator, "_commit_acceptance_submission", commit_inside_transaction
+    )
     monkeypatch.setattr(coordinator, "deliver_ready", deliver_with_competing_recovery)
 
     status = coordinator.submit_acceptance("run-1", coordinate, issued.token)
@@ -1433,6 +1449,100 @@ def test_acceptance_submission_serializes_redeem_through_exact_delivery(
     assert status.status == "completed"
     assert ledger.get(preview.effect_id).phase == "delivered"
     assert len(runtime.resume_calls) == 1
+    assert runtime.decision_guard_entries == before_entries + 1
+    assert guarded_phases == [("sealed", 1), ("delivery", 1)]
+
+
+def test_acceptance_issue_and_submit_share_invocation_then_effect_lock_order(
+    system, tmp_path, monkeypatch
+) -> None:
+    """Catches issuance taking the effect lease before native serialization."""
+
+    from lockstep.runtime.effects.authority import EffectAuthorityDenied
+
+    (
+        coordinator,
+        _authority,
+        runtime,
+        ledger,
+        _store,
+        coordinate,
+        _raw,
+        _producer_result,
+        _artifact_ref,
+        _registry,
+        _blobs,
+    ) = _acceptance_system(
+        system, tmp_path, monkeypatch, tokens=("accept-token", "second-token")
+    )
+    assert coordinator.reconcile("run-1").action == "prepared"
+    preview = coordinator.preview_acceptance("run-1", coordinate)
+    first = coordinator.issue_acceptance_consent(
+        "run-1", coordinate, preview.digest
+    )
+    effect_acquired = threading.Event()
+    submit_attempted = threading.Event()
+    submit_entered = threading.Event()
+    decision_local = threading.local()
+    acquire = coordinator._acquire
+    commitment_guard = runtime.commitment_guard
+
+    @contextmanager
+    def signaling_decision_guard(run_id):
+        is_submit = threading.current_thread().name == "accept-submit"
+        if is_submit:
+            submit_attempted.set()
+        with runtime._decision_lock:
+            if is_submit:
+                submit_entered.set()
+            decision_local.depth = getattr(decision_local, "depth", 0) + 1
+            try:
+                yield
+            finally:
+                decision_local.depth -= 1
+
+    @contextmanager
+    def serialized_commitment_guard(run_id, source):
+        if getattr(decision_local, "depth", 0):
+            with commitment_guard(run_id, source) as guarded:
+                yield guarded
+            return
+        with runtime._decision_lock, commitment_guard(run_id, source) as guarded:
+            yield guarded
+
+    def acquire_with_issue_barrier(effect_id):
+        lease = acquire(effect_id)
+        if threading.current_thread().name == "accept-issue":
+            effect_acquired.set()
+            assert submit_attempted.wait(2)
+            if not getattr(decision_local, "depth", 0):
+                assert submit_entered.wait(2)
+        return lease
+
+    monkeypatch.setattr(runtime, "decision_guard", signaling_decision_guard)
+    monkeypatch.setattr(runtime, "commitment_guard", serialized_commitment_guard)
+    monkeypatch.setattr(coordinator, "_acquire", acquire_with_issue_barrier)
+
+    def issue():
+        threading.current_thread().name = "accept-issue"
+        return coordinator.issue_acceptance_consent(
+            "run-1", coordinate, preview.digest
+        )
+
+    def submit():
+        threading.current_thread().name = "accept-submit"
+        return coordinator.submit_acceptance("run-1", coordinate, first.token)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        issued = pool.submit(issue)
+        assert effect_acquired.wait(2)
+        submitted = pool.submit(submit)
+        with pytest.raises(EffectAuthorityDenied, match="already issued"):
+            issued.result(timeout=2)
+        status = submitted.result(timeout=2)
+
+    assert status.status == "completed"
+    assert ledger.get(preview.effect_id).phase == "delivered"
 
 
 def test_acceptance_receipt_commit_before_ledger_seal_retries_exactly_once(
