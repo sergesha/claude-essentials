@@ -797,7 +797,7 @@ def _run_probe(
 
 def _assert_cli_resource_contract(
     executable: Path, project: Path, env: dict[str, str]
-) -> None:
+) -> tuple[dict[str, object], ...]:
     project.mkdir(parents=True, exist_ok=True)
     listed = subprocess.run(
         [str(executable), "template", "list"],
@@ -895,13 +895,12 @@ def _assert_cli_resource_contract(
                 assert estimate["schema"] == "lockstep.structural-estimate/v1"
                 estimates.append(estimate)
     assert len(estimates) == 3
-    assert all("peak_parallel_child_calls" in estimate for estimate in estimates)
-    assert all("peak_parallel_subcalls" not in estimate for estimate in estimates)
+    return tuple(estimates)
 
 
 def _assert_active_examples_compile(
     executable: Path, source_root: Path, project: Path, env: dict[str, str]
-) -> None:
+) -> tuple[dict[str, object], ...]:
     recipes = project / ".lockstep/recipes"
     recipes.mkdir(parents=True)
     examples = tuple(sorted((source_root / "recipes/examples").glob("*.recipe.yaml")))
@@ -935,8 +934,7 @@ def _assert_active_examples_compile(
         assert estimate["schema"] == "lockstep.structural-estimate/v1"
         estimates.append(estimate)
     assert len(estimates) == len(examples)
-    assert all("peak_parallel_child_calls" in estimate for estimate in estimates)
-    assert all("peak_parallel_subcalls" not in estimate for estimate in estimates)
+    return tuple(estimates)
 
 
 def _assert_surface_isolation(
@@ -971,12 +969,23 @@ def _assert_surface_isolation(
         assert leaked == []
 
 
-def _assert_manual_estimate(observed: dict[str, object]) -> None:
+def _manual_estimate(observed: dict[str, object]) -> dict[str, object]:
     estimate = observed["manual_estimate"]
     assert isinstance(estimate, dict)
     assert estimate["schema"] == "lockstep.structural-estimate/v1"
-    assert "peak_parallel_child_calls" in estimate
-    assert "peak_parallel_subcalls" not in estimate
+    return estimate
+
+
+def _assert_estimates_are_current(
+    estimates: tuple[dict[str, object], ...],
+) -> None:
+    assert estimates
+    assert all(
+        estimate["schema"] == "lockstep.structural-estimate/v1"
+        for estimate in estimates
+    )
+    assert all("peak_parallel_child_calls" in estimate for estimate in estimates)
+    assert all("peak_parallel_subcalls" not in estimate for estimate in estimates)
 
 
 @pytest.fixture(scope="module")
@@ -1012,8 +1021,8 @@ def test_legacy_runner_import_oracle_catches_absolute_and_relative_imports(
 
 
 def test_source_checkout_active_guidance_describes_the_installed_contract() -> None:
-    _assert_active_guidance(ROOT)
     _assert_documented_authoring_grammar(ROOT)
+    _assert_active_guidance(ROOT)
 
 
 @pytest.mark.parametrize(
@@ -1065,19 +1074,21 @@ def test_source_checkout_runs_all_complete_public_flows_from_foreign_cwd(
         environment_root=source_environment,
         exclude_checkout=False,
     )
-    assert observed["legacy_runner_importable"] is False
-    _assert_manual_estimate(observed)
-    _assert_cli_resource_contract(
+    cli_estimates = _assert_cli_resource_contract(
         source_environment / "bin/lockstep",
         tmp_path / "foreign-source-cli",
         source_env,
     )
-    _assert_active_examples_compile(
+    example_estimates = _assert_active_examples_compile(
         source_environment / "bin/lockstep",
         ROOT,
         tmp_path / "foreign-source-examples",
         source_env,
     )
+    _assert_estimates_are_current(
+        (*cli_estimates, *example_estimates, _manual_estimate(observed))
+    )
+    assert observed["legacy_runner_importable"] is False
 
 
 def test_clean_wheel_isolated_install_contains_only_current_runtime_and_runs_full_flows(
@@ -1137,22 +1148,14 @@ def test_clean_wheel_isolated_install_contains_only_current_runtime_and_runs_ful
         exclude_checkout=True,
     )
     with zipfile.ZipFile(built_wheel) as archive:
-        names = archive.namelist()
         _assert_no_legacy_runner_importers(
             {
                 name: archive.read(name)
-                for name in names
+                for name in archive.namelist()
                 if name.endswith(".py")
             }
         )
-        assert not any(name.endswith("lockstep/runtime/runners.py") for name in names)
-        for name in names:
-            if name.endswith((".py", ".md", ".yaml", ".json")):
-                content = archive.read(name)
-                assert all(term not in content for term in RETIRED_BYTES), name
-    assert observed["legacy_runner_importable"] is False
-    _assert_manual_estimate(observed)
-    _assert_cli_resource_contract(
+    cli_estimates = _assert_cli_resource_contract(
         venv / "bin/lockstep",
         tmp_path / "foreign-wheel-cli",
         _clean_env(
@@ -1160,6 +1163,15 @@ def test_clean_wheel_isolated_install_contains_only_current_runtime_and_runs_ful
             PATH=f"{venv / 'bin'}:/usr/bin:/bin",
         ),
     )
+    _assert_estimates_are_current((*cli_estimates, _manual_estimate(observed)))
+    with zipfile.ZipFile(built_wheel) as archive:
+        names = archive.namelist()
+        assert not any(name.endswith("lockstep/runtime/runners.py") for name in names)
+        for name in names:
+            if name.endswith((".py", ".md", ".yaml", ".json")):
+                content = archive.read(name)
+                assert all(term not in content for term in RETIRED_BYTES), name
+    assert observed["legacy_runner_importable"] is False
 
 
 def _stage_plugin(destination: Path) -> None:
@@ -1183,6 +1195,16 @@ def _stage_plugin(destination: Path) -> None:
             shutil.copy2(source, target)
             copied.add(relative)
     assert copied <= tracked
+
+
+def test_staged_delivery_excludes_source_examples_and_keeps_current_guidance(
+    tmp_path: Path,
+) -> None:
+    stage = tmp_path / "staged-plugin-guidance"
+    _stage_plugin(stage)
+    assert not (stage / "recipes").exists()
+    _assert_documented_authoring_grammar(stage)
+    _assert_active_guidance(stage)
 
 
 def test_staged_plugin_uses_only_tracked_delivery_paths_and_runs_full_flows(
@@ -1275,11 +1297,9 @@ def test_staged_plugin_uses_only_tracked_delivery_paths_and_runs_full_flows(
     _assert_no_legacy_runner_importers(
         _active_file_bytes(stage, ACTIVE_ROOT_PATHS)
     )
-    _assert_active_bytes_are_retired(stage, ACTIVE_ROOT_PATHS)
-    _assert_active_guidance(stage)
-    _assert_documented_authoring_grammar(stage)
-    assert observed["legacy_runner_importable"] is False
-    _assert_manual_estimate(observed)
-    _assert_cli_resource_contract(
+    cli_estimates = _assert_cli_resource_contract(
         stage / "engine/.venv/bin/lockstep", foreign / "resource-contract", env
     )
+    _assert_estimates_are_current((*cli_estimates, _manual_estimate(observed)))
+    _assert_active_bytes_are_retired(stage, ACTIVE_ROOT_PATHS)
+    assert observed["legacy_runner_importable"] is False
