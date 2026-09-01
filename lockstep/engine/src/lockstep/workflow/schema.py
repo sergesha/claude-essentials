@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, ClassVar, NoReturn
+from typing import Any, ClassVar
 
 import yaml
 from yaml.events import (
@@ -20,6 +18,13 @@ from yaml.events import (
 )
 from yaml.nodes import MappingNode, Node, SequenceNode
 
+from ._schema_validation import (
+    _V2_KEYS,
+    MarkedDocument,
+    SourceMark,
+    _escape,
+    _SchemaValidation,
+)
 from .diagnostics import Diagnostic, DiagnosticError
 from .ir import (
     AcceptIR,
@@ -34,47 +39,18 @@ from .ir import (
     ParallelIR,
     RepeatIR,
     RetryIR,
-    SourceLocation,
     StepIR,
     VerifyIR,
     WorkflowDefaultsIR,
     WorkflowIR,
 )
 
-_ID = re.compile(r"^[a-z][a-z0-9-]*$")
 _WORKFLOW_SUFFIX = ".workflow.yaml"
 _MAX_YAML_DEPTH = 64
 _MAX_YAML_NODES = 50_000
 _MAX_YAML_COLLECTION_ITEMS = 10_000
 _MAX_YAML_SCALAR_BYTES = 2 * 1024 * 1024
 _BLOCKS = frozenset({"step", "verify", "decide", "choose", "repeat", "call", "accept", "parallel", "graph", "include_graph", "escalate"})
-_V2_KEYS = frozenset({
-    "goto", "race", "cancel", "cancel_on_failure", "fail_fast", "speculative",
-    "cleanup_deadline", "quorum", "weighted_quorum", "first_success", "first_terminal",
-    "dynamic_branches", "branch_map", "map", "cross_machine", "patch", "patch_export",
-    "merge", "merge_order", "conflict_resolution", "checkpoint", "resume", "migrate",
-    "remote_heartbeat", "remote_lease", "artifact_store", "template", "templates",
-    "template_registry", "plugin", "plugins", "runtime_compilation",
-})
-
-
-SourceMark = SourceLocation
-
-
-@dataclass(frozen=True)
-class MarkedDocument:
-    path: Path
-    data: Any
-    marks: Mapping[str, SourceMark]
-    source_sha256: str
-
-    def mark_for(self, pointer: str) -> SourceMark | None:
-        current = pointer
-        while current not in self.marks and current:
-            current = current.rsplit("/", 1)[0]
-        return self.marks.get(current) or self.marks.get("")
-
-
 class _MarkedYamlError(Exception):
     def __init__(self, code: str, message: str, pointer: str, mark: Any) -> None:
         self.code, self.message, self.pointer, self.mark = code, message, pointer, mark
@@ -146,10 +122,6 @@ class _MarkedSafeLoader(yaml.SafeLoader):
             index += 1
         node.end_mark = self.get_event().end_mark
         return node
-
-
-def _escape(pointer_part: str) -> str:
-    return pointer_part.replace("~", "~0").replace("/", "~1")
 
 
 def _source_mark(mark: Any) -> SourceMark:
@@ -258,73 +230,10 @@ def load_workflow(path: str | Path) -> MarkedDocument:
     return load_workflow_bytes(source, source.read_bytes())
 
 
-class _Parser:
+class _Parser(_SchemaValidation):
     def __init__(self, document: MarkedDocument) -> None:
         self.document = document
         self._ids: dict[str, str] = {}
-
-    def fail(self, code: str, message: str, pointer: str, hint: str) -> NoReturn:
-        mark = self.document.mark_for(pointer)
-        raise DiagnosticError((Diagnostic(
-            code, message, self.document.path,
-            mark.line if mark else None, mark.column if mark else None, pointer, hint,
-        ),))
-
-    def mapping(self, value: Any, pointer: str, noun: str) -> dict[str, Any]:
-        if not isinstance(value, dict):
-            self.fail("LSW108", f"{noun} must be a mapping", pointer, f"make {noun} a YAML mapping")
-        return value
-
-    def sequence(self, value: Any, pointer: str, noun: str) -> list[Any]:
-        if not isinstance(value, list):
-            self.fail("LSW108", f"{noun} must be a list", pointer, f"make {noun} a YAML list")
-        return value
-
-    def string(self, value: Any, pointer: str, noun: str) -> str:
-        if not isinstance(value, str) or not value:
-            self.fail("LSW108", f"{noun} must be a non-empty string", pointer, f"provide a non-empty {noun}")
-        return value
-
-    def positive_int(self, value: Any, pointer: str, noun: str) -> int:
-        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
-            self.fail("LSW108", f"{noun} must be a positive integer", pointer, f"provide a positive {noun}")
-        return value
-
-    def keys(self, value: dict[str, Any], pointer: str, allowed: Iterable[str], required: Iterable[str] = ()) -> None:
-        allowed_set = set(allowed)
-        for key in value:
-            key_pointer = f"{pointer}/{_escape(str(key))}"
-            if not isinstance(key, str):
-                self.fail("LSW105", "mapping keys must be strings", key_pointer, "use a string key")
-            if key.startswith("x-"):
-                continue
-            if key in _V2_KEYS:
-                self.fail("LSW120", f"{key!r} is not available in Workflow DSL v1", key_pointer, "remove the v2-only key")
-            if key not in allowed_set:
-                self.fail("LSW105", f"unknown key {key!r}", key_pointer, "remove it or prefix inert metadata with x-")
-        for key in required:
-            if key not in value:
-                self.fail("LSW106", f"missing required key {key!r}", pointer, f"add required key {key!r}")
-
-    def identifier(self, value: Any, pointer: str, noun: str = "id", optional: bool = False) -> str | None:
-        if value is None and optional:
-            return None
-        text = self.string(value, pointer, noun)
-        if not _ID.fullmatch(text):
-            self.fail("LSW110", f"invalid {noun} {text!r}", pointer, "use lowercase letters, digits, and hyphens, beginning with a letter")
-        return text
-
-    def strings(self, value: Any, pointer: str, noun: str) -> tuple[str, ...]:
-        items = self.sequence(value, pointer, noun)
-        return tuple(self.string(item, f"{pointer}/{index}", noun.removesuffix("s")) for index, item in enumerate(items))
-
-    def handler(self, value: Any, pointer: str) -> str | None:
-        if value is None:
-            return None
-        text = self.string(value, pointer, "outcome handler")
-        if text != "escalate":
-            self.fail("LSW108", "v1 outcome handlers must be escalate", pointer, "use escalate")
-        return text
 
     def parse(self) -> WorkflowIR:
         root = self.mapping(self.document.data, "", "workflow document")
@@ -382,7 +291,11 @@ class _Parser:
     def block_step(self, item: dict[str, Any], pointer: str) -> StepIR:
         self.keys(item, pointer, {"step", "id", "task", "exit", "writes", "evidence", "artifact", "retry", "on_failure", "on_error"}, {"step", "task", "exit"})
         step = self.identifier(item["step"], f"{pointer}/step", "step")
-        artifact = self.exported_artifact(item["artifact"], f"{pointer}/artifact") if "artifact" in item else None
+        artifact = (
+            self.exported_artifact(item["artifact"], f"{pointer}/artifact")
+            if "artifact" in item
+            else None
+        )
         return StepIR(self.identifier(item.get("id"), f"{pointer}/id", optional=True), step, self.string(item["task"], f"{pointer}/task", "task"), self.string(item["exit"], f"{pointer}/exit", "exit"), self.strings(item.get("writes", []), f"{pointer}/writes", "writes"), self.optional_mapping(item, "evidence", pointer), artifact, self.retry(item["retry"], f"{pointer}/retry") if "retry" in item else None, self.handler(item.get("on_failure"), f"{pointer}/on_failure"), self.handler(item.get("on_error"), f"{pointer}/on_error"))
 
     def exported_artifact(self, value: Any, pointer: str) -> ExportedArtifactIR:
