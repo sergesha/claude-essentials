@@ -11,7 +11,6 @@ from lockstep.workflow.semantics import (
     InMemoryWorkflowCatalog,
 )
 
-
 EXPECTED_FIELDS = {
     "schema",
     "user_work_steps",
@@ -20,7 +19,7 @@ EXPECTED_FIELDS = {
     "child_calls",
     "maximum_child_calls",
     "peak_parallel_branches",
-    "peak_parallel_subcalls",
+    "peak_parallel_child_calls",
     "maximum_runner_timeout_seconds",
     "generated_node_count",
     "expanded_fragment_count",
@@ -73,6 +72,7 @@ def test_estimate_has_the_exact_closed_normative_schema_and_honest_unknowns(
     data = estimate.to_dict()
 
     assert set(data) == EXPECTED_FIELDS
+    assert not hasattr(estimate, "peak_parallel_subcalls")
     assert data["schema"] == "lockstep.structural-estimate/v1"
     assert data["user_work_steps"] == 1
     assert data["maximum_validator_submissions"] == 5
@@ -80,7 +80,8 @@ def test_estimate_has_the_exact_closed_normative_schema_and_honest_unknowns(
     assert data["child_calls"] == 1
     assert data["maximum_child_calls"] == 1
     assert data["peak_parallel_branches"] == 0
-    assert data["peak_parallel_subcalls"] == 0
+    assert data["peak_parallel_child_calls"] == 0
+    assert "peak_parallel_subcalls" not in data
     assert data["maximum_runner_timeout_seconds"] == 60
     assert data["generated_node_count"] > 0
     assert data["expanded_fragment_count"] == 0
@@ -167,7 +168,7 @@ def test_controlled_time_is_a_real_bound_when_every_engine_timeout_is_known(
     }
 
 
-def test_parallel_estimate_uses_peak_wall_time_and_counts_all_subcalls(
+def test_parallel_estimate_uses_peak_wall_time_and_counts_all_child_calls(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "parallel-cost.workflow.yaml"
@@ -186,7 +187,8 @@ def test_parallel_estimate_uses_peak_wall_time_and_counts_all_subcalls(
     assert estimate["child_calls"] == 2
     assert estimate["maximum_child_calls"] == 2
     assert estimate["peak_parallel_branches"] == 2
-    assert estimate["peak_parallel_subcalls"] == 2
+    assert estimate["peak_parallel_child_calls"] == 2
+    assert "peak_parallel_subcalls" not in estimate
     assert estimate["controlled_time"]["available"] is True
     assert estimate["controlled_time"]["upper_bound_seconds"] == 60
     assert "parallel reviews: max(60s, 60s), scope 120s" in estimate["controlled_time"]["formula"]

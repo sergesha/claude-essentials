@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -31,3 +30,4 @@ def test_codex_plugin_identity_describes_native_workflows_not_runner_subcalls() 
             "Use lockstep to author or run the requested native workflow and validate its evidence."
         ],
     }
+    assert "LOCKSTEP_RUNNER" not in json.dumps(manifest, sort_keys=True)

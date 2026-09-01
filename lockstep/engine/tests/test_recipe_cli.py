@@ -320,7 +320,7 @@ def test_recipe_estimate_json_is_the_exact_normative_schema_for_manual_yamlgraph
         "child_calls": 0,
         "maximum_child_calls": 0,
         "peak_parallel_branches": 0,
-        "peak_parallel_subcalls": 0,
+        "peak_parallel_child_calls": 0,
         "maximum_runner_timeout_seconds": None,
         "generated_node_count": 1,
         "expanded_fragment_count": 0,

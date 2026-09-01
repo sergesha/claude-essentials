@@ -6,7 +6,6 @@ import subprocess
 import tomllib
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -44,8 +43,10 @@ def test_host_manifests_share_identity_version_and_components():
             "External-effect bridging",
         ],
         "defaultPrompt": [
-            "Use lockstep to author or run the requested native workflow and "
-            "validate its evidence."
+            (
+                "Use lockstep to author or run the requested native workflow and "
+                "validate its evidence."
+            )
         ],
     }
 
@@ -55,7 +56,6 @@ def test_codex_mcp_contract_is_pinned_to_plugin_root():
     assert server == {
         "command": "./scripts/lockstep-plugin",
         "args": ["serve"],
-        "env": {"LOCKSTEP_RUNNER": "codex"},
         "cwd": "./",
         "required": True,
         "default_tools_approval_mode": "approve",
@@ -64,11 +64,11 @@ def test_codex_mcp_contract_is_pinned_to_plugin_root():
     }
 
 
-def test_claude_mcp_uses_launcher_and_literal_runner_default():
+def test_claude_mcp_uses_launcher_without_legacy_runner_default():
     server = _json(".claude-plugin/plugin.json")["mcpServers"]["lockstep"]
     assert server["command"] == "${CLAUDE_PLUGIN_ROOT}/scripts/lockstep-plugin"
     assert server["args"] == ["serve"]
-    assert server["env"] == {"LOCKSTEP_RUNNER": "claude"}
+    assert "env" not in server
 
 
 def test_launcher_is_executable_and_does_not_change_directory():
@@ -203,9 +203,9 @@ def test_runtime_skill_uses_host_neutral_worker_language():
     assert "host's subagent capability" in skill
 
 
-def test_author_skill_documents_both_runner_drivers_and_defaulting():
+def test_author_skill_does_not_document_retired_runner_configuration():
     skill = (ROOT / "skills/lockstep-author/SKILL.md").read_text()
-    assert "driver: claude" in skill
-    assert "driver: codex" in skill
-    assert "LOCKSTEP_RUNNER" in skill
-    assert "Runner names" in skill and "driver" in skill
+    assert "driver: claude" not in skill
+    assert "driver: codex" not in skill
+    assert "LOCKSTEP_RUNNER" not in skill
+    assert "Runner names" not in skill
