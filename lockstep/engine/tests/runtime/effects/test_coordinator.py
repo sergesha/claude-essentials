@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from itertools import count
+from threading import RLock
 
 import pytest
 
@@ -154,6 +155,8 @@ class FakeRuntime:
         self.resume_calls: list[tuple[str, NativeCoordinate, dict[str, object]]] = []
         self.resume_error: Exception | None = None
         self.commitment_callbacks = []
+        self._decision_lock = RLock()
+        self.decision_guard_depth = 0
 
     def binding(self, run_id: str) -> RunBinding:
         assert run_id == self._binding.public_run_id
@@ -211,6 +214,16 @@ class FakeRuntime:
             checkpoint_id="after-resume",
         )
         return self.current
+
+    @contextmanager
+    def decision_guard(self, run_id):
+        assert run_id == self._binding.public_run_id
+        with self._decision_lock:
+            self.decision_guard_depth += 1
+            try:
+                yield
+            finally:
+                self.decision_guard_depth -= 1
 
     @contextmanager
     def commitment_guard(self, run_id, source):
@@ -1380,6 +1393,45 @@ def test_acceptance_preview_issue_and_token_redemption_are_exact_and_idempotent(
 
     retry = coordinator.submit_acceptance("run-1", coordinate, issued.token)
     assert retry == status
+    assert len(runtime.resume_calls) == 1
+
+
+def test_acceptance_submission_serializes_redeem_through_exact_delivery(
+    system, tmp_path, monkeypatch
+) -> None:
+    """Catches recovery consuming the sealed accept before selected delivery."""
+
+    (
+        coordinator,
+        _authority,
+        runtime,
+        ledger,
+        _store,
+        coordinate,
+        _raw,
+        _producer_result,
+        _artifact_ref,
+        _registry,
+        _blobs,
+    ) = _acceptance_system(system, tmp_path, monkeypatch)
+    assert coordinator.reconcile("run-1").action == "prepared"
+    preview = coordinator.preview_acceptance("run-1", coordinate)
+    issued = coordinator.issue_acceptance_consent(
+        "run-1", coordinate, preview.digest
+    )
+    deliver_ready = coordinator.deliver_ready
+
+    def deliver_with_competing_recovery(run_id, interrupt_ids=None):
+        if interrupt_ids is not None and runtime.decision_guard_depth == 0:
+            deliver_ready(run_id)
+        return deliver_ready(run_id, interrupt_ids)
+
+    monkeypatch.setattr(coordinator, "deliver_ready", deliver_with_competing_recovery)
+
+    status = coordinator.submit_acceptance("run-1", coordinate, issued.token)
+
+    assert status.status == "completed"
+    assert ledger.get(preview.effect_id).phase == "delivered"
     assert len(runtime.resume_calls) == 1
 
 

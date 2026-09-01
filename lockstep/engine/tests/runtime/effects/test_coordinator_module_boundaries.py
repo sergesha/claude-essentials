@@ -395,7 +395,7 @@ _EXPECTED_METHOD_DIGESTS = {'__init__': '48266efa798f0c11908e5011c0c264eebcc3926
  'reconcile_due': 'bd36381e368f9ddbd4a22eed9c4fd7e636f7a443c40b09009b7219bce332a641',
  'reconcile_one': '118f216c6461c73bf249c1df89e17d9994b1008f490b70bc2e29fba8a88e168e',
  'reconcile_pending': '3bbddd380ceae0cd2452807a5a8ef24bd33029b593925e0bb8d270ba9ecc1c7e',
- 'submit_acceptance': 'e9474e0946a222e379f31bb4f3b8773139b6557541405bf42cf2ddc328304863',
+ 'submit_acceptance': 'e65a5b44d7687cf278c640ff0cea1c23c96799dcb2d7dd8b0a94d88b1717871f',
  'submit_manual': '2e841dba8cff9c14eb89c80f949fa9c1ab31659e99e71f7de2a0afff793dcb47',
  'wait_and_reconcile_due': '3f98f9edef0f7631da93121ec352a5277667d9728946790991e9e5468726c691'}
 

@@ -577,42 +577,43 @@ class _EffectCoordinatorAdmission:
             raise ProviderContractViolation(
                 "acceptance requires the owner consent authority"
             )
-        binding = self._binding(run_id)
-        snapshot = self._runtime.snapshot(run_id, subgraphs=True)
-        matches = tuple(
-            interrupt
-            for interrupt in self._protected(snapshot)
-            if interrupt.coordinate == source
-        )
-        if not matches:
-            return self._redeem_delivered_acceptance_retry(
+        with self._runtime.decision_guard(run_id):
+            binding = self._binding(run_id)
+            snapshot = self._runtime.snapshot(run_id, subgraphs=True)
+            matches = tuple(
+                interrupt
+                for interrupt in self._protected(snapshot)
+                if interrupt.coordinate == source
+            )
+            if not matches:
+                return self._redeem_delivered_acceptance_retry(
+                    run_id=run_id,
+                    source=source,
+                    token=token,
+                    binding=binding,
+                    snapshot=snapshot,
+                )
+            if len(matches) != 1:
+                raise CoordinatorLineageError(
+                    "acceptance source is not the exact pending interrupt"
+                )
+            interrupt = matches[0]
+            descriptor, effect_id, commitment, record = (
+                self._acceptance_submission_context(
+                    run_id=run_id,
+                    binding=binding,
+                    snapshot=snapshot,
+                    interrupt=interrupt,
+                )
+            )
+            self._commit_acceptance_submission(
                 run_id=run_id,
                 source=source,
+                binding=binding,
                 token=token,
-                binding=binding,
-                snapshot=snapshot,
+                descriptor=descriptor,
+                effect_id=effect_id,
+                commitment=commitment,
+                record=record,
             )
-        if len(matches) != 1:
-            raise CoordinatorLineageError(
-                "acceptance source is not the exact pending interrupt"
-            )
-        interrupt = matches[0]
-        descriptor, effect_id, commitment, record = (
-            self._acceptance_submission_context(
-                run_id=run_id,
-                binding=binding,
-                snapshot=snapshot,
-                interrupt=interrupt,
-            )
-        )
-        self._commit_acceptance_submission(
-            run_id=run_id,
-            source=source,
-            token=token,
-            binding=binding,
-            descriptor=descriptor,
-            effect_id=effect_id,
-            commitment=commitment,
-            record=record,
-        )
-        return self.deliver_ready(run_id, [source.interrupt_id])
+            return self.deliver_ready(run_id, [source.interrupt_id])
