@@ -222,6 +222,7 @@ def test_decision_guard_serializes_snapshot_to_decision_across_runtimes(tmp_path
     leases = LeaseStore(store)
     state = {"version": 0}
     first_entered = threading.Event()
+    second_lock_attempted = threading.Event()
     second_entered = threading.Event()
     release_first = threading.Event()
 
@@ -233,11 +234,22 @@ def test_decision_guard_serializes_snapshot_to_decision_across_runtimes(tmp_path
         def close(self):
             pass
 
-    def runtime():
+    class SignalingInvocationLockStore(InvocationLockStore):
+        @contextmanager
+        def hold(self, thread_id):
+            second_lock_attempted.set()
+            with super().hold(thread_id):
+                yield
+
+    def runtime(*, signal_lock_attempt=False):
         candidate = GraphRuntime(
             bundle_store=bundles,
             leases=leases,
-            invocations=InvocationLockStore(tmp_path / "owner-state"),
+            invocations=(
+                SignalingInvocationLockStore(tmp_path / "owner-state")
+                if signal_lock_attempt
+                else InvocationLockStore(tmp_path / "owner-state")
+            ),
             checkpoint_path=tmp_path / "checkpoints.sqlite",
             app_factory=lambda *_: App(),
         )
@@ -245,7 +257,7 @@ def test_decision_guard_serializes_snapshot_to_decision_across_runtimes(tmp_path
         return candidate
 
     first = runtime()
-    second = runtime()
+    second = runtime(signal_lock_attempt=True)
 
     def first_decision():
         with first.decision_guard(binding.public_run_id):
@@ -265,6 +277,7 @@ def test_decision_guard_serializes_snapshot_to_decision_across_runtimes(tmp_path
             first_pending = pool.submit(first_decision)
             assert first_entered.wait(1)
             second_pending = pool.submit(second_decision)
+            assert second_lock_attempted.wait(1)
             assert not second_entered.wait(0.1)
             release_first.set()
             first_pending.result(timeout=1)
@@ -282,6 +295,7 @@ def test_engine_drive_serializes_complete_decisions_across_runtimes(tmp_path):
     store = SQLiteStore(tmp_path / "runtime.sqlite")
     leases = LeaseStore(store)
     first_decision = threading.Event()
+    second_lock_attempted = threading.Event()
     second_snapshot = threading.Event()
     release_first = threading.Event()
 
@@ -297,11 +311,22 @@ def test_engine_drive_serializes_complete_decisions_across_runtimes(tmp_path):
         def close(self):
             pass
 
-    def runtime(entered):
+    class SignalingInvocationLockStore(InvocationLockStore):
+        @contextmanager
+        def hold(self, thread_id):
+            second_lock_attempted.set()
+            with super().hold(thread_id):
+                yield
+
+    def runtime(entered, *, signal_lock_attempt=False):
         candidate = GraphRuntime(
             bundle_store=bundles,
             leases=leases,
-            invocations=InvocationLockStore(tmp_path / "owner-state"),
+            invocations=(
+                SignalingInvocationLockStore(tmp_path / "owner-state")
+                if signal_lock_attempt
+                else InvocationLockStore(tmp_path / "owner-state")
+            ),
             checkpoint_path=tmp_path / "checkpoints.sqlite",
             app_factory=lambda *_: App(entered),
         )
@@ -309,7 +334,7 @@ def test_engine_drive_serializes_complete_decisions_across_runtimes(tmp_path):
         return candidate
 
     first_runtime = runtime(threading.Event())
-    second_runtime = runtime(second_snapshot)
+    second_runtime = runtime(second_snapshot, signal_lock_attempt=True)
 
     class Catalog:
         @staticmethod
@@ -354,6 +379,7 @@ def test_engine_drive_serializes_complete_decisions_across_runtimes(tmp_path):
             second_pending = pool.submit(
                 second.drive, binding.public_run_id, snapshot=stale
             )
+            assert second_lock_attempted.wait(1)
             assert not second_snapshot.wait(0.1)
             release_first.set()
             first_status = first_pending.result(timeout=1)
