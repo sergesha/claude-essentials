@@ -26,12 +26,21 @@ from lockstep.authoring_capture import (
 )
 from lockstep.errors import AuthoringError
 from lockstep.workflow.compiler import CompilationResult, compile_workflow_document
-from lockstep.workflow.ir import BlockIR, CallIR, ChooseIR, ParallelIR, RepeatIR
+from lockstep.workflow.ir import (
+    BlockIR,
+    CallIR,
+    ChooseIR,
+    FragmentIR,
+    GraphIR,
+    ParallelIR,
+    RepeatIR,
+)
 from lockstep.workflow.schema import MarkedDocument, load_workflow_bytes, parse_workflow
 from lockstep.workflow.semantics import (
     ChildWorkflowContract,
     ResolvedCatalog,
     ResolvedChild,
+    ResolvedFragment,
     ValidatedWorkflow,
 )
 
@@ -75,6 +84,23 @@ def workflow_call_names(document: MarkedDocument) -> tuple[str, ...]:
     return tuple(calls)
 
 
+def workflow_fragment_paths(document: MarkedDocument) -> tuple[str, ...]:
+    paths: list[str] = []
+    seen: set[str] = set()
+    pending = list(reversed(parse_workflow(document).flow))
+    while pending:
+        block = pending.pop()
+        if (
+            isinstance(block, GraphIR)
+            and block.kind == "include"
+            and block.path not in seen
+        ):
+            seen.add(block.path)
+            paths.append(block.path)
+        pending.extend(reversed(_nested_blocks(block)))
+    return tuple(paths)
+
+
 def _child_contract(validated: ValidatedWorkflow) -> ChildWorkflowContract:
     return ChildWorkflowContract(
         ("pass", "fail", "error"),
@@ -87,6 +113,7 @@ def compile_captured_source(
     document: MarkedDocument,
     *,
     children: Mapping[str, tuple[ValidatedWorkflow, CompilationResult]] | None = None,
+    fragments: Mapping[str, ResolvedFragment] | None = None,
 ) -> tuple[ValidatedWorkflow, ResolvedCatalog, CompilationResult]:
     resolved = {
         name: ResolvedChild(
@@ -95,7 +122,7 @@ def compile_captured_source(
         )
         for name, (validated, compiled) in (children or {}).items()
     }
-    catalog = ResolvedCatalog(children=resolved)
+    catalog = ResolvedCatalog(children=resolved, fragments=fragments or {})
     validated, compiled = compile_workflow_document(document, catalog)
     return validated, catalog, compiled
 
@@ -152,17 +179,29 @@ def _source_snapshot(
     *,
     max_bytes: int,
 ) -> SourceSnapshot:
-    parents = tuple(
-        _cached_directory(identities, parent)
-        for parent in (project, project / ".lockstep", path.parent)
-    )
-    _validate_parents(parents)
+    try:
+        relative = path.relative_to(project)
+    except ValueError as exc:
+        raise AuthoringError("workflow source is outside the project") from exc
+    parents = []
+    current = project
+    parents.append(_cached_directory(identities, current))
+    for part in relative.parts[:-1]:
+        current /= part
+        parents.append(_cached_directory(identities, current))
+    captured_parents = tuple(parents)
+    _validate_parents(captured_parents)
     content, file = capture_regular_file(
         path, max_bytes=max_bytes, label="workflow source"
     )
-    _validate_parents(parents)
+    _validate_parents(captured_parents)
     return SourceSnapshot(
-        role, path, content, hashlib.sha256(content).hexdigest(), file, parents
+        role,
+        path,
+        content,
+        hashlib.sha256(content).hexdigest(),
+        file,
+        captured_parents,
     )
 
 
@@ -174,9 +213,44 @@ class _ClosureCompiler:
         self.projected: list[_ProjectedRole] = []
         self.completed: dict[str, _CompiledWorkflow] = {}
         self.catalogs: dict[str, ResolvedCatalog] = {}
+        self.fragments: dict[Path, tuple[SourceSnapshot, ResolvedFragment]] = {}
         self.active: set[str] = set()
         self.destinations: set[Path] = set()
         self.read_budget = _AuthoringBudget("authoring read set")
+
+    def resolve_fragments(
+        self, role: str, directory: Path, logical_paths: tuple[str, ...]
+    ) -> dict[str, ResolvedFragment]:
+        resolved: dict[str, ResolvedFragment] = {}
+        for logical_path in logical_paths:
+            path = directory.joinpath(*Path(logical_path).parts)
+            captured = self.fragments.get(path)
+            if captured is None:
+                source = _source_snapshot(
+                    role,
+                    path,
+                    self.project,
+                    self.identities,
+                    max_bytes=self.read_budget.max_bytes_for_next,
+                )
+                self.read_budget.retain(source.content)
+                fragment_document = load_workflow_bytes(
+                    source.path, source.content
+                ).data
+                try:
+                    fragment_ir = FragmentIR.parse(fragment_document)
+                except TypeError as exc:
+                    raise AuthoringError(str(exc)) from exc
+                fragment = ResolvedFragment(
+                    logical_path,
+                    source.sha256,
+                    fragment_ir,
+                )
+                captured = source, fragment
+                self.fragments[path] = captured
+                self.sources.append(source)
+            resolved[logical_path] = captured[1]
+        return resolved
 
     def visit(self, recipe: AuthoredRecipe, path: Path) -> None:
         role = recipe.name
@@ -193,20 +267,24 @@ class _ClosureCompiler:
             self.read_budget.retain(source.content)
             document = load_workflow_bytes(source.path, source.content)
             children = workflow_call_names(document)
+            fragment_paths = workflow_fragment_paths(document)
             for child in children:
                 child_recipe = _workflow_recipe(self.project, child)
                 if child_recipe.workflow_path is None:
                     raise AuthoringError("workflow source is required")
                 self.visit(child_recipe, child_recipe.workflow_path)
+            self.sources.append(source)
+            fragments = self.resolve_fragments(role, source.path.parent, fragment_paths)
             validated, catalog, compiled = compile_captured_source(
-                document, children={child: self.completed[child] for child in children}
+                document,
+                children={child: self.completed[child] for child in children},
+                fragments=fragments,
             )
             projected = _workflow_destinations(recipe, compiled, children)
             if any(path in self.destinations for path in projected):
                 raise AuthoringError("compilation destinations must be unique")
             self.destinations.update(projected)
             self.completed[role], self.catalogs[role] = (validated, compiled), catalog
-            self.sources.append(source)
             self.edges.append((role, children))
             self.projected.append((role, projected))
         finally:

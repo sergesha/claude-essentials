@@ -6,10 +6,15 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-
 from lockstep.authoring import project_paths
 from lockstep.errors import AuthoringError
-from lockstep.workflow.compiler import GeneratedFile, _create_compiler_provenance, canonical_execution_bytes, generated_bundle_sha256
+from lockstep.workflow.compiler import (
+    GeneratedFile,
+    _create_compiler_provenance,
+    canonical_execution_bytes,
+    generated_bundle_sha256,
+)
+
 from tests._authoring_gate import compile_closure, tree_image, write_workflow
 
 
@@ -56,6 +61,36 @@ def test_public_compile_parse_semantic_and_graph_failures_are_write_free(tmp_pat
     elif failure == "missing": child.rename(child.with_suffix(".missing"))
     else: parent.write_text(parent.read_text().replace("workflow: child", "workflow: parent"))
     _reject(project, "parent", tmp_path / "state", monkeypatch, capsys)
+
+
+def test_public_compile_rejects_malformed_fragment_write_free(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    project = tmp_path / "project"
+    workflows = project / ".lockstep" / "workflows"
+    fragments = workflows / "fragments"
+    fragments.mkdir(parents=True)
+    (fragments / "invalid.graph.yaml").write_text("- not-a-fragment\n")
+    source = workflows / "included.workflow.yaml"
+    source.write_text(
+        "workflow_version: '1'\n"
+        "name: included\n"
+        "description: malformed fragment\n"
+        "protect: ['**']\n"
+        "flow:\n"
+        "  - include_graph:\n"
+        "      id: invalid\n"
+        "      path: fragments/invalid.graph.yaml\n"
+    )
+
+    _reject(
+        project,
+        "included",
+        tmp_path / "state",
+        monkeypatch,
+        capsys,
+        "fragment document must be a mapping",
+    )
 
 
 def test_public_compile_rejects_excessive_yaml_depth_before_project_mutation(
@@ -116,8 +151,10 @@ def _generated(compiled, files):
 def test_public_compile_rejects_cross_role_generated_collision_write_free(tmp_path, monkeypatch, capsys) -> None:
     import lockstep.authoring_compilation as compilation
     project = tmp_path / "project"; write_workflow(project, "child"); write_workflow(project, "parent", children=("child",)); original = compilation.compile_captured_source; injected = []
-    def compile(document, *, children=None):
-        validated, catalog, result = original(document, children=children)
+    def compile(document, *, children=None, fragments=None):
+        validated, catalog, result = original(
+            document, children=children, fragments=fragments
+        )
         if validated.workflow.name == "parent": result = _generated(result, (GeneratedFile.build("child.recipe.yaml", result.recipe_bytes),)); injected.append(True)
         return validated, catalog, result
     monkeypatch.setattr(compilation, "compile_captured_source", compile)
@@ -127,8 +164,11 @@ def test_public_compile_rejects_cross_role_generated_collision_write_free(tmp_pa
 def test_public_compile_rejects_amplified_real_generated_outputs(tmp_path, monkeypatch, capsys) -> None:
     import lockstep.authoring_compilation as compilation
     project = tmp_path / "project"; write_workflow(project, "leaf"); original = compilation.compile_captured_source; injected = []
-    def compile(document, *, children=None):
-        validated, catalog, result = original(document, children=children); payload = result.recipe_bytes + b"#" + b"a" * 850_000
+    def compile(document, *, children=None, fragments=None):
+        validated, catalog, result = original(
+            document, children=children, fragments=fragments
+        )
+        payload = result.recipe_bytes + b"#" + b"a" * 850_000
         files = tuple(GeneratedFile.build(f"generated-{index}.recipe.yaml", payload) for index in range(5)); injected.append(True)
         return validated, catalog, _generated(result, files)
     monkeypatch.setattr(compilation, "compile_captured_source", compile)

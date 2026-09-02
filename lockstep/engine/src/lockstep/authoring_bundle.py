@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-import hashlib, stat
+import hashlib
+import stat
 from dataclasses import dataclass
+from itertools import groupby
 from pathlib import Path
 from typing import Literal
 
@@ -170,7 +172,10 @@ class AuthoringPlan:
         roles = _topology(self.dependency_edges)
         if any(not isinstance(item, SourceSnapshot) for item in self.sources):
             raise TypeError("plan source snapshot is invalid")
-        if tuple(item.role for item in self.sources) not in ((), roles):
+        source_roles = tuple(
+            role for role, _items in groupby(item.role for item in self.sources)
+        )
+        if source_roles not in ((), roles):
             raise ValueError("plan source roles must be complete or empty")
         source_paths = tuple(item.path for item in self.sources)
         targets = tuple(item.path for item in self.targets)
