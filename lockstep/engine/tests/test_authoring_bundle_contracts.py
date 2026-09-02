@@ -8,7 +8,6 @@ import stat
 from pathlib import Path
 
 import pytest
-
 from lockstep.authoring import project_paths
 from lockstep.authoring_bundle import (
     AuthoringPlan,
@@ -20,6 +19,7 @@ from lockstep.authoring_bundle import (
 )
 from lockstep.authoring_compilation import compile_project, plan_project_compilation
 from lockstep.authoring_publisher import AuthoringPublisher
+
 from tests._authoring_gate import write_workflow
 
 
@@ -69,6 +69,64 @@ def test_compile_project_retains_same_pass_root_and_child_first_plan(tmp_path: P
     assert {target.role for target in compilation.plan.targets} == {"child", "parent"}
 
 
+def test_compile_project_resolves_captured_include_graph(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    workflows = project / ".lockstep" / "workflows"
+    fragments = workflows / "fragments"
+    fragments.mkdir(parents=True)
+    fragment = fragments / "shared.graph.yaml"
+    fragment.write_text(
+        "fragment:\n"
+        "  entry: begin\n"
+        "  exits: {pass: finish}\n"
+        "  effects: {mode: read-only, writes: []}\n"
+        "state: {note: str}\n"
+        "nodes:\n"
+        "  begin: {type: passthrough, output: {note: included}}\n"
+        "  finish: {type: passthrough}\n"
+        "edges:\n"
+        "  - {from: begin, to: finish}\n"
+    )
+    source = workflows / "included.workflow.yaml"
+    source.write_text(
+        "workflow_version: '1'\n"
+        "name: included\n"
+        "description: included graph\n"
+        "protect: ['**']\n"
+        "flow:\n"
+        "  - include_graph:\n"
+        "      id: shared\n"
+        "      path: fragments/shared.graph.yaml\n"
+        "      on: {pass: next}\n"
+    )
+
+    compilation = compile_project(project_paths(project, "included"))
+
+    captured = {item.path: item for item in compilation.plan.sources}
+    assert set(captured) == {source.resolve(), fragment.resolve()}
+    assert captured[source.resolve()].content == source.read_bytes()
+    assert captured[fragment.resolve()].content == fragment.read_bytes()
+    resolved = compilation.root_catalog.fragment_for(
+        "fragments/shared.graph.yaml"
+    )
+    assert resolved is not None
+    assert resolved.source_definition_sha256 == hashlib.sha256(
+        fragment.read_bytes()
+    ).hexdigest()
+    dependency = compilation.root_result.dependency_manifest.entries
+    assert [
+        (item.kind, item.logical_name, item.use_pointer, item.definition_sha256)
+        for item in dependency
+    ] == [
+        (
+            "fragment",
+            "fragments/shared.graph.yaml",
+            "/flow/0",
+            hashlib.sha256(fragment.read_bytes()).hexdigest(),
+        )
+    ]
+
+
 def test_targets_are_unique_owned_and_project_bound(tmp_path: Path) -> None:
     plan = _plan(tmp_path)
     paths = tuple(target.path for target in plan.targets)
@@ -80,6 +138,8 @@ def test_plan_rejects_partial_inventory_or_open_topology(tmp_path: Path) -> None
     plan = _plan(tmp_path)
     with pytest.raises(ValueError, match="complete or empty"):
         dataclasses.replace(plan, sources=plan.sources[:1])
+    with pytest.raises(ValueError, match="complete or empty"):
+        dataclasses.replace(plan, sources=(*plan.sources, plan.sources[0]))
     with pytest.raises(ValueError, match="non-empty"):
         dataclasses.replace(plan, sources=(), dependency_edges=())
     with pytest.raises(ValueError, match="earlier child"):
