@@ -1,5 +1,6 @@
 {
   "continuous-learning": "0.1.0",
   "redis-memory-mcp": "0.8.1",
-  "lockstep": "0.1.0"
+  "lockstep": "0.1.0",
+  "speciflow": "0.1.0"
 }
