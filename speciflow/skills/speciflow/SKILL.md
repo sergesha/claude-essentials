@@ -35,8 +35,19 @@ For every proposed mutation:
 2. Propose exactly one concrete next action and explain its effects.
 3. Wait for explicit user approval before mutating anything.
 
+Before every native-owner mutation, state `Review: required|skipped — reason`.
+Review is required for a semantic mutation; skip it only for demonstrably
+read-only or mechanical work and name the reason. Follow the review, root
+binding, exact-preview approval, and projection rules in
+[references/operations.md](references/operations.md).
+
 If a required native tool or integration is missing, report it and offer one safe loading or installation action. A component with implicit triggers must be invocation-scoped and explicit-only. For `openspec-to-beads`, offer only an invocation-scoped explicit-only load with automatic and proactive activation disabled; never offer unqualified installation. Wait for explicit approval before loading or installing it.
 
-SpeciFlow selects the cross-tool action. Superpowers may apply implementation discipline only as a bounded leaf step for work already selected by SpeciFlow; afterward, it must return control to SpeciFlow.
+SpeciFlow selects the cross-tool action. Apply every applicable Superpowers
+skill by its native trigger before the selected activity; architectural or
+creative planning uses `superpowers:brainstorming`, approved designs use
+`superpowers:writing-plans`, and any SpeciFlow edit uses
+`superpowers:writing-skills`. Superpowers may apply its discipline only to the
+bounded selected activity, then must return control to SpeciFlow.
 
 Do not define SpeciFlow phases, statuses, tasks, readiness, assignments, a second graph, queues, or cursors. Do not let Superpowers select cross-tool actions or the next Bead.

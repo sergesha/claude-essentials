@@ -10,7 +10,7 @@ Each concern has one authoritative owner:
 | Superpowers | TDD, debugging, verification, review, and implementation discipline |
 | Product Git and CI | Source changes, review history, dirty state, and implementation evidence |
 
-Backlog.md solely owns product intent and priority.
+Backlog.md solely owns product intent, priority, and scope.
 
 OpenSpec solely owns proposals, requirements, design, and specification tasks.
 
@@ -25,6 +25,16 @@ Native tool edits remain authoritative. Never copy owner content into a SpeciFlo
 Use native IDs or typed references when available; otherwise use an artifact
 path plus commit SHA, or the current user's approval of a dirty snapshot.
 Missing stable links are manual confirmed operations, not SpeciFlow IDs.
+
+## Review authority
+
+Backlog.md is the sole scope authority. A blocking defect is only a conflict
+with approved scope or applicable native methodology. A reviewer must return
+new capabilities, actors, services, protocols, platforms, dependencies,
+security boundaries, success criteria, requirements, or tasks as non-blocking
+scope proposals; it may not promote them into blockers or executable work.
+They enter an owner artifact only after an explicitly approved and reviewed
+Backlog scope mutation.
 
 ## Approval boundary
 
@@ -45,11 +55,12 @@ Closure is separate by owner: Beads completion, OpenSpec verification or
 archive, Backlog outcome acceptance, and product Git/CI evidence are separate
 facts. Ask closure questions only for selected owners; an absent owner is N/A.
 
-## Superpowers containment
+## Superpowers coordination
 
-SpeciFlow selects the cross-tool action. Superpowers may apply only the bounded
-implementation discipline needed for already selected work. Superpowers must return control to SpeciFlow after the bounded leaf execution step.
-It reports observed effects. Superpowers must not select cross-tool actions or the next Bead.
+SpeciFlow selects the cross-tool action. Apply applicable Superpowers skills by
+their native triggers before the bounded selected activity, then return control
+to SpeciFlow and report observed effects. Superpowers must not select
+cross-tool actions or the next Bead.
 It must not acquire Backlog, OpenSpec, Beads, Git, or Dolt ownership.
 
 ## SpeciFlow does not own domain state
