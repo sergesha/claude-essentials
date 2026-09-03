@@ -135,6 +135,21 @@ def test_default_storage_uses_standard_posix_home_resolution(
     assert storage._account_home() == profile.resolve()
 
 
+def test_nearest_project_storage_does_not_require_account_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    base = project / ".speciflow"
+    project.mkdir()
+    base.mkdir()
+    monkeypatch.setattr(storage.Path, "home", classmethod(lambda _cls: tmp_path / "missing-home"))
+
+    selection = storage.resolve(request(project))
+
+    assert selection.source == "ancestor"
+    assert selection.storage_base == base.resolve()
+
+
 def test_default_home_storage_resolution_is_repeatable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
