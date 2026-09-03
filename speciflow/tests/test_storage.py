@@ -135,6 +135,44 @@ def test_default_storage_uses_standard_posix_home_resolution(
     assert storage._account_home() == profile.resolve()
 
 
+def test_nearest_project_storage_does_not_require_account_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    base = project / ".speciflow"
+    project.mkdir()
+    base.mkdir()
+    monkeypatch.setattr(storage.Path, "home", classmethod(lambda _cls: tmp_path / "missing-home"))
+
+    selection = storage.resolve(request(project))
+
+    assert selection.source == "ancestor"
+    assert selection.storage_base == base.resolve()
+
+
+def test_default_home_storage_resolution_is_repeatable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    profile = tmp_path / "profile"
+    project = profile / "project" / "src"
+    project.mkdir(parents=True)
+    monkeypatch.setattr(storage.Path, "home", classmethod(lambda _cls: profile))
+
+    first = storage.resolve(request(project))
+    storage.init(storage.preview_init(first))
+    second = storage.resolve(request(project))
+    repeated_preview = storage.preview_init(second)
+
+    assert first.source == second.source == "default"
+    assert (first.anchor, first.storage_base, first.data_root) == (
+        second.anchor,
+        second.storage_base,
+        second.data_root,
+    )
+    assert repeated_preview.locator_writes == ()
+    assert repeated_preview.directories_to_create == ()
+
+
 def test_init_rejects_symlink_collision_and_keeps_existing_bytes(tmp_path: Path) -> None:
     chosen = tmp_path / "chosen"
     chosen.mkdir()

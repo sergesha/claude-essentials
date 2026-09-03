@@ -21,6 +21,7 @@ PROHIBITED_COMPONENT_KEYS = frozenset(
 
 EXPECTED_DISTRIBUTABLE_FILES = frozenset(
     {
+        "CHANGELOG.md",
         ".claude-plugin/plugin.json",
         ".codex-plugin/plugin.json",
         "skills/speciflow/SKILL.md",
@@ -86,7 +87,7 @@ def test_release_please_has_independent_speciflow_package(repo_root: Path) -> No
     }
 
     release_manifest = json.loads((repo_root / ".release-please-manifest.json").read_text())
-    assert "speciflow" not in release_manifest
+    assert release_manifest["speciflow"] == "0.1.0"
 
 
 def test_invocation_is_explicit_on_both_hosts(repo_root: Path) -> None:
