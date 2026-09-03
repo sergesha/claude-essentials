@@ -35,10 +35,12 @@ For every proposed mutation:
 2. Propose exactly one concrete next action and explain its effects.
 3. Wait for explicit user approval before mutating anything.
 
-Before every native-owner mutation, state `Review: required|skipped — reason`.
-Review is required for a semantic mutation; skip it only for demonstrably
-read-only or mechanical work and name the reason. Follow the review, root
-binding, exact-preview approval, and projection rules in
+Before every semantic Backlog, OpenSpec, or Beads mutation, and any related
+planning or executable coordination mutation, state
+`Review: required|skipped — reason`. Review is required for a semantic
+mutation; skip it only for demonstrably read-only or mechanical work and name
+the reason. Follow the review, root binding, exact-preview approval, and
+projection rules in
 [references/operations.md](references/operations.md).
 
 If a required native tool or integration is missing, report it and offer one safe loading or installation action. A component with implicit triggers must be invocation-scoped and explicit-only. For `openspec-to-beads`, offer only an invocation-scoped explicit-only load with automatic and proactive activation disabled; never offer unqualified installation. Wait for explicit approval before loading or installing it.
