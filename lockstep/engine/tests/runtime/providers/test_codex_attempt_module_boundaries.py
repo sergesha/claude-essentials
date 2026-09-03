@@ -95,11 +95,6 @@ driver_methods = {
     "ensure_started",
     "_alive",
     "_terminal_receipt",
-    "_public_receipt",
-    "_validate_public_receipts",
-    "_indeterminate",
-    "_adopt_public_terminal",
-    "_running_observation",
     "_error_result",
     "_stored_result",
     "_cleanup_spools",
@@ -242,7 +237,7 @@ engine_root = Path(inspect.getsourcefile(support)).parents[4]
 thresholds = json.loads(
     (engine_root / "tests" / "architecture" / "architecture_thresholds.json").read_bytes()
 )["kinds"]["file"]
-for tree in (support_tree, services_tree, preparation_tree):
+for tree in (support_tree, services_tree, preparation_tree, attempt_tree):
     assert definition_count(tree) < thresholds["signals"]["definition_count"]
     assert sum(isinstance(node, ast.ClassDef) for node in tree.body) < thresholds["signals"]["class_count"]
 
@@ -473,14 +468,14 @@ expected_files = {
     paths["support"]: (21, 5),
     paths["services"]: (4, 2),
     paths["preparation"]: (24, 3),
-    paths["attempt"]: (29, 1),
+    paths["attempt"]: (24, 1),
     paths["facade"]: (11, 1),
 }
 for path, (definitions, classes) in expected_files.items():
     metric = report.files[f"{path}::@file"]
     assert (metric.definition_count, metric.class_count) == (definitions, classes)
     assert metric.hard_triggers == ()
-    assert metric.candidate is (path == paths["attempt"])
+    assert metric.candidate is False
 
 state_metric = report.classes[
     f'{paths["preparation"]}::_CodexAttemptState'
@@ -522,10 +517,10 @@ assert (
     driver_metric.public_method_count,
     driver_metric.mutable_field_count,
     driver_metric.candidate,
-) == (28, 7, 1, True)
+) == (23, 7, 1, False)
 assert state_metric.hard_triggers == ()
 assert preparation_metric.hard_triggers == ()
-assert driver_metric.hard_triggers == ("method_count_gt_24",)
+assert driver_metric.hard_triggers == ()
 
 prepare_one_hop = report.one_hops[
     f'{paths["attempt"]}::_CodexAttemptDriver.prepare::@one_hop'
@@ -549,10 +544,6 @@ allowed_existing_candidates = {
     f'{paths["attempt"]}::_CodexAttemptDriver._terminal',
     f'{paths["attempt"]}::_CodexAttemptDriver.ensure_started::@one_hop',
     f'{paths["attempt"]}::_CodexAttemptDriver._terminal::@one_hop',
-    f'{paths["attempt"]}::_CodexAttemptDriver._public_receipt',
-    f'{paths["attempt"]}::_CodexAttemptDriver',
-    f'{paths["attempt"]}::@file',
-    f'{paths["preparation"]}::_CodexAttemptState._load_record',
 }
 scoped_candidates = {
     identity

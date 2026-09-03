@@ -22,7 +22,6 @@ EXPECTED_TOOLS = {
     "scenario_wait",
     "scenario_history",
     "scenario_events",
-    "scenario_evidence",
     "scenario_recover",
     "scenario_dryrun",
     "recipe_init",
@@ -248,7 +247,6 @@ def test_cross_project_status_and_resume_are_indistinguishable_and_read_only(
 
     for operation in (
         lambda: server.scenario_status(run_id, ctx=_ctx(foreign)),
-        lambda: server.scenario_evidence(run_id, ctx=_ctx(foreign)),
         lambda: server.scenario_done(
             run_id,
             "answer",

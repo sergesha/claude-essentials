@@ -8,7 +8,6 @@ from pathlib import Path
 
 from lockstep.runtime import config, sessions
 from lockstep.runtime.errors import LockstepError
-from lockstep.runtime.execution_evidence import project_execution_evidence
 from lockstep.runtime.native_models import NativeHistoryLimitExceeded
 from lockstep.runtime.observation import (
     project_events,
@@ -127,28 +126,6 @@ class RuntimeProjection:
             effects,
             limit=self._MAX_PUBLIC_EVENTS,
         )
-
-    def evidence(self, run_id: str | None, project: str) -> dict:
-        project_identity = str(Path(project).resolve())
-        try:
-            bindings = (
-                self._resources.bindings_for_project(project_identity)
-                if run_id is None
-                else (self._binding_for(run_id, project),)
-            )
-            return project_execution_evidence(
-                self._resources,
-                state_dir=self._state_dir,
-                project_identity=project_identity,
-                selected_run_id=run_id,
-                bindings=bindings,
-            )
-        except LockstepError:
-            raise
-        except Exception as exc:
-            raise LockstepError(
-                "trusted native state failed read-only verification"
-            ) from exc
 
     def list_runs(self, project: str) -> list[dict]:
         project_identity = str(Path(project).resolve())

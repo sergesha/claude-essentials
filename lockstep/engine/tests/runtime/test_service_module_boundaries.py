@@ -271,7 +271,6 @@ def test_command_service_never_inherits_observation_backdoors() -> None:
         "scenario_wait",
         "scenario_history",
         "scenario_events",
-        "scenario_evidence",
         "list_runs",
         "run_trace",
     } & set(dir(LockstepCommandService))

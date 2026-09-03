@@ -28,19 +28,6 @@ def write_json(value: object) -> None:
     sys.stdout.write(json.dumps(value, sort_keys=True, ensure_ascii=False) + "\n")
 
 
-def write_canonical_json(value: object) -> None:
-    sys.stdout.write(
-        json.dumps(
-            value,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-            allow_nan=False,
-        )
-        + "\n"
-    )
-
-
 def require_owner_tty() -> None:
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         raise AuthoringError("owner consent issuance and revocation require a TTY")

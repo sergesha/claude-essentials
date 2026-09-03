@@ -14,13 +14,11 @@ from typing import Literal
 
 from lockstep.runtime.effects.descriptors import parse_effect_result
 from lockstep.runtime.locking import file_lock
-from lockstep.runtime.owner_state import InsecureStatePath, verify_owner_file
 from lockstep.runtime.payload_limits import bounded_json
 from lockstep.runtime.providers._codex_preparation import (
     CodexLaunchRecord,
     _CodexAttemptState,
     _CodexPreparation,
-    _record_data,
 )
 from lockstep.runtime.providers._codex_support import (
     CodexInstallationBinding,
@@ -124,14 +122,6 @@ class _CodexAttemptDriver(_CodexAttemptState, _CodexPreparation):
                 "sha256": self._binding.executable_sha256,
             },
             "credential_identity_digest": record.credential_identity_digest,
-            "launch_record": str(directory / "launch.json"),
-            "launch_record_digest": hashlib.sha256(
-                _canonical(_record_data(record))
-            ).hexdigest(),
-            "launch_ref": record.launch_ref,
-            "request_digest": record.request_digest,
-            "runner_binding_digest": record.runner_binding_digest,
-            "workspace_ref": record.workspace_ref,
             "stdin": str(directory / "stdin.bin"),
             "stdout": str(directory / "stdout.bin"),
             "stderr": str(directory / "stderr.bin"),
@@ -141,12 +131,6 @@ class _CodexAttemptDriver(_CodexAttemptState, _CodexPreparation):
             "cancel": str(directory / "cancel"),
             "started": str(directory / "started.json"),
             "terminal": str(directory / "terminal.json"),
-            "effect_id": record.effect_id,
-            "public_launch_ref": record.public_launch_ref,
-            "start_ref": record.start_ref,
-            "spawn_fence": str(directory / "spawn-fence.json"),
-            "public_start": str(directory / "public-start.json"),
-            "public_terminal": str(directory / "public-terminal.json"),
             "deadline_epoch": record.deadline_at.timestamp(),
             "max_stdout_bytes": self._limits.max_stdout_bytes,
             "max_stderr_bytes": self._limits.max_stderr_bytes,
@@ -360,87 +344,10 @@ class _CodexAttemptDriver(_CodexAttemptState, _CodexPreparation):
             "output_overflow",
             "spawn_failed",
             "stdin_failed",
-            "receipt_publication_failed",
         }:
             raise CodexProviderError("invalid Codex terminal disposition")
         raw["termination_reason"] = reason
         return raw
-
-    def _public_receipt(
-        self,
-        path: Path,
-        expected: dict[str, object] | None = None,
-        *,
-        invalid_as_absent: bool = False,
-    ) -> dict[str, object] | None:
-        if not path.exists() and not path.is_symlink():
-            return None
-        try:
-            verify_owner_file(path)
-            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-            try:
-                encoded = os.read(descriptor, 64 * 1024 + 1)
-            finally:
-                os.close(descriptor)
-            raw = json.loads(encoded)
-            if (
-                not isinstance(raw, dict)
-                or encoded != _canonical(raw) + b"\n"
-                or (expected is not None and raw != expected)
-            ):
-                raise ValueError
-            return raw
-        except (
-            InsecureStatePath,
-            OSError,
-            TypeError,
-            ValueError,
-            json.JSONDecodeError,
-        ) as exc:
-            if invalid_as_absent:
-                return None
-            raise CodexProviderError("invalid public Codex receipt") from exc
-
-    def _validate_public_receipts(
-        self, record: CodexLaunchRecord, terminal: dict[str, object] | None
-    ) -> str:
-        directory = self._directory(record.effect_id)
-        start = {
-            "schema": "lockstep.codex-public-start/v1",
-            "effect_id": record.effect_id,
-            "public_launch_ref": record.public_launch_ref,
-            "start_ref": record.start_ref,
-        }
-        fence = self._public_receipt(directory / "spawn-fence.json", start)
-        started = self._public_receipt(
-            directory / "public-start.json", start, invalid_as_absent=True
-        )
-        public_terminal = self._public_receipt(directory / "public-terminal.json")
-        if fence is None and (started is not None or public_terminal is not None):
-            raise CodexProviderError("public Codex receipt exists without spawn fence")
-        disposition = "legacy" if fence is None else (
-            "started" if started is not None else "indeterminate"
-        )
-        if public_terminal is None:
-            return disposition
-        if terminal is None:
-            raise CodexProviderError("public Codex terminal lacks private terminal")
-        safe = {
-            "effect_id": record.effect_id,
-            "overflow": terminal["overflow"],
-            "public_launch_ref": record.public_launch_ref,
-            "quiescent": terminal["quiescent"],
-            "returncode": terminal["returncode"],
-            "start_ref": record.start_ref,
-            "termination_reason": terminal["termination_reason"],
-            "timed_out": terminal["timed_out"],
-        }
-        safe["terminal_ref"] = hashlib.sha256(
-            b"lockstep-public-terminal-v1\0" + _canonical(safe)
-        ).hexdigest()
-        if public_terminal != safe:
-            raise CodexProviderError("public Codex terminal does not join private truth")
-        return disposition
 
     def _error_result(self, effect_id: str, code: str):
         return parse_effect_result(
@@ -587,63 +494,30 @@ class _CodexAttemptDriver(_CodexAttemptState, _CodexPreparation):
                 stored,
             )
 
-    @staticmethod
-    def _indeterminate(record: CodexLaunchRecord) -> RunnerObservation:
-        return RunnerObservation(
-            record.effect_id,
-            record.request_digest,
-            record.runner_binding_digest,
-            "indeterminate",
-        )
-
-    def _adopt_public_terminal(
-        self,
-        record: CodexLaunchRecord,
-        receipt: dict[str, object],
-        disposition: str,
-    ) -> RunnerObservation:
-        if disposition == "indeterminate":
-            return self._indeterminate(record)
-        return self._terminal(record, receipt)
-
-    def _running_observation(
-        self, record: CodexLaunchRecord, state: dict[str, object]
-    ) -> RunnerObservation:
-        ready_pid = self._supervisor_ready(record)
-        alive = (
-            ready_pid is not None
-            and ready_pid == int(state["supervisor_pid"])
-            and self._supervisor_alive(record, ready_pid)
-        )
-        if alive:
-            disposition = "running"
-        else:
-            receipt = self._terminal_receipt(record)
-            if receipt is not None:
-                public = self._validate_public_receipts(record, receipt)
-                return self._adopt_public_terminal(record, receipt, public)
-            disposition = "indeterminate"
-        return RunnerObservation(
-            record.effect_id,
-            record.request_digest,
-            record.runner_binding_digest,
-            disposition,
-        )
-
     def inspect(self, effect_id: str) -> RunnerObservation:
         record = self._load_record(effect_id)
+        receipt = self._terminal_receipt(record)
+        if receipt is not None:
+            return self._terminal(record, receipt)
         state = self._state(effect_id)
         phase = state.get("phase")
-        if phase == "running":
-            return self._running_observation(record, state)
-        receipt = self._terminal_receipt(record)
-        public_disposition = self._validate_public_receipts(record, receipt)
-        if receipt is not None:
-            return self._adopt_public_terminal(record, receipt, public_disposition)
         if phase == "prepared":
-            disposition = (
-                "indeterminate" if public_disposition == "indeterminate" else "absent"
+            disposition = "absent"
+        elif phase == "running":
+            ready_pid = self._supervisor_ready(record)
+            alive = (
+                ready_pid is not None
+                and ready_pid == int(state["supervisor_pid"])
+                and self._supervisor_alive(record, ready_pid)
             )
+            if not alive:
+                # The supervisor publishes terminal.json before releasing its
+                # liveness lock. Close the observation race across those two
+                # reads before declaring an unrecoverable launch state.
+                receipt = self._terminal_receipt(record)
+                if receipt is not None:
+                    return self._terminal(record, receipt)
+            disposition = "running" if alive else "indeterminate"
         else:
             disposition = "indeterminate"
         return RunnerObservation(
@@ -658,16 +532,7 @@ class _CodexAttemptDriver(_CodexAttemptState, _CodexPreparation):
 
     def cancel(self, effect_id: str) -> RunnerObservation:
         record = self._load_record(effect_id)
-        receipt = self._terminal_receipt(record)
-        public_disposition = self._validate_public_receipts(record, receipt)
-        if receipt is not None:
-            if public_disposition == "indeterminate":
-                return RunnerObservation(
-                    record.effect_id,
-                    record.request_digest,
-                    record.runner_binding_digest,
-                    "indeterminate",
-                )
+        if self._terminal_receipt(record) is not None:
             return self.inspect(effect_id)
         state = self._state(effect_id)
         ready_pid = self._supervisor_ready(record)
@@ -683,7 +548,6 @@ class _CodexAttemptDriver(_CodexAttemptState, _CodexPreparation):
     def quiesce(self, effect_id: str) -> TerminalSafetyObservation:
         record = self._load_record(effect_id)
         receipt = self._terminal_receipt(record)
-        public_disposition = self._validate_public_receipts(record, receipt)
         launch = PreparedLaunch(
             record.effect_id,
             record.request_digest,
@@ -691,11 +555,7 @@ class _CodexAttemptDriver(_CodexAttemptState, _CodexPreparation):
             record.launch_ref,
             record.workspace_ref,
         )
-        if (
-            receipt is None
-            or not receipt["quiescent"]
-            or public_disposition == "indeterminate"
-        ):
+        if receipt is None or not receipt["quiescent"]:
             return TerminalSafetyObservation.pending_for(launch)
         terminal = self._terminal(record, receipt)
         assert terminal.result is not None

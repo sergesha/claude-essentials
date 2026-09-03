@@ -530,6 +530,5 @@ def test_mcp_exposes_authoring_wait_event_and_acceptance_surfaces() -> None:
         "template_show",
         "scenario_wait",
         "scenario_events",
-        "scenario_evidence",
         "scenario_accept_artifact",
     } <= names

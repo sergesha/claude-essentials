@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import FrozenInstanceError, fields
 import importlib
 import inspect
 import json
-from dataclasses import FrozenInstanceError, fields
 from pathlib import Path
 
 import pytest
@@ -255,7 +255,6 @@ def test_command_service_has_no_public_observation_backdoor() -> None:
         "history",
         "scenario_history",
         "scenario_events",
-        "scenario_evidence",
         "list_runs",
         "run_trace",
     }.isdisjoint(vars(LockstepCommandService))
@@ -263,16 +262,7 @@ def test_command_service_has_no_public_observation_backdoor() -> None:
 
 @pytest.mark.parametrize(
     "operation",
-    [
-        "status",
-        "close",
-        "wait",
-        "history",
-        "events",
-        "evidence",
-        "list_runs",
-        "run_trace",
-    ],
+    ["status", "close", "wait", "history", "events", "list_runs", "run_trace"],
 )
 def test_runtime_projection_exposes_observation_operations(operation: str) -> None:
     assert callable(getattr(RuntimeProjection, operation, None))
@@ -719,7 +709,7 @@ def test_owner_provision_runtime_rejects_oversize_config_before_decoding(
         authorized,
         project_identity=str(project.resolve()),
     )
-    assert index.requirements
+    selection_key = index.requirements[0].grant_selection_key
     config = tmp_path / "config.json"
     config.write_bytes(b"x" * (64 * 1024 + 1))
     grants = tmp_path / "grants.json"

@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import secrets
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -64,8 +63,6 @@ class CodexLaunchRecord:
     launcher_decision_generation: int
     deadline_at: datetime
     launch_ref: str
-    public_launch_ref: str
-    start_ref: str
     shell: bool = False
     close_fds: bool = True
     inherited_fds: tuple[int, ...] = ()
@@ -94,8 +91,6 @@ def _record_data(record: CodexLaunchRecord) -> dict[str, object]:
         "launcher_decision_generation": record.launcher_decision_generation,
         "deadline_at": record.deadline_at.isoformat(),
         "launch_ref": record.launch_ref,
-        "public_launch_ref": record.public_launch_ref,
-        "start_ref": record.start_ref,
         "shell": False,
         "close_fds": True,
         "inherited_fds": [],
@@ -209,19 +204,12 @@ class _CodexAttemptState:
                 launcher_decision_generation=int(raw["launcher_decision_generation"]),
                 deadline_at=datetime.fromisoformat(raw["deadline_at"]).astimezone(UTC),
                 launch_ref=raw["launch_ref"],
-                public_launch_ref=raw["public_launch_ref"],
-                start_ref=raw["start_ref"],
             )
             if (
                 record.execution_class != self.execution_class
                 or record.runner_binding_digest != self.binding_digest
-                or len(record.public_launch_ref) != 64
-                or len(record.start_ref) != 64
-                or record.public_launch_ref == record.start_ref
             ):
                 raise ValueError
-            bytes.fromhex(record.public_launch_ref)
-            bytes.fromhex(record.start_ref)
             return record
         except (
             FileNotFoundError,
@@ -286,9 +274,6 @@ class _CodexPreparation:
                 "go",
                 "cancel",
                 "started.json",
-                "spawn-fence.json",
-                "public-start.json",
-                "public-terminal.json",
             )
             if any(
                 (directory / name).exists() or (directory / name).is_symlink()
@@ -439,10 +424,6 @@ class _CodexPreparation:
         environment = dict(binding.environment)
         environment["CODEX_HOME"] = str(binding.codex_home)
         environment["HOME"] = str(binding.codex_home)
-        public_launch_ref = secrets.token_hex(32)
-        start_ref = secrets.token_hex(32)
-        if public_launch_ref == start_ref:
-            raise CodexProviderError("public Codex launch references are not independent")
         return CodexLaunchRecord(
             effect_id=request.effect_id,
             request_digest=request.request_digest,
@@ -465,8 +446,6 @@ class _CodexPreparation:
             launcher_decision_generation=self._decision_gate.generation,
             deadline_at=request.deadline_at,
             launch_ref="pending",
-            public_launch_ref=public_launch_ref,
-            start_ref=start_ref,
         )
 
     def _attested_launch_record(

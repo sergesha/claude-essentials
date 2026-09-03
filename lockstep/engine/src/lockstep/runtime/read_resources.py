@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -45,33 +44,6 @@ class ProjectedEffect:
     phase: str
     deadline_at: datetime | None
     updated_at: datetime
-    runner_binding_digest: str | None
-    workspace_ref: str | None
-    request_digest: str | None
-    grant_digest: str | None
-    launch_commitment_digest: str | None
-    result_ref: str | None
-    result: dict[str, object] | None
-
-
-@dataclass(frozen=True)
-class ProjectedPublicationConsent:
-    consent_ref: str
-    public_run_id: str
-    project_identity: str
-    definition_digest: str
-    source: NativeCoordinate
-    effect_id: str
-    descriptor_digest: str
-    producer_effect_id: str
-    artifact_ref: str
-    artifact_digest: str
-    destination: str
-    transformation: str
-    audience: str
-    commitment_digest: str
-    redeemed_at: str | None
-    receipt_digest: str | None
 
 
 class ProjectedEffects:
@@ -104,41 +76,10 @@ def _verify_sqlite_family(database: Path) -> None:
 
 
 def _timestamp(value: str) -> datetime:
-    if (
-        not isinstance(value, str)
-        or re.fullmatch(
-            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|\+00:00)",
-            value,
-        )
-        is None
-    ):
-        raise ValueError("trusted effect timestamp must be an exact UTC ISO-8601 value")
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError("trusted effect timestamp must include a timezone")
     return parsed.astimezone(UTC)
-
-
-def _result_object(value: str) -> dict[str, object]:
-    def reject_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
-        result: dict[str, object] = {}
-        for key, item in pairs:
-            if key in result:
-                raise ValueError("effect result observation has a duplicate key")
-            result[key] = item
-        return result
-
-    parsed = json.loads(value, object_pairs_hook=reject_duplicates)
-    if not isinstance(parsed, dict):
-        raise ValueError("effect result observation must be a JSON object")
-    canonical = json.dumps(
-        parsed,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        allow_nan=False,
-    )
-    if canonical != value:
-        raise ValueError("effect result observation must be canonical JSON")
-    return parsed
 
 
 def _materialization(
@@ -280,13 +221,7 @@ class RuntimeReadResources:
             rows = connection.execute(
                 "SELECT effect_id, thread_id, checkpoint_ns, checkpoint_id, "
                 "task_id, interrupt_id, descriptor_digest, effect_kind, phase, "
-                "deadline_at, updated_at, runner_binding_digest, workspace_ref, "
-                "request_digest, grant_digest, launch_commitment_digest, result_ref, "
-                "(SELECT result_json FROM effect_observations AS observed "
-                "WHERE observed.effect_id = effects.effect_id "
-                "AND observed.result_json IS NOT NULL "
-                "ORDER BY observed.revision DESC LIMIT 1) "
-                "FROM effects WHERE thread_id = ? "
+                "deadline_at, updated_at FROM effects WHERE thread_id = ? "
                 "ORDER BY created_at, effect_id LIMIT ?",
                 (thread_id, limit + 1),
             ).fetchall()
@@ -306,123 +241,10 @@ class RuntimeReadResources:
                         None if row[9] is None else _timestamp(row[9])
                     ),
                     updated_at=_timestamp(row[10]),
-                    runner_binding_digest=row[11],
-                    workspace_ref=row[12],
-                    request_digest=row[13],
-                    grant_digest=row[14],
-                    launch_commitment_digest=row[15],
-                    result_ref=row[16],
-                    result=(
-                        None
-                        if row[17] is None
-                        else _result_object(row[17])
-                    ),
                 )
                 for row in rows
             )
         )
-
-    def effect_count_for_threads(
-        self, thread_ids: tuple[str, ...], *, limit: int = 10_000
-    ) -> int:
-        """Admit the global public effect budget before materializing any effect."""
-
-        if type(limit) is not int or not 1 <= limit <= 10_000:
-            raise ValueError("effect count limit must be from 1 to 10000")
-        if (
-            any(not isinstance(thread_id, str) or not thread_id for thread_id in thread_ids)
-            or len(set(thread_ids)) != len(thread_ids)
-        ):
-            raise ValueError("effect count requires unique non-empty thread ids")
-        if not thread_ids:
-            return 0
-        _verify_sqlite_family(self.database)
-        connection = sqlite3.connect(sqlite_readonly_uri(self.database), uri=True)
-        try:
-            total = 0
-            for thread_id in thread_ids:
-                row = connection.execute(
-                    "SELECT COUNT(*) FROM effects WHERE thread_id = ?",
-                    (thread_id,),
-                ).fetchone()
-                total += int(row[0])
-                if total > limit:
-                    return limit + 1
-            return total
-        finally:
-            connection.close()
-
-    def publication_consents_for_run(
-        self, public_run_id: str, project_identity: str, *, limit: int = 10_000
-    ) -> tuple[ProjectedPublicationConsent, ...]:
-        if not public_run_id or not project_identity:
-            raise ValueError("publication consent run and project must not be empty")
-        if type(limit) is not int or not 1 <= limit <= 10_000:
-            raise ValueError("publication consent limit must be from 1 to 10000")
-        _verify_sqlite_family(self.database)
-        connection = sqlite3.connect(sqlite_readonly_uri(self.database), uri=True)
-        try:
-            rows = connection.execute(
-                "SELECT consent_ref, public_run_id, project_identity, definition_digest, "
-                "source_thread_id, source_checkpoint_ns, source_checkpoint_id, "
-                "source_task_id, source_interrupt_id, effect_id, descriptor_digest, "
-                "producer_effect_id, artifact_ref, artifact_digest, destination, "
-                "transformation, audience, commitment_digest, redeemed_at, receipt_digest "
-                "FROM publication_consents WHERE public_run_id = ? AND project_identity = ? "
-                "ORDER BY consent_ref LIMIT ?",
-                (public_run_id, project_identity, limit + 1),
-            ).fetchall()
-        finally:
-            connection.close()
-        if len(rows) > limit:
-            raise ValueError("publication consents exceed public bound")
-        return tuple(
-            ProjectedPublicationConsent(
-                consent_ref=row[0],
-                public_run_id=row[1],
-                project_identity=row[2],
-                definition_digest=row[3],
-                source=NativeCoordinate(row[4], row[6], row[5], row[7], row[8]),
-                effect_id=row[9],
-                descriptor_digest=row[10],
-                producer_effect_id=row[11],
-                artifact_ref=row[12],
-                artifact_digest=row[13],
-                destination=row[14],
-                transformation=row[15],
-                audience=row[16],
-                commitment_digest=row[17],
-                redeemed_at=row[18],
-                receipt_digest=row[19],
-            )
-            for row in rows
-        )
-
-    def effect_input_run_bindings(
-        self, *, limit: int = 10_000
-    ) -> dict[str, str]:
-        if type(limit) is not int or not 1 <= limit <= 10_000:
-            raise ValueError("effect input binding limit must be from 1 to 10000")
-        if not self.database.exists() and not self.database.is_symlink():
-            return {}
-        _verify_sqlite_family(self.database)
-        connection = sqlite3.connect(sqlite_readonly_uri(self.database), uri=True)
-        try:
-            rows = connection.execute(
-                "SELECT DISTINCT effect_id, public_run_id FROM effect_runtime_inputs "
-                "ORDER BY effect_id, public_run_id LIMIT ?",
-                (limit + 1,),
-            ).fetchall()
-        finally:
-            connection.close()
-        if len(rows) > limit:
-            raise ValueError("effect input bindings exceed public bound")
-        result: dict[str, str] = {}
-        for effect_id, public_run_id in rows:
-            previous = result.setdefault(effect_id, public_run_id)
-            if previous != public_run_id:
-                raise ValueError("effect input is bound to multiple runs")
-        return result
 
     @contextmanager
     def native_app(self, binding: RunBinding) -> Iterator[NativeApp]:
