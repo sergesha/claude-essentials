@@ -28,7 +28,8 @@ data is `projects/<project-key>` and its base locator is
 Linked worktrees share their Git-common anchor; independent clones do not. A
 non-Git project-local base is discoverable from a child only through its direct
 `anchor-locator-v1.json`. An unmarked shared ancestor is ambiguous unless the
-caller explicitly names the project anchor.
+caller explicitly names the project anchor. The account default is the final
+default candidate, not an unmarked ancestor.
 
 Locators are UTF-8 JSON with exactly `version`, `anchor`, `project_key`,
 `storage_base`, and `data_root`; version is `1`. Symlinks, duplicate or unknown
@@ -50,6 +51,9 @@ UTF-8 preview JSON bytes, and creates only those approved local locator and
 data-root paths. It creates no `planning/` or `beads/` directory. Exact repeat
 is a no-op; changed facts, partial state, races, collisions, and symlinks are
 conflicts.
+
+After bare init, report that storage is ready and invite the user's product or
+work request. Do not expose a bootstrap checklist.
 
 Native owner selection and initialization require later owner-scoped previews
 and approvals. One such preview may combine a native init with a conditional

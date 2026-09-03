@@ -8,7 +8,8 @@ OpenSpec is the sole owner of proposals, requirements, design, and specification
 
 Beads/Dolt is the sole owner of executable decomposition, dependencies, readiness, claim, blockers, and completion; use its native interface for execution-graph work.
 
-For already-selected implementation work, invoke only the applicable Superpowers skills as a bounded leaf, then return control to SpeciFlow.
+For a selected activity, invoke every applicable Superpowers skill by its
+native trigger before that bounded activity, then return control to SpeciFlow.
 
 Product Git and CI own source changes, review history, dirty state, and
 implementation evidence. They do not own OpenSpec approval or Beads status.
@@ -32,9 +33,31 @@ planning Git commit are distinct owner effects. Product `.gitignore`, hooks,
 attributes, and Git configuration changes require separate approved product
 actions and are never init effects.
 
+Immediately before each Backlog, OpenSpec, Beads, or related planning or
+executable coordination mutation, verify the unique canonical owner root and
+bind the native command through an explicit root argument or that exact working
+directory. Stop if the root or binding is uncertain.
+
 ## Approved mutations
 
-Inspect live native state, propose exactly one action and its exact effects, wait for explicit approval, invoke the sole owner's native interface or approved integration, inspect the native result, then commit only native data in the approved data repository.
+Inspect live native state, propose exactly one action and its exact effects,
+then state `Review: required|skipped — reason` before any Backlog, OpenSpec,
+Beads, or related planning or executable coordination mutation. Review is
+required for a semantic mutation; skip it only for demonstrably read-only or
+mechanical work and name the reason. Execute only after unambiguous user
+approval of the exact preview: unrelated or ambiguous text, including `lf`, is
+not approval. Invoke the sole owner's native interface or approved integration,
+inspect the native result, then commit only native data in the approved data
+repository.
+
+## Semantic review
+
+For a required review, give a fresh isolated read-only reviewer the approved
+scope, exact proposed artifact or diff, evidence, and applicable native
+methodology, but no author rationale or preferred verdict. It returns blocking
+defects relative to approved scope separately from scope proposals. Materially
+revised drafts require another review. End review when no approved-scope
+blocker remains; optional scope proposals do not keep it open.
 
 A single owner-scoped action may preview native init followed by a conditional
 commit of exactly the paths that init changed. One approval covers that pair
@@ -83,15 +106,22 @@ If the host cannot disable implicit activation, do not load or install the integ
 
 Acquire the integration only from its [pinned canonical subtree](https://github.com/lucastamoios/celeiro/tree/4c3cf508b3fd8a040d6cf99d4c887056cafe482d/.claude/skills/openspec-to-beads).
 
-If the upstream material, fetch, or analysis is unavailable, report it and keep direct manual projection available. Analyze the approved OpenSpec change directly, present an item-by-item native Beads write preview, and require explicit user confirmation before those writes. The agent may also offer an invocation-scoped, explicit-only loading method after approval, but never persistent or global installation.
+If the upstream material, fetch, or analysis is unavailable, report it and keep
+direct manual projection available. Analyze the approved OpenSpec change
+directly, present an item-by-item native Beads write preview, and require
+explicit user confirmation before those writes. The agent may also offer an
+invocation-scoped, explicit-only loading method after approval, but never
+persistent or global installation.
 
 Never copy or reimplement its conversion algorithm, templates, priority or dependency rules, gap heuristics, or issue schema.
 
-Before creation, deduplicate automatically only when a stable OpenSpec
-reference matches exactly one native Bead. Zero permits an approved create,
-multiple matches are `ambiguous`, and no stable reference requires item-by-item
-confirmation. On partial creation, report created native IDs and preview only
-remaining items. Unknown output is never retried.
+Every OpenSpec task and projected Beads issue must retain one stable approved
+OpenSpec source reference. A review finding is never a task source; missing or
+ambiguous references block that item. Before creation, deduplicate
+automatically only when that source reference matches exactly one native Bead.
+Zero permits an approved create, multiple matches are `ambiguous`. On partial
+creation, report created native IDs and preview only remaining items. Unknown
+output is never retried.
 
 ## Live queries
 
