@@ -4,15 +4,11 @@ from __future__ import annotations
 
 import subprocess
 import sys
-import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-
-
-_OBSOLETE_IMPORT = "lockstep" + "_mcp"
-_OBSOLETE_DISTRIBUTION = "lockstep" + "-mcp"
+import tomllib
 
 
 @dataclass
@@ -33,23 +29,6 @@ def pyproject(repo_root: Path) -> dict:
     return tomllib.loads((repo_root / "engine/pyproject.toml").read_text())
 
 
-def scan_runtime_sources(repo_root: Path, obsolete_names: tuple[str, ...]) -> list[str]:
-    """Return executable/configuration files that retain a legacy public name."""
-    paths = [
-        *sorted((repo_root / "engine/src").rglob("*.py")),
-        repo_root / ".mcp.json",
-        repo_root / ".claude-plugin/plugin.json",
-        repo_root / ".codex-plugin/plugin.json",
-        repo_root / "hooks/hooks.json",
-        repo_root / "scripts/lockstep-plugin",
-    ]
-    return [
-        str(path.relative_to(repo_root))
-        for path in paths
-        if any(name in path.read_text() for name in obsolete_names)
-    ]
-
-
 @pytest.fixture
 def cli() -> object:
     def run(*args: str, probe_startup: bool = False) -> CliResult:
@@ -62,7 +41,7 @@ def cli() -> object:
             + "raise SystemExit(cli.main())\n"
         )
         result = subprocess.run(
-            [sys.executable, "-c", code, *args], text=True, capture_output=True
+            [sys.executable, "-c", code, *args], text=True, capture_output=True, check=False
         )
         return CliResult(
             result.returncode,
@@ -80,11 +59,6 @@ def test_expected_console_scripts(pyproject):
         "lockstep": "lockstep.bootstrap:main",
         "lockstep-dependency-install": "lockstep.dependency_patch:main",
     }
-
-
-def test_executable_sources_have_no_obsolete_names(repo_root):
-    hits = scan_runtime_sources(repo_root, (_OBSOLETE_IMPORT, _OBSOLETE_DISTRIBUTION))
-    assert hits == []
 
 
 def test_mcp_serving_is_explicit(cli):

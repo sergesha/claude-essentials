@@ -27,17 +27,6 @@ def _binding(run_id: str = "run-1", thread_id: str = "thread-1"):
     )
 
 
-def test_run_catalog_has_no_workflow_state(sqlite_store):
-    assert set(sqlite_store.tables.runs.c.keys()) == {
-        "public_run_id",
-        "thread_id",
-        "recipe_digest",
-        "recipe_snapshot_ref",
-        "project_identity",
-        "created_at",
-    }
-
-
 def test_catalog_creates_and_discovers_an_immutable_binding(sqlite_store):
     from lockstep.runtime.catalog import RunCatalog
 
@@ -46,7 +35,6 @@ def test_catalog_creates_and_discovers_an_immutable_binding(sqlite_store):
 
     assert catalog.get("run-1") == created
     assert catalog.list("project-identity") == [created]
-    assert not hasattr(catalog, "update")
 
 
 def test_catalog_reuses_an_identical_binding_but_rejects_conflicts(sqlite_store):

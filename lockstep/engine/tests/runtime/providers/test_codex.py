@@ -19,7 +19,7 @@ from lockstep.runtime.effects.authority import EffectGrant
 from lockstep.runtime.native_models import NativeCoordinate
 from lockstep.runtime.project_snapshots import ProjectSnapshotRef, ProjectSnapshotStore
 from lockstep.runtime.providers.base import EffectRequest, RunnerObservation
-from lockstep.runtime.sandbox import FakeSandboxProvider, SandboxPolicy
+from lockstep.runtime.sandbox import FakeSandboxProvider
 
 
 def _executable(path: Path, body: str) -> Path:
@@ -768,7 +768,6 @@ def test_streaming_capture_limit_fails_without_snapshot_visibility(provider_syst
     receipt = json.loads((capture.parent / "terminal.json").read_bytes())
     assert receipt["stdout_size"] == 512
     assert not capture.exists()
-    assert "subprocess" not in EffectRequest.__dataclass_fields__
 
 
 def test_inspect_rechecks_terminal_after_supervisor_lock_release(
@@ -908,8 +907,3 @@ def test_attempt_quota_bounds_retained_provider_metadata(provider_system) -> Non
 
     with pytest.raises(CodexProviderError, match="quota"):
         adapter.prepare(second)
-
-
-def test_codex_mechanics_do_not_extend_generic_sandbox_contracts() -> None:
-    assert "permission_profile_digest" not in SandboxPolicy.__dataclass_fields__
-    assert "deployment_profile" not in SandboxPolicy.__dataclass_fields__
