@@ -227,9 +227,7 @@ def hook_pretool(stdin_json: dict, state_dir: Path) -> tuple[int, str]:
 # The lockstep MCP tools carry a different name prefix per install shape:
 # a `.mcp.json` server entry named "lockstep" yields `mcp__lockstep__<tool>`
 # (verified live 2026-08-07); a plugin-manifest install yields
-# `mcp__plugin_<plugin>_<server>__<tool>` — observed live on Claude Code
-# 2.1.220: `mcp__plugin_lockstep_lockstep__scenario_start` (fixture:
-# tests/fixtures/hooks/posttool_scenario_start_plugin_install.json). The
+# `mcp__plugin_<plugin>_<server>__<tool>`. The
 # PLUGIN segment is the user's install name — free text — but the SERVER
 # segment is pinned to "lockstep" by the shipped plugin manifest's
 # mcpServers key, so `mcp__plugin_.+_lockstep__` covers every plugin
@@ -428,8 +426,10 @@ def _read_only_legacy_authoring_diagnostics(state_dir: Path) -> tuple[str, ...]:
         )
     except StorageLimitExceeded:
         return (
-            "legacy authoring evidence audit is bounded to 256 namespaces; "
-            f"transaction evidence may remain undiscovered. {_ORPHAN_RECOVERY}",
+            (
+                "legacy authoring evidence audit is bounded to 256 namespaces; "
+                f"transaction evidence may remain undiscovered. {_ORPHAN_RECOVERY}"
+            ),
         )
     findings: list[str] = []
     for namespace in namespaces:
@@ -465,10 +465,12 @@ def doctor(state_dir: Path, recipes_dir: Path) -> tuple[bool, str]:
         legacy_findings = _read_only_legacy_authoring_diagnostics(state_dir)
     except Exception:  # noqa: BLE001 - unreadable owner state is a doctor finding
         legacy_findings = (
-            "read-only legacy authoring evidence audit failed; transaction "
-            "evidence may remain undiscovered. Use a pre-simplification Lockstep "
-            "build against the original exact project directory identity and "
-            "this state directory. Do not delete transaction.json manually.",
+            (
+                "read-only legacy authoring evidence audit failed; transaction "
+                "evidence may remain undiscovered. Use a pre-simplification Lockstep "
+                "build against the original exact project directory identity and "
+                "this state directory. Do not delete transaction.json manually."
+            ),
         )
     if legacy_findings:
         for finding in legacy_findings:
