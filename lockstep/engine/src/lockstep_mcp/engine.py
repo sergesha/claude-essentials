@@ -53,6 +53,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import time
 import uuid
@@ -140,8 +141,11 @@ def _subst(text: str, vars_: dict) -> str:
 
 class Engine:
     def __init__(self, state_dir: Path, recipes_dir: Path, memory_only: bool = False) -> None:
-        self._state_dir = Path(state_dir)
-        self._recipes_dir = Path(recipes_dir)
+        # Runs and child processes may use different working directories.
+        # Pin both roots once so inherited env and Codex MCP overrides keep
+        # addressing the same state and recipe snapshots.
+        self._state_dir = Path(state_dir).resolve()
+        self._recipes_dir = Path(recipes_dir).resolve()
         self._memory_only = memory_only
         self._runs = RunIndex(self._state_dir)
         # memory_only has no durable checkpoint file to recompile from, so
@@ -756,7 +760,9 @@ class Engine:
                     "escalated": True,
                 }
 
-            parked = self._maybe_park_subcall(run_id, step, "fail", adv)
+            parked = self._maybe_park_subcall(
+                run_id, step, "fail", adv, ctx.get("_subcall_runner")
+            )
             if parked is not None:
                 return parked
 
@@ -819,7 +825,9 @@ class Engine:
 
         self._advance_baseline(run_id, record.project, globs, manifest=pending_baseline)
 
-        parked = self._maybe_park_subcall(run_id, step, "pass", adv)
+        parked = self._maybe_park_subcall(
+            run_id, step, "pass", adv, ctx.get("_subcall_runner")
+        )
         if parked is not None:
             return parked
 
@@ -903,7 +911,14 @@ class Engine:
     def _is_subcall_parked(self, record: RunRecord) -> bool:
         return record.status == "awaiting" and (record.brief or {}).get("step") == "_subcall"
 
-    def _maybe_park_subcall(self, run_id: str, step: str, vstatus: str, adv: yg.Advance) -> dict | None:
+    def _maybe_park_subcall(
+        self,
+        run_id: str,
+        step: str,
+        vstatus: str,
+        adv: yg.Advance,
+        resolved_runner: str | None = None,
+    ) -> dict | None:
         """Park persistence: when a resume routed into the subcall triple and
         parked on the `_subcall` marker, persist the FULL marker (plus
         `started_at`) as the index brief and tell the worker a subcall
@@ -911,6 +926,8 @@ class Engine:
         if adv.done or adv.brief is None or adv.brief.step != "_subcall":
             return None
         marker = dict(adv.brief.raw)                   # FULL marker: node/runner/prompt/...
+        if resolved_runner:
+            marker["runner"] = resolved_runner
         marker["started_at"] = time.time()
         self._runs.update(run_id, step="_subcall", brief=marker)
         self._log_transition(run_id, step, vstatus, "_subcall")
@@ -1164,7 +1181,41 @@ class Engine:
             )
         env = runners.child_env(os.environ, self._state_dir, child_run, nonce)
         env["LOCKSTEP_RECIPES"] = str(self._recipes_dir)   # child resolves recipes where its parent did — pinned, not inherited
-        argv = subcalls.safe_argv(spec, prompt, None, None)  # model defaults to spec.models[0]; v2 never resumes runner sessions
+        codex_mcp_command = None
+        if spec.driver == "codex" and child_run is not None:
+            # Codex isolates bundled MCP servers from the runner process
+            # environment. Put the origin credential in an owner-controlled
+            # state-dir launcher, then override only the child session's MCP
+            # command. The nonce never appears in argv/proc.json.
+            codex_mcp_command = workdir / "codex-child-mcp"
+            engine_dir = Path(__file__).resolve().parents[2]
+            script = (
+                "#!/bin/sh\nset -eu\n"
+                f"export LOCKSTEP_STATE_DIR={shlex.quote(str(self._state_dir))}\n"
+                f"export LOCKSTEP_RECIPES={shlex.quote(str(self._recipes_dir))}\n"
+                f"export LOCKSTEP_CHILD_RUN={shlex.quote(child_run)}\n"
+                f"export LOCKSTEP_CHILD_NONCE={shlex.quote(nonce)}\n"
+                f"exec uv run --project {shlex.quote(str(engine_dir))} lockstep-mcp \"$@\"\n"
+            )
+            tmp = workdir / f"codex-child-mcp.{os.getpid()}.{time.time_ns()}.tmp"
+            try:
+                fd = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o700)
+                with os.fdopen(fd, "w") as fh:
+                    fh.write(script)
+                os.replace(tmp, codex_mcp_command)
+            except OSError as exc:
+                for path in (tmp, codex_mcp_command):
+                    try:
+                        path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                raise LockstepError(
+                    f"could not create Codex child MCP launcher: {exc}"
+                ) from exc
+        argv = subcalls.safe_argv(
+            spec, prompt, None, None,
+            str(codex_mcp_command) if codex_mcp_command is not None else None,
+        )  # model defaults to spec.models[0]; v2 never resumes runner sessions
         return {
             "_subcall_workdir": str(workdir), "_subcall_argv": argv,
             "_subcall_cwd": record.project, "_subcall_env": env,

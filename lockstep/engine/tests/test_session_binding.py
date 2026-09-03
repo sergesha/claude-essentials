@@ -255,6 +255,11 @@ def _recorded_payload() -> dict:
     return json.loads(p.read_text())
 
 
+def _recorded_codex_payload() -> dict:
+    p = Path(__file__).parent / "fixtures" / "hooks" / "posttool_scenario_start_codex.json"
+    return json.loads(p.read_text())
+
+
 def _force_run_id(state: Path, old: str, new: str) -> None:
     path = state / "runs.json"
     data = json.loads(path.read_text())
@@ -280,6 +285,22 @@ def test_bind_from_recorded_plugin_install_payload(tmp_path):
     assert binding["session_id"] == payload["session_id"]
 
 
+def test_bind_from_recorded_codex_payload(tmp_path):
+    proj, state = _setup(tmp_path)
+    payload = _recorded_codex_payload()
+    run_id = cli._posttool_run_id(
+        payload.get("tool_input"), payload.get("tool_response"), payload.get("tool_name", "")
+    )
+    assert run_id
+    _force_run_id(state, _mk_run(state, str(proj.resolve())), run_id)
+
+    cli.hook_posttool(payload, state)
+
+    binding = sessions.read_binding(state, run_id)
+    assert binding is not None
+    assert binding["session_id"] == payload["session_id"]
+
+
 def test_shipped_hook_matcher_covers_install_shapes():
     # The shipped hooks.json matcher must match the OBSERVED plugin-install
     # tool name, the `.mcp.json`-install name, AND a plugin installed under
@@ -294,6 +315,7 @@ def test_shipped_hook_matcher_covers_install_shapes():
     matcher = entry["matcher"]
     assert matcher == cli.LOCKSTEP_TOOL_MATCHER    # ONE pattern, two homes, byte-equal
     assert re.fullmatch(matcher, _recorded_payload()["tool_name"])
+    assert re.fullmatch(matcher, _recorded_codex_payload()["tool_name"])
     assert re.fullmatch(matcher, "mcp__lockstep__scenario_start")
     # the live-smoke hole: our plugin installed under a different name
     assert re.fullmatch(matcher, "mcp__plugin_myfork_lockstep__scenario_start")
@@ -323,6 +345,35 @@ def test_bind_from_plugin_install_under_any_plugin_name(tmp_path):
     binding = sessions.read_binding(state, run_id)
     assert binding is not None, "renamed-plugin payload did not bind"
     assert binding["session_id"] == payload["session_id"]
+
+
+def test_recorded_codex_payload_preserves_live_owner_and_stale_adoption(tmp_path):
+    proj, state = _setup(tmp_path)
+    payload = _recorded_codex_payload()
+    run_id = cli._posttool_run_id(
+        payload.get("tool_input"), payload.get("tool_response"), payload.get("tool_name", "")
+    )
+    assert run_id
+    _force_run_id(state, _mk_run(state, str(proj.resolve())), run_id)
+    cli.hook_posttool(payload, state)
+
+    session_b = "codex-session-b"
+    assert _pretool(state, proj, session_b)[1]
+    status_payload = {
+        **payload,
+        "session_id": session_b,
+        "tool_name": "mcp__lockstep__scenario_status",
+        "tool_input": {"run_id": run_id},
+        "tool_response": {"run_id": run_id, "status": "awaiting"},
+    }
+    cli.hook_posttool(status_payload, state)
+    assert sessions.read_binding(state, run_id)["session_id"] == payload["session_id"]
+    assert _pretool(state, proj, session_b)[1]
+
+    _age_binding(state, run_id, 31.0)
+    cli.hook_posttool(status_payload, state)
+    assert sessions.read_binding(state, run_id)["session_id"] == session_b
+    assert _pretool(state, proj, session_b) == (0, "")
 
 
 # ---------------------------------------------------------------------------

@@ -3,6 +3,7 @@ import textwrap
 from pathlib import Path
 
 import pytest
+import yaml
 
 from lockstep_mcp.runners import (
     DEFAULTS,
@@ -85,6 +86,53 @@ def test_budgets_default_when_absent(tmp_path):
     assert spec.timeout_minutes == DEFAULTS["timeout_minutes"]
 
 
+def test_legacy_runner_defaults_to_claude_driver(tmp_path):
+    exe = _fake_exe(tmp_path)
+    _write_runners(tmp_path, exe)
+    assert resolve(tmp_path, "claude", {}).driver == "claude"
+
+
+def test_explicit_codex_driver_loads_without_guessing_from_name(tmp_path):
+    exe = _fake_exe(tmp_path)
+    (tmp_path / "runners.yaml").write_text(textwrap.dedent(f"""
+        runners:
+          reviewer:
+            driver: codex
+            path: {exe}
+            models: [gpt-5.6-luna]
+    """))
+    spec = resolve(tmp_path, "reviewer", {})
+    assert spec.name == "reviewer"
+    assert spec.driver == "codex"
+
+
+@pytest.mark.parametrize("driver", ["", "Codex", "openai", "claude-code"])
+def test_unknown_or_empty_driver_is_rejected(tmp_path, driver):
+    exe = _fake_exe(tmp_path)
+    (tmp_path / "runners.yaml").write_text(textwrap.dedent(f"""
+        runners:
+          reviewer:
+            driver: {driver!r}
+            path: {exe}
+            models: [m]
+    """))
+    with pytest.raises(RunnerError, match="driver"):
+        load_runners(tmp_path)
+
+
+@pytest.mark.parametrize("driver", [None, [], {}, 1, True])
+def test_non_string_driver_is_a_runner_error(tmp_path, driver):
+    exe = _fake_exe(tmp_path)
+    config = {
+        "runners": {
+            "reviewer": {"driver": driver, "path": str(exe), "models": ["m"]}
+        }
+    }
+    (tmp_path / "runners.yaml").write_text(yaml.safe_dump(config))
+    with pytest.raises(RunnerError, match="driver"):
+        load_runners(tmp_path)
+
+
 # ---------------------------------------------------------------------------
 # budgets honoured per-runner, unknown runner keys rejected
 # ---------------------------------------------------------------------------
@@ -158,6 +206,56 @@ def test_argv_exact_with_resume(tmp_path):
     argv = build_argv(spec, "do it", "claude-haiku-4-5", "sess-1")
     assert argv == [str(exe), "-p", "--output-format", "json",
                     "--model", "claude-haiku-4-5", "--resume", "sess-1", "--", "do it"]
+
+
+def test_codex_argv_exact_hostile_prompt_stays_behind_terminator(tmp_path):
+    exe = _fake_exe(tmp_path)
+    (tmp_path / "runners.yaml").write_text(textwrap.dedent(f"""
+        runners:
+          reviewer:
+            driver: codex
+            path: {exe}
+            models: [gpt-5.6-luna]
+    """))
+    spec = resolve(tmp_path, "reviewer", {})
+    hostile = "--danger-full-access"
+    assert build_argv(spec, hostile, "gpt-5.6-luna", None) == [
+        str(exe), "exec", "--json", "--sandbox", "workspace-write",
+        "--model", "gpt-5.6-luna", "--", hostile,
+    ]
+
+
+def test_codex_child_mcp_override_is_before_exec_and_contains_no_credential(tmp_path):
+    exe = _fake_exe(tmp_path)
+    (tmp_path / "runners.yaml").write_text(textwrap.dedent(f"""
+        runners:
+          reviewer:
+            driver: codex
+            path: {exe}
+            models: [gpt-5.6-luna]
+    """))
+    spec = resolve(tmp_path, "reviewer", {})
+    wrapper = tmp_path / "state/codex-child-mcp"
+    argv = build_argv(spec, "review", None, None, str(wrapper))
+
+    assert argv[:4] == [
+        str(exe), "-c", f'mcp_servers.lockstep.command="{wrapper}"', "exec",
+    ]
+    assert argv[-2:] == ["--", "review"]
+
+
+def test_codex_resume_is_rejected_loudly(tmp_path):
+    exe = _fake_exe(tmp_path)
+    (tmp_path / "runners.yaml").write_text(textwrap.dedent(f"""
+        runners:
+          reviewer:
+            driver: codex
+            path: {exe}
+            models: [gpt-5.6-luna]
+    """))
+    spec = resolve(tmp_path, "reviewer", {})
+    with pytest.raises(RunnerError, match="resume"):
+        build_argv(spec, "review", None, "thread-1")
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +379,8 @@ def test_engine_start_refuses_state_dir_inside_project(tmp_path):
 def test_child_env_exact_allowlist(tmp_path):
     base = {
         "PATH": "/bin", "HOME": "/home/u", "SystemRoot": "C:\\Windows",
+        "CODEX_HOME": "/owner/codex",
+        "CODEX_API_KEY": "drop-me", "OPENAI_API_KEY": "drop-me-too",
         "SHELL": "/bin/zsh",                       # dropped: a -p child needs no shell
         "SECRET_TOKEN": "leak", "ANTHROPIC_API_KEY": "leak2",
         "LOCKSTEP_RECIPES": "/recipes",            # passthrough: fractal child, same recipes
@@ -289,6 +389,7 @@ def test_child_env_exact_allowlist(tmp_path):
     env = child_env(base, tmp_path, "run-1", "n1")
     assert env == {
         "PATH": "/bin", "HOME": "/home/u", "SystemRoot": "C:\\Windows",
+        "CODEX_HOME": "/owner/codex",
         "LOCKSTEP_RECIPES": "/recipes",
         "LOCKSTEP_STATE_DIR": str(tmp_path),       # preserved-and-pinned: shared index
         "LOCKSTEP_CHILD_RUN": "run-1", "LOCKSTEP_CHILD_NONCE": "n1",

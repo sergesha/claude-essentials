@@ -10,6 +10,7 @@ from an agent running as the same OS user (see ``assert_state_dir_sane``).
 """
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,7 +20,8 @@ import yaml
 
 DEFAULTS = {"timeout_minutes": 30, "max_subcalls_per_run": 8, "max_fractal_depth": 2}
 _BUDGET_KEYS = tuple(DEFAULTS)
-_RUNNER_KEYS = {"path", "models", *_BUDGET_KEYS}
+_DRIVERS = frozenset({"claude", "codex"})
+_RUNNER_KEYS = {"driver", "path", "models", *_BUDGET_KEYS}
 # Process essentials only (POSIX + Windows). No SHELL — a `-p` child spawns
 # no interactive shell. LOCKSTEP_RECIPES passes through so a fractal child
 # resolves recipes where its parent did, not against its own cwd.
@@ -30,7 +32,7 @@ _RUNNER_KEYS = {"path", "models", *_BUDGET_KEYS}
 _ENV_ALLOWLIST = (
     "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR", "TEMP", "TMP",
     "SystemRoot", "COMSPEC", "PATHEXT", "USERPROFILE",
-    "LOCKSTEP_RECIPES", "LOCKSTEP_RUNNER",
+    "CODEX_HOME", "LOCKSTEP_RECIPES", "LOCKSTEP_RUNNER",
 )
 
 
@@ -46,6 +48,7 @@ class RunnerSpec:
     timeout_minutes: int
     max_subcalls_per_run: int
     max_fractal_depth: int
+    driver: str = "claude"
 
 
 def _as_int(name: str, key: str, value: Any) -> int:
@@ -79,10 +82,16 @@ def load_runners(state_dir: Path) -> dict[str, RunnerSpec]:
         limits = {
             k: _as_int(name, k, body.get(k, budgets.get(k, DEFAULTS[k]))) for k in _BUDGET_KEYS
         }
+        driver = body.get("driver", "claude")
+        if not isinstance(driver, str) or driver not in _DRIVERS:
+            raise RunnerError(
+                f"runner '{name}': driver must be one of {sorted(_DRIVERS)}, got {driver!r}"
+            )
         out[name] = RunnerSpec(
             name=name,
             path=str(body.get("path", "")),
             models=list(body.get("models") or []),
+            driver=driver,
             **limits,
         )
     return out
@@ -168,7 +177,9 @@ def resolve(state_dir: Path, node_runner: str | None, env: Mapping[str, str]) ->
     return spec
 
 
-def build_argv(spec: RunnerSpec, prompt: str, model: str | None, resume_session: str | None) -> list[str]:
+def build_argv(spec: RunnerSpec, prompt: str, model: str | None,
+               resume_session: str | None,
+               codex_mcp_command: str | None = None) -> list[str]:
     if not spec.models:
         raise RunnerError(f"runner '{spec.name}': models allowlist is required and must be non-empty")
     if model is None:
@@ -178,9 +189,30 @@ def build_argv(spec: RunnerSpec, prompt: str, model: str | None, resume_session:
     # The prompt is assembled from a brief carrying WORKER-SUPPLIED vars: it
     # goes LAST, behind an explicit `--` terminator, so a prompt starting
     # with `-`/`--` can never parse as a flag. `--model` is ALWAYS emitted.
-    argv = [spec.path, "-p", "--output-format", "json", "--model", model]
-    if resume_session:
-        argv += ["--resume", resume_session]
+    if spec.driver == "claude":
+        argv = [spec.path, "-p", "--output-format", "json", "--model", model]
+        if resume_session:
+            argv += ["--resume", resume_session]
+    elif spec.driver == "codex":
+        if resume_session:
+            raise RunnerError(
+                f"runner '{spec.name}': resume_session is not supported by the codex driver"
+            )
+        argv = [spec.path]
+        if codex_mcp_command is not None:
+            if not os.path.isabs(codex_mcp_command):
+                raise RunnerError("codex_mcp_command must be an absolute path")
+            argv += ["-c", f"mcp_servers.lockstep.command={json.dumps(codex_mcp_command)}"]
+        argv += [
+            "exec",
+            "--json",
+            "--sandbox",
+            "workspace-write",
+            "--model",
+            model,
+        ]
+    else:
+        raise RunnerError(f"runner '{spec.name}': unsupported driver {spec.driver!r}")
     argv += ["--", prompt]
     return argv
 

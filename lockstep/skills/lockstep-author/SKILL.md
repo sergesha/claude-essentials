@@ -238,8 +238,8 @@ would be a real integrity hole.
 
 A **subcall** is a recipe-level triple built from existing node types only —
 a `python` spawn node, an `interrupt` marker node, a `python` poll node —
-that hands one closed sub-task to a separate `claude -p` process the main
-(worker) agent cannot read or steer. `subcall-one-shot.yaml` (one-shot,
+that hands one closed sub-task to a separate configured CLI-agent process the
+main (worker) agent cannot read or steer. `subcall-one-shot.yaml` (one-shot,
 validated by its captured output) and `subcall-fractal.yaml` +
 `child-review.yaml` (fractal — the spawned session runs its own lockstep
 child run) in `tests/fixtures/recipes/good/` are the ground truth; copy
@@ -263,7 +263,7 @@ nodes:
     message:
       step: _subcall            # the marker discriminator — exactly this
       node: review              # unique node id within the recipe
-      runner: claude
+      # runner omitted: use this host adapter's LOCKSTEP_RUNNER default
       timeout_minutes: 30
       prompt: "..."             # verbatim, no {var} placeholders
       scenario: review-gate     # OMIT for a one-shot subcall
@@ -337,16 +337,21 @@ name resolvable at all:
 ```yaml
 runners:
   claude:
+    driver: claude
     path: /usr/local/bin/claude   # ABSOLUTE — the engine never PATH-resolves
-    models: [haiku, sonnet]       # required, non-empty — fail-closed otherwise.
-                                  # The engine always launches with the FIRST
-                                  # entry; later entries are reserved for
-                                  # future per-marker model selection.
-    timeout_minutes: 30           # optional override; falls back to budgets/defaults
+    models: [claude-haiku-4-5]
+  codex:
+    driver: codex
+    path: /usr/local/bin/codex
+    models: [gpt-5.6-luna]
 budgets:
   max_subcalls_per_run: 8
   max_fractal_depth: 2
 ```
+
+Runner names are arbitrary owner-controlled configuration keys; `driver`
+selects the command grammar and must be exactly `claude` or `codex`. An
+omitted `driver` defaults to `claude` for backward compatibility.
 
 `path` MUST be an absolute, executable file — the engine checks this again
 immediately before every spawn, never from a cached value. A `runner:`
@@ -355,7 +360,8 @@ loud start-time refusal (`scenario_start` resolves every marker's runner
 before creating the run), never a silent fallback. A marker's `runner:` is
 optional — the adapter default (`LOCKSTEP_RUNNER`) applies when absent, and
 it passes through to fractal child sessions, so a depth-2 recipe may rely
-on it too. See README.md "Subcalls
+on it too. An explicit `runner:` selects that named allowlist entry and may
+intentionally cross from one host driver to the other. See README.md "Subcalls
 (v2)" for why the path must be absolute and the state dir must sit outside
 the project tree, and for what this setup does and does NOT guarantee.
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- Add a Codex plugin adapter, shared policy hooks, and Codex one-shot/fractal runner support while preserving Claude Code compatibility.
+
 ## 0.1.0 (2026-08-08)
 
 

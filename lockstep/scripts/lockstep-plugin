@@ -1,0 +1,26 @@
+#!/bin/sh
+set -eu
+
+case "$0" in
+  /*) lockstep_script=$0 ;;
+  *) lockstep_script=$PWD/$0 ;;
+esac
+lockstep_scripts_dir=${lockstep_script%/*}
+lockstep_plugin_root=${lockstep_scripts_dir%/*}
+
+# Codex deliberately gives bundled stdio MCP servers only the manifest's
+# explicit environment. Recover its profile root from the installed plugin
+# cache path so spawned Codex children use the same auth/plugin configuration.
+# Claude installs do not set LOCKSTEP_RUNNER=codex and never enter this branch.
+if [ "${LOCKSTEP_RUNNER:-}" = codex ] && [ -z "${CODEX_HOME:-}" ]; then
+  case "$lockstep_plugin_root" in
+    */plugins/cache/*)
+      lockstep_codex_home=${lockstep_plugin_root%%/plugins/cache/*}
+      if [ -n "$lockstep_codex_home" ]; then
+        export CODEX_HOME=$lockstep_codex_home
+      fi
+      ;;
+  esac
+fi
+
+exec uv run --project "$lockstep_plugin_root/engine" lockstep-mcp "$@"

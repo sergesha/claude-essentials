@@ -13,7 +13,18 @@ FAKE = Path(__file__).parent / "fixtures" / "fake_runner.py"
 
 
 def _argv(*extra):
-    return [sys.executable, str(FAKE), *extra]
+    return [
+        sys.executable,
+        str(FAKE),
+        *extra,
+        "-p",
+        "--output-format",
+        "json",
+        "--model",
+        "claude-sonnet-4-5",
+        "--",
+        "test prompt",
+    ]
 
 
 def _wait_terminal(wd, tries=140):
@@ -312,6 +323,38 @@ def test_fractal_poll_errors_when_process_died_but_child_awaiting(tmp_path):
 def _spec():
     return RunnerSpec(name="claude", path=sys.executable, models=["claude-sonnet-4-5"],
                       timeout_minutes=5, max_subcalls_per_run=8, max_fractal_depth=2)
+
+
+def test_direct_runner_spec_defaults_to_claude_driver():
+    assert _spec().driver == "claude"
+
+
+def test_extract_session_id_from_claude_json():
+    assert subcalls.extract_session_id('{"session_id":"claude-session"}\n') == "claude-session"
+
+
+def test_extract_session_id_from_codex_jsonl_fixture():
+    output = (Path(__file__).parent / "fixtures/runners/codex-jsonl.txt").read_text()
+    assert subcalls.extract_session_id(output) == "019c42aa-example-thread"
+
+
+@pytest.mark.parametrize("output", [
+    "",
+    "not-json\n",
+    '{"type":"thread.started"}\n',
+    '{"type":"thread.started","thread_id":""}\n',
+    '[]\n{"result":"ok"}\n',
+])
+def test_extract_session_id_ignores_malformed_or_incomplete_lines(output):
+    assert subcalls.extract_session_id(output) is None
+
+
+def test_extract_session_id_scans_all_lines_not_only_the_last():
+    output = (
+        '{"type":"thread.started","thread_id":"thread-1"}\n'
+        '{"type":"turn.completed"}\n'
+    )
+    assert subcalls.extract_session_id(output) == "thread-1"
 
 
 def test_safe_argv_accepts_sane_resume_and_keeps_prompt_terminated():

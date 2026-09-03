@@ -15,14 +15,13 @@ introspection — the SDK's real tool registry).
 
 Lazy singleton (`_eng()` / `_reset_engine()`): the `Engine` is built once,
 from `LOCKSTEP_STATE_DIR`/`LOCKSTEP_RECIPES` env vars (Global Constraints
-defaults: `~/.lockstep`, `<cwd>/.lockstep/recipes`), on first tool call —
-never at import time, so tests can set the env vars and call
+defaults: `~/.lockstep`, `<resolved host project>/.lockstep/recipes`), on first
+tool call — never at import time, so tests can set the env vars and call
 `_reset_engine()` before exercising any tool.
 
-`run.project` provenance: `scenario_start` captures the
-server process cwd (`Path.cwd().resolve()`) as `project` — it is never a
-tool argument. `scenario_dryrun` (which has no run/project of its own)
-uses the same server-cwd convention for its containment check.
+`run.project` provenance is never a tool argument: Claude supplies the server
+process cwd; Codex supplies the active workspace in MCP request metadata.
+`scenario_dryrun` uses the same resolved host project for containment checks.
 
 Two small helpers duplicate logic that already lives in `Engine`
 (`_check_path_containment`) and `RunIndex`/`recipes_dir` access
@@ -49,6 +48,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 import yaml
+from mcp.server.mcpserver import Context
 from mcp.server.mcpserver import MCPServer as FastMCP
 
 from lockstep_mcp import evidence as evidence_mod
@@ -61,6 +61,7 @@ from lockstep_mcp.engine import Engine, LockstepError
 app = FastMCP("lockstep")
 
 _engine: Engine | None = None
+_engine_config: tuple[Path, Path] | None = None
 
 # scenario_dryrun runs ONLY these; command (cmd_ok, git_clean,
 # junit_gate) and baseline (fresh, unchanged, changed_in, diff_only) checks
@@ -68,25 +69,51 @@ _engine: Engine | None = None
 SHAPE_CHECK_TYPES = {"file_exists", "file_nonempty", "md_has_sections", "file_matches"}
 
 
-def _eng() -> Engine:
-    global _engine
-    if _engine is None:
+def _project_for_context(ctx: Context | None) -> Path:
+    """Resolve the host project without exposing it as a tool argument.
+
+    Claude starts the server in the project directory. Codex starts bundled
+    plugin commands from the plugin root, but includes the active workspace in
+    its per-call metadata. Unknown clients retain the cwd convention.
+    """
+    if ctx is not None:
+        try:
+            meta = ctx.request_context.meta
+        except (AttributeError, ValueError):
+            meta = None
+        if isinstance(meta, dict):
+            turn = meta.get("x-codex-turn-metadata")
+            workspaces = turn.get("workspaces") if isinstance(turn, dict) else None
+            if isinstance(workspaces, dict):
+                for workspace in workspaces:
+                    if isinstance(workspace, str) and workspace:
+                        return Path(workspace).resolve()
+    return Path.cwd().resolve()
+
+
+def _eng(project: Path | None = None) -> Engine:
+    global _engine, _engine_config
+    project_root = (project or Path.cwd()).resolve()
+    state_dir = Path(os.environ.get("LOCKSTEP_STATE_DIR") or str(Path.home() / ".lockstep"))
+    recipes_dir = Path(
+        os.environ.get("LOCKSTEP_RECIPES") or str(project_root / ".lockstep" / "recipes")
+    )
+    config = (state_dir.resolve(), recipes_dir.resolve())
+    if _engine is None or _engine_config != config:
         # `or`, never a get() default — an unset variable the plugin
         # manifest forwards arrives present and EMPTY, and `Path("")` is
         # the cwd, which would put run state inside the project tree.
-        state_dir = Path(os.environ.get("LOCKSTEP_STATE_DIR") or str(Path.home() / ".lockstep"))
-        recipes_dir = Path(
-            os.environ.get("LOCKSTEP_RECIPES") or str(Path.cwd() / ".lockstep" / "recipes")
-        )
         _engine = Engine(state_dir, recipes_dir)
+        _engine_config = config
     return _engine
 
 
 def _reset_engine() -> None:
     """Test-only: drop the lazy singleton so the next `_eng()` call rebuilds
     it from the (possibly just-changed) environment."""
-    global _engine
+    global _engine, _engine_config
     _engine = None
+    _engine_config = None
 
 
 def _containment_errors(schema: dict | None, evidence: dict, project: str) -> list[str]:
@@ -128,7 +155,7 @@ def _load_step_brief(recipe_path: Path, step: str) -> dict | None:
     return None
 
 
-def _assert_origin(run_id: str) -> None:
+def _assert_origin(run_id: str, project: Path | None = None) -> None:
     """Origin binding: a run with `parent_run` set was minted for a
     spawned child session, and only the process carrying that session's
     credential (the LOCKSTEP_CHILD_RUN + LOCKSTEP_CHILD_NONCE pair
@@ -142,7 +169,7 @@ def _assert_origin(run_id: str) -> None:
     and a worker with shell can Bash-launch its own credentialed engine.
     That is the SAME same-user residual class v1 already carries."
     """
-    record = _eng()._runs.get(run_id)  # noqa: SLF001
+    record = _eng(project)._runs.get(run_id)  # noqa: SLF001
     if record.parent_run is None:
         return
     env_run = os.environ.get("LOCKSTEP_CHILD_RUN")
@@ -172,45 +199,51 @@ def _mark(res: dict) -> dict:
 
 
 @app.tool()
-def scenario_start(recipe: str, vars: dict | None = None) -> dict:
+def scenario_start(recipe: str, vars: dict | None = None, ctx: Context | None = None) -> dict:
     """Start a new run of `recipe`. `run.project` = the server process cwd
  — never an argument here."""
-    project = str(Path.cwd().resolve())
-    return _mark(_eng().start(recipe, vars or {}, project))
+    project = _project_for_context(ctx)
+    return _mark(_eng(project).start(recipe, vars or {}, str(project)))
 
 
 @app.tool()
-def scenario_status(run_id: str) -> dict:
-    return _mark(_eng().status(run_id))
+def scenario_status(run_id: str, ctx: Context | None = None) -> dict:
+    return _mark(_eng(_project_for_context(ctx)).status(run_id))
 
 
 @app.tool()
-def scenario_done(run_id: str, step: str, evidence: dict) -> dict:
-    _assert_origin(run_id)
-    return _mark(_eng().done(run_id, step, evidence))
+def scenario_done(run_id: str, step: str, evidence: dict, ctx: Context | None = None) -> dict:
+    project = _project_for_context(ctx)
+    _assert_origin(run_id, project)
+    return _mark(_eng(project).done(run_id, step, evidence))
 
 
 @app.tool()
-def scenario_escalate(run_id: str, reason: str) -> dict:
-    _assert_origin(run_id)
-    return _mark(_eng().escalate(run_id, reason))
+def scenario_escalate(run_id: str, reason: str, ctx: Context | None = None) -> dict:
+    project = _project_for_context(ctx)
+    _assert_origin(run_id, project)
+    return _mark(_eng(project).escalate(run_id, reason))
 
 
 @app.tool()
-def scenario_abort(run_id: str) -> dict:
-    _assert_origin(run_id)
-    return _mark(_eng().abort(run_id))
+def scenario_abort(run_id: str, ctx: Context | None = None) -> dict:
+    project = _project_for_context(ctx)
+    _assert_origin(run_id, project)
+    return _mark(_eng(project).abort(run_id))
 
 
 @app.tool()
-def scenario_dryrun(recipe: str, step: str, evidence: dict) -> dict:
+def scenario_dryrun(
+    recipe: str, step: str, evidence: dict, ctx: Context | None = None
+) -> dict:
     """SHAPE-ONLY dryrun: applies the same `_`-prefix
     rejection, schema validation, and path resolve+containment `done()`
     applies (project root = server cwd, since there is no run). Runs only
     shape checks; command/baseline checks report `skipped (dryrun)` and
     never execute. No RunIndex entry, no snapshot, no baseline artifact —
     nothing durable, nothing besides shape checks actually runs."""
-    eng = _eng()
+    project_root = _project_for_context(ctx)
+    eng = _eng(project_root)
     recipe_path = eng.recipe_path(recipe)
     if not recipe_path.exists():
         raise ValueError(f"recipe not found: {recipe}")
@@ -232,7 +265,7 @@ def scenario_dryrun(recipe: str, step: str, evidence: dict) -> dict:
     if schema_errors:
         return {"accepted": False, "errors": schema_errors}
 
-    project = str(Path.cwd().resolve())
+    project = str(project_root)
     path_errors = _containment_errors(schema, raw_evidence, project)
     if path_errors:
         return {"accepted": False, "errors": path_errors}
@@ -268,14 +301,19 @@ def scenario_dryrun(recipe: str, step: str, evidence: dict) -> dict:
 
 
 @app.tool()
-def list_recipes() -> list[str]:
-    d = Path(_eng()._recipes_dir)  # noqa: SLF001 - same-package internal, no public accessor
+def list_recipes(ctx: Context | None = None) -> list[str]:
+    d = Path(
+        _eng(_project_for_context(ctx))._recipes_dir  # noqa: SLF001
+    )
     return sorted(p.stem for p in d.glob("*.yaml"))
 
 
 @app.tool()
-def validate_recipe(path: str) -> dict:
+def validate_recipe(path: str, ctx: Context | None = None) -> dict:
+    project = _project_for_context(ctx)
     p = Path(path)
+    if not p.is_absolute():
+        p = project / p
     yg_ok, yg_msg = yg.cli_validate(p)
     errors, warnings = profile_check.check_recipe_full(p)
     return {
@@ -287,8 +325,10 @@ def validate_recipe(path: str) -> dict:
 
 
 @app.tool()
-def render_flow(recipe: str, run_id: str | None = None) -> str:
-    eng = _eng()
+def render_flow(
+    recipe: str, run_id: str | None = None, ctx: Context | None = None
+) -> str:
+    eng = _eng(_project_for_context(ctx))
     recipe_path = eng.recipe_path(recipe)
     overlay = None
     if run_id:
@@ -299,8 +339,14 @@ def render_flow(recipe: str, run_id: str | None = None) -> str:
 
 
 @app.tool()
-def list_runs(project: str | None = None, active_only: bool = False) -> list[dict]:
-    records = _eng()._runs.list(project=project, active_only=active_only)  # noqa: SLF001
+def list_runs(
+    project: str | None = None,
+    active_only: bool = False,
+    ctx: Context | None = None,
+) -> list[dict]:
+    records = _eng(_project_for_context(ctx))._runs.list(  # noqa: SLF001
+        project=project, active_only=active_only
+    )
     out = []
     for r in records:
         d = asdict(r)
@@ -310,8 +356,8 @@ def list_runs(project: str | None = None, active_only: bool = False) -> list[dic
 
 
 @app.tool()
-def run_trace(run_id: str) -> str:
-    p = _eng().route_log_path(run_id)
+def run_trace(run_id: str, ctx: Context | None = None) -> str:
+    p = _eng(_project_for_context(ctx)).route_log_path(run_id)
     if not p.exists():
         return ""
     return p.read_text()

@@ -44,6 +44,36 @@ def _write_policy(state_dir: Path, project: str, recipe: str) -> Path:
     return path
 
 
+def test_pretool_matcher_covers_claude_and_codex_mutations():
+    import re
+
+    hooks = json.loads((Path(__file__).parents[2] / "hooks" / "hooks.json").read_text())
+    (entry,) = hooks["hooks"]["PreToolUse"]
+    matcher = entry["matcher"]
+    for tool in ("Write", "Edit", "NotebookEdit", "apply_patch", "Bash", "Task", "Agent"):
+        assert re.fullmatch(matcher, tool), tool
+    for tool in ("Read", "Glob", "Grep", "WebSearch"):
+        assert re.fullmatch(matcher, tool) is None, tool
+
+
+def test_every_hook_uses_the_shared_launcher_with_pinned_verb_and_timeout():
+    hooks = json.loads(
+        (Path(__file__).parents[2] / "hooks" / "hooks.json").read_text()
+    )["hooks"]
+    expected = {
+        "Stop": ("hook-stop", 30),
+        "SessionStart": ("hook-session-start", 30),
+        "PreToolUse": ("hook-pretool", 300),
+        "PostToolUse": ("hook-posttool", 60),
+    }
+    for event, (verb, timeout) in expected.items():
+        (entry,) = hooks[event]
+        (handler,) = entry["hooks"]
+        assert handler["command"] == f"${{CLAUDE_PLUGIN_ROOT}}/scripts/lockstep-plugin {verb}"
+        assert handler["timeout"] == timeout
+        assert "uv run --project" not in handler["command"]
+
+
 # ---------------------------------------------------------------------------
 # base four
 # ---------------------------------------------------------------------------

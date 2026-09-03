@@ -23,6 +23,14 @@ def _wait_status(e, run_id, want, deadline_s=10.0):
     return st
 
 
+def test_engine_normalizes_state_and_recipe_dirs_before_child_launch(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    e = Engine(state_dir=Path("state"), recipes_dir=Path("recipes"), memory_only=True)
+
+    assert e._state_dir == (tmp_path / "state").resolve()
+    assert e._recipes_dir == (tmp_path / "recipes").resolve()
+
+
 def test_subcall_runs_and_completes(tmp_path, monkeypatch):
     e, proj = make_engine(tmp_path, monkeypatch)
     r = e.start("subcall-one-shot", vars={}, project=str(proj))
@@ -143,6 +151,120 @@ def test_envelope_visible_via_peek_state(tmp_path, monkeypatch):
     env = e._peek_state(r["run_id"])["_subcall_envelope"]
     assert env["session_id"] == "fake-session-1" and env["exit_code"] == 0
     assert env["artifact_hashes"] == {}                    # one-shot: the envelope IS the artifact
+
+
+def test_codex_default_runner_completes_one_shot_and_records_thread(tmp_path, monkeypatch):
+    e, proj = make_engine(
+        tmp_path,
+        monkeypatch,
+        runner="codex",
+        driver="codex",
+        model="gpt-5.6-luna",
+    )
+    run = e.start("subcall-one-shot-default", vars={}, project=str(proj))
+    pass_plan(e, proj, run)
+
+    assert _wait_status(e, run["run_id"], "done")["status"] == "done"
+    envelope = e._peek_state(run["run_id"])["_subcall_envelope"]
+    assert envelope["runner"] == "codex"
+    assert envelope["session_id"] == "fake-thread-1"
+
+
+def test_codex_fractal_uses_private_mcp_credential_wrapper(tmp_path, monkeypatch):
+    e, proj = make_engine(
+        tmp_path,
+        monkeypatch,
+        runner="codex",
+        driver="codex",
+        model="gpt-5.6-luna",
+    )
+    run = e.start("subcall-fractal-default", vars={}, project=str(proj))
+    pass_plan(e, proj, run)
+    child = e._runs.children(run["run_id"])[0]
+    workdir = (
+        tmp_path / "state" / "runs" /
+        f"{run['run_id']}.subcalls" / "review"
+    )
+    meta = json.loads((workdir / "proc.json").read_text())
+    wrapper = workdir / "codex-child-mcp"
+
+    assert wrapper.is_file()
+    script = wrapper.read_text()
+    assert child.run_id in script
+    assert child.nonce in script
+    assert f"export LOCKSTEP_STATE_DIR={tmp_path / 'state'}" in script
+    assert f"export LOCKSTEP_RECIPES={FIX / 'good'}" in script
+    assert child.nonce not in json.dumps(meta["argv"])
+    assert meta["argv"][1:4] == [
+        "-c", f'mcp_servers.lockstep.command="{wrapper}"', "exec",
+    ]
+
+
+def test_codex_wrapper_write_failure_is_structured_and_leaves_no_credential_file(
+    tmp_path, monkeypatch,
+):
+    e, proj = make_engine(
+        tmp_path,
+        monkeypatch,
+        runner="codex",
+        driver="codex",
+        model="gpt-5.6-luna",
+    )
+    run = e.start("subcall-fractal-default", vars={}, project=str(proj))
+    real_replace = os.replace
+
+    def fail_wrapper_replace(src, dst):
+        if Path(dst).name == "codex-child-mcp":
+            raise OSError("simulated wrapper failure")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", fail_wrapper_replace)
+    out = pass_plan(e, proj, run)
+    workdir = (
+        tmp_path / "state" / "runs" /
+        f"{run['run_id']}.subcalls" / "review"
+    )
+
+    assert out.get("error") is True
+    assert any("Codex child MCP launcher" in reason for reason in out["reasons"])
+    assert list(workdir.glob("codex-child-mcp*")) == []
+
+
+def test_explicit_claude_runner_overrides_codex_adapter_default(tmp_path, monkeypatch):
+    e, proj = make_engine(
+        tmp_path,
+        monkeypatch,
+        runner="claude",
+        driver="claude",
+        model="claude-haiku-4-5",
+        extra_runners=[("codex", "codex", "gpt-5.6-luna")],
+    )
+    monkeypatch.setenv("LOCKSTEP_RUNNER", "codex")
+    run = e.start("subcall-one-shot", vars={}, project=str(proj))
+    pass_plan(e, proj, run)
+
+    assert _wait_status(e, run["run_id"], "done")["status"] == "done"
+    envelope = e._peek_state(run["run_id"])["_subcall_envelope"]
+    assert envelope["runner"] == "claude"
+    assert envelope["session_id"] == "fake-session-1"
+
+
+def test_explicit_codex_runner_overrides_claude_adapter_default(tmp_path, monkeypatch):
+    e, proj = make_engine(
+        tmp_path,
+        monkeypatch,
+        runner="claude",
+        driver="claude",
+        model="claude-haiku-4-5",
+        extra_runners=[("codex", "codex", "gpt-5.6-luna")],
+    )
+    run = e.start("subcall-one-shot-codex", vars={}, project=str(proj))
+    pass_plan(e, proj, run)
+
+    assert _wait_status(e, run["run_id"], "done")["status"] == "done"
+    envelope = e._peek_state(run["run_id"])["_subcall_envelope"]
+    assert envelope["runner"] == "codex"
+    assert envelope["session_id"] == "fake-thread-1"
 
 
 # --- fractal child runs ----------------------------------------------

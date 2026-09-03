@@ -40,18 +40,33 @@ status signal", not "process compliance".
 
 ## Install
 
-Requires `uv` on the machine that runs the MCP server. Distribution is the plugin's own cloned
-files: `mcpServers`/`hooks.json` invoke `uv run --project ${CLAUDE_PLUGIN_ROOT}/engine
-lockstep-mcp <verb>` — no PyPI package required. `${CLAUDE_PLUGIN_ROOT}` is set by Claude Code to
-the plugin's install directory. Hooks and the MCP server work immediately after install; the
-first invocation resolves dependencies into `uv`'s cache (a one-time delay), subsequent runs are
-fast. A PyPI release of `lockstep-mcp` (installable via `uvx`) is an optional future distribution
-path, not required for the plugin to work.
+Requires `uv` on the machine that runs the MCP server. One checkout ships two
+thin manifests: `.claude-plugin/plugin.json` for Claude Code and
+`.codex-plugin/plugin.json` plus `.mcp.json` for Codex. Both use
+`scripts/lockstep-plugin` and the same Python engine, skills, hooks, state, and
+evidence model; no PyPI package is required. The first invocation may resolve
+dependencies into `uv`'s cache.
+
+Claude Code, through the existing marketplace:
 
 ```
 /plugin marketplace add sergesha/claude-essentials
 /plugin install lockstep@claude-essentials
 ```
+
+Codex, from a local checkout of the repository root:
+
+```bash
+codex plugin marketplace add /absolute/path/to/claude-essentials --json
+codex plugin add lockstep@claude-essentials --json
+```
+
+Start Codex interactively once and approve the installed hooks when prompted.
+Do not use hook-trust or approval bypass flags for normal operation. Codex must
+run the bundled MCP command from the plugin root; each tool call carries the
+active workspace, and lockstep records that host-supplied workspace as
+`run.project`. Claude retains its process-cwd provenance. Neither host exposes
+project as an agent-controlled `scenario_start` argument.
 
 Or auto-enable per project in `.claude/settings.json`:
 
@@ -75,7 +90,7 @@ curl -fsSL https://raw.githubusercontent.com/sergesha/claude-essentials/main/loc
   -o .lockstep/recipes/feature-dev.yaml
 ```
 
-Then, in a Claude Code session in that project, ask the agent to start it (it calls the MCP
+Then, in a Claude Code or Codex session in that project, ask the agent to start it (it calls the MCP
 tool `scenario_start` with `recipe: "feature-dev"`). The `lockstep` skill (installed with the
 plugin) drives the rest of the loop: `scenario_status` → do the current step → `scenario_done`
 with evidence → repeat. See `skills/lockstep/SKILL.md` for the full loop and
@@ -88,23 +103,25 @@ Two environment variables, read by the MCP server process:
 | Var | Default | Purpose |
 |---|---|---|
 | `LOCKSTEP_STATE_DIR` | `~/.lockstep` | Durable run state: SQLite checkpoints, `runs.json`, recipe snapshots, baseline manifests, `policy.d/`, `bindings/`. Deliberately outside the project — not in git, easy to deny writes to. |
-| `LOCKSTEP_RECIPES` | `<cwd>/.lockstep/recipes` | Where `list_recipes`/`scenario_start` resolve recipe names from. |
+| `LOCKSTEP_RECIPES` | `<resolved host project>/.lockstep/recipes` | Where `list_recipes`/`scenario_start` resolve recipe names from. Claude resolves the host project from process cwd; Codex uses its workspace metadata. |
 
 `LOCKSTEP_SESSION_STALE_MINUTES` (default `30`) is the session-liveness window for the policy
 gate's session binding (see below): a run's driving session counts as live while its binding's
 `last_seen` stamp is within the window, and an abandoned run becomes adoptable once its driver
 has been silent longer. Read only by the hooks — the engine neither reads nor writes bindings.
 
-The plugin's `mcpServers.lockstep.env` block passes both of the first two through as
-`${LOCKSTEP_STATE_DIR}` / `${LOCKSTEP_RECIPES}` — set them in your own shell/settings before
-starting Claude Code if you want a non-default location. **Caveat**: Claude Code's `${VAR}`
-expansion, when the variable is unset, leaves the literal placeholder text in place (with a
-warning surfaced in `claude mcp list`) rather than omitting the key — so an unset
-`LOCKSTEP_STATE_DIR` does NOT fall through to the engine's own `~/.lockstep` default via this
-path, it passes the literal string `${LOCKSTEP_STATE_DIR}` as a directory name. Export both
-vars (even just to their defaults, e.g. `LOCKSTEP_STATE_DIR=~/.lockstep`) before launching
-Claude Code, or drop the `env` block from a local copy of the plugin config if you want the
-engine's own built-in defaults to apply untouched.
+The shipped manifests intentionally do not emit unresolved optional
+placeholders for the first two variables, so absent values reach the engine's
+built-in defaults. Each adapter sets only its literal `LOCKSTEP_RUNNER` host
+default. The defaults are the portable shared configuration for a stock plugin
+install. Claude can use non-default paths by exporting both variables before
+launch so its MCP and hook processes inherit the same values. Codex isolates a
+bundled stdio MCP server to the manifest's explicit environment, so arbitrary
+parent variables do not reach it: keep the defaults, or use an owner-maintained
+local plugin copy that injects identical literal values into `.mcp.json` and
+every hook command. An MCP-entry-only `LOCKSTEP_STATE_DIR` override is unsafe
+on either host because hooks would inspect a different state directory and
+policy binding could fail closed.
 
 ## Protecting the state dir, recipes, and the engine itself
 
@@ -120,13 +137,13 @@ The honest guarantee above is conditional on this. Deny the agent write access t
   spawns later) uses only those snapshots, so a live edit mid-run is inert; but an agent that
   can edit the *live* file before ever calling `scenario_start` can smuggle a weakened recipe
   into the very run it then starts
-- the plugin/engine source itself (the plugin's cloned files — `${CLAUDE_PLUGIN_ROOT}`,
+- the plugin/engine source itself (the installed plugin files,
   including `lockstep/engine/`): v2 executes `lockstep_mcp/_subcall_wrapper.py` by path as the
   subcall supervisor, and every hook/server invocation runs the cloned `lockstep_mcp` code — an
   agent that can rewrite it replaces the supervisor and owns the "independent" session outright
-- the hooks/plugin config itself and `.claude/settings.json`, for the same reason
+- the hooks/plugin config itself and the host's Claude/Codex settings, for the same reason
 
-via your permission system (Claude Code's `permissions.deny` in project or user settings).
+via your host permission system.
 **Without an owner-managed permission system, this boundary is filesystem-only** — plain OS
 file permissions on those paths, nothing lockstep-specific enforces it.
 
@@ -135,7 +152,7 @@ file permissions on those paths, nothing lockstep-specific enforces it.
 **Policy gate** (opt-in per project): `lockstep-mcp policy require --project <path> --recipe
 <name>` writes a policy file under `$LOCKSTEP_STATE_DIR/policy.d/`, owner-authored only (the
 agent can't write there per the previous section). Once set, the PreToolUse hook denies
-`Write|Edit|NotebookEdit|Bash|Task` in that project unless **the calling session is driving an
+`Write|Edit|NotebookEdit|apply_patch|Bash|Task|Agent` in that project unless **the calling session is driving an
 active run of exactly that recipe** — session binding, not mere run existence: the platform
 delivers `session_id` in every hook input, and each run carries a hook-owned binding sidecar
 (`$LOCKSTEP_STATE_DIR/bindings/<run-id>.json`) naming the one session that drives it. The run
@@ -187,7 +204,7 @@ handler self-exec.
 ## Subcalls (v2)
 
 A **subcall** is a recipe step that hands a closed sub-task to a separate
-`claude -p` process the main (worker) agent's conversation cannot read or
+configured Claude or Codex process the main (worker) agent's conversation cannot read or
 steer — first use case: an independent review gate, so the reviewer isn't
 the same session that did the work. A **fractal** subcall goes further: the
 spawned session runs its own lockstep child run, with its own snapshot,
@@ -235,9 +252,10 @@ is dead is denied even while the worker stays unlocked by its own run.
   and a worker with shell can Bash-launch its own credentialed engine. That
   is the SAME same-user residual class v1 already carries (shell reaches
   the state dir too) — stated honestly, not claimed closed.
-- **Input poisoning is real.** The worker CAN read the child's transcript
-  (`~/.claude/projects/<slug>/` — outside this project's boundary; add your
-  own deny if that matters to you) and CAN author the child's inputs — a
+- **Input poisoning is real.** The worker may be able to read the child
+  runner's host transcript (for example Claude's
+  `~/.claude/projects/<slug>/`; host transcript storage is outside this
+  project's boundary, so add your own deny if that matters) and CAN author the child's inputs — a
   file planted with "this was already reviewed/approved" is a live attack,
   not a hypothetical. This is why the shipped reviewer prompt
   (`feature-dev-reviewed.yaml`) explicitly instructs the reviewer to treat
@@ -251,7 +269,7 @@ is dead is denied even while the worker stays unlocked by its own run.
 - **Subcall work quality is not guaranteed**, same as everywhere else in
   this README — shape checks are tripwires, not proof.
 
-**Owner setup**: a `runner:` name (e.g. `claude`) only resolves through
+**Owner setup**: a `runner:` name only resolves through
 `$LOCKSTEP_STATE_DIR/runners.yaml` — owner-authored, denied to the agent by
 the same permission rule as the rest of the state dir. It pins the
 runner's executable by ABSOLUTE path (never resolved from `PATH`) and a
@@ -265,6 +283,26 @@ dir itself must not sit inside the project tree — the engine refuses to
 start a run if it does (`runners.assert_state_dir_sane`), because a state
 dir under the gate would hand the agent the allowlist it's supposed to be
 denied.
+
+```yaml
+runners:
+  claude:
+    driver: claude
+    path: /absolute/path/to/claude
+    models: [claude-haiku-4-5]
+  codex:
+    driver: codex
+    path: /absolute/path/to/codex
+    models: [gpt-5.6-luna]
+```
+
+Runner names are arbitrary keys; `driver` selects CLI grammar. Omitted
+`driver` defaults to `claude` for compatibility. Omitted marker `runner:` uses
+the adapter's `LOCKSTEP_RUNNER` (`claude` or `codex`); an explicit marker may
+intentionally cross runners. Codex children use `workspace-write`, never a
+dangerous sandbox, approval, rule, or hook-trust bypass. `CODEX_HOME` is the
+only Codex-specific environment forwarded so the child can use saved CLI
+authentication; `CODEX_API_KEY` and `OPENAI_API_KEY` are deliberately excluded.
 
 **Spawned-child tool discovery** (live-smoke finding): on a host with many
 MCP servers, Claude Code defers MCP tools behind its tool-search
@@ -288,23 +326,50 @@ scope:
 
 - `copilot` stays in `FORBIDDEN_NODE_TYPES` in v2 — the conditional
   shim-runner allowance is deferred.
-- v2 never resumes runner sessions; the envelope's `session_id` is
-  informational only (`safe_argv`'s resume gate exists for the future
-  continuation path).
+- v2 never resumes spawned runner sessions; the envelope's `session_id` is
+  informational. The Codex driver rejects resume loudly.
+
+## Host-parity smoke
+
+Run this matrix once for each installed adapter (`claude`, then `codex`) after
+upgrading. Use separate temporary state and project directories for each row so
+policy state and child ancestry cannot leak between cases.
+
+1. **Main loop:** start `two-steps`, complete both steps, and assert the terminal
+   record in `runs.json` names the active project rather than the installed
+   plugin directory.
+2. **Policy gate:** require `minimal`, confirm a mutation is denied before a
+   run, start the recipe, confirm the bound session is allowed, and confirm a
+   second live session is denied. Clear the policy after the case.
+3. **One-shot subcall:** configure both entries in `runners.yaml`, run a recipe
+   whose marker omits `runner:`, and confirm the envelope records the adapter
+   default plus a Claude `session_id` or Codex `thread_id`-derived session id.
+4. **Fractal subcall:** use a fresh state/project pair, launch the reviewed
+   feature example, and confirm the origin-bound child reaches a terminal state
+   and the parent validates its pinned artifact hash.
+5. **Cross-runner override:** repeat one subcall with an explicit runner naming
+   the other driver; it must use that entry rather than the adapter default.
+
+Perform trust and hook approval interactively. The smoke must not use approval,
+sandbox, rule, or hook-trust bypass flags.
 
 ## Known assumptions
 
-**`run.project` = the MCP server process's cwd at `scenario_start`** (captured once via
-`Path.cwd().resolve()`, never a tool argument) — hooks match a run to the current project by
-resolved-equality-or-parent-prefix against this value. **VERIFIED live** (2026-08-07): a
+**`run.project` is host-supplied, never a tool argument.** Claude uses the MCP
+server process cwd; Codex plugin commands run from the installed plugin root,
+so the server reads the active workspace from Codex tool-call metadata. Hooks
+match a run to the current project by resolved-equality-or-parent-prefix.
+**VERIFIED live** for Claude (2026-08-07): a
 scratch project directory with a `.mcp.json` pointing `uv run --project
 <clone>/lockstep/engine lockstep-mcp serve` at a throwaway `LOCKSTEP_STATE_DIR`, driven by
 `claude -p --mcp-config .mcp.json --strict-mcp-config --allowedTools
 "mcp__lockstep__scenario_start" --model haiku` with a prompt making exactly one
 `scenario_start(recipe="two-steps")` call. The resulting `runs.json` record's `project` field
 was read back directly and asserted byte-equal to the scratch directory path — confirmed: the
-MCP server does launch with the project directory as its cwd when Claude Code spawns it per
-its `.mcp.json` entry, and `Path.cwd()` at server-start time is exactly that project directory.
+MCP server launches with the project directory as cwd. **VERIFIED live** for
+Codex (2026-08-19): an installed local plugin launched its bundled MCP server
+from the plugin cache, while `scenario_start` persisted the scratch workspace
+from `x-codex-turn-metadata.workspaces`.
 
 **MCP tool names depend on the install shape — binding does not.** A `.mcp.json` server named
 `lockstep` yields `mcp__lockstep__<tool>`; a plugin-manifest install yields
@@ -356,7 +421,8 @@ response marker — gated `Write` allowed, doctor green.
   at all. Don't rely on the hook to make an agent honest; rely on it only to reduce the chance
   an active run goes unreported by accident.
 - **Write-capable MCP tools from other servers are outside the PreToolUse matcher.** The
-  policy gate matches on tool names `Write|Edit|NotebookEdit|Bash|Task` only; a different MCP
+  policy gate matches on tool names
+  `Write|Edit|NotebookEdit|apply_patch|Bash|Task|Agent` only; a different MCP
   server's own write-capable tool (a filesystem-write tool from an unrelated plugin, say) isn't
   named in that matcher and isn't gated by lockstep's policy at all.
 - **`scenario_dryrun` can probe tripwire regexes for free.** Shape checks (`file_matches`,

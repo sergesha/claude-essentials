@@ -7,6 +7,8 @@ success with it), child-terminal poll + hash collection, tamper detection,
 nonce redaction.
 """
 import hashlib
+import json
+import os
 
 import pytest
 
@@ -14,25 +16,36 @@ from lockstep_mcp import server, subcalls
 from _subcall_helpers import FIX, write_runners_yaml
 
 
-def test_full_subcall_cycle_with_restart(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("runner", "driver", "model"),
+    [
+        ("claude", "claude", "claude-haiku-4-5"),
+        ("codex", "codex", "gpt-5.6-luna"),
+    ],
+)
+def test_full_subcall_cycle_with_restart(tmp_path, monkeypatch, runner, driver, model):
     state = tmp_path / "state"
-    write_runners_yaml(state, sleep=30.0)      # runner stays alive while the test plays reviewer (fractal rule 3: running)
+    write_runners_yaml(
+        state, sleep=30.0, runner=runner, driver=driver, model=model
+    )                                           # runner stays alive while the test plays reviewer
     proj = tmp_path / "proj"
     proj.mkdir()
     monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(state))
     monkeypatch.setenv("LOCKSTEP_RECIPES", str(FIX / "good"))
-    monkeypatch.setenv("LOCKSTEP_RUNNER", "claude")
+    monkeypatch.setenv("LOCKSTEP_RUNNER", runner)
     monkeypatch.delenv("LOCKSTEP_CHILD_RUN", raising=False)
     monkeypatch.delenv("LOCKSTEP_CHILD_NONCE", raising=False)
     monkeypatch.chdir(proj)                    # scenario_start captures cwd as the project
     server._reset_engine()
 
     # 1. start; pass the plan step -> the fractal subcall spawns
-    r = server.scenario_start("subcall-fractal")
+    r = server.scenario_start("subcall-fractal-default")
     (proj / ".lockstep").mkdir()
     (proj / ".lockstep" / "plan.md").write_text("x")
     out = server.scenario_done(r["run_id"], "plan", {"plan_path": ".lockstep/plan.md"})
     assert out["step"] == "_subcall" and out["subcall"]["node"] == "review"
+    proc = json.loads(next((state / "runs").glob(f"{r['run_id']}.subcalls/*/proc.json")).read_text())
+    os.kill(proc["pid"], 0)                    # exact Codex/Claude grammar kept the runner alive
 
     # 2. while the subcall runs, the parent is untouchable
     refused = server.scenario_done(r["run_id"], "review", {"anything": 1})
@@ -43,7 +56,7 @@ def test_full_subcall_cycle_with_restart(tmp_path, monkeypatch):
             call()
         assert "subcall in progress" in str(e.value)
     st = server.scenario_status(r["run_id"])
-    assert st["subcall"]["node"] == "review" and st["subcall"]["runner"] == "claude"
+    assert st["subcall"]["node"] == "review" and st["subcall"]["runner"] == runner
 
     # 3. full restart mid-subcall: engine singleton AND the supervisor
     #    handle registry (_reset_engine alone leaves the Popen handles;
