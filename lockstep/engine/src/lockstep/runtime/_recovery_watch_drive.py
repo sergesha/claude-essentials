@@ -25,28 +25,29 @@ class _RecoveryWatchDrive:
             if not snapshot.pending and not snapshot.next:
                 self._settle_terminal_watch(watch.public_run_id)
                 return False
-            pending = self._pending_run_drive_descriptor(snapshot)
-            if pending is None:
-                return False
-            interrupt, descriptor = pending
-            if isinstance(descriptor, DecisionDescriptor):
-                report = self._coordinator.reconcile_one(
-                    watch.public_run_id,
-                    interrupt.coordinate,
-                    expected_descriptor_digest=descriptor.digest,
-                )
-                accepted = report.action == "delivered"
-                if accepted:
-                    self._settle_after_accepted_drive(binding)
-                return accepted
-            if not isinstance(
-                descriptor,
-                (
-                    EffectDescriptor,
-                    ScopeDescriptor,
-                    AcceptDescriptor,
-                    PublishDescriptor,
-                ),
-            ):
-                return False
+            if not self._has_multiple_engine_owned_effects(snapshot):
+                pending = self._pending_run_drive_descriptor(snapshot)
+                if pending is None:
+                    return False
+                interrupt, descriptor = pending
+                if isinstance(descriptor, DecisionDescriptor):
+                    report = self._coordinator.reconcile_one(
+                        watch.public_run_id,
+                        interrupt.coordinate,
+                        expected_descriptor_digest=descriptor.digest,
+                    )
+                    accepted = report.action == "delivered"
+                    if accepted:
+                        self._settle_after_accepted_drive(binding)
+                    return accepted
+                if not isinstance(
+                    descriptor,
+                    (
+                        EffectDescriptor,
+                        ScopeDescriptor,
+                        AcceptDescriptor,
+                        PublishDescriptor,
+                    ),
+                ):
+                    return False
         return self._drive_delegated_watch(binding)

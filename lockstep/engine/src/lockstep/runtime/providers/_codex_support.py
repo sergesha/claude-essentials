@@ -1,6 +1,7 @@
 """Closed Codex installation, policy, and attestation values."""
 
 from __future__ import annotations
+
 import hashlib
 import json
 import os
@@ -12,6 +13,7 @@ from itertools import pairwise
 from pathlib import Path
 from threading import RLock
 from typing import Literal
+
 from lockstep.runtime.owner_state import verify_owner_directory, verify_owner_file
 from lockstep.runtime.payload_limits import bounded_json
 from lockstep.runtime.sandbox import SandboxAttestation, SandboxPolicy

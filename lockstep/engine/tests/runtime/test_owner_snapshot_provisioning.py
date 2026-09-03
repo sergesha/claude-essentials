@@ -12,6 +12,8 @@ import time
 from pathlib import Path
 
 import pytest
+
+from lockstep import cli
 from lockstep.runtime.advisory_lock import advisory_file_lock
 from lockstep.runtime.effects.owner_policy import (
     RuntimeProvisioningInventory,
@@ -22,8 +24,6 @@ from lockstep.runtime.effects.owner_provisioning import provision_runtime_snapsh
 from lockstep.runtime.owner_state import ensure_owner_directory
 from lockstep.runtime.providers.codex import CodexInstallationBinding
 from lockstep.runtime.service import preflight_recipe
-
-from lockstep import cli
 
 
 def _effect_node(logical_id: str, *, selector: str = "codex") -> dict[str, object]:

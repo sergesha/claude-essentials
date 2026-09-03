@@ -1,4 +1,5 @@
 """Frozen immutable contracts for one whole-project authoring plan."""
+
 from __future__ import annotations
 
 import dataclasses
@@ -8,6 +9,7 @@ import stat
 from pathlib import Path
 
 import pytest
+
 from lockstep.authoring import project_paths
 from lockstep.authoring_bundle import (
     AuthoringPlan,
@@ -19,7 +21,6 @@ from lockstep.authoring_bundle import (
 )
 from lockstep.authoring_compilation import compile_project, plan_project_compilation
 from lockstep.authoring_publisher import AuthoringPublisher
-
 from tests._authoring_gate import write_workflow
 
 

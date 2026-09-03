@@ -6,6 +6,7 @@ from lockstep.runtime.blobs import BlobRef
 from lockstep.runtime.catalog import RunBinding
 from lockstep.runtime.effects.descriptors import parse_effect_descriptor
 from lockstep.runtime.effects.ledger import RunDriveWatch
+from lockstep.runtime.effects.models import EffectDescriptor
 from lockstep.runtime.native_models import NativeInterrupt, NativeSnapshot
 from lockstep.runtime.start_input import decode_canonical_start_input
 
@@ -45,3 +46,21 @@ class _RecoveryWatchInspection:
         except (TypeError, ValueError):
             return None
         return interrupt, descriptor
+
+    @staticmethod
+    def _has_multiple_engine_owned_effects(snapshot: NativeSnapshot) -> bool:
+        if len(snapshot.pending) < 2:
+            return False
+        for interrupt in snapshot.pending:
+            raw = (
+                interrupt.value.get("lockstep_effect")
+                if isinstance(interrupt.value, dict)
+                else None
+            )
+            try:
+                descriptor = parse_effect_descriptor(raw)
+            except (TypeError, ValueError):
+                return False
+            if not isinstance(descriptor, EffectDescriptor) or descriptor.runner is None:
+                return False
+        return True
