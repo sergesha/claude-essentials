@@ -33,20 +33,22 @@ planning Git commit are distinct owner effects. Product `.gitignore`, hooks,
 attributes, and Git configuration changes require separate approved product
 actions and are never init effects.
 
-Immediately before each native mutation, verify the unique canonical owner
-root and bind the native command through an explicit root argument or that
-exact working directory. Stop if the root or binding is uncertain.
+Immediately before each Backlog, OpenSpec, Beads, or related planning or
+executable coordination mutation, verify the unique canonical owner root and
+bind the native command through an explicit root argument or that exact working
+directory. Stop if the root or binding is uncertain.
 
 ## Approved mutations
 
 Inspect live native state, propose exactly one action and its exact effects,
-then state `Review: required|skipped — reason` before any native-owner
-mutation. Review is required for a semantic mutation; skip it only for
-demonstrably read-only or mechanical work and name the reason. Execute only
-after unambiguous user approval of the exact preview: unrelated or ambiguous
-text, including `lf`, is not approval. Invoke the sole owner's native interface
-or approved integration, inspect the native result, then commit only native
-data in the approved data repository.
+then state `Review: required|skipped — reason` before any Backlog, OpenSpec,
+Beads, or related planning or executable coordination mutation. Review is
+required for a semantic mutation; skip it only for demonstrably read-only or
+mechanical work and name the reason. Execute only after unambiguous user
+approval of the exact preview: unrelated or ambiguous text, including `lf`, is
+not approval. Invoke the sole owner's native interface or approved integration,
+inspect the native result, then commit only native data in the approved data
+repository.
 
 ## Semantic review
 
