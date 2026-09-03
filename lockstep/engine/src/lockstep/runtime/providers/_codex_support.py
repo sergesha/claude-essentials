@@ -220,12 +220,6 @@ class CodexInstallationBinding:
         if not home.is_dir():
             raise CodexProviderError("CODEX_HOME must be an owner-selected directory")
         verify_owner_directory(home)
-        for entry in home.iterdir():
-            if entry.name != "auth.json":
-                raise CodexProviderError(
-                    "managed CODEX_HOME may contain only the owner auth.json credential"
-                )
-            verify_owner_file(entry)
         credential_identity_digest = _credential_identity(home / "auth.json")
         allowed_environment = {"PATH", "LANG", "LC_ALL", "TMPDIR"}
         if set(environment) != allowed_environment:
