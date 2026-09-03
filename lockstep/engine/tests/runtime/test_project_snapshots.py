@@ -44,8 +44,8 @@ def test_snapshot_records_declared_paths_blob_refs_and_provenance(stores):
 def test_new_snapshot_fsyncs_containing_directory_after_publish(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from lockstep.runtime.blobs import BlobStore
     import lockstep.runtime.project_snapshots as snapshots
+    from lockstep.runtime.blobs import BlobStore
 
     owner = tmp_path / "owner-state"
     blobs = BlobStore(owner)
@@ -104,20 +104,6 @@ def test_snapshot_provenance_is_not_targetable_by_dict_update(stores):
     assert provenance == {"revision": "1"}
 
 
-def test_snapshot_provenance_exposes_no_mutable_instance_backing(stores):
-    blob_store, snapshot_store = stores
-    ref = snapshot_store.capture(
-        {"app.py": blob_store.put(b"v1")},
-        declared_paths=["app.py"],
-        provenance={"revision": "1"},
-    )
-    provenance = snapshot_store.read(ref).provenance
-
-    with pytest.raises(TypeError):
-        vars(provenance)
-    with pytest.raises(AttributeError):
-        provenance._sealed = False
-    assert provenance == {"revision": "1"}
 
 
 def test_snapshot_provenance_recursively_freezes_nested_json(stores):

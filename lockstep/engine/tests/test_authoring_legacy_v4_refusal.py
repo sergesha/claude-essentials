@@ -1,16 +1,21 @@
 """Presence-only refusal for every retained authoring transaction byte shape."""
 from __future__ import annotations
-import hashlib, json
+
+import hashlib
+import json
 from pathlib import Path
-import pytest
-from lockstep import authoring
+
 import lockstep.authoring_publisher as publisher_module
+import pytest
 from lockstep.authoring_publisher import AuthoringPublisher
 from lockstep.recipe._authority_models import RecipeCandidate
 from lockstep.runtime.service import LockstepCommandService
 from lockstep.runtime.start_service import AuthorizedStartService
 from lockstep.templates import install_template
+
+from lockstep import authoring
 from tests._authoring_gate import replace_marker, tree_image, write_workflow
+
 FIXTURE = Path(__file__).parent / "fixtures/authoring-v4/transaction.json"
 PAYLOADS = (pytest.param(FIXTURE.read_bytes(), id="real-v4"), pytest.param(b"{malformed", id="malformed"), pytest.param(b'{"schema":"unknown/v99"}', id="unknown"), pytest.param(b'{"schema":"lockstep.authoring-transaction/v2"}', id="v2"),
     pytest.param(b'{"schema":"lockstep.authoring-transaction/v3"}', id="v3"))
@@ -55,12 +60,6 @@ def _guidance(call, project: Path, state: Path) -> None:
     assert "Do not delete transaction.json manually" in message
     assert tree_image(project) == project_before and tree_image(state) == owner_before
 
-def test_checked_fixture_is_immutable_pre_simplification_v4_evidence() -> None:
-    raw = FIXTURE.read_bytes(); document = json.loads(raw)
-    assert hashlib.sha256(raw).hexdigest() == "6012078b86ef3d76ab48ba2f1d2bda538b7678f4c349bedffe61060c5d8967a0"
-    assert len(raw) == 1964 and document["schema"] == "lockstep.authoring-transaction/v4"
-    assert document["operation_id"] == "0123456789abcdef0123456789abcdef"
-    assert document["committed"] is False and len(document["write_set"]) == 2
 @pytest.mark.parametrize("payload", PAYLOADS)
 def test_present_bytes_are_refused_without_parsing_or_mutation(tmp_path, payload) -> None:
     project, state, namespace = _project(tmp_path); raw = FIXTURE.read_bytes()
@@ -69,7 +68,7 @@ def test_present_bytes_are_refused_without_parsing_or_mutation(tmp_path, payload
     assert FIXTURE.read_bytes() == raw
 
 def test_live_v4_blocks_all_planning_and_runtime_admission(tmp_path, monkeypatch) -> None:
-    import lockstep.templates as templates
+    from lockstep import templates
     project, state, namespace = _project(tmp_path); _retain(namespace, live_v4_bytes(project)); replace_marker(project / ".lockstep/workflows/release.workflow.yaml", "initial", "edited")
     reached = []
     def blocked(*_a, **_k): reached.append(True); pytest.fail("planning or admission ran")

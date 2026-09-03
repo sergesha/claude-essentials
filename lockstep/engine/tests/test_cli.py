@@ -19,9 +19,9 @@ from types import SimpleNamespace
 
 import pytest
 import yaml
+from lockstep.recipe.loader import RecipeLoader
 
 from lockstep import __version__, cli
-from lockstep.recipe.loader import RecipeLoader
 
 FIXTURES = Path(__file__).parent / "fixtures" / "native"
 
@@ -112,6 +112,57 @@ def test_doctor_exit_code_reflects_health(tmp_path, monkeypatch):
     (tmp_path / "state").mkdir(mode=0o700)
     (tmp_path / "recipes").mkdir()
     assert cli.main(["doctor"]) == 0
+
+
+def test_scenario_cli_closes_observer_when_operation_fails(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    from lockstep.runtime import engine as engine_module
+
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    calls = []
+
+    class FailingObserver:
+        def status(self, *_args):
+            calls.append("status")
+            raise RuntimeError("scenario failure")
+
+        def close(self):
+            calls.append("close")
+
+    monkeypatch.setattr(
+        engine_module.Engine, "observe", lambda *_args: FailingObserver()
+    )
+
+    assert cli.main(["scenario", "status", "run-1"]) == 2
+    assert calls == ["status", "close"]
+    assert "scenario failure" in capsys.readouterr().err
+
+
+def test_scenario_cli_closes_command_service_after_malformed_json(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    from lockstep.runtime import engine as engine_module
+
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    calls = []
+
+    class Command:
+        def start(self, *_args):
+            pytest.fail("malformed input reached the command service")
+
+        def close(self):
+            calls.append("close")
+
+    monkeypatch.setattr(engine_module.Engine, "command", lambda *_args: Command())
+
+    assert cli.main(["scenario", "start", "release", "--input", "{"]) == 2
+    assert calls == ["close"]
+    assert "must be JSON" in capsys.readouterr().err
 
 
 def test_consent_issue_and_revoke_require_an_interactive_owner_tty_before_service(
@@ -228,10 +279,10 @@ def test_consent_issue_confirmation_mismatch_never_mints(tmp_path, monkeypatch, 
     ["--artifact", "--destination", "--generation", "--consent-ref", "--token", "--yes"],
 )
 def test_consent_issue_parser_has_no_noninteractive_or_caller_authority_escape(
-    forbidden: str,
+    forbidden: str, capsys,
 ) -> None:
-    with pytest.raises(SystemExit):
-        cli._build_parser().parse_args(
+    with pytest.raises(SystemExit) as exit_status:
+        cli.main(
             [
                 "consent",
                 "issue",
@@ -243,6 +294,8 @@ def test_consent_issue_parser_has_no_noninteractive_or_caller_authority_escape(
                 "forged",
             ]
         )
+    assert exit_status.value.code == 2
+    assert "unrecognized arguments" in capsys.readouterr().err
 
 
 def test_scenario_parser_rejects_removed_evidence_action() -> None:
@@ -254,6 +307,7 @@ def test_consent_accept_reads_hidden_token_and_forwards_only_token_and_cwd(
     tmp_path, monkeypatch, capsys
 ) -> None:
     import getpass
+
     from lockstep.runtime import engine as engine_module
 
     project = tmp_path / "project"
