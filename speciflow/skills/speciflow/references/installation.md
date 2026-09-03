@@ -49,3 +49,9 @@ missing dependency only when its owner is selected for the current requested
 operation. Offer one owner-specific installation action with its exact source,
 version or channel, command, target, external effects, and approval gate. A
 missing unselected owner tool is `N/A`.
+
+For an npm-based installation preview, Backlog.md is package `backlog.md` with
+the `backlog` CLI, and OpenSpec is package `@fission-ai/openspec` with the
+`openspec` CLI. The unscoped npm package `openspec` is not the OpenSpec owner
+CLI. Do not pin a version in this skill: inspect current package metadata and
+the installed interface before proposing the exact channel or version.
