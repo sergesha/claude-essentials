@@ -38,10 +38,10 @@ are:
   then use only commands that interface documents. Confirm `bd where` matches
   the selected Beads root and query its documented read/status interface. When
   supported, `bd vc status` supplies the native branch, commit, and dirty state;
-  `bd dolt status` reports the Dolt service state. `bd dolt` is not a raw Dolt
-  CLI passthrough: never invent subcommands or forward raw Dolt flags such as
-  `bd dolt log -n`. If the installed interface provides no required equivalent,
-  report `broken` instead of guessing a command.
+  `bd dolt status` reports the Dolt service state. Never synthesize subcommands
+  or options from a related CLI, a different version, or memory. If the
+  installed interface provides no required equivalent, report `broken` instead
+  of guessing a command.
 - Superpowers: the selected installed skill closure resolves and required
   applicable skills are readable; Superpowers owns no project status.
 
