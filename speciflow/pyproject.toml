@@ -1,0 +1,12 @@
+[project]
+name = "speciflow-tests"
+version = "0.0.0"
+requires-python = ">=3.11"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest==8.4.2"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["integration: requires an installed real owner CLI", "host_eval: requires host credentials"]

@@ -30,6 +30,15 @@
         { "type": "json", "path": ".claude-plugin/plugin.json", "jsonpath": "$.version" },
         { "type": "generic", "path": "engine/src/lockstep_mcp/__init__.py" }
       ]
+    },
+    "speciflow": {
+      "package-name": "speciflow",
+      "changelog-path": "CHANGELOG.md",
+      "initial-version": "0.1.0",
+      "extra-files": [
+        { "type": "json", "path": ".claude-plugin/plugin.json", "jsonpath": "$.version" },
+        { "type": "json", "path": ".codex-plugin/plugin.json", "jsonpath": "$.version" }
+      ]
     }
   }
 }

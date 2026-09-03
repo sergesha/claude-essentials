@@ -1,0 +1,20 @@
+{
+  "name": "claude-essentials",
+  "interface": {
+    "displayName": "Claude Essentials"
+  },
+  "plugins": [
+    {
+      "name": "speciflow",
+      "source": {
+        "source": "local",
+        "path": "./speciflow"
+      },
+      "category": "Productivity",
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      }
+    }
+  ]
+}

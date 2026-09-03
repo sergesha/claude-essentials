@@ -25,6 +25,12 @@
       "description": "Flow-enforcement engine for coding agents: declarative yamlgraph recipes, durable runs, deterministic evidence gates",
       "source": "./lockstep",
       "category": "developer-tools"
+    },
+    {
+      "name": "speciflow",
+      "description": "Coordinated specification-driven workflow guidance for coding agents.",
+      "source": "./speciflow",
+      "category": "developer-tools"
     }
   ]
 }
