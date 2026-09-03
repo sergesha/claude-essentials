@@ -26,7 +26,7 @@ from lockstep.runtime.effects.models import (
 )
 from lockstep.runtime.effects.owner_policy import RuntimeRequirementIndex
 from lockstep.runtime.effects.owner_provisioning import provision_runtime_snapshot
-from lockstep.runtime.engine import Engine
+from lockstep.runtime.engine import Engine, LockstepError
 from lockstep.runtime.graph_runtime import GraphRuntime
 from lockstep.runtime.providers.codex import CodexRunnerAdapter
 from lockstep.runtime.service import preflight_recipe
@@ -87,12 +87,20 @@ def _terminal_status(command, project: Path, run_id: str):
     return observed if observed["status"] == "completed" else None
 
 
-def _run_public_parallel_review_lifecycle(
+@dataclass(frozen=True)
+class _PreparedParallelReview:
+    project: Path
+    recipes: Path
+    owner_state: Path
+    barrier: Path
+
+
+def _prepare_parallel_review(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-) -> _PublicParallelTrace:
-    """Drive the packaged parallel review through real owner-bound adapters."""
-
+    *,
+    delay_controlled_effects: bool = False,
+) -> _PreparedParallelReview:
     project = tmp_path / "project"
     project.mkdir()
     (project / "tracked.txt").write_bytes(b"parallel review input\n")
@@ -112,17 +120,19 @@ def _run_public_parallel_review_lifecycle(
         binding = config[selector]
         assert isinstance(binding, dict)
         binding["executable"] = str(CONTROLLED_EFFECT)
-    codex_environment = config["codex"]["environment"]
+    codex = config["codex"]
+    pinned = config["pinned"]
+    assert isinstance(codex, dict)
+    assert isinstance(pinned, dict)
+    codex_environment = codex["environment"]
     assert isinstance(codex_environment, dict)
     barrier = (
         Path(codex_environment["TMPDIR"])
         / "lockstep-controlled-two-process-barrier"
     )
     barrier.mkdir()
-    codex = config["codex"]
-    pinned = config["pinned"]
-    assert isinstance(codex, dict)
-    assert isinstance(pinned, dict)
+    if delay_controlled_effects:
+        (barrier / "hold").mkdir()
     owner_state = tmp_path / "owner-state"
     monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(owner_state))
     provision_runtime_snapshot(
@@ -135,6 +145,29 @@ def _run_public_parallel_review_lifecycle(
         index=requirements,
         project=project,
     )
+    return _PreparedParallelReview(project, recipes, owner_state, barrier)
+
+
+def _wait_until(predicate, *, timeout: float = 15.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        value = predicate()
+        if value:
+            return value
+        time.sleep(0.02)
+    pytest.fail("public parallel-review lifecycle timed out")
+
+
+def _run_public_parallel_review_lifecycle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> _PublicParallelTrace:
+    """Drive the packaged parallel review through real owner-bound adapters."""
+
+    prepared = _prepare_parallel_review(tmp_path, monkeypatch)
+    project = prepared.project
+    recipes = prepared.recipes
+    owner_state = prepared.owner_state
 
     resume_batches: list[tuple[str, ...]] = []
     resume_schemas: list[tuple[str, ...]] = []
@@ -398,6 +431,60 @@ def test_packaged_parallel_review_overlaps_real_adapters_and_joins_once(
     }
     assert trace.joined_value == {"outcome": "PASS", "value": "pass"}
     assert trace.terminal["status"] == "completed"
+
+
+def test_parallel_review_restart_reconciles_two_in_flight_managed_effects_and_joins(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fresh command service reconciles two in-flight managed effects."""
+
+    prepared = _prepare_parallel_review(
+        tmp_path, monkeypatch, delay_controlled_effects=True
+    )
+    command = Engine.command(prepared.owner_state, prepared.recipes)
+    try:
+        run_id = command.start("release", {}, str(prepared.project))["run_id"]
+        command.scenario_recover(str(prepared.project), limit=128)
+        _wait_until(lambda: len(tuple(prepared.barrier.glob("*.ready"))) == 2)
+    finally:
+        command.close()
+
+    (prepared.barrier / "release").write_bytes(b"")
+    _wait_until(lambda: len(tuple(prepared.barrier.glob("*.completed"))) == 2)
+    restarted = Engine.command(prepared.owner_state, prepared.recipes)
+    try:
+        restarted.scenario_recover(str(prepared.project), limit=128)
+        for logical_id in ("accept-1", "accept-2"):
+            def preview_when_ready(logical_id: str = logical_id):
+                try:
+                    return restarted.preview_publication_consent(
+                        run_id, logical_id, project=str(prepared.project)
+                    )
+                except LockstepError:
+                    return None
+
+            preview = _wait_until(preview_when_ready)
+            consent = restarted.issue_publication_consent(
+                run_id, logical_id, preview["digest"], project=str(prepared.project)
+            )
+            restarted.scenario_accept_artifact(consent.token, project=str(prepared.project))
+
+        terminal = _wait_until(
+            lambda: _terminal_status(restarted, prepared.project, run_id)
+        )
+        assert terminal == {
+            "status": "completed",
+            "run_id": run_id,
+            "owner": "engine",
+            "next_action": None,
+        }
+        assert (prepared.project / ".lockstep/security-review.md").is_file()
+        assert (prepared.project / ".lockstep/architecture-review.md").is_file()
+        assert len(tuple(prepared.barrier.glob("*.ready"))) == 2
+        assert len(tuple(prepared.barrier.glob("*.completed"))) == 2
+    finally:
+        restarted.close()
 
 
 def _compile(tmp_path: Path, *, bounded: bool = False) -> Path:
