@@ -16,7 +16,7 @@ unselected owner; every other result applies to a selected owner:
 | Result | Meaning |
 | --- | --- |
 | `N/A` | An unselected owner; do not create or repair it. |
-| `broken` | A selected owner has a missing required tool or interface. State what is missing; offer installation only on request. |
+| `broken` | A selected owner has a missing required tool or interface. State what is missing and apply the root skill's missing-tool rule: offer one safe owner-specific loading or installation action, but do not run it without approval. |
 | `ambiguous` | Multiple roots or conflicting facts prevent one native answer. Preserve the alternatives and ask the user. |
 | `unknown` | Output was lost or a required fact cannot be verified. Stop rather than infer or retry a mutation. |
 | `valid` | The applicable documented checks below passed through the installed native interface. |
@@ -63,6 +63,27 @@ state.
   state.
 
 Never persist recommendations, phases, cursors, queues, or derived results.
+
+## Bootstrap preview
+
+For an explicit setup or full-stack initialization request, inspect all
+selected owners and show the complete ordered checklist before asking for the
+first approval. Include only applicable steps: owner dependency installation,
+bare storage init, planning Git init, each native owner init with its commit
+effect, and a final live status check. Show the exact source, target, effects,
+and approval boundary for every mutating item.
+
+The checklist is an ephemeral preview, not SpeciFlow state, a queue, or
+authorization for all steps. Reinspect native state after each approved item
+and update the remaining preview. Ask approval for only the current item; when
+multiple owner installations are equally valid, present them as an
+`ambiguous` choice.
+
+A same-owner native init and conditional commit of its exact resulting paths
+may be one previewed action and one approval. Inspect the init result before
+committing; if the native tool already committed, do not add another commit.
+Never combine different owners, dependency installation, bare storage init, or
+planning Git init under that approval.
 
 ## Views and export
 

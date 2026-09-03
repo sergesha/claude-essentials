@@ -36,6 +36,13 @@ actions and are never init effects.
 
 Inspect live native state, propose exactly one action and its exact effects, wait for explicit approval, invoke the sole owner's native interface or approved integration, inspect the native result, then commit only native data in the approved data repository.
 
+A single owner-scoped action may preview native init followed by a conditional
+commit of exactly the paths that init changed. One approval covers that pair
+only when both effects were shown together. Inspect the actual Git state after
+init: a message that Git integration is active is not evidence that a commit
+occurred. If init already committed, do not create another commit; if its
+result differs from the preview or cannot be identified exactly, stop.
+
 For each native action inspect its interface, selected root, revision and dirty
 state, available preview, and post-check. Every planning preview says
 `commit: automatic` or `commit: none`. A clean isolated planning mutation

@@ -51,7 +51,10 @@ data-root paths. It creates no `planning/` or `beads/` directory. Exact repeat
 is a no-op; changed facts, partial state, races, collisions, and symlinks are
 conflicts.
 
-Native owner selection, native initialization, and commits require later, separate owner previews and approvals.
+Native owner selection and initialization require later owner-scoped previews
+and approvals. One such preview may combine a native init with a conditional
+commit of exactly its resulting paths; bare storage init never includes either
+effect.
 Never automatically commit the `claude-essentials` skill source repository.
 
 ## Native-root boundary
