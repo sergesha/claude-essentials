@@ -172,6 +172,32 @@ def _check_file_matches(check: dict, evidence: dict, ctx: dict) -> list[str]:
     return []
 
 
+def _check_review_verdict(check: dict, evidence: dict, ctx: dict) -> list[str]:
+    """Require one unambiguous PASS/FAIL verdict as the final content line."""
+    raw, err = _get_path(check, evidence)
+    if err:
+        return [f"review_verdict: {err}"]
+    expected = check.get("expected")
+    if expected is not None and expected not in {"PASS", "FAIL"}:
+        return ["review_verdict: expected must be PASS or FAIL"]
+    resolved = _resolve_path(raw, ctx.get("_project"))
+    if not resolved.is_file():
+        return [f"review_verdict: {raw} is not a file"]
+    text = resolved.read_text()
+    verdicts = re.findall(
+        r"(?m)^[ \t]*Verdict:[ \t]*(PASS|FAIL)[ \t]*$", text
+    )
+    if len(verdicts) != 1:
+        return [f"review_verdict: expected exactly one verdict line, found {len(verdicts)}"]
+    final_lines = text.rstrip().splitlines()
+    final = final_lines[-1].strip() if final_lines else ""
+    if final != f"Verdict: {verdicts[0]}":
+        return ["review_verdict: verdict must be the final content line"]
+    if expected is not None and verdicts[0] != expected:
+        return [f"review_verdict: expected {expected}, found {verdicts[0]}"]
+    return []
+
+
 def _resolve_state_path(dotted: str, state_blob: dict) -> tuple[bool, Any]:
     """(present, value) — the flag distinguishes 'key absent' from 'value
     falsy'; a bare .get() chain conflates them into fail-open ambiguity."""
@@ -538,6 +564,7 @@ CHECKS: dict[str, Callable[[dict, dict, dict], list[str]]] = {
     "file_nonempty": _check_file_nonempty,
     "md_has_sections": _check_md_has_sections,
     "file_matches": _check_file_matches,
+    "review_verdict": _check_review_verdict,
     "file_matches_hash": _check_file_matches_hash,
     "cmd_ok": _check_cmd_ok,
     "git_clean": _check_git_clean,

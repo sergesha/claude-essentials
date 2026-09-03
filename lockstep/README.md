@@ -96,6 +96,24 @@ plugin) drives the rest of the loop: `scenario_status` → do the current step �
 with evidence → repeat. See `skills/lockstep/SKILL.md` for the full loop and
 `skills/lockstep-author/SKILL.md` for writing your own recipe.
 
+For ordinary Python feature and bug-fix work where the agent authors tests,
+copy both recipes instead:
+
+```bash
+mkdir -p .lockstep/recipes
+curl -fsSL https://raw.githubusercontent.com/sergesha/claude-essentials/main/lockstep/recipes/examples/daily-change-reviewed.yaml \
+  -o .lockstep/recipes/daily-change-reviewed.yaml
+curl -fsSL https://raw.githubusercontent.com/sergesha/claude-essentials/main/lockstep/recipes/examples/daily-review-gate.yaml \
+  -o .lockstep/recipes/daily-review-gate.yaml
+```
+
+Start `daily-change-reviewed`; it enforces plan → tests → implementation →
+full pytest → independent fractal review. Tests are frozen before implementation,
+and source plus tests are hash/baseline-pinned across the review. The workflow
+expects the project to use `src/`, `tests/`, and pytest; dependency or test-runner
+configuration changes need a separate recipe because `pyproject.toml`,
+`pytest.ini`, and `conftest.py` are deliberately frozen.
+
 ## Configuration
 
 Two environment variables, read by the MCP server process:
