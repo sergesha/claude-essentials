@@ -6,12 +6,18 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
 from lockstep.mcp import server
+from lockstep.recipe.authority import (
+    OwnerReviewedGrant,
+    OwnerReviewedPythonTarget,
+    RecipeAuthorityPolicy,
+    StrictRecipeIngress,
+)
 from lockstep.runtime import advisory_lock, sessions
 from lockstep.runtime.engine import LockstepError
 
 FIXTURES = Path(__file__).parent / "fixtures" / "native"
+MIXED_CHECKS = Path(__file__).parent / "fixtures" / "recipes" / "good" / "mixed-checks.recipe.yaml"
 EXPECTED_TOOLS = {
     "scenario_start",
     "scenario_status",
@@ -66,6 +72,30 @@ def _ctx(project: Path, session_id: str | None = None):
     if session_id is not None:
         meta["session_id"] = session_id
     return SimpleNamespace(request_context=SimpleNamespace(meta=meta))
+
+
+def _authorize_dryrun_recipe(recipes: Path, monkeypatch) -> None:
+    destination = recipes / "mixed-checks.recipe.yaml"
+    destination.write_bytes(MIXED_CHECKS.read_bytes())
+    candidate = StrictRecipeIngress(recipes).inspect(destination.name)
+    requirement = candidate.authority_requirements[0]
+    authorized = candidate.authorize(
+        RecipeAuthorityPolicy(
+            (
+                OwnerReviewedGrant(
+                    recipe_sha256=candidate.definition_sha256,
+                    requirement_sha256=requirement.sha256,
+                    authority="os_user_execution",
+                ),
+            ),
+            python_targets=(
+                OwnerReviewedPythonTarget(
+                    module="lockstep.runtime.validators", function="run_checks"
+                ),
+            ),
+        )
+    )
+    monkeypatch.setattr(server, "preflight_recipe", lambda *_args: authorized)
 
 
 def test_tools_registered():
@@ -536,6 +566,43 @@ def test_dryrun_reads_only_an_authorized_immutable_recipe(tmp_path, monkeypatch)
     with pytest.raises(LockstepError, match="executable authority denied"):
         server.scenario_dryrun("unsafe", "work", {"answer": "yes"}, ctx=_ctx(project))
     assert not (tmp_path / "state").exists()
+
+
+def test_dryrun_reports_shape_checks_without_executing_commands(
+    tmp_path, monkeypatch
+) -> None:
+    project, recipes = _configure(monkeypatch, tmp_path)
+    _authorize_dryrun_recipe(recipes, monkeypatch)
+
+    result = server.scenario_dryrun(
+        "mixed-checks", "one", {"path": "missing.txt"}, ctx=_ctx(project)
+    )
+
+    assert result == {
+        "accepted": True,
+        "results": [
+            {
+                "type": "file_exists",
+                "verdict": "fail",
+                "reasons": ["file_exists: missing.txt is not a file"],
+            },
+            {"type": "cmd_ok", "verdict": "skipped (dryrun)"},
+        ],
+    }
+    assert not (project / "DRYRUN-SENTINEL-SHOULD-NOT-EXIST").exists()
+
+
+def test_dryrun_rejects_project_path_escape(tmp_path, monkeypatch) -> None:
+    project, recipes = _configure(monkeypatch, tmp_path)
+    _authorize_dryrun_recipe(recipes, monkeypatch)
+
+    result = server.scenario_dryrun(
+        "mixed-checks", "one", {"path": "../../outside"}, ctx=_ctx(project)
+    )
+
+    assert result["accepted"] is False
+    assert any("project" in error and "path" in error for error in result["errors"])
+    assert not (project / "DRYRUN-SENTINEL-SHOULD-NOT-EXIST").exists()
 
 
 def test_dryrun_bounds_evidence_before_recipe_preflight_or_state(tmp_path, monkeypatch):

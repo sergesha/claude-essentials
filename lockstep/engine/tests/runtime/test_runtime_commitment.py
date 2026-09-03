@@ -10,8 +10,6 @@ from contextlib import suppress
 
 import pytest
 import yaml
-
-from lockstep import cli
 from lockstep.recipe.authority import RecipeAuthorityPolicy, StrictRecipeIngress
 from lockstep.runtime.effects.owner_policy import (
     _RuntimeAdmissionChanged,
@@ -24,6 +22,8 @@ from lockstep.runtime.read_resources import RuntimeReadResources
 from lockstep.runtime.recipe_bundles import RecipeBundleRef
 from lockstep.runtime.start_service import AuthorizedStartService
 from lockstep.templates import install_template
+
+from lockstep import cli
 from tests._authoring_gate import provision_controlled_runtime
 
 from ._runtime_commitment_harness import (
@@ -513,6 +513,27 @@ def test_public_managed_lifecycle_reconstructs_after_command_restart(
         assert restarted.catalog.get(run_id) == binding
         assert restarted.bundle_store.read_manifest(bundle_ref) == manifest
         assert not live_recipe.exists()
+
+        observer = Engine.observe(
+            provisioned.owner_state,
+            provisioned.project / ".lockstep" / "recipes",
+        )
+        try:
+            status_before = observer.status(run_id, str(provisioned.project))
+            history_before = observer.history(run_id, str(provisioned.project))
+        finally:
+            observer.close()
+        restarted.scenario_recover(str(provisioned.project), limit=128)
+        observer = Engine.observe(
+            provisioned.owner_state,
+            provisioned.project / ".lockstep" / "recipes",
+        )
+        try:
+            assert observer.status(run_id, str(provisioned.project)) == status_before
+            assert observer.history(run_id, str(provisioned.project)) == history_before
+        finally:
+            observer.close()
+        assert composition.runners.codex.spawn_count == 0
     finally:
         command.close()
         if spawned and terminal_path is not None:
@@ -546,7 +567,7 @@ def test_owner_drift_after_resolve_fails_before_spawn(
                     str(provisioned.project),
                 )
             )
-        except BaseException as exc:  # pragma: no cover - asserted below
+        except BaseException as exc:  # noqa: BLE001  # pragma: no cover
             started.append(exc)
 
     start_thread = threading.Thread(target=start_public_run)

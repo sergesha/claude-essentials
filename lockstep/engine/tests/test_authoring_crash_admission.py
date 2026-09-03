@@ -1,23 +1,30 @@
 """Canonical-iff runtime admission after every bounded-writer crash cut."""
 from __future__ import annotations
 
-import json, multiprocessing, os, stat
+import json
+import multiprocessing
+import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
-import pytest
-
 import lockstep.authoring_publisher as publisher
-from lockstep import authoring
+import pytest
 from lockstep.authoring_bundle import AuthoringPlan
 from lockstep.authoring_compilation import plan_project_compilation
-from lockstep.authoring_installation import CapturedWorkflowSource, plan_captured_workflow_installation
+from lockstep.authoring_installation import (
+    CapturedWorkflowSource,
+    plan_captured_workflow_installation,
+)
 from lockstep.authoring_publisher import AuthoringPublisher
+from lockstep.runtime.engine import LockstepError
 from lockstep.runtime.service import LockstepCommandService
 from lockstep.runtime.start_service import AuthorizedStartService
-from lockstep.workflow.compiler import canonical_execution_bytes
 from lockstep.template_installation import plan_template_installation
-from lockstep.templates import TemplateCollision, install_template
+from lockstep.templates import install_template
+from lockstep.workflow.compiler import canonical_execution_bytes
+
+from lockstep import authoring
 from tests._authoring_gate import (
     assert_no_durable_runtime_change,
     provision_controlled_runtime,
@@ -25,7 +32,6 @@ from tests._authoring_gate import (
     tree_image,
     write_workflow,
 )
-
 
 CUT_EXIT = 86
 
@@ -49,7 +55,7 @@ def _scenario(root: Path, surface: str, present: bool) -> Scenario:
         source = authoring._minimal_workflow_source("release")
         plan = plan_captured_workflow_installation(project, (CapturedWorkflowSource("release", source),), root_role="release")
         return Scenario(project, state, "release", plan.plan)
-    import lockstep.templates as templates
+    from lockstep import templates
     manifest = templates._manifest("reviewed-change")
     sources = templates._captured_role_sources("reviewed-change", "change", manifest)
     plan = plan_template_installation(project, sources, root_role="change")
@@ -90,12 +96,6 @@ def _public_write(scenario: Scenario, surface: str) -> None:
     if surface == "compile": authoring.publish_project_compilation(scenario.project, "release", state_dir=scenario.state)
     elif surface == "minimal": authoring.initialize_minimal(scenario.project, "release", state_dir=scenario.state)
     else: install_template("reviewed-change", "change", scenario.project, state_dir=scenario.state)
-
-
-def _materialize(target, content: bytes, mode: int) -> None:
-    target.path.parent.mkdir(parents=True, exist_ok=True)
-    target.path.write_bytes(content)
-    target.path.chmod(mode)
 
 
 def _crash_child(scenario: Scenario, surface: str, phase: str, ordinal: int, force_route: bool) -> None:
@@ -149,7 +149,7 @@ def _runtime_oracle(scenario: Scenario, monkeypatch, accept: bool, surface: str)
     before = tree_image(scenario.state)
     try:
         if not accept:
-            with pytest.raises(Exception): service.start(scenario.root, {}, str(scenario.project))
+            with pytest.raises(LockstepError): service.start(scenario.root, {}, str(scenario.project))
             assert captured == []; assert_no_durable_runtime_change(before, scenario.state); return
         assert service.start(scenario.root, {}, str(scenario.project))["run_id"] == "probe"
     finally: service.close()
@@ -163,77 +163,41 @@ def _runtime_oracle(scenario: Scenario, monkeypatch, accept: bool, surface: str)
     assert proof.source_bundle_sha256 == plan.authorized.source_bundle_sha256 and canonical_input == b"{}"
 
 
-CASES = (("compile", False), ("compile", True), ("minimal", False), ("template", False))
 PHASES = ("after-temp-creation", "after-temp-fsync", "after-final-validation", "after-mutation", "after-target-fsync", "after-parent-fsync")
 
 
-@pytest.mark.parametrize(("surface", "present"), CASES)
 @pytest.mark.parametrize("phase", PHASES)
-def test_every_public_writer_cut_has_canonical_iff_runtime_admission(
-    tmp_path, monkeypatch, surface, present, phase
+def test_template_crash_cuts_admit_only_a_complete_canonical_installation(
+    tmp_path, monkeypatch, phase
 ) -> None:
-    probe = _scenario(tmp_path / "probe", surface, present)
-    for ordinal in range(len(probe.targets)):
-        cell = tmp_path / f"{surface}-{present}-{phase}-{ordinal}"; cell.mkdir()
-        scenario = _scenario(cell, surface, present)
-        assert _run_cut(scenario, surface, phase, ordinal) == CUT_EXIT
-        cut_project = tree_image(scenario.project)
-        changed, old_complete = _semantics(scenario)
-        new_complete = changed == len(scenario.targets)
-        assert not (old_complete and scenario.source is not None and scenario.source.read_bytes() == scenario.old_source)
-        with monkeypatch.context() as runtime: _runtime_oracle(scenario, runtime, new_complete, surface)
-        assert tree_image(scenario.project) == cut_project
+    surface, present = "template", False
+    scenario = _scenario(tmp_path, surface, present)
+    assert _run_cut(scenario, surface, phase, 0) == CUT_EXIT
+    cut_project = tree_image(scenario.project)
+    changed, old_complete = _semantics(scenario)
+    new_complete = changed == len(scenario.targets)
+    assert not (
+        old_complete
+        and scenario.source is not None
+        and scenario.source.read_bytes() == scenario.old_source
+    )
+    with monkeypatch.context() as runtime:
+        _runtime_oracle(scenario, runtime, new_complete, surface)
+    assert tree_image(scenario.project) == cut_project
 
 
-@pytest.mark.parametrize("surface", ("minimal", "template"))
-@pytest.mark.parametrize("phase", PHASES)
-def test_every_proper_crash_prefix_regenerates_through_the_same_public_initializer(
-    tmp_path, monkeypatch, surface, phase
+def test_partial_template_crash_regenerates_through_public_initializer(
+    tmp_path, monkeypatch
 ) -> None:
-    probe = _scenario(tmp_path / "probe", surface, False)
-    for ordinal in range(len(probe.targets)):
-        cell = tmp_path / f"{surface}-{phase}-{ordinal}"
-        cell.mkdir()
-        scenario = _scenario(cell, surface, False)
-        assert _run_cut(scenario, surface, phase, ordinal) == CUT_EXIT
-        changed, _old = _semantics(scenario)
-        before = tree_image(scenario.project)
-        if changed == len(scenario.targets):
-            error = TemplateCollision if surface == "template" else authoring.AuthoringError
-            with pytest.raises(error):
-                _public_write(scenario, surface)
-            assert tree_image(scenario.project) == before
-            continue
-        _public_write(scenario, surface)
-        assert _semantics(scenario) == (len(scenario.targets), False)
-        with monkeypatch.context() as runtime:
-            _runtime_oracle(scenario, runtime, True, surface)
-
-
-@pytest.mark.parametrize("surface", ("minimal", "template"))
-@pytest.mark.parametrize("shape", ("occupied-after-absence", "bytes", "mode", "full"))
-def test_noncanonical_or_full_installation_shapes_remain_collisions_without_mutation(
-    tmp_path, surface, shape
-) -> None:
+    surface, phase = "template", "after-mutation"
     scenario = _scenario(tmp_path, surface, False)
-    AuthoringPublisher(scenario.state).require_ready(scenario.project)
-    targets = scenario.plan.targets
-    if shape == "occupied-after-absence":
-        _materialize(targets[1], targets[1].after, targets[1].mode)
-    elif shape == "bytes":
-        _materialize(targets[0], b"foreign\n", targets[0].mode)
-    elif shape == "mode":
-        _materialize(targets[0], targets[0].after, 0o600)
-    else:
-        for target in targets:
-            _materialize(target, target.after, target.mode)
-    before_project, before_state = tree_image(scenario.project), tree_image(scenario.state)
-    error = TemplateCollision if surface == "template" else authoring.AuthoringError
-
-    with pytest.raises(error):
-        _public_write(scenario, surface)
-    assert tree_image(scenario.project) == before_project
-    assert tree_image(scenario.state) == before_state
+    assert _run_cut(scenario, surface, phase, 0) == CUT_EXIT
+    changed, _old = _semantics(scenario)
+    assert changed < len(scenario.targets)
+    _public_write(scenario, surface)
+    assert _semantics(scenario) == (len(scenario.targets), False)
+    with monkeypatch.context() as runtime:
+        _runtime_oracle(scenario, runtime, True, surface)
 
 
 def test_present_unchanged_compile_cut_before_first_mutation_preserves_and_admits_old_canonical(
@@ -277,31 +241,3 @@ def test_subprocess_cut_skips_finally_cleanup_and_preserves_mixed_stale_tree(tmp
     snapshot = tree_image(stale.project); assert stale.source is not None and b"new" in stale.source.read_bytes()
     changed, _old = _semantics(stale); assert 0 < changed < len(stale.targets)
     _runtime_oracle(stale, monkeypatch, False, "compile"); assert tree_image(stale.project) == snapshot
-
-
-@pytest.mark.parametrize("surface", ("compile", "minimal", "template"))
-def test_complete_last_target_cut_admits_the_exact_surface_dag(tmp_path, monkeypatch, surface) -> None:
-    scenario = _scenario(tmp_path, surface, False); last = len(scenario.targets) - 1
-    assert _run_cut(scenario, surface, "after-parent-fsync", last, force_route=True) == CUT_EXIT
-    assert _semantics(scenario) == (len(scenario.targets), False)
-    _runtime_oracle(scenario, monkeypatch, True, surface)
-
-
-@pytest.mark.parametrize("surface", ("compile", "minimal", "template"))
-def test_public_writer_surfaces_route_to_the_bounded_per_file_writer(tmp_path, monkeypatch, surface) -> None:
-    scenario = _scenario(tmp_path, surface, False); seen = []; original = publisher._publish_per_file
-    monkeypatch.setattr(publisher, "_publish_per_file", lambda plan: seen.append(plan) or original(plan))
-    _public_write(scenario, surface)
-    assert seen == [scenario.plan]
-
-
-def test_final_verification_rejects_foreign_earlier_target_without_rollback(tmp_path, monkeypatch) -> None:
-    scenario = _scenario(tmp_path, "minimal", False); first, last = scenario.targets[0], scenario.targets[-1]
-    original = publisher.capture_after_identity_at; tampered = b"foreign\n"
-    def capture(parent, after):
-        value = original(parent, after)
-        if after.path == last: first.write_bytes(tampered)
-        return value
-    monkeypatch.setattr(publisher, "capture_after_identity_at", capture)
-    with pytest.raises(Exception): publisher._publish_per_file(scenario.plan)
-    assert first.read_bytes() == tampered

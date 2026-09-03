@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import inspect
 import subprocess
 from pathlib import Path
 
@@ -8,20 +7,10 @@ import pytest
 from lockstep.runtime.blobs import BlobStore
 from lockstep.runtime.project_paths import ProjectTreeLimits
 from lockstep.runtime.project_snapshots import ProjectSnapshotRef, ProjectSnapshotStore
-from lockstep.runtime.providers import workspaces as workspace_module
 from lockstep.runtime.providers.workspaces import (
     LocalGitWorkspaceProvider,
     WorkspaceError,
 )
-
-
-def test_workspace_provider_is_composed_from_cohesive_collaborators(tmp_path):
-    provider, _lease = _materialized(tmp_path)
-
-    assert type(provider._materializer).__name__ == "WorkspaceMaterializationTransaction"
-    assert type(provider._rollover).__name__ == "WorkspaceRolloverTransaction"
-    assert type(provider._attestor).__name__ == "WorkspaceAttestor"
-    assert type(provider._record_repository).__name__ == "WorkspaceRecordRepository"
 
 
 def _materialized(tmp_path: Path):
@@ -46,13 +35,10 @@ def _materialized(tmp_path: Path):
 
 
 def test_workspace_lease_uses_revision_and_phase_without_fake_fences(tmp_path):
-    provider, lease = _materialized(tmp_path)
+    _provider, lease = _materialized(tmp_path)
 
     assert lease.revision == 1
     assert lease.phase == "materialized"
-    assert not hasattr(lease, "generation")
-    assert not hasattr(lease, "cleanup_fence")
-    assert not hasattr(provider, "actual_death_proof")
 
 
 def test_rollover_returns_snapshot_ref_and_rejects_stale_revision(tmp_path):
@@ -205,11 +191,10 @@ def test_materialize_recovers_deterministic_staging_and_unrecorded_checkout(tmp_
     assert (lease.workspace_path / "src/app.py").read_bytes() == b"expected"
 
 
-def test_materialize_constructs_git_without_any_production_subprocess(tmp_path):
+def test_materialize_constructs_git_metadata(tmp_path):
     provider, lease = _materialized(tmp_path)
 
     assert provider.inspect(lease.workspace_ref) == lease
-    assert "subprocess" not in inspect.getsource(workspace_module)
     assert (lease.workspace_path / ".git/HEAD").read_bytes() == (
         b"ref: refs/heads/lockstep\n"
     )

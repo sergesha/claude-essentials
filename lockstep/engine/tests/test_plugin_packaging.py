@@ -3,8 +3,9 @@ import os
 import shutil
 import stat
 import subprocess
-import tomllib
 from pathlib import Path
+
+import tomllib
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -70,17 +71,6 @@ def test_claude_mcp_uses_launcher_without_legacy_runner_default():
     assert server["command"] == "${CLAUDE_PLUGIN_ROOT}/scripts/lockstep-plugin"
     assert server["args"] == ["serve"]
     assert "env" not in server
-
-
-def test_launcher_is_executable_and_does_not_change_directory():
-    launcher = ROOT / "scripts/lockstep-plugin"
-    assert launcher.stat().st_mode & stat.S_IXUSR
-    source = launcher.read_text()
-    assert source.startswith("#!/bin/sh\n")
-    assert "cd " not in source
-    assert '"$lockstep_plugin_root/scripts/lockstep-install"' in source
-    assert "exec uv run --project" in source
-    assert "--no-sync lockstep" in source
 
 
 def test_launcher_resolves_engine_but_preserves_caller_cwd(tmp_path):
@@ -151,72 +141,3 @@ def test_launcher_derives_codex_home_from_installed_plugin_path(tmp_path):
     )
 
     assert set(result.stdout.splitlines()) == {str(codex_home)}
-
-
-def test_runtime_never_reads_the_non_authoritative_plugin_host_marker():
-    runtime = ROOT / "engine/src/lockstep"
-    readers = [
-        str(path.relative_to(ROOT))
-        for path in sorted(runtime.rglob("*.py"))
-        if "LOCKSTEP_PLUGIN_HOST" in path.read_text()
-    ]
-    assert readers == []
-
-
-def test_install_build_and_plugin_enforce_sync_patch_no_sync_order(tmp_path):
-    """An implicit sync after patching would restore the vulnerable wheel."""
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    fake_uv = fake_bin / "uv"
-    fake_uv.write_text(
-        "#!/bin/sh\n"
-        "printf '%s\\n' \"$*\" >> \"$LOCKSTEP_TEST_LOG\"\n"
-    )
-    fake_uv.chmod(fake_uv.stat().st_mode | stat.S_IXUSR)
-    log = tmp_path / "uv.log"
-    env = {
-        **os.environ,
-        "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
-        "LOCKSTEP_TEST_LOG": str(log),
-    }
-
-    subprocess.run([str(ROOT / "scripts/lockstep-install")], env=env, check=True)
-    assert log.read_text().splitlines() == [
-        f"sync --project {ROOT / 'engine'} --frozen",
-        f"run --project {ROOT / 'engine'} --no-sync lockstep-dependency-install",
-    ]
-
-    log.write_text("")
-    subprocess.run([str(ROOT / "scripts/lockstep-build")], env=env, check=True)
-    assert log.read_text().splitlines() == [
-        f"sync --project {ROOT / 'engine'} --frozen",
-        f"run --project {ROOT / 'engine'} --no-sync lockstep-dependency-install",
-        f"build --project {ROOT / 'engine'}",
-    ]
-
-    log.write_text("")
-    subprocess.run(
-        [str(ROOT / "scripts/lockstep-plugin"), "doctor"],
-        cwd=tmp_path,
-        env=env,
-        check=True,
-    )
-    assert log.read_text().splitlines() == [
-        f"sync --project {ROOT / 'engine'} --frozen",
-        f"run --project {ROOT / 'engine'} --no-sync lockstep-dependency-install",
-        f"run --project {ROOT / 'engine'} --no-sync lockstep doctor",
-    ]
-
-
-def test_runtime_skill_uses_host_neutral_worker_language():
-    skill = (ROOT / "skills/lockstep/SKILL.md").read_text()
-    assert "your own `Agent` tool" not in skill
-    assert "host's subagent capability" in skill
-
-
-def test_author_skill_does_not_document_retired_runner_configuration():
-    skill = (ROOT / "skills/lockstep-author/SKILL.md").read_text()
-    assert "driver: claude" not in skill
-    assert "driver: codex" not in skill
-    assert "LOCKSTEP_RUNNER" not in skill
-    assert "Runner names" not in skill

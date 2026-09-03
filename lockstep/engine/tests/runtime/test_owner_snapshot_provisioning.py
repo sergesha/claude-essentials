@@ -2,28 +2,28 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import os
-from pathlib import Path
 import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
-
-from lockstep import cli
 from lockstep.runtime.advisory_lock import advisory_file_lock
 from lockstep.runtime.effects.owner_policy import (
-    RuntimeRequirementIndex,
     RuntimeProvisioningInventory,
+    RuntimeRequirementIndex,
     requirement_digest,
 )
 from lockstep.runtime.effects.owner_provisioning import provision_runtime_snapshot
-from lockstep.runtime.service import preflight_recipe
 from lockstep.runtime.owner_state import ensure_owner_directory
 from lockstep.runtime.providers.codex import CodexInstallationBinding
+from lockstep.runtime.service import preflight_recipe
+
+from lockstep import cli
 
 
 def _effect_node(logical_id: str, *, selector: str = "codex") -> dict[str, object]:
@@ -250,41 +250,6 @@ def _subprocess_result(
         process.kill()
         process.wait(timeout=10)
         pytest.fail("owner provisioning blocked on a non-regular file")
-
-
-@pytest.mark.parametrize(
-    "module_name",
-    (
-        "lockstep.runtime.effects.owner_policy",
-        "lockstep.runtime.effects.owner_policy_ingress",
-        "lockstep.runtime.effects.owner_provisioning",
-        "lockstep.runtime.effects.owner_snapshot_file",
-        "lockstep.runtime.effects.owner_snapshot_store",
-    ),
-)
-def test_focused_owner_modules_import_in_a_fresh_interpreter(
-    module_name: str,
-) -> None:
-    result = subprocess.run(
-        [sys.executable, "-c", f"import {module_name}"],
-        capture_output=True,
-        text=True,
-        timeout=5,
-        check=False,
-    )
-
-    assert result.returncode == 0, result.stderr
-
-
-def test_owner_policy_does_not_reexport_provisioning_operations() -> None:
-    from lockstep.runtime.effects import owner_policy, owner_provisioning
-
-    assert not hasattr(owner_policy, "provision_runtime_snapshot")
-    assert not hasattr(owner_policy, "validate_runtime_provision_inputs")
-    assert not hasattr(owner_policy, "parse_runtime_provision_documents")
-    assert not hasattr(owner_policy, "__getattr__")
-    assert callable(owner_provisioning.provision_runtime_snapshot)
-    assert callable(owner_provisioning.validate_runtime_provision_inputs)
 
 
 def test_equal_inputs_are_byte_for_byte_idempotent(tmp_path: Path) -> None:

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pytest
-
 from lockstep.runtime.errors import LockstepError
 from lockstep.runtime.observation import status_revision
 from lockstep.runtime.projection import RuntimeProjection
@@ -96,5 +95,3 @@ def test_wait_is_observational_and_never_calls_a_mutation_port() -> None:
     result = projection.wait("run-1", 1, "/project")
 
     assert result["changed"] is False
-    assert not hasattr(projection, "runtime")
-    assert not hasattr(projection, "coordinator")

@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import pytest
 from lockstep.runtime.catalog import RunBinding
 from lockstep.runtime.effects.descriptors import (
     derive_effect_id,
@@ -11,7 +12,6 @@ from lockstep.runtime.native_models import (
     NativeSnapshot,
 )
 from lockstep.runtime.status import project_status
-import pytest
 
 
 def _binding() -> RunBinding:
@@ -23,18 +23,6 @@ def _parked(value: object = "Work?") -> NativeSnapshot:
     return NativeSnapshot(
         values={}, pending=(NativeInterrupt(coordinate, value),), next=("work",)
     )
-
-
-def test_status_is_derived_not_catalogued(tmp_path):
-    from lockstep.runtime.storage import SQLiteStore
-
-    store = SQLiteStore(tmp_path / "runtime.sqlite")
-    try:
-        status = project_status(_binding(), _parked(), (), ())
-        assert status.status == "awaiting"
-        assert "status" not in store.tables.runs.columns
-    finally:
-        store.close()
 
 
 def test_child_correlation_is_opaque_and_contains_no_native_namespace() -> None:

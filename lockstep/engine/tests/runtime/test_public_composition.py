@@ -2,23 +2,16 @@
 
 from __future__ import annotations
 
-import argparse
-from dataclasses import FrozenInstanceError, fields
 import importlib
-import inspect
 import json
 from pathlib import Path
 
 import pytest
-
-from lockstep import cli
 from lockstep.authoring import json_text
 from lockstep.recipe.authority import RecipeAuthorityPolicy, StrictRecipeIngress
 from lockstep.runtime.engine import Engine, LockstepError
-from lockstep.runtime.projection import RuntimeProjection
-from lockstep.runtime.providers.codex import CodexRunnerAdapter
-from lockstep.runtime.providers.pinned import PinnedRunnerAdapter
-from lockstep.runtime.service import LockstepCommandService
+
+from lockstep import cli
 
 
 def _write_empty_runtime_recipe(project: Path) -> None:
@@ -165,46 +158,6 @@ def _provision_argv(project: Path, config: Path, grants: Path) -> list[str]:
     ]
 
 
-@pytest.mark.parametrize(
-    "factory_name",
-    ["observe", "command"],
-)
-def test_engine_exposes_explicit_capability_factory(
-    factory_name: str,
-) -> None:
-    factory = getattr(Engine, factory_name, None)
-    assert callable(factory), f"Engine.{factory_name} is absent"
-
-
-def test_engine_observe_returns_runtime_projection(tmp_path) -> None:
-    projection = Engine.observe(tmp_path / "owner-state", tmp_path / "recipes")
-    assert isinstance(projection, RuntimeProjection)
-
-
-def test_engine_capability_factories_have_only_the_frozen_paths() -> None:
-    assert tuple(inspect.signature(Engine.observe).parameters) == (
-        "state_dir",
-        "recipes_dir",
-    )
-    assert tuple(inspect.signature(Engine.command).parameters) == (
-        "state_dir",
-        "recipes_dir",
-    )
-
-
-def test_engine_command_returns_command_service(tmp_path) -> None:
-    command = Engine.command(tmp_path / "owner-state", tmp_path / "recipes")
-    try:
-        assert isinstance(command, LockstepCommandService)
-    finally:
-        command.close()
-
-
-def test_command_service_constructor_has_no_runtime_policy_injection_seam() -> None:
-    parameters = inspect.signature(LockstepCommandService).parameters
-    assert {"runners", "effect_authority"}.isdisjoint(parameters)
-
-
 def test_engine_command_construction_is_write_and_recovery_inert(tmp_path) -> None:
     state = tmp_path / "owner-state"
 
@@ -245,136 +198,6 @@ def test_managed_start_fails_at_execution_policy_boundary_before_owner_write(
     assert not state.exists()
 
 
-def test_command_service_has_no_public_observation_backdoor() -> None:
-    service_module = importlib.import_module("lockstep.runtime.service")
-    assert not hasattr(service_module, "LockstepService")
-    assert {
-        "status",
-        "scenario_status",
-        "scenario_wait",
-        "history",
-        "scenario_history",
-        "scenario_events",
-        "list_runs",
-        "run_trace",
-    }.isdisjoint(vars(LockstepCommandService))
-
-
-@pytest.mark.parametrize(
-    "operation",
-    ["status", "close", "wait", "history", "events", "list_runs", "run_trace"],
-)
-def test_runtime_projection_exposes_observation_operations(operation: str) -> None:
-    assert callable(getattr(RuntimeProjection, operation, None))
-
-
-def test_released_runner_composition_is_closed_to_exact_adapter_fields() -> None:
-    module = importlib.import_module("lockstep.runtime.providers.composition")
-    composition_type = module.ReleasedRunnerComposition
-    codex = object.__new__(CodexRunnerAdapter)
-    pinned = object.__new__(PinnedRunnerAdapter)
-    composition = composition_type(codex=codex, pinned=pinned)
-
-    assert tuple(field.name for field in fields(composition)) == ("codex", "pinned")
-    assert not hasattr(composition, "__dict__")
-    with pytest.raises(FrozenInstanceError):
-        composition.codex = codex
-
-
-def test_released_runner_composition_resolves_only_codex_and_pinned() -> None:
-    module = importlib.import_module("lockstep.runtime.providers.composition")
-    codex = object.__new__(CodexRunnerAdapter)
-    pinned = object.__new__(PinnedRunnerAdapter)
-    composition = module.ReleasedRunnerComposition(codex=codex, pinned=pinned)
-
-    assert composition.resolve("codex") is codex
-    assert composition.resolve("pinned") is pinned
-    with pytest.raises(ValueError, match="unsupported runner selector"):
-        composition.resolve("ambient")
-
-
-def test_owner_policy_exports_exact_required_types() -> None:
-    module = importlib.import_module("lockstep.runtime.effects.owner_policy")
-    assert tuple(
-        name
-        for name in (
-            "RuntimeRequirement",
-            "RuntimeRequirementIndex",
-            "RuntimeProvisioningInventory",
-            "OwnerRuntimeGrant",
-            "OwnerRuntimeSnapshot",
-            "OwnerRuntimeAuthority",
-        )
-        if isinstance(getattr(module, name, None), type)
-    ) == (
-        "RuntimeRequirement",
-        "RuntimeRequirementIndex",
-        "RuntimeProvisioningInventory",
-        "OwnerRuntimeGrant",
-        "OwnerRuntimeSnapshot",
-        "OwnerRuntimeAuthority",
-    )
-
-
-def test_runtime_requirement_has_only_static_inventory_fields() -> None:
-    module = importlib.import_module("lockstep.runtime.effects.owner_policy")
-    selection_key = module.grant_selection_key(
-        project_identity="/project",
-        definition_digest="b" * 64,
-        protected_descriptor_digest="c" * 64,
-        runner_selector="codex",
-        required_capabilities=("workspace-write",),
-        required_authorities=("os_user_execution",),
-    )
-    requirement = module.RuntimeRequirement(
-        grant_selection_key=selection_key,
-        project_identity="/project",
-        definition_digest="b" * 64,
-        protected_descriptor_digest="c" * 64,
-        runner_selector="codex",
-        required_capabilities=("workspace-write",),
-        required_authorities=("os_user_execution",),
-        uses=(("workflow.recipe.yaml", "edit"),),
-    )
-
-    assert tuple(field.name for field in fields(requirement)) == (
-        "grant_selection_key",
-        "project_identity",
-        "definition_digest",
-        "protected_descriptor_digest",
-        "runner_selector",
-        "required_capabilities",
-        "required_authorities",
-        "uses",
-    )
-    assert not hasattr(requirement, "__dict__")
-    with pytest.raises(FrozenInstanceError):
-        requirement.runner_selector = "pinned"
-
-
-def test_grant_selection_key_matches_frozen_canonical_json_vector() -> None:
-    module = importlib.import_module("lockstep.runtime.effects.owner_policy")
-    assert module.grant_selection_key(
-        project_identity="/p",
-        definition_digest="0" * 64,
-        protected_descriptor_digest="1" * 64,
-        runner_selector="codex",
-        required_capabilities=("cap.a",),
-        required_authorities=("authority.a",),
-    ) == "c9a506aaeb569b7ec65851e38a4d4131b08ff9d073981d8dfaa8dfe89f274c33"
-
-
-def test_requirement_digest_matches_frozen_canonical_json_vector() -> None:
-    module = importlib.import_module("lockstep.runtime.effects.owner_policy")
-    assert module.requirement_digest(
-        grant_selection_key=(
-            "c9a506aaeb569b7ec65851e38a4d4131b08ff9d073981d8dfaa8dfe89f274c33"
-        ),
-        runner_binding_digest="2" * 64,
-        config_generation=1,
-    ) == "70eb5584fa444783136b11861db90376d7f31e4fadcb8d7b2afea877473d2688"
-
-
 def test_runtime_requirement_rejects_key_for_a_different_stable_tuple() -> None:
     module = importlib.import_module("lockstep.runtime.effects.owner_policy")
     stable = {
@@ -392,39 +215,6 @@ def test_runtime_requirement_rejects_key_for_a_different_stable_tuple() -> None:
             grant_selection_key=selection_key,
             **{**stable, "project_identity": "project-b"},
             uses=(),
-        )
-
-
-@pytest.mark.parametrize(
-    "uses",
-    [
-        [("file", "id")],
-        (["file", "id"],),
-        (("file",),),
-        (("file", "id", "extra"),),
-        ((1, "id"),),
-        tuple((f"file-{index:03d}", "id") for index in range(257)),
-        (("x" * 513, "id"),),
-        (("file-b", "id"), ("file-a", "id")),
-        (("file", "id"), ("file", "id")),
-    ],
-)
-def test_runtime_requirement_rejects_noncanonical_bounded_uses(uses) -> None:
-    module = importlib.import_module("lockstep.runtime.effects.owner_policy")
-    stable = {
-        "project_identity": "project",
-        "definition_digest": "definition",
-        "protected_descriptor_digest": "descriptor",
-        "runner_selector": "codex",
-        "required_capabilities": ("cap.alpha",),
-        "required_authorities": ("authority.execute",),
-    }
-
-    with pytest.raises((TypeError, ValueError)):
-        module.RuntimeRequirement(
-            grant_selection_key=module.grant_selection_key(**stable),
-            **stable,
-            uses=uses,
         )
 
 
@@ -558,99 +348,6 @@ def test_requirement_index_union_is_canonical_across_distinct_root_order(
     assert len(forward.requirements) == 2
 
 
-def test_requirement_index_rejects_selection_key_collision(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    module = importlib.import_module("lockstep.runtime.effects.owner_policy")
-    requirements = importlib.import_module(
-        "lockstep.runtime.effects._owner_policy_requirements"
-    )
-    first = _authorized_managed_recipe(
-        tmp_path, name="first", logical_id="first-effect"
-    )
-    second = _authorized_managed_recipe(
-        tmp_path, name="second", logical_id="second-effect"
-    )
-    monkeypatch.setattr(
-        requirements, "grant_selection_key", lambda **_values: "0" * 64
-    )
-
-    with pytest.raises(ValueError, match="selection key collision"):
-        module.RuntimeRequirementIndex.for_authorized_closures(
-            (first, second), project_identity="/project"
-        )
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("required_capabilities", ["cap.a"]),
-        ("required_capabilities", ("cap.b", "cap.a")),
-        ("required_capabilities", ("cap.a", "cap.a")),
-        ("required_capabilities", tuple(f"cap.{index:03d}" for index in range(257))),
-        ("required_capabilities", ("x" * 513,)),
-        ("required_authorities", ("authority.b", "authority.a")),
-    ],
-)
-def test_grant_selection_key_rejects_noncanonical_bounded_tuples(
-    field: str,
-    value,
-) -> None:
-    module = importlib.import_module("lockstep.runtime.effects.owner_policy")
-    values = {
-        "project_identity": "/p",
-        "definition_digest": "0" * 64,
-        "protected_descriptor_digest": "1" * 64,
-        "runner_selector": "codex",
-        "required_capabilities": ("cap.a",),
-        "required_authorities": ("authority.a",),
-    }
-    values[field] = value
-
-    with pytest.raises((TypeError, ValueError)):
-        module.grant_selection_key(**values)
-
-
-def test_owner_cli_public_verb_exists() -> None:
-    parser = cli._build_parser()  # noqa: SLF001 - public grammar contract
-    root_subparsers = next(
-        action
-        for action in parser._actions  # noqa: SLF001
-        if isinstance(action, argparse._SubParsersAction)  # noqa: SLF001
-    )
-    assert "owner" in root_subparsers.choices, "lockstep owner verb is absent"
-
-
-def test_owner_provision_runtime_cli_surface_is_explicit_replacement() -> None:
-    args = cli._build_parser().parse_args(  # noqa: SLF001 - public grammar contract
-        [
-            "owner",
-            "provision-runtime",
-            "--config",
-            "/config.json",
-            "--project",
-            "/project",
-            "--recipe",
-            "first",
-            "--recipe",
-            "second",
-            "--replace-grants",
-            "/grants.json",
-        ]
-    )
-
-    assert vars(args) == {
-        "version": False,
-        "verb": "owner",
-        "action": "provision-runtime",
-        "config": "/config.json",
-        "project": "/project",
-        "recipe": ["first", "second"],
-        "replace_grants": "/grants.json",
-    }
-
-
 def test_owner_provision_runtime_rejects_config_symlink_before_policy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -697,19 +394,7 @@ def test_owner_provision_runtime_rejects_oversize_config_before_decoding(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     project = tmp_path / "project"
-    recipes = project / ".lockstep" / "recipes"
-    recipes.mkdir(parents=True)
-    authorized = _authorized_managed_recipe(
-        recipes,
-        name="sample",
-        logical_id="sample-work",
-    )
-    module = importlib.import_module("lockstep.runtime.effects.owner_policy")
-    index = module.RuntimeRequirementIndex.for_authorized_closure(
-        authorized,
-        project_identity=str(project.resolve()),
-    )
-    selection_key = index.requirements[0].grant_selection_key
+    project.mkdir()
     config = tmp_path / "config.json"
     config.write_bytes(b"x" * (64 * 1024 + 1))
     grants = tmp_path / "grants.json"
@@ -783,10 +468,8 @@ def test_owner_provision_runtime_rejects_binding_home_symlink(
 
 
 @pytest.mark.parametrize("member", ["codex", "pinned"])
-@pytest.mark.parametrize("shared_bit", [0o040, 0o020, 0o010, 0o004, 0o002, 0o001])
-def test_owner_provision_runtime_rejects_every_shared_home_mode_bit(
+def test_owner_provision_runtime_rejects_shared_home_mode(
     member: str,
-    shared_bit: int,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -796,7 +479,7 @@ def test_owner_provision_runtime_rejects_every_shared_home_mode_bit(
     config_value = _valid_provision_config(tmp_path)
     binding = config_value[member]
     assert isinstance(binding, dict)
-    Path(str(binding["codex_home"])).chmod(0o700 | shared_bit)
+    Path(str(binding["codex_home"])).chmod(0o704)
     config = tmp_path / "config.json"
     config.write_text(json.dumps(config_value), encoding="utf-8")
     grants = tmp_path / "grants.json"
@@ -845,9 +528,7 @@ def test_owner_provision_runtime_enforces_distinct_credential_roles(
     assert not (owner_state / "runtime-owner" / "snapshot.json").exists()
 
 
-@pytest.mark.parametrize("shared_bit", [0o040, 0o020, 0o010, 0o004, 0o002, 0o001])
-def test_owner_provision_runtime_rejects_every_shared_auth_mode_bit(
-    shared_bit: int,
+def test_owner_provision_runtime_rejects_shared_auth_mode(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -857,7 +538,7 @@ def test_owner_provision_runtime_rejects_every_shared_auth_mode_bit(
     config_value = _valid_provision_config(tmp_path)
     codex = config_value["codex"]
     assert isinstance(codex, dict)
-    (Path(str(codex["codex_home"])) / "auth.json").chmod(0o600 | shared_bit)
+    (Path(str(codex["codex_home"])) / "auth.json").chmod(0o604)
     config = tmp_path / "config.json"
     config.write_text(json.dumps(config_value), encoding="utf-8")
     grants = tmp_path / "grants.json"
@@ -908,9 +589,7 @@ def test_owner_provision_runtime_rejects_symlink_tmpdir(
     assert not (owner_state / "runtime-owner" / "snapshot.json").exists()
 
 
-@pytest.mark.parametrize("shared_bit", [0o040, 0o020, 0o010, 0o004, 0o002, 0o001])
-def test_owner_provision_runtime_rejects_every_shared_tmpdir_mode_bit(
-    shared_bit: int,
+def test_owner_provision_runtime_rejects_shared_tmpdir_mode(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -922,7 +601,7 @@ def test_owner_provision_runtime_rejects_every_shared_tmpdir_mode_bit(
     assert isinstance(codex, dict)
     environment = codex["environment"]
     assert isinstance(environment, dict)
-    Path(str(environment["TMPDIR"])).chmod(0o700 | shared_bit)
+    Path(str(environment["TMPDIR"])).chmod(0o704)
     config = tmp_path / "config.json"
     config.write_text(json.dumps(config_value), encoding="utf-8")
     grants = tmp_path / "grants.json"

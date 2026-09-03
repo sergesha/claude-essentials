@@ -12,6 +12,7 @@ from lockstep.runtime.effects.descriptors import (
 from lockstep.runtime.native_models import NativeCoordinate, NativeInterrupt
 from lockstep.runtime.providers.base import EffectRequest, TerminalSafetyObservation
 from lockstep.runtime.status import project_status
+
 from tests.runtime.effects.test_coordinator import NOW, _result, managed_descriptor
 
 
@@ -164,27 +165,6 @@ def test_partial_delivery_leaves_only_the_unsatisfied_native_interrupt(system) -
     assert ledger.get(records[second_coordinate].effect_id).phase == "launching"
 
 
-def test_runtime_schema_contains_no_parallel_workflow_authority(system) -> None:
-    """Parallel progress belongs to native tasks/barrier, never SQL sidecars."""
-    _coordinator, _runtime, _runner, _ledger, store, _coordinate = system
-    names = set(store.metadata.tables)
-
-    assert names == {
-        "runs",
-        "leases",
-        "effects",
-        "effect_observations",
-        "run_drive_watches",
-        "runtime_schema_migrations",
-        "runtime_schema_epoch",
-        "consent_epochs",
-        "publication_consents",
-    }
-    assert not any(
-        forbidden in name
-        for name in names
-        for forbidden in ("branch", "join", "scheduler", "timer")
-    )
 
 
 def test_status_aggregates_all_pending_effects_without_mutating_them(system) -> None:

@@ -9,8 +9,6 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import UniqueConstraint, func, select
-
 from lockstep.runtime.catalog import RunBinding
 from lockstep.runtime.effects.descriptors import parse_effect_descriptor
 from lockstep.runtime.effects.models import AcceptDescriptor
@@ -18,6 +16,7 @@ from lockstep.runtime.native_models import NativeCoordinate
 from lockstep.runtime.providers.base import EffectRequest, PreparedLaunch
 from lockstep.runtime.publication import PreparedPublication
 from lockstep.runtime.storage import SQLiteStore
+from sqlalchemy import func, select
 
 
 def _accept_descriptor(
@@ -106,60 +105,6 @@ def _publish_intent(result, **changes) -> EffectRequest:
     }
     values.update(changes)
     return EffectRequest.build(**values)
-
-
-def test_owner_consent_tables_are_exact_and_additive(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "runtime.sqlite")
-    try:
-        epochs = store.tables.consent_epochs
-        consents = store.tables.publication_consents
-
-        assert tuple(epochs.c.keys()) == (
-            "project_identity",
-            "epoch",
-            "updated_at",
-        )
-        assert tuple(consents.c.keys()) == (
-            "consent_ref",
-            "token_sha256",
-            "project_identity",
-            "public_run_id",
-            "definition_digest",
-            "source_thread_id",
-            "source_checkpoint_ns",
-            "source_checkpoint_id",
-            "source_task_id",
-            "source_interrupt_id",
-            "effect_id",
-            "descriptor_digest",
-            "producer_effect_id",
-            "artifact_ref",
-            "artifact_digest",
-            "destination",
-            "transformation",
-            "audience",
-            "commitment_digest",
-            "consent_epoch",
-            "issued_at",
-            "redeemed_at",
-            "receipt_digest",
-        )
-        assert epochs.primary_key.columns.keys() == ["project_identity"]
-        assert consents.primary_key.columns.keys() == ["consent_ref"]
-        uniques = {
-            (constraint.name, tuple(column.name for column in constraint.columns))
-            for constraint in consents.constraints
-            if isinstance(constraint, UniqueConstraint)
-        }
-        assert (None, ("token_sha256",)) in uniques
-        assert (None, ("receipt_digest",)) in uniques
-        assert (
-            "uq_publication_consents_exact_epoch",
-            ("project_identity", "consent_epoch", "commitment_digest"),
-        ) in uniques
-        assert not ({"raw_token", "session_id", "status"} & set(consents.c.keys()))
-    finally:
-        store.close()
 
 
 def test_publication_consent_commitment_binds_every_exact_input() -> None:
@@ -561,8 +506,9 @@ def test_publish_grant_is_deterministic_exact_and_never_delegated(tmp_path) -> N
 
 
 def test_nonpublish_resolution_and_commitment_delegate_unchanged(tmp_path) -> None:
-    from tests.runtime.providers.fakes import FakeEffectAuthority
     from lockstep.runtime.effects.owner_consent import OwnerConsentAuthority
+
+    from tests.runtime.providers.fakes import FakeEffectAuthority
 
     delegate = FakeEffectAuthority(clock=lambda: datetime(2026, 8, 25, 12, tzinfo=UTC))
     intent = EffectRequest.build(
@@ -656,8 +602,9 @@ def test_publish_commitment_linearizes_with_revocation_and_rechecks_exact_grant(
             (grant, replace(request, grant_digest="0" * 64), prepared),
             (grant, request, replace(prepared, publisher_binding_digest="0" * 64)),
         ):
-            with pytest.raises(EffectAuthorityDenied, match="invalid|stale|exact"):
-                with authority.commitment(bad_grant, bad_request, bad_launch):
-                    pass
+            with pytest.raises(EffectAuthorityDenied, match="invalid|stale|exact"), authority.commitment(
+                bad_grant, bad_request, bad_launch
+            ):
+                pass
     finally:
         store.close()

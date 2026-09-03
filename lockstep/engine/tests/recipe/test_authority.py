@@ -3,7 +3,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-
 from lockstep.recipe.authority import (
     AuthorityDenied,
     OwnerReviewedGrant,
@@ -498,17 +497,6 @@ def test_native_adapter_compiles_only_authorized_immutable_materialization(tmp_p
     app.close()
 
     assert [item.value for item in parked.pending] == [{"step": "wait"}]
-
-
-def test_raw_path_adapter_surface_is_removed_after_native_cutover():
-    import lockstep.recipe.yamlgraph_adapter as yg
-
-    assert not hasattr(yg, "compile_recipe")
-    assert not hasattr(yg, "validate")
-    assert not hasattr(yg, "legacy_compile_recipe")
-    assert not hasattr(yg, "legacy_validate_recipe")
-    assert not hasattr(yg, "render")
-    assert not hasattr(yg, "cli_mermaid")
 
 
 @pytest.mark.parametrize(

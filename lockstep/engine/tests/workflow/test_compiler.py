@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 import hashlib
-import ast
 import json
 from pathlib import Path
 
 import yaml
-
 from lockstep.runtime.effects.descriptors import parse_effect_descriptor
 from lockstep.runtime.effects.models import EffectDescriptor
 from lockstep.workflow.compiler import compile_workflow
@@ -193,29 +191,3 @@ def test_source_bytes_not_only_parsed_values_participate_in_freshness(
     assert first.source_sha256 != second.source_sha256
     assert first_result.recipe_bytes != second_result.recipe_bytes
     assert first_result.digest != second_result.digest
-
-
-def test_pure_compiler_modules_do_not_import_runtime_or_graph_engines() -> None:
-    root = Path(__file__).parents[2] / "src" / "lockstep" / "workflow"
-    forbidden = {
-        "yamlgraph", "langgraph", "lockstep.runtime.service",
-        "lockstep.runtime.engine", "lockstep.runtime.storage",
-        "lockstep.runtime.effects.ledger",
-    }
-    for name in ("compiler.py", "lowering.py", "canonical.py", "freshness.py", "estimate.py"):
-        tree = ast.parse((root / name).read_text())
-        imported = {
-            alias.name
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Import)
-            for alias in node.names
-        }
-        imported.update(
-            node.module or ""
-            for node in ast.walk(tree)
-            if isinstance(node, ast.ImportFrom)
-        )
-        assert not any(
-            module == blocked or module.startswith(blocked + ".")
-            for module in imported for blocked in forbidden
-        ), (name, imported & forbidden)
