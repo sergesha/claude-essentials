@@ -6,32 +6,31 @@ Installation is performed only when the user requests it.
 
 Before any host-side write, show one exact preview containing the source,
 version or channel, command or UI action, target, and external effects. Wait for
-explicit approval before running either marketplace-registration or
-plugin-installation action. Start a new session when the host requires a
-reload, then invoke SpeciFlow explicitly.
+explicit approval before running the requested host installation action. Start
+a new session when the host requires a reload, then invoke SpeciFlow explicitly.
 
 ## Codex
 
-Use the repository's Codex marketplace. Preview source
-`<absolute-repository-path>/.agents/plugins/marketplace.json`, package
-`speciflow@claude-essentials` version `0.1.0`, and these user-level actions:
+Use Codex's built-in `$skill-installer` with the canonical GitHub skill URL.
+This is a Codex prompt, not a shell command:
 
 ```text
-codex plugin marketplace add <absolute-repository-path> --json
-codex plugin add speciflow@claude-essentials --json
+$skill-installer install https://github.com/sergesha/claude-essentials/tree/main/speciflow/skills/speciflow
 ```
 
-The targets are the user's Codex marketplace registration and installed
-SpeciFlow bundle. External effects are limited to those host-managed entries
-and files. Obtain separate explicit approval before each requested action,
-start a new Codex session, and invoke `$speciflow` explicitly.
+Preview source channel `sergesha/claude-essentials` branch `main`, target
+`$CODEX_HOME/skills/speciflow` (normally `~/.codex/skills/speciflow`), and the
+network read plus user-level skill files the installer will create. Obtain
+explicit approval before installation. On the next turn, verify SpeciFlow in
+`/skills`; if the current thread does not refresh it, use `/new` without exiting
+Codex. Invoke `$speciflow` explicitly.
 
 ## Claude
 
-Use the repository's Claude marketplace. Preview source
-`sergesha/claude-essentials` and its `.claude-plugin/marketplace.json`, package
-`speciflow@claude-essentials` version `0.1.0`, and these user-level Claude
-marketplace actions:
+Use Claude's plugin marketplace. Preview source `sergesha/claude-essentials`
+and its `.claude-plugin/marketplace.json`, package
+`speciflow@claude-essentials`, the version in the package manifest, and these
+user-level Claude actions:
 
 ```text
 /plugin marketplace add sergesha/claude-essentials
