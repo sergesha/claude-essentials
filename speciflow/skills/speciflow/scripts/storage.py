@@ -205,7 +205,9 @@ def _locator_from_path(path: Path, *, anchor: Path, key: str, base: Path) -> Loc
     return locator
 
 
-def _nearest_base(cwd: Path, *, anchor: Path | None, git: bool) -> tuple[Path, Path] | None:
+def _nearest_base(
+    cwd: Path, *, anchor: Path | None, git: bool, default_base: Path | None = None
+) -> tuple[Path, Path] | None:
     for parent in (cwd, *cwd.parents):
         base = parent / ".speciflow"
         if not _lexists(base):
@@ -213,6 +215,8 @@ def _nearest_base(cwd: Path, *, anchor: Path | None, git: bool) -> tuple[Path, P
         if _is_symlink(base) or not base.is_dir():
             raise StorageConflict("storage base is not a directory")
         base = base.resolve()
+        if base == default_base:
+            continue
         if git:
             return base, anchor if anchor is not None else cwd
         if anchor is not None:
@@ -251,7 +255,11 @@ def resolve(request: ResolveRequest) -> Selection:
     if explicit_base is not None:
         source, base = "explicit", explicit_base
     else:
-        nearest = _nearest_base(cwd, anchor=requested_anchor if git is None else anchor, git=git is not None)
+        default_base = _account_home() / ".speciflow"
+        nearest = _nearest_base(
+            cwd, anchor=requested_anchor if git is None else anchor, git=git is not None,
+            default_base=default_base,
+        )
         if nearest is not None:
             source, base = "ancestor", nearest[0]
             if git is None:
@@ -269,9 +277,9 @@ def resolve(request: ResolveRequest) -> Selection:
                 common_locator = _locator_from_path(common_locator_path, anchor=anchor, key=key, base=common_base)
                 source, base = "git_common", common_locator.storage_base
             else:
-                source, base = "default", _account_home() / ".speciflow"
+                source, base = "default", default_base
         else:
-            source, base = "default", _account_home() / ".speciflow"
+            source, base = "default", default_base
     key = _project_key(anchor)
     storage_path = _storage_locator(base, key)
     if git is not None:
