@@ -5,6 +5,24 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0](https://github.com/sergesha/claude-essentials/compare/redis-memory-mcp-v0.8.1...redis-memory-mcp-v0.9.0) (2026-09-03)
+
+
+### Features
+
+* add redis-memory-mcp plugin ([bc76056](https://github.com/sergesha/claude-essentials/commit/bc7605668a6cf03311bec4f275c716bb143d6964))
+* **redis-memory-mcp:** enforced per-NAMESPACE isolation via Redis ACLs ([#17](https://github.com/sergesha/claude-essentials/issues/17)) ([#20](https://github.com/sergesha/claude-essentials/issues/20)) ([797aeba](https://github.com/sergesha/claude-essentials/commit/797aebaf2db4c7a4eba35078b9626a3220a44de8))
+* **redis-memory-mcp:** support joining a shared container network ([#14](https://github.com/sergesha/claude-essentials/issues/14)) ([348cdba](https://github.com/sergesha/claude-essentials/commit/348cdba7b22ff6a862e6d24f5b22c13fa89b8c6b))
+* **redis-memory-mcp:** Unix-socket transport for cross-OS-user access ([#16](https://github.com/sergesha/claude-essentials/issues/16)) ([7821490](https://github.com/sergesha/claude-essentials/commit/78214903485354211d2ac7ef77c83f214950d062))
+
+
+### Bug Fixes
+
+* extra-files paths in release-please-config were repo-root-relative, not package-relative ([#12](https://github.com/sergesha/claude-essentials/issues/12)) ([c4cb978](https://github.com/sergesha/claude-essentials/commit/c4cb9781f073fb6027564347b6e8c552b59df774))
+* plugin-installed redis-memory does not inherit shell env vars ([#10](https://github.com/sergesha/claude-essentials/issues/10)) ([883b833](https://github.com/sergesha/claude-essentials/commit/883b8334af6a4b0d8bc85e68cecb0a858504ec1b))
+* **redis-memory-mcp:** keep the namespace password out of the container argv ([#23](https://github.com/sergesha/claude-essentials/issues/23)) ([87fd1e2](https://github.com/sergesha/claude-essentials/commit/87fd1e24af5562b88a669186399ab11b60d0d4d8))
+* **redis-memory-mcp:** stop shipping/advertising an open secrets store ([#19](https://github.com/sergesha/claude-essentials/issues/19)) ([294263c](https://github.com/sergesha/claude-essentials/commit/294263cd9fa8ff8e9871aa521ad6e2504a0b7103))
+
 ## [0.8.1](https://github.com/sergesha/claude-essentials/compare/redis-memory-mcp-v0.8.0...redis-memory-mcp-v0.8.1) (2026-08-02)
 
 

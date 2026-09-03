@@ -1,5 +1,5 @@
 {
   "continuous-learning": "0.1.0",
-  "redis-memory-mcp": "0.8.1",
+  "redis-memory-mcp": "0.9.0",
   "lockstep": "0.1.0"
 }
