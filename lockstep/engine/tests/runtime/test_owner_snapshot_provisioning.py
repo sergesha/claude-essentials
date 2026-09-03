@@ -125,6 +125,9 @@ def _config(tmp_path: Path, *, model: str = "model") -> dict[str, object]:
     if not auth.exists():
         auth.write_text("{}", encoding="utf-8")
         auth.chmod(0o600)
+    (codex_home / "config.toml").write_text(
+        'model = "owner-selected"\n', encoding="utf-8"
+    )
     pinned_home = tmp_path / "pinned-home"
     pinned_home.mkdir(mode=0o700, exist_ok=True)
     private_tmp = tmp_path / "private-tmp"
