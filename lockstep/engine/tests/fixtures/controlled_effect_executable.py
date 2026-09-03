@@ -43,6 +43,18 @@ def _snapshot_digest(workspace: Path) -> str:
     return digest.hexdigest()
 
 
+def _await_controlled_release() -> Path | None:
+    barrier = Path(os.environ["TMPDIR"]) / "lockstep-controlled-two-process-barrier"
+    if not (barrier / "hold").is_dir():
+        return None
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if (barrier / "release").is_file():
+            return barrier
+        time.sleep(0.01)
+    raise SystemExit("controlled release gate timed out")
+
+
 def _await_parallel_peer() -> None:
     barrier = Path(os.environ["TMPDIR"]) / "lockstep-controlled-two-process-barrier"
     if not barrier.is_dir():
@@ -84,6 +96,7 @@ def main() -> int:
     start_ns = time.monotonic_ns()
     snapshot_digest = _snapshot_digest(workspace)
     _await_parallel_peer()
+    release_gate = _await_controlled_release()
     end_ns = time.monotonic_ns()
     artifact = _artifact_path(prompt)
     if artifact is not None:
@@ -110,8 +123,11 @@ def main() -> int:
             },
             sort_keys=True,
             separators=(",", ":"),
-        )
+        ),
+        flush=True,
     )
+    if release_gate is not None:
+        (release_gate / f"{os.getpid()}.completed").write_bytes(b"")
     return 0
 
 
