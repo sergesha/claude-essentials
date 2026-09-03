@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.1.0...speciflow-v0.2.0) (2026-09-03)
+
+
+### Features
+
+* **speciflow:** guard planning and review scope ([#33](https://github.com/sergesha/claude-essentials/issues/33)) ([9c0d6b3](https://github.com/sergesha/claude-essentials/commit/9c0d6b3fd9665c6d3badda92a8d9716264bc278c))
+
 ## 0.1.0 (2026-09-03)
 
 
