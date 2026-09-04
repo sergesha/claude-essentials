@@ -238,6 +238,7 @@ def _runtime_config(root: Path) -> dict[str, object]:
     provider_environment_marker = root / "provider-environment.txt"
     executable.write_text(
         "#!/bin/sh\n"
+        + "cat >/dev/null\n"
         + "printf '%s\\n' \"$@\" > "
         + shlex.quote(str(provider_argv_marker))
         + "\n"
