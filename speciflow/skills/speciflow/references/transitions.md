@@ -49,8 +49,9 @@ archive, claim, closure, acceptance, or completion.
 ## Supporting-tool containment
 
 First identify the concern's sole semantic owner through
-[ownership.md](ownership.md). Supporting material remains non-authoritative
-until that owner incorporates it through its documented interface and
-lifecycle and supplies any required approval. Copying it into planning Git, or
-approval of that copy, cannot transfer semantic ownership. One tool's verdict
-never supplies another owner's transition.
+[ownership.md](ownership.md). Permission or approval to store or copy
+supporting material is separate from semantic authority: a copy remains
+non-authoritative regardless of copy approval and cannot be named final,
+canonical, or approved for a concern owned elsewhere. Only that owner can
+incorporate and approve it through its documented interface and lifecycle. One
+tool's verdict never supplies another owner's transition.
