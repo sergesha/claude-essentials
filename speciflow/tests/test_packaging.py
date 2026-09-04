@@ -28,6 +28,7 @@ EXPECTED_DISTRIBUTABLE_FILES = frozenset(
         "skills/speciflow/agents/openai.yaml",
         "skills/speciflow/references/operations.md",
         "skills/speciflow/references/ownership.md",
+        "skills/speciflow/references/transitions.md",
         "skills/speciflow/references/storage.md",
         "skills/speciflow/references/diagnostics.md",
         "skills/speciflow/references/installation.md",
@@ -58,14 +59,14 @@ def test_both_marketplaces_register_the_speciflow_package(repo_root: Path) -> No
     assert codex_entry["source"] == {"source": "local", "path": "./speciflow"}
 
 
-def test_plugin_manifests_are_independent_version_zero_one_zero(repo_root: Path) -> None:
+def test_plugin_manifests_are_independent_version_zero_two_zero(repo_root: Path) -> None:
     for relative in (
         "speciflow/.claude-plugin/plugin.json",
         "speciflow/.codex-plugin/plugin.json",
     ):
         manifest = json.loads((repo_root / relative).read_text())
         assert manifest["name"] == "speciflow"
-        assert manifest["version"] == "0.1.0"
+        assert manifest["version"] == "0.2.0"
         assert not PROHIBITED_COMPONENT_KEYS.intersection(manifest)
 
     codex = json.loads((repo_root / "speciflow/.codex-plugin/plugin.json").read_text())
@@ -87,7 +88,7 @@ def test_release_please_has_independent_speciflow_package(repo_root: Path) -> No
     }
 
     release_manifest = json.loads((repo_root / ".release-please-manifest.json").read_text())
-    assert release_manifest["speciflow"] == "0.1.0"
+    assert release_manifest["speciflow"] == "0.2.0"
 
 
 def test_invocation_is_explicit_on_both_hosts(repo_root: Path) -> None:

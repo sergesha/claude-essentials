@@ -26,6 +26,20 @@ Use native IDs or typed references when available; otherwise use an artifact
 path plus commit SHA, or the current user's approval of a dirty snapshot.
 Missing stable links are manual confirmed operations, not SpeciFlow IDs.
 
+## Approved refinement
+
+Every cross-owner result must remain a refinement of the applicable approved
+upstream intent. Provenance identifies the source but does not prove complete
+coverage. The downstream owner may add detail within its authority, but may not
+narrow an outcome, discard required work at a blocker or intermediate
+milestone, or conceal an unresolved dependency.
+
+Only the owner of the upstream intent may approve an exclusion, deferral, or
+substitution. Validation, review, downstream acceptance, and implementation
+evidence do not supply that approval. Use the ephemeral comparison in
+[transitions.md](transitions.md); never persist a coverage table or SpeciFlow
+traceability record.
+
 ## Review authority
 
 Backlog.md is the sole scope authority. A blocking defect is only a conflict
