@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -9,12 +10,14 @@ from lockstep.runtime import config, sessions
 from lockstep.runtime.effects.descriptors import derive_effect_id
 from lockstep.runtime.effects.models import EffectDescriptor
 from lockstep.runtime.errors import LockstepError
+from lockstep.runtime.evidence import project_path_errors, validate_evidence
 from lockstep.runtime.graph_runtime import (
     NativeCoordinateRejected,
     NativeHistoryLimitExceeded,
 )
 from lockstep.runtime.providers.manual import ManualSubmission
 from lockstep.runtime.status import project_status
+from lockstep.runtime.validator_execution import validate_manual_checks
 
 
 class WorkerSubmissionService:
@@ -42,6 +45,48 @@ class WorkerSubmissionService:
         self._select_interrupt = select_interrupt
         self._protected_descriptor = protected_descriptor
         self._drive_engine_owned = drive_engine_owned
+
+    @staticmethod
+    def _validate_manual_pass(
+        binding: object,
+        interrupt: object,
+        result: Mapping[str, Any],
+        submission: ManualSubmission | None,
+    ) -> None:
+        if submission is None or submission.kind != "done":
+            return
+        value = getattr(interrupt, "value", None)
+        if not isinstance(value, dict):
+            raise LockstepError("protected manual interrupt has no evidence contract")
+        try:
+            evidence = json.loads(submission.payload)
+        except (TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise LockstepError("protected manual PASS has invalid evidence") from exc
+        if not isinstance(evidence, dict):
+            raise LockstepError("protected manual PASS requires evidence")
+        try:
+            canonical_submission = ManualSubmission.build("PASS", evidence=evidence)
+        except (TypeError, ValueError) as exc:
+            raise LockstepError("protected manual PASS has invalid evidence") from exc
+        if submission != canonical_submission:
+            raise LockstepError("protected manual PASS evidence is not canonical")
+        if result.get("evidence") != evidence:
+            raise LockstepError("protected manual evidence does not match submission")
+        project = getattr(binding, "project_identity", None)
+        if not isinstance(project, str) or not project:
+            raise LockstepError("protected manual run has no project identity")
+        schema = value.get("evidence_schema")
+        try:
+            errors = validate_evidence(schema, evidence)
+            errors.extend(project_path_errors(schema, evidence, project))
+        except Exception as exc:
+            raise LockstepError("invalid protected manual evidence contract") from exc
+        if not errors:
+            errors.extend(
+                validate_manual_checks(value.get("checks"), evidence, project)
+            )
+        if errors:
+            raise LockstepError("manual evidence rejected: " + "; ".join(errors))
 
     def _submit_manual(
         self,
@@ -95,6 +140,10 @@ class WorkerSubmissionService:
                     binding, interrupt = self._select_interrupt(run_id, step, project)
                     descriptor = self._protected_descriptor(interrupt)
                     if descriptor is not None:
+                        if descriptor.kind == "manual":
+                            self._validate_manual_pass(
+                                binding, interrupt, result, manual_submission
+                            )
                         return self._submit_manual(
                             run_id,
                             binding,

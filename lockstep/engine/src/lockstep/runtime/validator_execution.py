@@ -16,6 +16,20 @@ from lockstep.runtime.validator_registry import NON_BASELINE_CHECKS
 
 CHECKS = {**NON_BASELINE_CHECKS, **BASELINE_CHECKS}
 
+_MANUAL_PROJECT_READ_CHECK_TYPES = frozenset(
+    (
+        "file_exists",
+        "file_nonempty",
+        "md_has_sections",
+        "file_matches",
+        "review_verdict",
+    )
+)
+_MANUAL_PROCESS_CHECK_TYPES = frozenset(("cmd_ok", "git_clean", "junit_gate"))
+_MANUAL_TRUSTED_CONTEXT_CHECK_TYPES = frozenset(BASELINE_CHECKS) | {
+    "file_matches_hash"
+}
+
 
 def _embedded_verdict(state: dict[str, Any]) -> dict[str, Any]:
     evidence = state.get("evidence") or {}
@@ -71,6 +85,48 @@ def _execute_configured_checks(
     if reasons:
         return {"verdict_status": "fail", "verdict_reasons": reasons}
     return {"verdict_status": "pass", "verdict_reasons": []}
+
+
+def validate_manual_checks(
+    checks: object, evidence: dict, project: str
+) -> list[str]:
+    """Run eligible project reads without conferring broader authority."""
+    if checks is None:
+        return []
+    if not isinstance(checks, list) or any(
+        not isinstance(check, dict) for check in checks
+    ):
+        return ["declared checks must be a list of objects"]
+    if not checks:
+        return []
+    classification_errors: list[str] = []
+    for check in checks:
+        check_type = check.get("type")
+        if not isinstance(check_type, str):
+            classification_errors.append(f"unknown check type: {check_type!r}")
+        elif check_type in _MANUAL_PROCESS_CHECK_TYPES:
+            classification_errors.append(
+                "manual completion cannot run declared check without pinned "
+                f"execution: {check_type}"
+            )
+        elif check_type in _MANUAL_TRUSTED_CONTEXT_CHECK_TYPES:
+            classification_errors.append(
+                "manual completion lacks trusted validation context for declared "
+                f"check: {check_type}"
+            )
+        elif check_type not in _MANUAL_PROJECT_READ_CHECK_TYPES:
+            classification_errors.append(f"unknown check type: {check_type!r}")
+    if classification_errors:
+        return classification_errors
+
+    context = {"_project": project}
+    reasons: list[str] = []
+    try:
+        for check in checks:
+            reasons.extend(CHECKS[check["type"]](check, evidence, context))
+    except Exception as exc:  # noqa: BLE001 - manual validation fails closed
+        return [str(exc)]
+    return reasons
 
 
 def _apply_effect_contract(

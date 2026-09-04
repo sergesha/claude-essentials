@@ -35,6 +35,7 @@ from lockstep.runtime.providers.codex import (
 from lockstep.runtime.providers.workspaces import LocalGitWorkspaceProvider
 from lockstep.runtime.service import preflight_recipe
 from lockstep.templates import install_template
+from tests._authoring_gate import compile_closure, tree_image
 from tests._managed_projection_fixture import managed_projection_compile
 from tests.runtime._runtime_commitment_harness import _runtime_config
 from tests.runtime._runtime_commitment_observer import RuntimeCommitmentObserver
@@ -42,6 +43,111 @@ from tests.runtime._runtime_commitment_observer import RuntimeCommitmentObserver
 CONTROLLED_EFFECT = (
     Path(__file__).parents[1] / "fixtures" / "controlled_effect_executable.py"
 )
+
+
+@pytest.mark.parametrize(
+    ("evidence_schema", "evidence", "error", "corrected_evidence"),
+    (
+        (
+            (
+                "      type: object\n"
+                "      required: [approved]\n"
+                "      properties:\n"
+                "        approved: {type: boolean, const: true}\n"
+                "      additionalProperties: false\n"
+            ),
+            {"approved": False},
+            "True was expected",
+            {"approved": True},
+        ),
+        (
+            (
+                "      type: object\n"
+                "      required: [target]\n"
+                "      properties:\n"
+                "        target: {type: string, format: project-path}\n"
+                "      additionalProperties: false\n"
+            ),
+            {"target": "../../outside"},
+            "path escapes project root",
+            {"target": "inside"},
+        ),
+    ),
+)
+def test_protected_manual_rejection_preserves_pending_effect_and_project(
+    tmp_path: Path,
+    evidence_schema: str,
+    evidence: dict[str, object],
+    error: str,
+    corrected_evidence: dict[str, object],
+) -> None:
+    project = tmp_path / "project"
+    workflow = project / ".lockstep" / "workflows" / "manual-guard.workflow.yaml"
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text(
+        "workflow_version: '1'\n"
+        "name: manual-guard\n"
+        "description: protected manual validation\n"
+        "protect: ['**']\n"
+        "flow:\n"
+        "  - step: guarded\n"
+        "    task: Complete the guarded work.\n"
+        "    exit: Supply evidence that satisfies the immutable contract.\n"
+        "    evidence:\n"
+        f"{evidence_schema}",
+        encoding="utf-8",
+    )
+    compile_closure(project, "manual-guard")
+    owner_state = tmp_path / "project-owner-state"
+    command = Engine.command(owner_state, project / ".lockstep" / "recipes")
+    try:
+        started = command.start("manual-guard", {}, str(project))
+        run_id = started["run_id"]
+        session_id = "manual-validation-worker"
+        assert sessions.touch(owner_state, run_id, session_id, 20) == "bound"
+        binding = command.catalog.get(run_id)
+        with command._admission_recovery_lock:
+            command.runtime.bind(binding)
+            before_snapshot = command.runtime.snapshot(run_id, subgraphs=True)
+        before_effects = command.effects.list_for_thread(binding.thread_id)
+        before_project = tree_image(project)
+        publication_root = owner_state / "publications"
+        before_publications = tree_image(publication_root)
+        assert len(before_snapshot.pending) == 1
+        assert len(before_effects) == 1
+        assert before_effects[0].phase == "prepared"
+
+        with pytest.raises(LockstepError, match=error):
+            command.scenario_done(
+                run_id,
+                "guarded",
+                evidence,
+                session_id=session_id,
+                project=str(project),
+            )
+
+        after_snapshot = command.runtime.snapshot(run_id, subgraphs=True)
+        after_effects = command.effects.list_for_thread(binding.thread_id)
+        assert after_snapshot.pending == before_snapshot.pending
+        assert after_snapshot.checkpoint_id == before_snapshot.checkpoint_id
+        assert after_effects == before_effects
+        assert tree_image(publication_root) == before_publications
+        assert tree_image(project) == before_project
+
+        corrected = command.scenario_done(
+            run_id,
+            "guarded",
+            corrected_evidence,
+            session_id=session_id,
+            project=str(project),
+        )
+        assert corrected["status"] == "completed"
+        completed_effects = command.effects.list_for_thread(binding.thread_id)
+        assert len(completed_effects) == 1
+        assert completed_effects[0].result is not None
+        assert completed_effects[0].result.outcome == "PASS"
+    finally:
+        command.close()
 
 
 def _wait_for_public_worker_step(

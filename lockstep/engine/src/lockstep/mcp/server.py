@@ -61,6 +61,7 @@ from lockstep.recipe.authority import (
 from lockstep.recipe.loader import RecipeLoader
 from lockstep.runtime import sessions
 from lockstep.runtime.engine import Engine
+from lockstep.runtime.evidence import project_path_errors
 from lockstep.runtime.projection import RuntimeProjection
 from lockstep.runtime.recipe_bundles import RecipeBundleStore
 from lockstep.runtime.service import (
@@ -150,30 +151,6 @@ def _reset_engine() -> None:
         _projection.close()
     _projection = None
     _projection_config = None
-
-
-def _containment_errors(schema: dict | None, evidence: dict, project: str) -> list[str]:
-    """Same rule as `Engine._check_path_containment`, for
-    `scenario_dryrun` — which has no `RunRecord` to read `project` from, so
-    the caller passes the server cwd instead."""
-    if not isinstance(schema, dict):
-        return []
-    props = schema.get("properties") or {}
-    base = Path(project).resolve()
-    errors: list[str] = []
-    for key, prop in props.items():
-        if not isinstance(prop, dict) or prop.get("format") != "project-path":
-            continue
-        if key not in evidence:
-            continue
-        raw = evidence[key]
-        if not isinstance(raw, str):
-            errors.append(f"{key}: project-path value must be a string")
-            continue
-        resolved = (base / raw).resolve()
-        if resolved != base and base not in resolved.parents:
-            errors.append(f"{key}: path escapes project root: {raw!r}")
-    return errors
 
 
 def _load_step_brief(recipe_path: Path, step: str) -> dict | None:
@@ -351,7 +328,7 @@ def scenario_dryrun(
         step,
         raw_evidence,
         project_root=project_root,
-        containment_errors=_containment_errors,
+        containment_errors=project_path_errors,
         load_step_brief=_load_step_brief,
         preflight=preflight_recipe,
     )
