@@ -4,12 +4,16 @@ from __future__ import annotations
 
 from lockstep.runtime._recovery_backfill import _bound_runtime
 from lockstep.runtime.catalog import RunBinding
+from lockstep.runtime.effects._coordinator_values import ReconcileAction
 
 
 class _RecoveryWatchSettlement:
     def _settle_terminal_watch(self, run_id: str) -> None:
         reports = self._coordinator.reconcile_consumed(run_id)
-        if any(report.action != "delivered" for report in reports):
+        if any(
+            ReconcileAction(report.action) is not ReconcileAction.DELIVERED
+            for report in reports
+        ):
             return
         self._effects.acknowledge_run_drive_watch(run_id)
 

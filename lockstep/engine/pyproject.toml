@@ -33,6 +33,24 @@ dev = [
 
 [tool.mypy]
 files = [
+  "src/lockstep/runtime/_publication_queries.py",
+  "src/lockstep/runtime/_publication_values.py",
+  "src/lockstep/runtime/_recovery_watch_drive.py",
+  "src/lockstep/runtime/_recovery_watch_settlement.py",
+  "src/lockstep/runtime/engine_drive_service.py",
+  "src/lockstep/runtime/publication.py",
+  "src/lockstep/runtime/effects/_coordinator_authority_recovery.py",
+  "src/lockstep/runtime/effects/_coordinator_foundation.py",
+  "src/lockstep/runtime/effects/_coordinator_orchestration.py",
+  "src/lockstep/runtime/effects/_coordinator_publication_existing.py",
+  "src/lockstep/runtime/effects/_coordinator_publication_planning.py",
+  "src/lockstep/runtime/effects/_coordinator_publication_preparation.py",
+  "src/lockstep/runtime/effects/_coordinator_publication_recovery.py",
+  "src/lockstep/runtime/effects/_coordinator_publication_recovery_transaction.py",
+  "src/lockstep/runtime/effects/_coordinator_publication_transition.py",
+  "src/lockstep/runtime/effects/_coordinator_reconciliation.py",
+  "src/lockstep/runtime/effects/_coordinator_runner.py",
+  "src/lockstep/runtime/effects/_coordinator_values.py",
   "src/lockstep/runtime/effects/_ledger_records.py",
   "src/lockstep/runtime/effects/_ledger_policy.py",
   "src/lockstep/runtime/effects/_ledger_queries.py",
@@ -45,3 +63,31 @@ python_version = "3.11"
 show_error_codes = true
 strict_equality = true
 warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = [
+  "lockstep.runtime.effects._coordinator_authority_recovery",
+  "lockstep.runtime.effects._coordinator_foundation",
+  "lockstep.runtime.effects._coordinator_orchestration",
+  "lockstep.runtime.effects._coordinator_publication_existing",
+  "lockstep.runtime.effects._coordinator_publication_planning",
+  "lockstep.runtime.effects._coordinator_publication_preparation",
+  "lockstep.runtime.effects._coordinator_publication_recovery",
+  "lockstep.runtime.effects._coordinator_publication_recovery_transaction",
+  "lockstep.runtime.effects._coordinator_publication_transition",
+  "lockstep.runtime.effects._coordinator_reconciliation",
+  "lockstep.runtime.effects._coordinator_runner",
+]
+disable_error_code = ["attr-defined"]
+
+[[tool.mypy.overrides]]
+module = "lockstep.runtime._publication_queries"
+disable_error_code = ["attr-defined"]
+
+[[tool.mypy.overrides]]
+module = [
+  "lockstep.runtime._recovery_watch_drive",
+  "lockstep.runtime._recovery_watch_settlement",
+  "lockstep.runtime.engine_drive_service",
+]
+disable_error_code = ["attr-defined"]

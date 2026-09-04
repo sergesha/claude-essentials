@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from lockstep.runtime.catalog import RunBinding
+from lockstep.runtime.effects._coordinator_values import ReconcileAction
 from lockstep.runtime.effects.models import (
     AcceptDescriptor,
     DecisionDescriptor,
@@ -25,15 +26,21 @@ ProtectedDescriptor = (
 )
 Protected = tuple[tuple[object, ProtectedDescriptor], ...]
 _CONTINUATION_ACTIONS = frozenset(
-    {"prepared", "launch_claimed", "sealed", "delivered", "awaiting_delivery"}
+    {
+        ReconcileAction.PREPARED,
+        ReconcileAction.LAUNCH_CLAIMED,
+        ReconcileAction.SEALED,
+        ReconcileAction.DELIVERED,
+        ReconcileAction.AWAITING_DELIVERY,
+    }
 )
 _ACCEPTED_ATTEMPT_ACTIONS = _CONTINUATION_ACTIONS | frozenset(
     {
-        "publication_claimed",
-        "publication_progress",
-        "running",
-        "quiescence_pending",
-        "indeterminate",
+        ReconcileAction.PUBLICATION_CLAIMED,
+        ReconcileAction.PUBLICATION_PROGRESS,
+        ReconcileAction.RUNNING,
+        ReconcileAction.QUIESCENCE_PENDING,
+        ReconcileAction.INDETERMINATE,
     }
 )
 
@@ -80,13 +87,18 @@ class EngineDriveService:
         )
 
     @staticmethod
-    def _accepted_attempt(actions: set[str]) -> bool:
+    def _accepted_attempt(actions: set[ReconcileAction]) -> bool:
         return bool(actions & _ACCEPTED_ATTEMPT_ACTIONS)
 
     @staticmethod
-    def _requires_followup(actions: set[str]) -> bool:
+    def _requires_followup(actions: set[ReconcileAction]) -> bool:
         return (bool(actions) and actions <= _CONTINUATION_ACTIONS) or bool(
-            actions & {"running", "quiescence_pending", "busy"}
+            actions
+            & {
+                ReconcileAction.RUNNING,
+                ReconcileAction.QUIESCENCE_PENDING,
+                ReconcileAction.BUSY,
+            }
         )
 
     def _settle(
@@ -106,9 +118,9 @@ class EngineDriveService:
         self,
         run_id: str,
         protected: Protected,
-        actions: set[str],
+        actions: set[ReconcileAction],
     ) -> tuple[object, bool]:
-        if "awaiting_delivery" not in actions:
+        if ReconcileAction.AWAITING_DELIVERY not in actions:
             return self._runtime.snapshot(run_id, subgraphs=True), False
         self._coordinator.deliver_ready(run_id)
         delivered = self._runtime.snapshot(run_id, subgraphs=True)
@@ -127,11 +139,19 @@ class EngineDriveService:
         binding: RunBinding,
         snapshot: object,
     ) -> tuple[ScenarioStatus | None, object, bool]:
-        status = project_status(binding, snapshot, self._leases, self._effects)
+        status = project_status(
+            binding,
+            snapshot,  # type: ignore[arg-type]
+            self._leases,
+            self._effects,
+        )
         protected = self._protected(snapshot)
         if not protected:
             cleanup = self._coordinator.reconcile_consumed(run_id)
-            if any(report.action == "busy" for report in cleanup):
+            if any(
+                ReconcileAction(report.action) is ReconcileAction.BUSY
+                for report in cleanup
+            ):
                 self._activate_effect_run(run_id)
                 return status, snapshot, False
             return self._settle(run_id, status, keep_active=False), snapshot, False
@@ -145,12 +165,17 @@ class EngineDriveService:
         if has_runner and not self._reserve_effect_run(run_id):
             return status, snapshot, False
         reports = self._coordinator.reconcile_pending(run_id)
-        actions = {report.action for report in reports}
+        actions = {ReconcileAction(report.action) for report in reports}
         if self._requires_followup(actions):
             self._activate_effect_run(run_id)
         accepted = self._accepted_attempt(actions)
         snapshot, delivery_blocked = self._deliver(run_id, protected, actions)
-        status = project_status(binding, snapshot, self._leases, self._effects)
+        status = project_status(
+            binding,
+            snapshot,  # type: ignore[arg-type]
+            self._leases,
+            self._effects,
+        )
         if delivery_blocked:
             return status, snapshot, accepted
         if status.status == "awaiting" and status.owner == "worker":
@@ -160,7 +185,14 @@ class EngineDriveService:
                 keep_active=False,
             ), snapshot, accepted
         if not actions <= _CONTINUATION_ACTIONS:
-            keep_active = bool(actions & {"running", "quiescence_pending", "busy"})
+            keep_active = bool(
+                actions
+                & {
+                    ReconcileAction.RUNNING,
+                    ReconcileAction.QUIESCENCE_PENDING,
+                    ReconcileAction.BUSY,
+                }
+            )
             return self._settle(
                 run_id,
                 status,

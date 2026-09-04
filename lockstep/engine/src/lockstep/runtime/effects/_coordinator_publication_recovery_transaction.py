@@ -4,9 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from lockstep.runtime._publication_values import PublicationPhase
 from lockstep.runtime.catalog import RunBinding
 from lockstep.runtime.effects._coordinator_values import (
+    ReconcileAction,
     ReconcileReport,
+    make_reconcile_report,
 )
 from lockstep.runtime.effects.descriptors import (
     parse_effect_descriptor,
@@ -48,10 +51,13 @@ class _EffectCoordinatorPublicationRecoveryTransaction:
         *,
         publisher: ProjectPublisher,
         prepared_publication: Any,
-        recovery_phase: str,
+        recovery_phase: PublicationPhase,
         effect_id: str,
     ) -> tuple[Any, EffectResult]:
-        if recovery_phase in {"rollback_pending", "rolled_back"}:
+        if recovery_phase in {
+            PublicationPhase.ROLLBACK_PENDING,
+            PublicationPhase.ROLLED_BACK,
+        }:
             receipt = publisher.rollback_or_recover(prepared_publication)
             result = self._publication_error_result(
                 effect_id, receipt.journal_digest
@@ -72,7 +78,7 @@ class _EffectCoordinatorPublicationRecoveryTransaction:
         publication_lease: Lease,
         publisher: ProjectPublisher,
         prepared_publication: Any,
-        recovery_phase: str,
+        recovery_phase: PublicationPhase,
     ) -> ReconcileReport | tuple[Any, EffectResult]:
         with self._runtime.commitment_guard(
             run_id, record.coordinate
@@ -91,7 +97,7 @@ class _EffectCoordinatorPublicationRecoveryTransaction:
                 lease=lease,
                 publication_lease=publication_lease,
             ):
-                return self._report(run_id, current, "busy")
+                return make_reconcile_report(run_id, current, ReconcileAction.BUSY)
             return self._publication_recovery_receipt(
                 publisher=publisher,
                 prepared_publication=prepared_publication,
@@ -112,9 +118,15 @@ class _EffectCoordinatorPublicationRecoveryTransaction:
         receipt: Any,
         result: EffectResult,
     ) -> ReconcileReport:
-        if receipt.phase not in {"applied", "rolled_back"}:
-            return self._report(run_id, record, "publication_progress")
-        if receipt.phase == "applied":
+        receipt_phase = PublicationPhase(receipt.phase)
+        if receipt_phase not in {
+            PublicationPhase.APPLIED,
+            PublicationPhase.ROLLED_BACK,
+        }:
+            return make_reconcile_report(
+                run_id, record, ReconcileAction.PUBLICATION_PROGRESS
+            )
+        if receipt_phase is PublicationPhase.APPLIED:
             self._capture_publication_successor(
                 binding=binding,
                 interrupt=interrupt,
@@ -128,4 +140,4 @@ class _EffectCoordinatorPublicationRecoveryTransaction:
             lease=lease,
             runner_binding_digest=publisher.binding_digest,
         )
-        return self._report(run_id, sealed, "sealed")
+        return make_reconcile_report(run_id, sealed, ReconcileAction.SEALED)

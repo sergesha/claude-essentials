@@ -11,6 +11,7 @@ from lockstep.runtime.catalog import RunBinding
 from lockstep.runtime.effects._coordinator_values import (
     CoordinatorLineageError,
     ProviderContractViolation,
+    ReconcileAction,
     ReconcileReport,
     _Context,
 )
@@ -143,7 +144,9 @@ class _EffectCoordinatorFoundation:
             raise CoordinatorLineageError(
                 "native decision resume did not consume the exact interrupt"
             )
-        return ReconcileReport(run_id, effect_id, "delivered", None)
+        return ReconcileReport(
+            run_id, effect_id, ReconcileAction.DELIVERED.value, None
+        )
 
     def _protected_lineage(
         self, run_id: str, coordinate, descriptor_digest: str
@@ -171,11 +174,6 @@ class _EffectCoordinatorFoundation:
         return self._leases.acquire(
             "effect", effect_id, self._owner_factory(), self._lease_ttl
         )
-
-    def _report(
-        self, run_id: str, record: EffectRecord, action: str
-    ) -> ReconcileReport:
-        return ReconcileReport(run_id, record.effect_id, action, record.phase)
 
     def _manual_handoff(
         self,

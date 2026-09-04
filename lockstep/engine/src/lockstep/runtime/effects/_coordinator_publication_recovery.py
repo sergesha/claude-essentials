@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from typing import Any
 
+from lockstep.runtime._publication_values import PublicationPhase
 from lockstep.runtime.catalog import RunBinding
 from lockstep.runtime.effects._coordinator_values import (
     CoordinatorLineageError,
+    ReconcileAction,
     ReconcileReport,
+    make_reconcile_report,
 )
 from lockstep.runtime.effects.authority import (
     EffectGrant,
@@ -43,11 +46,11 @@ class _EffectCoordinatorPublicationRecovery:
         lease: Lease,
         publisher: ProjectPublisher,
         prepared_publication: Any,
-        recovery_phase: str,
+        recovery_phase: PublicationPhase,
     ) -> ReconcileReport:
         publication_lease = self._publication_lease(binding)
         if publication_lease is None:
-            return self._report(run_id, record, "busy")
+            return make_reconcile_report(run_id, record, ReconcileAction.BUSY)
         try:
             recovered = self._guarded_publication_recovery(
                 run_id=run_id,
@@ -92,7 +95,10 @@ class _EffectCoordinatorPublicationRecovery:
             record.effect_id, record.request_digest or ""
         )
         if recovering is None or recovering[1] not in {
-            "applying", "applied", "rollback_pending", "rolled_back"
+            PublicationPhase.APPLYING,
+            PublicationPhase.APPLIED,
+            PublicationPhase.ROLLBACK_PENDING,
+            PublicationPhase.ROLLED_BACK,
         }:
             return None
         prepared_publication, recovery_phase = recovering
@@ -131,7 +137,7 @@ class _EffectCoordinatorPublicationRecovery:
     ) -> ReconcileReport:
         publication_lease = self._publication_lease(binding)
         if publication_lease is None:
-            return self._report(run_id, record, "busy")
+            return make_reconcile_report(run_id, record, ReconcileAction.BUSY)
         try:
             with self._runtime.commitment_guard(
                 run_id, record.coordinate
@@ -154,13 +160,16 @@ class _EffectCoordinatorPublicationRecovery:
                     or not self._leases.is_current(lease)
                     or not self._leases.is_current(publication_lease)
                 ):
-                    return self._report(run_id, current, "busy")
+                    return make_reconcile_report(run_id, current, ReconcileAction.BUSY)
                 with self._authority.commitment(
                     grant, request, prepared_publication
                 ):
                     receipt = publisher.apply_or_recover(prepared_publication)
-            if receipt.phase != "applied":
-                return self._report(run_id, record, "publication_progress")
+            receipt_phase = PublicationPhase(receipt.phase)
+            if receipt_phase is not PublicationPhase.APPLIED:
+                return make_reconcile_report(
+                    run_id, record, ReconcileAction.PUBLICATION_PROGRESS
+                )
             self._capture_publication_successor(
                 binding=binding,
                 interrupt=interrupt,
@@ -176,6 +185,6 @@ class _EffectCoordinatorPublicationRecovery:
                 lease=lease,
                 runner_binding_digest=publisher.binding_digest,
             )
-            return self._report(run_id, sealed, "sealed")
+            return make_reconcile_report(run_id, sealed, ReconcileAction.SEALED)
         finally:
             self._leases.release(publication_lease)

@@ -7,7 +7,9 @@ from datetime import UTC, datetime
 
 from lockstep.runtime.effects._coordinator_values import (
     CoordinatorLineageError,
+    ReconcileAction,
     ReconcileReport,
+    make_reconcile_report,
 )
 from lockstep.runtime.effects.descriptors import (
     parse_effect_descriptor,
@@ -44,7 +46,9 @@ class _EffectCoordinatorReconciliation:
             expected_descriptor_digest=expected_descriptor_digest,
         )
         if selected is None:
-            return ReconcileReport(run_id, None, "no_effect", None)
+            return ReconcileReport(
+                run_id, None, ReconcileAction.NO_EFFECT.value, None
+            )
         if isinstance(selected, ReconcileReport):
             return selected
         interrupt, record = selected
@@ -58,7 +62,7 @@ class _EffectCoordinatorReconciliation:
             return ReconcileReport(
                 run_id,
                 effect_id,
-                "busy",
+                ReconcileAction.BUSY.value,
                 None if record is None else record.phase,
             )
         try:
@@ -73,7 +77,7 @@ class _EffectCoordinatorReconciliation:
             )
         except (StaleEffectLease, StaleEffectRevision):
             current = self._ledger.get(effect_id)
-            return self._report(run_id, current, "busy")
+            return make_reconcile_report(run_id, current, ReconcileAction.BUSY)
         finally:
             self._leases.release(lease)
 

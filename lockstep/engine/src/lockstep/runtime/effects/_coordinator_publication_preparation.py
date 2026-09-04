@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from lockstep.runtime.effects._coordinator_values import ReconcileReport
+from lockstep.runtime.effects._coordinator_values import (
+    ReconcileAction,
+    ReconcileReport,
+    make_reconcile_report,
+)
 from lockstep.runtime.effects.authority import EffectGrant
 from lockstep.runtime.effects.models import PublishDescriptor
 from lockstep.runtime.leases import Lease
@@ -33,4 +37,4 @@ class _EffectCoordinatorPublicationPreparation:
             grant_digest=grant.digest,
             lease=lease,
         )
-        return self._report(run_id, prepared, "prepared")
+        return make_reconcile_report(run_id, prepared, ReconcileAction.PREPARED)

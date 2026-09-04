@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from lockstep.runtime.effects._coordinator_values import (
     ProviderContractViolation,
+    ReconcileAction,
     ReconcileReport,
+    make_reconcile_report,
 )
 from lockstep.runtime.effects.ledger import (
     EffectRecord,
@@ -33,14 +35,14 @@ class _EffectCoordinatorAuthorityRecovery:
         lease: Lease,
     ) -> ReconcileReport:
         if observation.state == "absent":
-            return self._report(run_id, record, "authority_blocked")
+            return make_reconcile_report(run_id, record, ReconcileAction.AUTHORITY_BLOCKED)
         if observation.state == "indeterminate":
             indeterminate = self._ledger.mark_indeterminate(
                 record.effect_id,
                 expected_revision=record.revision,
                 lease=lease,
             )
-            return self._report(run_id, indeterminate, "indeterminate")
+            return make_reconcile_report(run_id, indeterminate, ReconcileAction.INDETERMINATE)
         if observation.state not in {"running", "terminal"}:
             raise ProviderContractViolation("unknown launch observation state")
         running = self._ledger.mark_running(
@@ -49,4 +51,4 @@ class _EffectCoordinatorAuthorityRecovery:
             lease=lease,
             runner_binding_digest=record.runner_binding_digest,
         )
-        return self._report(run_id, running, "running")
+        return make_reconcile_report(run_id, running, ReconcileAction.RUNNING)

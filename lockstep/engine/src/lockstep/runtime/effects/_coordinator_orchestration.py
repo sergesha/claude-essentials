@@ -8,7 +8,9 @@ from typing import Any
 from lockstep.runtime.catalog import RunBinding
 from lockstep.runtime.effects._coordinator_values import (
     CoordinatorLineageError,
+    ReconcileAction,
     ReconcileReport,
+    make_reconcile_report,
 )
 from lockstep.runtime.effects.descriptors import (
     derive_effect_id,
@@ -75,7 +77,7 @@ class _EffectCoordinatorOrchestration:
                 try:
                     lease = self._acquire(missing.effect_id)
                 except LeaseUnavailable:
-                    return self._report(run_id, missing, "busy")
+                    return make_reconcile_report(run_id, missing, ReconcileAction.BUSY)
                 try:
                     delivered = self._ledger.mark_delivered(
                         missing.effect_id,
@@ -84,7 +86,7 @@ class _EffectCoordinatorOrchestration:
                     )
                 finally:
                     self._leases.release(lease)
-                return self._report(run_id, delivered, "delivered")
+                return make_reconcile_report(run_id, delivered, ReconcileAction.DELIVERED)
             raise CoordinatorLineageError(
                 "nonterminal effect is absent from compatible native lineage"
             )
@@ -113,7 +115,7 @@ class _EffectCoordinatorOrchestration:
             )
             == "descended"
         ):
-            return self._report(run_id, delivered, "delivered")
+            return make_reconcile_report(run_id, delivered, ReconcileAction.DELIVERED)
         return None
 
     def _select_reconcile_effect(
@@ -175,7 +177,7 @@ class _EffectCoordinatorOrchestration:
                 or current.phase != record.phase
                 or not self._leases.is_current(lease)
             ):
-                return self._report(run_id, current, "busy")
+                return make_reconcile_report(run_id, current, ReconcileAction.BUSY)
             return current
         try:
             return self._ledger.get(effect_id)
@@ -247,7 +249,7 @@ class _EffectCoordinatorOrchestration:
             return ReconcileReport(
                 run_id,
                 effect_id,
-                "busy",
+                ReconcileAction.BUSY.value,
                 None if record is None else record.phase,
             )
         special = self._reconcile_special_descriptor(

@@ -306,6 +306,7 @@ def _advance_to_running(system):
     assert coordinator.reconcile("run-1").action == "launch_claimed"
     report = coordinator.reconcile("run-1")
     assert report.action == "running"
+    assert type(report.action) is str
     return ledger.get(report.effect_id), runner
 
 

@@ -6,8 +6,10 @@ from lockstep.runtime.catalog import RunBinding
 from lockstep.runtime.effects._coordinator_values import (
     CoordinatorLineageError,
     ProviderContractViolation,
+    ReconcileAction,
     ReconcileReport,
     _Context,
+    make_reconcile_report,
 )
 from lockstep.runtime.effects.authority import (
     EffectAuthorityDenied,
@@ -54,7 +56,7 @@ class _EffectCoordinatorRunner:
                 lease=lease,
                 scope_descriptor=context.descriptor,
             )
-            return self._report(run_id, sealed, "sealed")
+            return make_reconcile_report(run_id, sealed, ReconcileAction.SEALED)
         if record.deadline_at is not None and record.deadline_at <= self._now():
             sealed = self._ledger.seal(
                 record.effect_id,
@@ -62,13 +64,13 @@ class _EffectCoordinatorRunner:
                 expected_revision=record.revision,
                 lease=lease,
             )
-            return self._report(run_id, sealed, "sealed")
+            return make_reconcile_report(run_id, sealed, ReconcileAction.SEALED)
         if context.request is None:
             assert context.descriptor.kind == "manual"
             self._manual_handoff(
                 binding, context.interrupt, context.descriptor
             )
-            return self._report(run_id, record, "manual_pending")
+            return make_reconcile_report(run_id, record, ReconcileAction.MANUAL_PENDING)
         assert context.runner is not None
         try:
             launch = context.runner.prepare(context.request)
@@ -79,7 +81,7 @@ class _EffectCoordinatorRunner:
                 expected_revision=record.revision,
                 lease=lease,
             )
-            return self._report(run_id, sealed, "sealed")
+            return make_reconcile_report(run_id, sealed, ReconcileAction.SEALED)
         self._check_launch(context.request, launch)
         launching = self._ledger.mark_launching(
             record.effect_id,
@@ -91,7 +93,7 @@ class _EffectCoordinatorRunner:
                 context.request, launch
             ),
         )
-        return self._report(run_id, launching, "launch_claimed")
+        return make_reconcile_report(run_id, launching, ReconcileAction.LAUNCH_CLAIMED)
 
     def _commit_runner_launch(
         self,
@@ -126,7 +128,9 @@ class _EffectCoordinatorRunner:
                 record.deadline_at is not None
                 and record.deadline_at <= self._now()
             ):
-                return self._report(run_id, record, "deadline_blocked")
+                return make_reconcile_report(
+                    run_id, record, ReconcileAction.DEADLINE_BLOCKED
+                )
             guarded_context = self._context(
                 binding,
                 guarded.snapshot,
@@ -151,7 +155,7 @@ class _EffectCoordinatorRunner:
                 or current.phase != record.phase
                 or not self._leases.is_current(lease)
             ):
-                return self._report(run_id, current, "busy")
+                return make_reconcile_report(run_id, current, ReconcileAction.BUSY)
             with self._authority.commitment(
                 guarded_context.grant,
                 guarded_context.request,
@@ -176,14 +180,14 @@ class _EffectCoordinatorRunner:
                 lease=lease,
                 runner_binding_digest=record.runner_binding_digest,
             )
-            return self._report(run_id, sealed, "sealed")
+            return make_reconcile_report(run_id, sealed, ReconcileAction.SEALED)
         if observation.state == "indeterminate":
             indeterminate = self._ledger.mark_indeterminate(
                 record.effect_id,
                 expected_revision=record.revision,
                 lease=lease,
             )
-            return self._report(run_id, indeterminate, "indeterminate")
+            return make_reconcile_report(run_id, indeterminate, ReconcileAction.INDETERMINATE)
         if observation.state not in {"running", "terminal"}:
             raise ProviderContractViolation("unknown launch observation state")
         running = self._ledger.mark_running(
@@ -192,7 +196,7 @@ class _EffectCoordinatorRunner:
             lease=lease,
             runner_binding_digest=record.runner_binding_digest,
         )
-        return self._report(run_id, running, "running")
+        return make_reconcile_report(run_id, running, ReconcileAction.RUNNING)
 
     def _reconcile_launching_effect(
         self,
@@ -205,7 +209,7 @@ class _EffectCoordinatorRunner:
     ) -> ReconcileReport:
         assert context.runner is not None
         if not self._leases.is_current(lease):
-            return self._report(run_id, record, "busy")
+            return make_reconcile_report(run_id, record, ReconcileAction.BUSY)
         expired = (
             record.deadline_at is not None
             and record.deadline_at <= self._now()
@@ -255,7 +259,7 @@ class _EffectCoordinatorRunner:
     ) -> ReconcileReport:
         assert context.runner is not None
         if not self._leases.is_current(lease):
-            return self._report(run_id, record, "busy")
+            return make_reconcile_report(run_id, record, ReconcileAction.BUSY)
         cancelled = context.runner.cancel(record.effect_id)
         self._check_observation(record, cancelled)
         safety = context.runner.quiesce(record.effect_id)
@@ -263,7 +267,9 @@ class _EffectCoordinatorRunner:
         if not self._terminal_safety(
             context, safety, result=timeout_result, binding=record
         ):
-            return self._report(run_id, record, "quiescence_pending")
+            return make_reconcile_report(
+                run_id, record, ReconcileAction.QUIESCENCE_PENDING
+            )
         sealed = self._ledger.seal(
             record.effect_id,
             timeout_result,
@@ -271,7 +277,7 @@ class _EffectCoordinatorRunner:
             lease=lease,
             runner_binding_digest=record.runner_binding_digest,
         )
-        return self._report(run_id, sealed, "sealed")
+        return make_reconcile_report(run_id, sealed, ReconcileAction.SEALED)
 
     def _adopt_effect_successor(
         self,
@@ -311,7 +317,7 @@ class _EffectCoordinatorRunner:
         observation = context.runner.inspect(record.effect_id)
         self._check_observation(record, observation)
         if observation.state == "running":
-            return self._report(run_id, record, "running")
+            return make_reconcile_report(run_id, record, ReconcileAction.RUNNING)
         if observation.state != "terminal":
             raise ProviderContractViolation(
                 "provider result must be a closed ordinary EffectResult"
@@ -323,7 +329,9 @@ class _EffectCoordinatorRunner:
         if not self._terminal_safety(
             context, safety, result=result, binding=record
         ):
-            return self._report(run_id, record, "quiescence_pending")
+            return make_reconcile_report(
+                run_id, record, ReconcileAction.QUIESCENCE_PENDING
+            )
         result = self._admit_artifacts(binding, context, record, result, safety)
         self._adopt_effect_successor(
             binding=binding,
@@ -338,7 +346,7 @@ class _EffectCoordinatorRunner:
             lease=lease,
             runner_binding_digest=record.runner_binding_digest,
         )
-        return self._report(run_id, sealed, "sealed")
+        return make_reconcile_report(run_id, sealed, ReconcileAction.SEALED)
 
     def _reconcile_running_effect(
         self,
@@ -399,8 +407,8 @@ class _EffectCoordinatorRunner:
                 lease=lease,
             )
         if record.phase in {"sealed", "indeterminate"}:
-            return self._report(run_id, record, "awaiting_delivery")
-        return self._report(run_id, record, "unchanged")
+            return make_reconcile_report(run_id, record, ReconcileAction.AWAITING_DELIVERY)
+        return make_reconcile_report(run_id, record, ReconcileAction.UNCHANGED)
 
     def _reconcile_context(
         self,
@@ -481,7 +489,7 @@ class _EffectCoordinatorRunner:
             grant_digest=None if context.grant is None else context.grant.digest,
             lease=lease,
         )
-        return self._report(run_id, prepared, "prepared")
+        return make_reconcile_report(run_id, prepared, ReconcileAction.PREPARED)
 
     def _definitive_prelaunch_result(
         self,

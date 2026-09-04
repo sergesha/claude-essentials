@@ -6,6 +6,7 @@ import hashlib
 import json
 from collections.abc import Iterable
 from dataclasses import dataclass
+from enum import StrEnum
 
 from lockstep.runtime.artifacts import ArtifactRef
 from lockstep.runtime.blobs import BlobRef
@@ -179,6 +180,16 @@ class PreparedPublication:
     journal_digest: str
     request_digest: str
     publisher_binding_digest: str
+
+
+class PublicationPhase(StrEnum):
+    """Closed persisted lifecycle of one publication journal."""
+
+    PREPARED = "prepared"
+    APPLYING = "applying"
+    ROLLBACK_PENDING = "rollback_pending"
+    APPLIED = "applied"
+    ROLLED_BACK = "rolled_back"
 
 
 @dataclass(frozen=True)
