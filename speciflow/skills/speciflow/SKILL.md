@@ -25,7 +25,7 @@ approved intent is a stop, not a downstream repair opportunity.
 
 For storage selection or explicit initialization requests, read [references/storage.md](references/storage.md).
 
-For those requests, use the private storage helper at its resolved sibling path, [scripts/storage.py](scripts/storage.py). It is not a public CLI. Invoke this helper only while this skill has been explicitly invoked; send one UTF-8 JSON request for `resolve`, `preview`, or `init`, and use its one JSON result only to support this skill's storage guidance.
+For those requests, use the private storage helper at its resolved sibling path, [scripts/storage.py](scripts/storage.py). It is not a public CLI. Invoke it only while this skill has been explicitly invoked: `storage.py resolve PROJECT [--base BASE]` and, after approval, `storage.py init PROJECT [--base BASE]`. Use its compact JSON only for storage preparation, then continue to selected native-owner initialization; storage preparation is not a terminal lifecycle.
 
 For operational requests across the four tools, read [references/operations.md](references/operations.md).
 It contains fixed native root selection, planning-Git/Beads-Dolt separation,
