@@ -47,15 +47,17 @@ revision, dirty state, preview capability, and post-check. Classify the
 requested owner-state effect before selecting its mechanism: promoting or
 applying pending content into canonical state is a lifecycle transition
 regardless of a filesystem mechanism or label. Propose exactly one action and
-its exact effects, name the exact native lifecycle operation in the preview,
-then state `Review: required|skipped — reason` before any Backlog, OpenSpec,
-Beads, or related planning or executable coordination mutation. Review is
-required for a semantic mutation; skip it only for demonstrably read-only or
-mechanical work and name the reason. Approval of semantic intent is not
-approval of an unspecified filesystem or lifecycle operation; unrelated or
-ambiguous text, including `lf`, is not approval. Execute only after unambiguous
-user approval of the exact preview, through the documented owner interface or
-approved integration. Directly edit owner artifacts only when that is the
+its exact effects, name the exact documented owner operation or editing
+interface in the preview, and, when the classified effect is a lifecycle
+transition, name the exact native lifecycle operation. Then state `Review:
+required|skipped — reason` before any Backlog, OpenSpec, Beads, or related
+planning or executable coordination mutation. Review is required for a
+semantic mutation; skip it only for demonstrably read-only or mechanical work
+and name the reason. Approval of semantic intent is not approval of an
+unspecified filesystem or lifecycle operation; unrelated or ambiguous text,
+including `lf`, is not approval. Execute only after unambiguous user approval
+of the exact preview, through the documented owner interface or approved
+integration. Directly edit owner artifacts only when that is the
 documented editing interface and the change stays within the artifact's current
 lifecycle state; never use direct edits or generic file operations to simulate
 a create, apply, archive, close, claim, or commit transition. If the installed
