@@ -69,9 +69,10 @@ Never persist recommendations, phases, cursors, queues, or derived results.
 For an explicit setup or full-stack initialization request, inspect all
 selected owners and show the complete ordered checklist before asking for the
 first approval. Include only applicable steps: owner dependency installation,
-bare storage init, planning Git init, each native owner init with its commit
-effect, and a final live status check. Show the exact source, target, effects,
-and approval boundary for every mutating item.
+storage preparation followed by each applicable native-owner initialization
+with its commit effect, planning Git init, and a final live status check. Show
+the exact source, target, effects, and approval boundary for every mutating
+item.
 
 The checklist is an ephemeral preview, not SpeciFlow state, a queue, or
 authorization for all steps. Reinspect native state after each approved item
@@ -82,8 +83,8 @@ multiple owner installations are equally valid, present them as an
 A same-owner native init and conditional commit of its exact resulting paths
 may be one previewed action and one approval. Inspect the init result before
 committing; if the native tool already committed, do not add another commit.
-Never combine different owners, dependency installation, bare storage init, or
-planning Git init under that approval.
+Never combine different owners, dependency installation, storage preparation,
+or planning Git init under that native-owner approval.
 
 ## Views and export
 
