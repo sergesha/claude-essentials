@@ -24,7 +24,7 @@ documented native root query or marker: one valid candidate is selected, two
 different candidates are `ambiguous`, and a similar directory name is not
 discovery. The deterministic roots are `<data-root>/planning`,
 `<data-root>/planning/backlog`, `<data-root>/planning/openspec`, and
-`<data-root>/beads`; never persist them in a locator.
+`<data-root>/beads`; never persist them in SpeciFlow metadata.
 
 Put only planning documents and configuration in the isolated `planning/` Git
 repository. Keep the Beads/Dolt native root in sibling `beads/`, verify it with
@@ -86,7 +86,7 @@ isolated planning mutation defaults to an automatic exact-path commit unless the
 `commit: none`; never auto-commit a product, skill-source, package-source, or
 `claude-essentials` repository. If `planning/` is not already Git, preview a
 separate `git init` native action with separate approval or `commit: none`;
-never hide Git initialization in storage init or document mutation.
+never hide Git initialization in storage preparation or document mutation.
 
 For Beads, observe the native Dolt commit policy and use only documented native
 Beads commit behavior. Required but unperformed automatic commits are
