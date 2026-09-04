@@ -69,10 +69,10 @@ Never persist recommendations, phases, cursors, queues, or derived results.
 For an explicit setup or full-stack initialization request, inspect all
 selected owners and show the complete ordered checklist before asking for the
 first approval. Include only applicable steps: owner dependency installation,
-storage preparation followed by each applicable native-owner initialization
-with its commit effect, planning Git init, and a final live status check. Show
-the exact source, target, effects, and approval boundary for every mutating
-item.
+storage preparation, planning Git init when required, each applicable
+native-owner initialization with its commit effect, and a final live status
+check. Show the exact source, target, effects, and approval boundary for every
+mutating item.
 
 The checklist is an ephemeral preview, not SpeciFlow state, a queue, or
 authorization for all steps. Reinspect native state after each approved item
