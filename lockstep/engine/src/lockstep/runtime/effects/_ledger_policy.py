@@ -6,14 +6,15 @@ import json
 from datetime import datetime
 
 from lockstep.runtime.effects._ledger_records import (
+    EffectPhase,
     EffectRecord,
     _binding_digest,
     _dump,
     _nonempty,
 )
 from lockstep.runtime.effects.models import (
-    AcceptDescriptor,
     AcceptanceResult,
+    AcceptDescriptor,
     EffectDescriptor,
     EffectResult,
     PublishDescriptor,
@@ -157,12 +158,12 @@ def _validate_scope_seal(
 
 def _validate_prelaunch_seal(
     current: EffectRecord,
-    target: str,
+    target: EffectPhase,
     result: EffectResult | ScopeResult | AcceptanceResult | None,
 ) -> None:
     if (
-        target == "sealed"
-        and current.phase == "prepared"
+        target is EffectPhase.SEALED
+        and current.phase is EffectPhase.PREPARED
         and isinstance(result, EffectResult)
         and current.effect_kind != "manual"
         and (
@@ -177,14 +178,18 @@ def _validate_prelaunch_seal(
 
 def _terminal_transition_replay(
     current: EffectRecord,
-    target: str,
+    target: EffectPhase,
     result: EffectResult | ScopeResult | AcceptanceResult | None,
 ) -> EffectRecord | None:
-    if current.phase in {"sealed", "indeterminate", "delivered"} and result is not None:
+    if current.phase in {
+        EffectPhase.SEALED,
+        EffectPhase.INDETERMINATE,
+        EffectPhase.DELIVERED,
+    } and result is not None:
         if current.result == result:
             return current
         raise EffectConflict("effect is already sealed with a different result")
-    if current.phase == "delivered" and target == "delivered":
+    if current.phase is EffectPhase.DELIVERED and target is EffectPhase.DELIVERED:
         return current
     return None
 
@@ -192,12 +197,12 @@ def _terminal_transition_replay(
 def _validate_transition_facts(
     current: EffectRecord,
     *,
-    target: str,
+    target: EffectPhase,
     runner_binding_digest: str | None,
     workspace_ref: str | None,
     launch_commitment_digest: str | None,
 ) -> tuple[str | None, str | None]:
-    if target == "launching" and (
+    if target is EffectPhase.LAUNCHING and (
         current.request_digest is None
         or current.grant_digest is None
         or launch_commitment_digest is None
@@ -206,8 +211,8 @@ def _validate_transition_facts(
             "runner launch requires request, grant, and launch commitments"
         )
     if (
-        target == "sealed"
-        and current.phase in {"launching", "running"}
+        target is EffectPhase.SEALED
+        and current.phase in {EffectPhase.LAUNCHING, EffectPhase.RUNNING}
         and runner_binding_digest is None
     ):
         raise EffectConflict("active effect seal requires its runner binding")
@@ -221,7 +226,7 @@ def _validate_transition_facts(
     if workspace_ref is not None:
         normalized_workspace = _nonempty(workspace_ref, "workspace_ref")
         if (
-            target == "launching"
+            target is EffectPhase.LAUNCHING
             and current.workspace_ref is not None
             and current.workspace_ref != normalized_workspace
         ):
@@ -234,7 +239,7 @@ def _validate_transition_facts(
 def _transition_values(
     current: EffectRecord,
     *,
-    target: str,
+    target: EffectPhase,
     lease: Lease | None,
     workspace_ref: str | None,
     launch_digest: str | None,
@@ -243,15 +248,15 @@ def _transition_values(
 ) -> tuple[dict[str, object], str | None, int, datetime]:
     revision = current.revision + 1
     changes: dict[str, object] = {
-        "phase": target,
+        "phase": target.value,
         "revision": revision,
         "updated_at": _dump(now),
     }
     if lease is not None:
         changes["lease_epoch"] = lease.epoch
-    if target == "launching" and workspace_ref is not None:
+    if target is EffectPhase.LAUNCHING and workspace_ref is not None:
         changes["workspace_ref"] = workspace_ref
-    if target == "launching":
+    if target is EffectPhase.LAUNCHING:
         changes["launch_commitment_digest"] = launch_digest
     result_json = None
     if result is not None:

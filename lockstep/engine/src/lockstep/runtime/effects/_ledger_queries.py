@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import and_, func, or_, select
 
 from lockstep.runtime.effects._ledger_records import (
+    EffectPhase,
     EffectRecord,
     RunDriveWatch,
     _dump,
@@ -26,9 +28,22 @@ from lockstep.runtime.effects.models import (
 )
 from lockstep.runtime.native_models import NativeCoordinate
 
+if TYPE_CHECKING:
+    from lockstep.runtime.storage import SQLiteStore
+
+
+_DELIVERED_PHASE_VALUES = (EffectPhase.DELIVERED.value,)
+_ACTIVE_DEADLINE_PHASE_VALUES = (
+    EffectPhase.PREPARED.value,
+    EffectPhase.LAUNCHING.value,
+    EffectPhase.RUNNING.value,
+)
+
 
 class _EffectLedgerQueries:
     """Read-only effect and run-drive projections for the ledger facade."""
+
+    _store: SQLiteStore
 
     @staticmethod
     def _run_drive_watch(row) -> RunDriveWatch:
@@ -130,6 +145,10 @@ class _EffectLedgerQueries:
 
     def _from_row(self, connection, row) -> EffectRecord:
         values = row._mapping
+        created_at = _load(values["created_at"])
+        updated_at = _load(values["updated_at"])
+        if created_at is None or updated_at is None:
+            raise ValueError("effect timestamps must not be null")
         return EffectRecord(
             effect_id=values["effect_id"],
             coordinate=NativeCoordinate(
@@ -142,7 +161,7 @@ class _EffectLedgerQueries:
             descriptor_digest=values["descriptor_digest"],
             effect_kind=values["effect_kind"],
             deadline_at=_load(values["deadline_at"]),
-            phase=values["phase"],
+            phase=EffectPhase(values["phase"]),
             lease_epoch=int(values["lease_epoch"]),
             runner_binding_digest=values["runner_binding_digest"],
             workspace_ref=values["workspace_ref"],
@@ -151,8 +170,8 @@ class _EffectLedgerQueries:
             launch_commitment_digest=values["launch_commitment_digest"],
             result_ref=values["result_ref"],
             fixed_error_code=values["fixed_error_code"],
-            created_at=_load(values["created_at"]),
-            updated_at=_load(values["updated_at"]),
+            created_at=created_at,
+            updated_at=updated_at,
             revision=int(values["revision"]),
             result=self._result_for(connection, values["effect_id"]),
         )
@@ -193,7 +212,7 @@ class _EffectLedgerQueries:
         table = self._store.tables.effects
         statement = (
             select(table)
-            .where(table.c.phase.not_in({"delivered"}))
+            .where(table.c.phase.not_in(_DELIVERED_PHASE_VALUES))
             .order_by(table.c.deadline_at, table.c.effect_id)
         )
         if limit is not None:
@@ -216,7 +235,7 @@ class _EffectLedgerQueries:
                 .where(
                     and_(
                         table.c.thread_id == thread_id,
-                        table.c.phase.not_in({"delivered"}),
+                        table.c.phase.not_in(_DELIVERED_PHASE_VALUES),
                     )
                 )
                 .order_by(table.c.deadline_at, table.c.effect_id)
@@ -233,10 +252,10 @@ class _EffectLedgerQueries:
             raise ValueError("recovery-effect limit must be a positive integer")
         table = self._store.tables.effects
         condition = and_(
-            table.c.phase.not_in({"delivered"}),
+            table.c.phase.not_in(_DELIVERED_PHASE_VALUES),
             or_(
                 table.c.effect_kind != "manual",
-                table.c.phase != "prepared",
+                table.c.phase != EffectPhase.PREPARED.value,
             ),
         )
         if after_thread_id is not None:
@@ -261,7 +280,7 @@ class _EffectLedgerQueries:
                 select(table)
                 .where(
                     and_(
-                        table.c.phase.in_(("prepared", "launching", "running")),
+                        table.c.phase.in_(_ACTIVE_DEADLINE_PHASE_VALUES),
                         table.c.deadline_at.is_not(None),
                         table.c.deadline_at <= _dump(now),
                     )
@@ -278,7 +297,7 @@ class _EffectLedgerQueries:
                 select(table.c.deadline_at)
                 .where(
                     and_(
-                        table.c.phase.in_(("prepared", "launching", "running")),
+                        table.c.phase.in_(_ACTIVE_DEADLINE_PHASE_VALUES),
                         table.c.deadline_at.is_not(None),
                     )
                 )

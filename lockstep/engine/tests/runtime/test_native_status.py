@@ -1,11 +1,14 @@
+import json
 from types import SimpleNamespace
 
 import pytest
+
 from lockstep.runtime.catalog import RunBinding
 from lockstep.runtime.effects.descriptors import (
     derive_effect_id,
     parse_effect_descriptor,
 )
+from lockstep.runtime.effects.ledger import EffectPhase
 from lockstep.runtime.native_models import (
     NativeCoordinate,
     NativeInterrupt,
@@ -169,7 +172,7 @@ def test_pinned_status_exposes_only_compiler_logical_command_and_ledger_phase():
                 coordinate=parked.pending[0].coordinate,
                 descriptor_digest=descriptor.digest,
                 effect_kind="pinned",
-                phase="running",
+                phase=EffectPhase.RUNNING,
             )
 
     snapshot = NativeSnapshot(
@@ -195,6 +198,16 @@ def test_pinned_status_exposes_only_compiler_logical_command_and_ledger_phase():
         "logical_cwd": ".",
         "phase": "running",
     }
+    public_phase = public["gate_execution"]["phase"]
+    assert type(public_phase) is str
+    assert (
+        json.dumps(
+            {"phase": public_phase},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        == b'{"phase":"running"}'
+    )
     rendered = repr(public)
     assert "secret-snapshot-ref" not in rendered
     assert "workspace_path" not in rendered

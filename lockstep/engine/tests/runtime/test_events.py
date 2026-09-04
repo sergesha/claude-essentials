@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import asdict
 from datetime import UTC, datetime
 from importlib import import_module
@@ -7,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from lockstep.runtime.effects.ledger import EffectPhase
 from lockstep.runtime.observation import project_events
 
 
@@ -57,7 +59,7 @@ def test_events_merge_native_and_effect_observations_without_invoking_graph() ->
         SimpleNamespace(
             effect_id="effect-1",
             effect_kind="verify",
-            phase="sealed",
+            phase=EffectPhase.SEALED,
             updated_at=datetime(2026, 8, 21, 12, 0, 1, tzinfo=UTC),
         ),
     )
@@ -67,6 +69,14 @@ def test_events_merge_native_and_effect_observations_without_invoking_graph() ->
     assert [item["source"] for item in result] == ["native", "effect"]
     assert result[0]["checkpoint_id"] == "cp-1"
     assert result[1]["effect_id"] == "effect-1"
+    public_phase = result[1]["phase"]
+    assert type(public_phase) is str
+    assert (
+        json.dumps(
+            {"phase": public_phase}, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        == b'{"phase":"sealed"}'
+    )
 
 
 def test_events_whitelist_fields_and_never_expose_state_or_effect_results() -> None:
