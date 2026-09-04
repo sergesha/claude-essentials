@@ -40,15 +40,30 @@ directory. Stop if the root or binding is uncertain.
 
 ## Approved mutations
 
-Inspect live native state, propose exactly one action and its exact effects,
-then state `Review: required|skipped — reason` before any Backlog, OpenSpec,
-Beads, or related planning or executable coordination mutation. Review is
-required for a semantic mutation; skip it only for demonstrably read-only or
-mechanical work and name the reason. Execute only after unambiguous user
-approval of the exact preview: unrelated or ambiguous text, including `lf`, is
-not approval. Invoke the sole owner's native interface or approved integration,
-inspect the native result, then commit only native data in the approved data
-repository.
+For a cross-owner action, complete the ephemeral preservation contract in
+[transitions.md](transitions.md) before previewing the mutation. Then inspect
+the installed owner's documented lifecycle, current native state, root,
+revision, dirty state, preview capability, and post-check. Classify the
+requested owner-state effect before selecting its mechanism: promoting or
+applying pending content into canonical state is a lifecycle transition
+regardless of a filesystem mechanism or label. Propose exactly one action and
+its exact effects, name the exact documented owner operation or editing
+interface in the preview, and, when the classified effect is a lifecycle
+transition, name the exact native lifecycle operation. Then state `Review:
+required|skipped — reason` before any Backlog, OpenSpec, Beads, or related
+planning or executable coordination mutation. Review is required for a
+semantic mutation; skip it only for demonstrably read-only or mechanical work
+and name the reason. Approval of semantic intent is not approval of an
+unspecified filesystem or lifecycle operation; unrelated or ambiguous text,
+including `lf`, is not approval. Execute only after unambiguous user approval
+of the exact preview, through the documented owner interface or approved
+integration. Directly edit owner artifacts only when that is the
+documented editing interface and the change stays within the artifact's current
+lifecycle state; never use direct edits or generic file operations to simulate
+a create, apply, archive, close, claim, or commit transition. If the installed
+owner cannot perform the required lifecycle transition, stop as unsupported or
+broken. Re-inspect native state after execution before reporting any effect,
+then commit only native data in the approved data repository.
 
 ## Semantic review
 
@@ -66,10 +81,8 @@ init: a message that Git integration is active is not evidence that a commit
 occurred. If init already committed, do not create another commit; if its
 result differs from the preview or cannot be identified exactly, stop.
 
-For each native action inspect its interface, selected root, revision and dirty
-state, available preview, and post-check. Every planning preview says
-`commit: automatic` or `commit: none`. A clean isolated planning mutation
-defaults to an automatic exact-path commit unless the user approves
+Every planning preview says `commit: automatic` or `commit: none`. A clean
+isolated planning mutation defaults to an automatic exact-path commit unless the user approves
 `commit: none`; never auto-commit a product, skill-source, package-source, or
 `claude-essentials` repository. If `planning/` is not already Git, preview a
 separate `git init` native action with separate approval or `commit: none`;
@@ -79,7 +92,8 @@ For Beads, observe the native Dolt commit policy and use only documented native
 Beads commit behavior. Required but unperformed automatic commits are
 `incomplete`; lost or ambiguous output is `unknown`. Use a documented atomic claim
 when available; otherwise prohibit automatic claim and require manual native
-assignment. A guessed ID or local lock is not claim or create evidence.
+assignment. A guessed ID, local lock, note, Git commit, OpenSpec validation,
+or review verdict is not claim, create, or other owner-transition evidence.
 Never hide an owner result with planning Git or duplicate the same owner's
 native commit.
 

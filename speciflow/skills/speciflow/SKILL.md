@@ -17,6 +17,12 @@ disable-model-invocation: true
 Read [references/ownership.md](references/ownership.md) before coordinating the
 tools. It assigns each concern and closure fact to a native owner.
 
+Before any cross-owner refinement, projection, application, promotion,
+archive, closure, or state report, read
+[references/transitions.md](references/transitions.md). Complete its ephemeral
+intent-preservation check before proposing the target mutation; unmatched
+approved intent is a stop, not a downstream repair opportunity.
+
 For storage selection or explicit initialization requests, read [references/storage.md](references/storage.md).
 
 For those requests, use the private storage helper at its resolved sibling path, [scripts/storage.py](scripts/storage.py). It is not a public CLI. Invoke this helper only while this skill has been explicitly invoked; send one UTF-8 JSON request for `resolve`, `preview`, or `init`, and use its one JSON result only to support this skill's storage guidance.
