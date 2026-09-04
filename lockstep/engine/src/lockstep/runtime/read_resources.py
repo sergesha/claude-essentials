@@ -17,6 +17,7 @@ from lockstep.recipe.authority import (
 )
 from lockstep.recipe.yamlgraph_adapter import NativeApp, open_native_app_readonly
 from lockstep.runtime.catalog import RunBinding
+from lockstep.runtime.effects._ledger_records import EffectPhase
 from lockstep.runtime.native_models import (
     NativeCoordinate,
     NativeHistoryLimitExceeded,
@@ -41,7 +42,7 @@ class ProjectedEffect:
     coordinate: NativeCoordinate
     descriptor_digest: str
     effect_kind: str
-    phase: str
+    phase: EffectPhase
     deadline_at: datetime | None
     updated_at: datetime
 
@@ -236,7 +237,7 @@ class RuntimeReadResources:
                     coordinate=NativeCoordinate(row[1], row[3], row[2], row[4], row[5]),
                     descriptor_digest=row[6],
                     effect_kind=row[7],
-                    phase=row[8],
+                    phase=EffectPhase(row[8]),
                     deadline_at=(
                         None if row[9] is None else _timestamp(row[9])
                     ),

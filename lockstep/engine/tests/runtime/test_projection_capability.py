@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
 import sqlite3
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -11,7 +11,6 @@ from lockstep.mcp import server
 from lockstep.runtime.engine import Engine
 from lockstep.runtime.errors import LockstepError
 from lockstep.runtime.service import LockstepCommandService
-
 
 FIXTURES = Path(__file__).parents[1] / "fixtures" / "native"
 
@@ -210,6 +209,41 @@ def test_projection_events_fail_closed_on_relevant_malformed_timestamp(
         match="trusted native state failed read-only verification",
     ):
         Engine.observe(state, recipes).events(run_id, str(project))
+
+
+def test_projection_status_fails_closed_on_relevant_unknown_effect_phase(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = _configure(tmp_path, monkeypatch)
+    state = tmp_path / "owner-state"
+    recipes = project / ".lockstep" / "recipes"
+    command = LockstepCommandService(state, recipes)
+    try:
+        run_id = command.start("native-parent-direct", {}, str(project))["run_id"]
+    finally:
+        command.close()
+    connection = sqlite3.connect(state / "runtime.sqlite")
+    try:
+        cursor = connection.execute(
+            "UPDATE effects SET phase = ? WHERE thread_id = "
+            "(SELECT thread_id FROM runs WHERE public_run_id = ?)",
+            ("unknown", run_id),
+        )
+        assert cursor.rowcount == 1
+        connection.commit()
+    finally:
+        connection.close()
+
+    projection = Engine.observe(state, recipes)
+    try:
+        with pytest.raises(
+            LockstepError,
+            match="trusted native state failed read-only verification",
+        ):
+            projection.status(run_id, str(project))
+    finally:
+        projection.close()
 
 
 def test_projection_rejects_catalog_recipe_digest_not_backed_by_bundle(

@@ -25,7 +25,23 @@ packages = ["src/lockstep"]
 
 [dependency-groups]
 dev = [
+  "mypy>=1.15,<2",
   "opentelemetry-sdk==1.44.0",
   "pytest>=8",
   "ruff>=0.16.5",
 ]
+
+[tool.mypy]
+files = [
+  "src/lockstep/runtime/effects/_ledger_records.py",
+  "src/lockstep/runtime/effects/_ledger_policy.py",
+  "src/lockstep/runtime/effects/_ledger_queries.py",
+  "src/lockstep/runtime/effects/ledger.py",
+  "src/lockstep/runtime/read_resources.py",
+  "tests/typing/effect_phase_contract.py",
+]
+mypy_path = "src"
+python_version = "3.11"
+show_error_codes = true
+strict_equality = true
+warn_unused_ignores = true

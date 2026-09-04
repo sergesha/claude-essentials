@@ -68,7 +68,7 @@ def project_events(
             "source": "effect",
             "effect_id": item.effect_id,
             "effect_kind": item.effect_kind,
-            "phase": item.phase,
+            "phase": str(item.phase),
             "updated_at": (
                 item.updated_at.isoformat()
                 if hasattr(item.updated_at, "isoformat")
