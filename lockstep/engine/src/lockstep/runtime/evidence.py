@@ -11,6 +11,8 @@ absence of a schema, not a blanket rejection of `{}`.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from jsonschema import Draft202012Validator
 
 
@@ -21,3 +23,27 @@ def validate_evidence(schema: dict | None, evidence: dict) -> list[str]:
         return []
     validator = Draft202012Validator(schema)
     return [e.message for e in validator.iter_errors(evidence)]
+
+
+def project_path_errors(
+    schema: dict | None, evidence: dict, project: str
+) -> list[str]:
+    """Resolve every declared project path and reject values outside ``project``."""
+    if not isinstance(schema, dict):
+        return []
+    props = schema.get("properties") or {}
+    base = Path(project).resolve()
+    errors: list[str] = []
+    for key, prop in props.items():
+        if not isinstance(prop, dict) or prop.get("format") != "project-path":
+            continue
+        if key not in evidence:
+            continue
+        raw = evidence[key]
+        if not isinstance(raw, str):
+            errors.append(f"{key}: project-path value must be a string")
+            continue
+        resolved = (base / raw).resolve()
+        if resolved != base and base not in resolved.parents:
+            errors.append(f"{key}: path escapes project root: {raw!r}")
+    return errors
