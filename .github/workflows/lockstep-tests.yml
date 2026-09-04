@@ -44,6 +44,10 @@ jobs:
         working-directory: lockstep/engine
         run: uv sync
 
+      - name: install reviewed yamlgraph patch
+        working-directory: lockstep/engine
+        run: uv run lockstep-dependency-install
+
       - name: mypy effect phase contract
         working-directory: lockstep/engine
         run: uv run mypy
