@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import hashlib
+from dataclasses import dataclass
 from typing import Any
 
 from lockstep.runtime.catalog import RunBinding
@@ -116,7 +116,7 @@ def _parallel_projection(
                 or record.descriptor_digest != descriptor.digest
             ):
                 raise ValueError("effect record mismatch")
-            phase = record.phase
+            phase = str(record.phase)
             deadline = record.deadline_at
         except (AttributeError, KeyError, TypeError, ValueError):
             logical_id = str(raw.get("logical_id") or "")
@@ -248,7 +248,7 @@ def _pinned_projection(
         "execution_class": "pinned-validator",
         "logical_argv": list(command.logical_argv),
         "logical_cwd": command.logical_cwd,
-        "phase": record.phase,
+        "phase": str(record.phase),
     }
     return _running_effect_status(
         binding,

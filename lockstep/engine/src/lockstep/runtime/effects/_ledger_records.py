@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 
 from lockstep.runtime.effects.models import (
     AcceptanceResult,
@@ -12,6 +13,17 @@ from lockstep.runtime.effects.models import (
     ScopeResult,
 )
 from lockstep.runtime.native_models import NativeCoordinate
+
+
+class EffectPhase(StrEnum):
+    """Closed lifecycle states stored by the durable effect ledger."""
+
+    PREPARED = "prepared"
+    LAUNCHING = "launching"
+    RUNNING = "running"
+    SEALED = "sealed"
+    INDETERMINATE = "indeterminate"
+    DELIVERED = "delivered"
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,7 +78,7 @@ class EffectRecord:
     descriptor_digest: str
     effect_kind: str
     deadline_at: datetime | None
-    phase: str
+    phase: EffectPhase
     lease_epoch: int
     runner_binding_digest: str | None
     workspace_ref: str | None
@@ -106,7 +118,7 @@ class _PreparedEffectFacts:
             "descriptor_digest": self.descriptor_digest,
             "effect_kind": self.effect_kind,
             "deadline_at": None if self.deadline_at is None else _dump(self.deadline_at),
-            "phase": "prepared",
+            "phase": EffectPhase.PREPARED.value,
             "lease_epoch": 0,
             "runner_binding_digest": self.runner_binding_digest,
             "workspace_ref": self.workspace_ref,

@@ -11,14 +11,15 @@ from sqlalchemy.exc import IntegrityError
 from lockstep.runtime.blobs import BlobRef
 from lockstep.runtime.catalog import RunBinding, RunCatalog
 from lockstep.runtime.effects._ledger_policy import (
-    PRELAUNCH_ERROR_CODES as PRELAUNCH_ERROR_CODES,
+    PRELAUNCH_ERROR_CODES as PRELAUNCH_ERROR_CODES,  # noqa: PLC0414
+)
+from lockstep.runtime.effects._ledger_policy import (
     EffectConflict,
     IllegalEffectTransition,
     StaleEffectLease,
     StaleEffectRevision,
     _terminal_transition_replay,
     _transition_values,
-    _validate_effect_preparation as _validate_effect_preparation,
     _validate_prelaunch_seal,
     _validate_prepare_coordinate,
     _validate_prepare_descriptor,
@@ -26,16 +27,20 @@ from lockstep.runtime.effects._ledger_policy import (
     _validate_scope_seal,
     _validate_transition_facts,
 )
+from lockstep.runtime.effects._ledger_policy import (
+    _validate_effect_preparation as _validate_effect_preparation,  # noqa: PLC0414
+)
 from lockstep.runtime.effects._ledger_queries import _EffectLedgerQueries
 from lockstep.runtime.effects._ledger_records import (
+    EffectPhase,
     EffectRecord,
     RunDriveWatch,
-    _PreparedEffectFacts,
     _binding_digest,
     _clock_now,
     _dump,
     _load,
     _nonempty,
+    _PreparedEffectFacts,
     _utc,
 )
 from lockstep.runtime.effects.descriptors import (
@@ -43,17 +48,18 @@ from lockstep.runtime.effects.descriptors import (
     parse_effect_result,
 )
 from lockstep.runtime.effects.models import (
-    AcceptDescriptor,
     AcceptanceResult,
+    AcceptDescriptor,
     EffectDescriptor,
     EffectResult,
+    PublishDescriptor,
     ScopeDescriptor,
     ScopeResult,
-    PublishDescriptor,
 )
 from lockstep.runtime.leases import Lease
 from lockstep.runtime.native_models import NativeCoordinate
 from lockstep.runtime.storage import SQLiteStore
+
 
 class EffectLedger(_EffectLedgerQueries):
     """Owns attempt lifecycle facts, never workflow routing or status."""
@@ -226,11 +232,14 @@ class EffectLedger(_EffectLedgerQueries):
         current: EffectRecord,
         effect_id: str,
         expected_revision: int,
-        target: str,
-        allowed_sources: set[str],
+        target: EffectPhase,
+        allowed_sources: set[EffectPhase],
         lease: Lease | None,
     ) -> None:
-        if current.effect_kind == "scope" and target in {"launching", "running"}:
+        if current.effect_kind == "scope" and target in {
+            EffectPhase.LAUNCHING,
+            EffectPhase.RUNNING,
+        }:
             raise IllegalEffectTransition("scope effects have no launch lifecycle")
         if current.revision != expected_revision:
             raise StaleEffectRevision(
@@ -241,8 +250,15 @@ class EffectLedger(_EffectLedgerQueries):
                 f"illegal effect phase edge {current.phase} -> {target}"
             )
         lease_required = (
-            target in {"launching", "running", "indeterminate"}
-            or (target == "sealed" and current.phase in {"launching", "running"})
+            target in {
+                EffectPhase.LAUNCHING,
+                EffectPhase.RUNNING,
+                EffectPhase.INDETERMINATE,
+            }
+            or (
+                target is EffectPhase.SEALED
+                and current.phase in {EffectPhase.LAUNCHING, EffectPhase.RUNNING}
+            )
             or lease is not None
         )
         if lease_required:
@@ -256,7 +272,7 @@ class EffectLedger(_EffectLedgerQueries):
         *,
         effect_id: str,
         expected_revision: int,
-        target: str,
+        target: EffectPhase,
         changes: dict[str, object],
         result_json: str | None,
         revision: int,
@@ -280,7 +296,7 @@ class EffectLedger(_EffectLedgerQueries):
             observations.insert().values(
                 effect_id=effect_id,
                 revision=revision,
-                phase=target,
+                phase=target.value,
                 result_json=result_json,
                 observed_at=_dump(now),
             )
@@ -295,8 +311,8 @@ class EffectLedger(_EffectLedgerQueries):
         effect_id: str,
         *,
         expected_revision: int,
-        target: str,
-        allowed_sources: set[str],
+        target: EffectPhase,
+        allowed_sources: set[EffectPhase],
         lease: Lease | None = None,
         runner_binding_digest: str | None = None,
         workspace_ref: str | None = None,
@@ -389,8 +405,8 @@ class EffectLedger(_EffectLedgerQueries):
         return self._transition(
             effect_id,
             expected_revision=expected_revision,
-            target="launching",
-            allowed_sources={"prepared"},
+            target=EffectPhase.LAUNCHING,
+            allowed_sources={EffectPhase.PREPARED},
             lease=lease,
             runner_binding_digest=runner_binding_digest,
             workspace_ref=workspace_ref,
@@ -408,8 +424,8 @@ class EffectLedger(_EffectLedgerQueries):
         return self._transition(
             effect_id,
             expected_revision=expected_revision,
-            target="running",
-            allowed_sources={"launching"},
+            target=EffectPhase.RUNNING,
+            allowed_sources={EffectPhase.LAUNCHING},
             lease=lease,
             runner_binding_digest=runner_binding_digest,
         )
@@ -434,8 +450,12 @@ class EffectLedger(_EffectLedgerQueries):
         return self._transition(
             effect_id,
             expected_revision=expected_revision,
-            target="sealed",
-            allowed_sources={"prepared", "launching", "running"},
+            target=EffectPhase.SEALED,
+            allowed_sources={
+                EffectPhase.PREPARED,
+                EffectPhase.LAUNCHING,
+                EffectPhase.RUNNING,
+            },
             lease=lease,
             runner_binding_digest=runner_binding_digest,
             result=result,
@@ -461,8 +481,8 @@ class EffectLedger(_EffectLedgerQueries):
         return self._transition(
             effect_id,
             expected_revision=expected_revision,
-            target="indeterminate",
-            allowed_sources={"launching"},
+            target=EffectPhase.INDETERMINATE,
+            allowed_sources={EffectPhase.LAUNCHING},
             lease=lease,
             result=result,
         )
@@ -475,12 +495,12 @@ class EffectLedger(_EffectLedgerQueries):
         lease: Lease | None = None,
     ) -> EffectRecord:
         current = self.get(effect_id)
-        if current.phase == "delivered":
+        if current.phase is EffectPhase.DELIVERED:
             return current
         return self._transition(
             effect_id,
             expected_revision=expected_revision,
-            target="delivered",
-            allowed_sources={"sealed", "indeterminate"},
+            target=EffectPhase.DELIVERED,
+            allowed_sources={EffectPhase.SEALED, EffectPhase.INDETERMINATE},
             lease=lease,
         )
