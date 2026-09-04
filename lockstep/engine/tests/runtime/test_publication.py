@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -105,14 +106,21 @@ def test_publication_prepare_is_side_effect_free_and_apply_is_exact(tmp_path: Pa
         refs, ("out/one.txt", "out/two.txt"),
         publisher_binding_digest=publisher.binding_digest,
     ))
+    prepared = json.loads(publisher.journal_path(handle).read_bytes())
 
     assert not (project / "out/one.txt").exists()
+    assert type(prepared["phase"]) is str
+    assert prepared["phase"] == "prepared"
     receipt = _finish_apply(publisher, handle)
 
     assert receipt.phase == "applied"
+    assert type(receipt.phase) is str
     assert (project / "out/one.txt").read_bytes() == b"ONE"
     assert (project / "out/two.txt").read_bytes() == b"TWO"
     assert publisher.apply_or_recover(handle) == receipt
+    applied = json.loads(publisher.journal_path(handle).read_bytes())
+    assert type(applied["phase"]) is str
+    assert applied["phase"] == "applied"
 
 
 @pytest.mark.parametrize("crash_after", [0, 1])
@@ -232,6 +240,35 @@ def test_corrupt_journal_is_preserved_and_fails_closed(tmp_path: Path) -> None:
 
     with pytest.raises(PublicationJournalError):
         _finish_apply(publisher, handle)
+
+    assert journal.read_bytes() == before
+    assert not (project / "one.txt").exists()
+
+
+def test_unknown_publication_phase_is_preserved_and_fails_closed(
+    tmp_path: Path,
+) -> None:
+    from lockstep.runtime.publication import PublicationJournalError, ProjectPublisher
+
+    owner, blobs, registry, refs = _registry(tmp_path, {"one": b"ONE"})
+    project = tmp_path / "project"
+    project.mkdir()
+    publisher = ProjectPublisher(owner, project, registry, blobs)
+    handle = publisher.prepare(
+        _request(
+            refs,
+            ("one.txt",),
+            publisher_binding_digest=publisher.binding_digest,
+        )
+    )
+    journal = publisher.journal_path(handle)
+    value = json.loads(journal.read_bytes())
+    value["phase"] = "unknown"
+    journal.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")))
+    before = journal.read_bytes()
+
+    with pytest.raises(PublicationJournalError):
+        publisher.apply_or_recover(handle)
 
     assert journal.read_bytes() == before
     assert not (project / "one.txt").exists()

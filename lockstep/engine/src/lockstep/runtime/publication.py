@@ -21,6 +21,7 @@ from lockstep.runtime._publication_values import (
     PublicationError as PublicationError,
     PublicationJournalError as PublicationJournalError,
     PublicationLimits,
+    PublicationPhase,
     PublicationReceipt,
     PublicationRequest,
     PreparedPublication,
@@ -115,7 +116,11 @@ class ProjectPublisher(_ProjectPublicationQueries):
             active = self._read_active_optional()
             if active is not None and active != journal_digest:
                 old = self._read_journal_digest(active)
-                if old["phase"] not in {"applied", "rolled_back"}:
+                old_phase = PublicationPhase(str(old["phase"]))
+                if old_phase not in {
+                    PublicationPhase.APPLIED,
+                    PublicationPhase.ROLLED_BACK,
+                }:
                     raise PublicationConflict(
                         "another publication is active for this project"
                     )
@@ -129,7 +134,7 @@ class ProjectPublisher(_ProjectPublicationQueries):
             else:
                 journal = {
                     "schema": "lockstep.publication-journal/v1",
-                    "phase": "prepared",
+                    "phase": PublicationPhase.PREPARED.value,
                     "request_digest": request.request_digest,
                     "publisher_binding_digest": self.binding_digest,
                     "request": _request_data(request),
@@ -209,14 +214,14 @@ class ProjectPublisher(_ProjectPublicationQueries):
         path = self.journal_path(handle)
         with file_lock(path, timeout=30.0, stale_after=300.0):
             journal = self._read_journal(handle)
-            phase = journal["phase"]
-            if phase == "applied":
+            phase = PublicationPhase(str(journal["phase"]))
+            if phase is PublicationPhase.APPLIED:
                 self._verify_complete(journal["plan"], direction="apply")
-                return self._receipt(handle, "applied")
-            if phase not in {"prepared", "applying"}:
+                return self._receipt(handle, PublicationPhase.APPLIED)
+            if phase not in {PublicationPhase.PREPARED, PublicationPhase.APPLYING}:
                 raise PublicationConflict(f"cannot apply publication in phase {phase}")
-            if phase == "prepared":
-                journal["phase"] = "applying"
+            if phase is PublicationPhase.PREPARED:
+                journal["phase"] = PublicationPhase.APPLYING.value
                 journal["cursor"] = 0
                 self._store_journal(path, journal)
                 # Admission into the applying phase and the first replacement
@@ -235,21 +240,25 @@ class ProjectPublisher(_ProjectPublicationQueries):
         path = self.journal_path(handle)
         with file_lock(path, timeout=30.0, stale_after=300.0):
             journal = self._read_journal(handle)
-            phase = journal["phase"]
-            if phase == "rolled_back":
+            phase = PublicationPhase(str(journal["phase"]))
+            if phase is PublicationPhase.ROLLED_BACK:
                 self._verify_complete(journal["plan"], direction="rollback")
-                return self._receipt(handle, "rolled_back")
-            if phase not in {"applying", "rollback_pending"}:
+                return self._receipt(handle, PublicationPhase.ROLLED_BACK)
+            if phase not in {
+                PublicationPhase.APPLYING,
+                PublicationPhase.ROLLBACK_PENDING,
+            }:
                 raise PublicationConflict(
                     f"cannot roll back publication in phase {phase}"
                 )
-            if phase == "applying":
-                journal["phase"] = "rollback_pending"
+            if phase is PublicationPhase.APPLYING:
+                journal["phase"] = PublicationPhase.ROLLBACK_PENDING.value
                 journal["cursor"] = min(
-                    int(journal["cursor"]), len(journal["plan"]) - 1
+                    int(journal["cursor"]),  # type: ignore[call-overload]
+                    len(journal["plan"]) - 1,  # type: ignore[arg-type]
                 )
                 self._store_journal(path, journal)
-                return self._receipt(handle, "rollback_pending")
+                return self._receipt(handle, PublicationPhase.ROLLBACK_PENDING)
             return self._advance_plan(path, journal, handle, direction="rollback")
 
     def _advance_plan(
@@ -261,12 +270,16 @@ class ProjectPublisher(_ProjectPublicationQueries):
         direction: str,
     ) -> PublicationReceipt:
         plan = self._validate_plan(journal["plan"])
-        cursor = int(journal["cursor"])
+        cursor = int(journal["cursor"])  # type: ignore[call-overload]
         terminal = cursor >= len(plan) if direction == "apply" else cursor < 0
         if terminal:
             self._verify_complete(journal["plan"], direction=direction)
-            phase = "applied" if direction == "apply" else "rolled_back"
-            journal["phase"] = phase
+            phase = (
+                PublicationPhase.APPLIED
+                if direction == "apply"
+                else PublicationPhase.ROLLED_BACK
+            )
+            journal["phase"] = phase.value
             self._store_journal(path, journal)
             return self._receipt(handle, phase)
         item = plan[cursor]
@@ -284,14 +297,18 @@ class ProjectPublisher(_ProjectPublicationQueries):
                 if _same_image(current, desired):
                     journal["cursor"] = cursor + (1 if direction == "apply" else -1)
                     self._store_journal(path, journal)
-                    return self._receipt(handle, str(journal["phase"]))
+                    return self._receipt(
+                        handle, PublicationPhase(str(journal["phase"]))
+                    )
                 if not _same_image(current, expected):
                     raise PublicationConflict(
                         f"publication destination changed: {item['destination']}"
                     )
                 self._replace(parent_fd, leaf, expected, desired)
                 _after_replacement(direction, cursor)
-                return self._receipt(handle, str(journal["phase"]))
+                return self._receipt(
+                    handle, PublicationPhase(str(journal["phase"]))
+                )
             finally:
                 os.close(parent_fd)
         finally:
