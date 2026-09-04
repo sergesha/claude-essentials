@@ -22,3 +22,30 @@ Proceed only when every applicable item is retained. Otherwise stop and report
 the authoritative source, target transition, and exact unmatched, weakened,
 deferred, substituted, or prematurely terminated intent. Do not silently edit,
 reinterpret, or repair another owner's artifact.
+
+## Native lifecycle fidelity
+
+Before proposing a mutation, inspect the installed owner's version, help or
+instructions, bound native root, current artifact state, and available
+lifecycle operations. Installed documentation wins over remembered syntax and
+examples in this skill.
+
+Use the owner's documented operation for every lifecycle transition it owns,
+including create, update, validate, apply, archive, close, claim, and commit
+when available. Direct artifact editing is allowed only when the installed
+owner documents those artifacts as its editing interface; it does not replace
+an available operation that creates or transitions canonical state. If the
+required operation is missing, incompatible, or unavailable, report the
+capability as unsupported or broken instead of simulating it with file copy,
+generic editing, a guessed status, or another tool.
+
+After execution, inspect the native owner state again. One owner's validation,
+approval, commit, or completion never implies another owner's approval,
+archive, claim, closure, acceptance, or completion.
+
+## Supporting-tool containment
+
+Supporting content changes an owner only after incorporation through that
+owner's documented interface and lifecycle; until then it remains
+non-authoritative. One tool's verdict never supplies another owner's
+transition.
