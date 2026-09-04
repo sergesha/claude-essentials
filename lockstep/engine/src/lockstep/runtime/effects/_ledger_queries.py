@@ -8,6 +8,7 @@ from datetime import datetime
 from sqlalchemy import and_, func, or_, select
 
 from lockstep.runtime.effects._ledger_records import (
+    EffectPhase,
     EffectRecord,
     RunDriveWatch,
     _dump,
@@ -142,7 +143,7 @@ class _EffectLedgerQueries:
             descriptor_digest=values["descriptor_digest"],
             effect_kind=values["effect_kind"],
             deadline_at=_load(values["deadline_at"]),
-            phase=values["phase"],
+            phase=EffectPhase(values["phase"]),
             lease_epoch=int(values["lease_epoch"]),
             runner_binding_digest=values["runner_binding_digest"],
             workspace_ref=values["workspace_ref"],
