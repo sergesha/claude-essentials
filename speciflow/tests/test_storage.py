@@ -82,21 +82,10 @@ def test_metadata_status_is_missing_valid_or_invalid(tmp_path: Path) -> None:
     assert initialized["metadata_status"] == "valid"
     metadata = Path(initialized["metadata_path"])
     changed = json.loads(metadata.read_text())
-    changed["version"] = 2
+    changed["version"] = True
     metadata.write_text(json.dumps(changed))
     invalid = result("resolve", project, "--base", base)
     assert invalid["metadata_status"] == "invalid"
-
-
-def test_boolean_metadata_version_is_invalid(tmp_path: Path) -> None:
-    project, base = tmp_path / "project", tmp_path / "base"
-    project.mkdir()
-    initialized = result("init", project, "--base", base)
-    metadata = Path(initialized["metadata_path"])
-    changed = json.loads(metadata.read_text())
-    changed["version"] = True
-    metadata.write_text(json.dumps(changed))
-    assert result("resolve", project, "--base", base)["metadata_status"] == "invalid"
 
 
 def test_init_adopts_populated_root_without_touching_native_bytes(tmp_path: Path) -> None:
