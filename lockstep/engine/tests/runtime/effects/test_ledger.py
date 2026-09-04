@@ -4,6 +4,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 
 import pytest
+from sqlalchemy import select, update
+
 from lockstep.runtime.native_models import NativeCoordinate
 
 
@@ -86,6 +88,64 @@ def test_prepare_is_idempotent_but_rejects_changed_descriptor_or_runner(ledger) 
         prepare(effect_ledger, logical_id="changed")
     with pytest.raises(EffectConflict, match="runner"):
         prepare(effect_ledger, runner="d" * 64)
+
+
+def test_effect_phase_storage_keeps_existing_string_contract(ledger) -> None:
+    effect_ledger, storage = ledger
+    prepared = prepare(effect_ledger)
+
+    with storage.read_connection() as connection:
+        stored_prepared = connection.execute(
+            select(storage.tables.effects.c.phase).where(
+                storage.tables.effects.c.effect_id == prepared.effect_id
+            )
+        ).scalar_one()
+
+    lease = effect_lease(storage, prepared.effect_id)
+    effect_ledger.mark_launching(
+        prepared.effect_id,
+        expected_revision=prepared.revision,
+        lease=lease,
+        runner_binding_digest="b" * 64,
+        launch_commitment_digest="f" * 64,
+    )
+
+    with storage.read_connection() as connection:
+        stored_launching = connection.execute(
+            select(storage.tables.effects.c.phase).where(
+                storage.tables.effects.c.effect_id == prepared.effect_id
+            )
+        ).scalar_one()
+        observation_phases = tuple(
+            connection.execute(
+                select(storage.tables.effect_observations.c.phase)
+                .where(
+                    storage.tables.effect_observations.c.effect_id
+                    == prepared.effect_id
+                )
+                .order_by(storage.tables.effect_observations.c.revision)
+            ).scalars()
+        )
+
+    assert type(stored_prepared) is str
+    assert stored_prepared == "prepared"
+    assert type(stored_launching) is str
+    assert stored_launching == "launching"
+    assert observation_phases == ("launching",)
+
+
+def test_effect_ledger_rejects_unknown_persisted_phase(ledger) -> None:
+    effect_ledger, storage = ledger
+    prepared = prepare(effect_ledger)
+    with storage.write_transaction() as connection:
+        connection.execute(
+            update(storage.tables.effects)
+            .where(storage.tables.effects.c.effect_id == prepared.effect_id)
+            .values(phase="unknown")
+        )
+
+    with pytest.raises(ValueError):
+        effect_ledger.get(prepared.effect_id)
 
 
 
