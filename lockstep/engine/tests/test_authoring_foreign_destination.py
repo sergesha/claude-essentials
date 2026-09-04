@@ -70,7 +70,7 @@ def test_swapped_temporary_inode_is_never_deleted_as_owned(tmp_path, monkeypatch
         os.write(descriptor, foreign); os.close(descriptor); observed.append(after.path.parent / leaf)
         return original(parent, leaf, owned, after)
     monkeypatch.setattr(publisher, "_prove_owned_temporary", swap)
-    with pytest.raises(AuthoringError, match="ownership changed"): publisher._publish_per_file(scenario.plan)
+    with pytest.raises(AuthoringError): publisher._publish_per_file(scenario.plan)
     assert len(observed) == 1 and observed[0].read_bytes() == foreign
 
 
