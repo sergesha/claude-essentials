@@ -30,13 +30,16 @@ instructions, bound native root, current artifact state, and available
 lifecycle operations. Installed documentation wins over remembered syntax and
 examples in this skill.
 
-Use the owner's documented operation for every lifecycle transition it owns,
-including create, update, validate, apply, archive, close, claim, and commit
-when available. Direct artifact editing is allowed only when the installed
-owner documents those artifacts as its editing interface; it does not replace
-an available operation that creates or transitions canonical state. If the
-required operation is missing, incompatible, or unavailable, report the
-capability as unsupported or broken instead of simulating it with file copy,
+Classify the requested owner-state effect before selecting its mechanism. A
+change that promotes or applies pending content into canonical state is a
+lifecycle transition regardless of its filesystem mechanism or label. Use the
+owner's documented operation for every lifecycle transition it owns, including
+create, update, validate, apply, archive, close, claim, and commit when
+available. Direct artifact editing is allowed only when the installed owner
+documents those artifacts as its editing interface and the change stays within
+the artifact's current lifecycle state. If the required lifecycle-transition
+operation is missing, incompatible, or unavailable, report the capability as
+unsupported or broken instead of simulating it with file copy, direct or
 generic editing, a guessed status, or another tool.
 
 After execution, inspect the native owner state again. One owner's validation,
@@ -45,7 +48,9 @@ archive, claim, closure, acceptance, or completion.
 
 ## Supporting-tool containment
 
-Supporting content changes an owner only after incorporation through that
-owner's documented interface and lifecycle; until then it remains
-non-authoritative. One tool's verdict never supplies another owner's
-transition.
+First identify the concern's sole semantic owner through
+[ownership.md](ownership.md). Supporting material remains non-authoritative
+until that owner incorporates it through its documented interface and
+lifecycle and supplies any required approval. Copying it into planning Git, or
+approval of that copy, cannot transfer semantic ownership. One tool's verdict
+never supplies another owner's transition.
