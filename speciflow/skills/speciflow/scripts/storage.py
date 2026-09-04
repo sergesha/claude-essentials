@@ -53,7 +53,7 @@ def metadata_status(path: Path, expected: dict[str, object]) -> str:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         return "invalid"
-    return "valid" if value == expected else "invalid"
+    return "valid" if type(value) is dict and type(value.get("version")) is int and value == expected else "invalid"
 
 
 def main(argv: list[str] | None = None) -> int:
