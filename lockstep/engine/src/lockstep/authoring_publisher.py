@@ -60,13 +60,11 @@ def _publish_per_file(plan: AuthoringPlan) -> None:
 def _publish_target(tree: AuthoringProjectTree, target: PlannedTarget) -> None:
     parent, leaf = tree.open_parent(target)
     temporary = f".lockstep-authoring-{secrets.token_hex(16)}.tmp"
+    descriptor: int | None = None
     owned: tuple[int, int] | None = None
     try:
         descriptor, owned = _create_temporary(parent, temporary)
-        try:
-            _write_temporary(descriptor, target)
-        finally:
-            os.close(descriptor)
+        _write_temporary(descriptor, target)
         _prove_owned_temporary(parent, temporary, owned, target)
         validate_target_at(parent, target)
         _publish_owned_temporary(parent, temporary, leaf, target)
@@ -74,9 +72,13 @@ def _publish_target(tree: AuthoringProjectTree, target: PlannedTarget) -> None:
         os.fsync(parent)
         capture_after_identity_at(parent, target)
     finally:
-        if owned is not None:
-            _cleanup_owned_temporary(parent, temporary, owned)
-        os.close(parent)
+        try:
+            if owned is not None:
+                _cleanup_owned_temporary(parent, temporary, owned)
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            os.close(parent)
 def _create_temporary(parent: int, leaf: str) -> tuple[int, tuple[int, int]]:
     try:
         flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
@@ -92,9 +94,11 @@ def _create_temporary(parent: int, leaf: str) -> tuple[int, tuple[int, int]]:
             raise AuthoringError("authoring temporary is not a regular file")
         return descriptor, owned
     except Exception:
-        os.close(descriptor)
-        if owned is not None:
-            _cleanup_owned_temporary(parent, leaf, owned)
+        try:
+            if owned is not None:
+                _cleanup_owned_temporary(parent, leaf, owned)
+        finally:
+            os.close(descriptor)
         raise
 def _write_temporary(descriptor: int, target: PlannedTarget) -> None:
     _write_all(descriptor, target.after)
