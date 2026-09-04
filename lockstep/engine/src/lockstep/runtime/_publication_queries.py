@@ -12,6 +12,7 @@ from lockstep.runtime._publication_values import (
     PreparedPublication,
     PublicationConflict,
     PublicationJournalError,
+    PublicationPhase,
     PublicationReceipt,
     _canonical,
     _digest,
@@ -64,7 +65,7 @@ class _ProjectPublicationQueries:
 
     def prepared_for(
         self, effect_id: str, authority_request_digest: str
-    ) -> tuple[PreparedPublication, str] | None:
+    ) -> tuple[PreparedPublication, PublicationPhase] | None:
         """Return only the one project-active journal for an exact ledger claim."""
 
         active = self._read_active_optional()
@@ -83,7 +84,7 @@ class _ProjectPublicationQueries:
         request_digest = _digest(raw.get("request_digest"), "request digest")
         handle = PreparedPublication(active, request_digest, self.binding_digest)
         journal = self._read_journal(handle)
-        return handle, str(journal["phase"])
+        return handle, PublicationPhase(str(journal["phase"]))
 
     def _verify_complete(self, raw_plan: object, *, direction: str) -> None:
         plan = self._validate_plan(raw_plan)
@@ -91,11 +92,16 @@ class _ProjectPublicationQueries:
         try:
             for item in plan:
                 parent_fd, leaf, _ancestors = self._open_parent(
-                    root_fd, item["destination"], expected=item["ancestors"]
+                    root_fd,
+                    item["destination"],  # type: ignore[arg-type]
+                    expected=item["ancestors"],
                 )
                 try:
                     desired = item["after"] if direction == "apply" else item["before"]
-                    if not _same_image(self._current_image(parent_fd, leaf), desired):
+                    if not _same_image(
+                        self._current_image(parent_fd, leaf),
+                        desired,  # type: ignore[arg-type]
+                    ):
                         raise PublicationConflict(
                             f"publication destination changed: {item['destination']}"
                         )
@@ -224,9 +230,7 @@ class _ProjectPublicationQueries:
                 "request", "plan", "cursor",
             }
             or data.get("schema") != "lockstep.publication-journal/v1"
-            or data.get("phase") not in {
-                "prepared", "applying", "rollback_pending", "applied", "rolled_back"
-            }
+            or data.get("phase") not in {phase.value for phase in PublicationPhase}
         ):
             raise PublicationJournalError("invalid publication journal")
         return data
@@ -241,9 +245,7 @@ class _ProjectPublicationQueries:
                 raise ValueError
             if data["schema"] != "lockstep.publication-journal/v1":
                 raise ValueError
-            if data["phase"] not in {
-                "prepared", "applying", "rollback_pending", "applied", "rolled_back"
-            }:
+            if data["phase"] not in {phase.value for phase in PublicationPhase}:
                 raise ValueError
             if data["request_digest"] != handle.request_digest:
                 raise ValueError
@@ -364,5 +366,9 @@ class _ProjectPublicationQueries:
         if handle.publisher_binding_digest != self.binding_digest:
             raise PublicationConflict("publication handle names another publisher")
 
-    def _receipt(self, handle: PreparedPublication, phase: str) -> PublicationReceipt:
-        return PublicationReceipt(handle.journal_digest, handle.request_digest, phase)
+    def _receipt(
+        self, handle: PreparedPublication, phase: PublicationPhase
+    ) -> PublicationReceipt:
+        return PublicationReceipt(
+            handle.journal_digest, handle.request_digest, phase.value
+        )

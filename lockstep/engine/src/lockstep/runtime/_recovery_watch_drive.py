@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from lockstep.runtime._recovery_backfill import _bound_runtime
+from lockstep.runtime.effects._coordinator_values import ReconcileAction
 from lockstep.runtime.effects.ledger import RunDriveWatch
 from lockstep.runtime.effects.models import (
     AcceptDescriptor,
@@ -36,7 +37,9 @@ class _RecoveryWatchDrive:
                         interrupt.coordinate,
                         expected_descriptor_digest=descriptor.digest,
                     )
-                    accepted = report.action == "delivered"
+                    accepted = (
+                        ReconcileAction(report.action) is ReconcileAction.DELIVERED
+                    )
                     if accepted:
                         self._settle_after_accepted_drive(binding)
                     return accepted

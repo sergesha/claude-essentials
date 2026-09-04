@@ -7,7 +7,9 @@ from typing import Any
 from lockstep.runtime.catalog import RunBinding
 from lockstep.runtime.effects._coordinator_values import (
     CoordinatorLineageError,
+    ReconcileAction,
     ReconcileReport,
+    make_reconcile_report,
 )
 from lockstep.runtime.effects.authority import (
     EffectGrant,
@@ -50,7 +52,9 @@ class _EffectCoordinatorPublicationTransition:
                 runner_binding_digest=publisher.binding_digest,
                 launch_commitment_digest=commitment_digest,
             )
-            return self._report(run_id, claimed, "publication_claimed")
+            return make_reconcile_report(
+                run_id, claimed, ReconcileAction.PUBLICATION_CLAIMED
+            )
         if record.phase == "launching":
             if record.launch_commitment_digest != commitment_digest:
                 raise CoordinatorLineageError(

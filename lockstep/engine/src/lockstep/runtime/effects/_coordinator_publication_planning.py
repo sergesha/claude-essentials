@@ -14,8 +14,10 @@ from lockstep.runtime.catalog import RunBinding
 from lockstep.runtime.effects._coordinator_values import (
     CoordinatorLineageError,
     ProviderContractViolation,
+    ReconcileAction,
     ReconcileReport,
     _PublicationItemContext,
+    make_reconcile_report,
 )
 from lockstep.runtime.effects.authority import (
     EffectGrant,
@@ -337,11 +339,11 @@ class _EffectCoordinatorPublicationPlanning:
                 workspace_ref=None,
                 lease=lease,
             )
-            return self._report(run_id, prepared, "prepared")
+            return make_reconcile_report(run_id, prepared, ReconcileAction.PREPARED)
         if record.phase == "prepared":
-            return self._report(run_id, record, "acceptance_pending")
+            return make_reconcile_report(run_id, record, ReconcileAction.ACCEPTANCE_PENDING)
         if record.phase in {"sealed", "indeterminate"}:
-            return self._report(run_id, record, "awaiting_delivery")
+            return make_reconcile_report(run_id, record, ReconcileAction.AWAITING_DELIVERY)
         raise CoordinatorLineageError("acceptance has an impossible ledger phase")
 
     def _publication_lease(self, binding: RunBinding) -> Lease | None:
