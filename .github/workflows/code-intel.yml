@@ -1,0 +1,32 @@
+name: code-intel
+
+on:
+  pull_request:
+    paths:
+      - "code-intel/**"
+      - ".claude-plugin/marketplace.json"
+      - ".agents/plugins/marketplace.json"
+      - "release-please-config.json"
+      - ".release-please-manifest.json"
+      - ".github/workflows/code-intel.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "code-intel/**"
+      - ".claude-plugin/marketplace.json"
+      - ".agents/plugins/marketplace.json"
+      - "release-please-config.json"
+      - ".release-please-manifest.json"
+      - ".github/workflows/code-intel.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Run code-intel packaging tests
+        run: python3 code-intel/tests/test_packaging.py -v

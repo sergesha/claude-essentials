@@ -1,0 +1,14 @@
+{
+  "name": "code-intel",
+  "version": "0.1.0",
+  "description": "Shared CodeGraph and code-review-graph setup and checkout indexing.",
+  "author": {
+    "name": "sergesha"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/sergesha/claude-essentials",
+  "repository": "https://github.com/sergesha/claude-essentials",
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json",
+  "mcpServers": "./.mcp.json"
+}
