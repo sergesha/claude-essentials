@@ -380,6 +380,56 @@ class DiscoveryTests(ControllerCase):
         self.assertEqual(snapshot(self.base), before)
         self.assertFalse((self.base / "UNEXPECTED").exists())
 
+    def test_single_nested_repository_is_an_umbrella(self):
+        parent = self.base / "single parent"
+        child = self.make_repo("single parent/child")
+        (parent / "AGENTS.md").write_text("umbrella\n")
+
+        scope = self.module.discover_scope(
+            parent, deadline=time.monotonic() + 10
+        )
+
+        self.assertEqual(scope.kind, "umbrella")
+        self.assertEqual(scope.repositories, (child.resolve(),))
+
+    def test_umbrella_does_not_require_an_ai_marker(self):
+        parent = self.base / "markerless"
+        first = self.make_repo("markerless/first")
+        second = self.make_repo("markerless/second")
+
+        scope = self.module.discover_scope(
+            parent, deadline=time.monotonic() + 10
+        )
+
+        self.assertEqual(scope.kind, "umbrella")
+        self.assertEqual(
+            scope.repositories, tuple(sorted((first.resolve(), second.resolve())))
+        )
+
+    def test_deeply_nested_repository_is_discovered(self):
+        parent = self.base / "deep parent"
+        child = self.make_repo("deep parent/a/b/c/d/child")
+        (parent / "AGENTS.md").write_text("umbrella\n")
+
+        scope = self.module.discover_scope(
+            parent, deadline=time.monotonic() + 10
+        )
+
+        self.assertEqual(scope.kind, "umbrella")
+        self.assertEqual(scope.repositories, (child.resolve(),))
+
+    def test_discovery_does_not_descend_into_repository_internals(self):
+        parent = self.base / "outer parent"
+        outer = self.make_repo("outer parent/repository")
+        self.make_repo("outer parent/repository/vendor-source")
+
+        scope = self.module.discover_scope(
+            parent, deadline=time.monotonic() + 10
+        )
+
+        self.assertEqual(scope.kind, "umbrella")
+        self.assertEqual(scope.repositories, (outer.resolve(),))
+
     def test_unrelated_non_git_directory_has_no_scope(self):
         unrelated = self.base / "unrelated"
         unrelated.mkdir()
@@ -589,6 +639,31 @@ class IndexCommandTests(ControllerCase):
         self.assertEqual(once.count(".code-review-graph/\n"), 1)
         self.assertEqual(exclude.read_text(), once)
         self.assertEqual(gitignore.read_text(), "tracked-global-rule\n")
+
+    def test_local_excludes_preserve_non_utf8_bytes(self):
+        exclude_output = git(self.repo, "rev-parse", "--git-path", "info/exclude")
+        exclude = Path(exclude_output)
+        if not exclude.is_absolute():
+            exclude = self.repo / exclude
+        prefix = b"\xff\xfe# arbitrary local bytes\nlocal-only"
+        exclude.write_bytes(prefix)
+
+        try:
+            self.module.ensure_local_excludes(
+                self.repo, deadline=time.monotonic() + 10
+            )
+        except self.module.UserError as exc:
+            self.fail(f"valid Git exclude bytes were rejected: {exc}")
+        once = exclude.read_bytes()
+        self.module.ensure_local_excludes(
+            self.repo, deadline=time.monotonic() + 10
+        )
+
+        self.assertEqual(
+            once,
+            prefix + b"\n.codegraph/\n.code-review-graph/\n",
+        )
+        self.assertEqual(exclude.read_bytes(), once)
 
     def test_remaining_refuses_expired_deadline(self):
         self.assertGreater(

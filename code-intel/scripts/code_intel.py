@@ -28,7 +28,6 @@ EXCLUDED_DISCOVERY_DIRS = {
     ".cache",
     "__pycache__",
 }
-AI_MARKERS = ("CLAUDE.md", "AGENTS.md", ".claude", ".codex", ".cursorrules")
 
 
 @dataclass(frozen=True)
@@ -94,12 +93,6 @@ def _repository_scope(path: Path, *, deadline: float) -> RepoScope:
     return RepoScope(kind, root, (root,))
 
 
-def _has_ai_marker(path: Path) -> bool:
-    return any((path / marker).exists() for marker in AI_MARKERS) or (
-        path / ".github" / "copilot-instructions.md"
-    ).is_file()
-
-
 def _nested_repositories(path: Path, *, deadline: float) -> tuple[Path, ...]:
     repositories: set[Path] = set()
     for current_name, directories, _files in os.walk(
@@ -116,6 +109,7 @@ def _nested_repositories(path: Path, *, deadline: float) -> tuple[Path, ...]:
         if current == path or not (current / ".git").exists():
             continue
         repositories.add(_repository_scope(current, deadline=deadline).root)
+        directories[:] = []
     return tuple(sorted(repositories))
 
 
@@ -128,12 +122,7 @@ def discover_scope(path: Path, *, deadline: float) -> RepoScope:
         return _repository_scope(root, deadline=deadline)
 
     repositories = _nested_repositories(root, deadline=deadline)
-    nearby = sum(
-        len(repository.relative_to(root).parts) + 1 <= 3
-        for repository in repositories
-        if repository.is_relative_to(root)
-    )
-    if _has_ai_marker(root) and nearby >= 2:
+    if repositories:
         return RepoScope("umbrella", root, repositories)
     return RepoScope("none", root, ())
 
@@ -293,20 +282,22 @@ def ensure_local_excludes(root: Path, *, deadline: float) -> None:
     if not exclude.is_absolute():
         exclude = root / exclude
     try:
-        existing = exclude.read_bytes().decode("utf-8") if exclude.exists() else ""
+        existing = exclude.read_bytes() if exclude.exists() else b""
         lines = existing.splitlines()
         missing = [
             entry
-            for entry in (".codegraph/", ".code-review-graph/")
+            for entry in (b".codegraph/", b".code-review-graph/")
             if entry not in lines
         ]
         if not missing:
             return
-        separator = "" if not existing or existing.endswith(("\n", "\r")) else "\n"
-        updated = existing + separator + "".join(entry + "\n" for entry in missing)
+        separator = (
+            b"" if not existing or existing.endswith((b"\n", b"\r")) else b"\n"
+        )
+        updated = existing + separator + b"".join(entry + b"\n" for entry in missing)
         exclude.parent.mkdir(parents=True, exist_ok=True)
-        exclude.write_bytes(updated.encode("utf-8"))
-    except (OSError, UnicodeError) as exc:
+        exclude.write_bytes(updated)
+    except OSError as exc:
         raise UserError(f"Cannot update Git exclude file at {exclude}: {exc}") from exc
 
 
