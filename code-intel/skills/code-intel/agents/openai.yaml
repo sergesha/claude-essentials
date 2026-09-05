@@ -1,0 +1,6 @@
+interface:
+  display_name: "Code Intelligence"
+  short_description: "Set up and use checkout-scoped code graphs"
+  default_prompt: "Use $code-intel to check this checkout's graph readiness and route the code question."
+policy:
+  allow_implicit_invocation: true

@@ -24,9 +24,60 @@ permissions:
   contents: read
 
 jobs:
-  tests:
+  test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Run code-intel packaging tests
-        run: python3 code-intel/tests/test_packaging.py -v
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Establish host CLIs
+        run: |
+          npm install --global @anthropic-ai/claude-code @openai/codex
+          command -v claude
+          command -v codex
+          claude --version
+          codex --version
+      - name: Repository tests and repository-owned skill validation
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          python3 -B code-intel/tests/test_code_intel.py -v
+          python3 -B code-intel/tests/test_packaging.py -v
+          python3 -B code-intel/tests/test_packaging.py PackagingTests.test_repository_owned_skill_validation -v
+      - name: Claude package validation
+        run: claude plugin validate code-intel
+      - name: Isolated Codex marketplace and install smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${RUNNER_TEMP:=${TMPDIR:-/tmp}}"
+          : "${GITHUB_WORKSPACE:=$(pwd -P)}"
+          host_tmp="$(mktemp -d "$RUNNER_TEMP/code-intel-host.XXXXXX")"
+          trap 'rm -rf "$host_tmp"' EXIT
+          export CODEX_HOME="$host_tmp/codex-home"
+          export PLUGIN_DATA="$host_tmp/plugin-data"
+          export CLAUDE_PLUGIN_DATA=""
+          export XDG_CONFIG_HOME="$host_tmp/xdg-config"
+          export XDG_CACHE_HOME="$host_tmp/xdg-cache"
+          export XDG_DATA_HOME="$host_tmp/xdg-data"
+          export PYTHONDONTWRITEBYTECODE=1
+          mkdir -p "$CODEX_HOME" "$PLUGIN_DATA" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME"
+          codex plugin marketplace add "$GITHUB_WORKSPACE" --json
+          codex plugin marketplace list --json > "$host_tmp/marketplaces.json"
+          codex plugin add code-intel@claude-essentials --json
+          codex plugin list --json > "$host_tmp/plugins.json"
+          python3 - "$host_tmp/marketplaces.json" "$host_tmp/plugins.json" <<'PY'
+          import json
+          import sys
+          marketplace = json.dumps(json.load(open(sys.argv[1], encoding="utf-8")))
+          plugins = json.dumps(json.load(open(sys.argv[2], encoding="utf-8")))
+          assert "claude-essentials" in marketplace, marketplace
+          assert "code-intel" in plugins and "claude-essentials" in plugins, plugins
+          PY
