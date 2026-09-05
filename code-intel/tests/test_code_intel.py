@@ -324,5 +324,279 @@ class ToolContractTests(ControllerCase):
         self.check_descendant_cleanup(parent_exits=True)
 
 
+class DiscoveryTests(ControllerCase):
+    def make_repo(self, relative):
+        root = self.base / relative
+        root.mkdir(parents=True)
+        git(root, "init", "-q")
+        return root
+
+    def test_normal_repository_uses_canonical_checkout_root(self):
+        nested = self.repo / "nested"
+        nested.mkdir()
+
+        scope = self.module.discover_scope(
+            nested / "..", deadline=time.monotonic() + 10
+        )
+
+        self.assertEqual(scope.kind, "repository")
+        self.assertEqual(scope.root, self.repo.resolve())
+        self.assertEqual(scope.repositories, (self.repo.resolve(),))
+
+    def test_linked_worktree_keeps_its_own_identity(self):
+        worktree = self.base / "linked worktree;$x"
+        git(self.repo, "worktree", "add", "-qb", "linked-test", str(worktree))
+
+        scope = self.module.discover_scope(
+            worktree, deadline=time.monotonic() + 10
+        )
+
+        self.assertEqual(scope.kind, "worktree")
+        self.assertEqual(scope.root, worktree.resolve())
+        self.assertEqual(scope.repositories, (worktree.resolve(),))
+        self.assertNotEqual(scope.root, (self.repo / ".git").resolve())
+
+    def test_umbrella_setup_is_read_only_sorted_and_codegraph_only_at_root(self):
+        first = self.make_repo("a repo;$(touch UNEXPECTED)")
+        last = self.make_repo("z repo;$HOME")
+        (self.base / "AGENTS.md").write_text("umbrella\n")
+        before = snapshot(self.base)
+
+        scope = self.module.discover_scope(
+            self.base, deadline=time.monotonic() + 10
+        )
+
+        expected_repositories = tuple(
+            sorted((first.resolve(), self.repo.resolve(), last.resolve()))
+        )
+        self.assertEqual(scope.kind, "umbrella")
+        self.assertEqual(scope.root, self.base.resolve())
+        self.assertEqual(scope.repositories, expected_repositories)
+        self.assertEqual(
+            self.module.setup_roots(scope),
+            tuple((root, ("codegraph", "crg")) for root in expected_repositories)
+            + ((self.base.resolve(), ("codegraph",)),),
+        )
+        self.assertEqual(snapshot(self.base), before)
+        self.assertFalse((self.base / "UNEXPECTED").exists())
+
+    def test_unrelated_non_git_directory_has_no_scope(self):
+        unrelated = self.base / "unrelated"
+        unrelated.mkdir()
+
+        scope = self.module.discover_scope(
+            unrelated, deadline=time.monotonic() + 10
+        )
+
+        self.assertEqual(
+            scope,
+            self.module.RepoScope("none", unrelated.resolve(), ()),
+        )
+        with self.assertRaisesRegex(self.module.UserError, "No Git repository"):
+            self.module.setup_roots(scope)
+
+    def test_discovery_prunes_generated_and_symlink_directories(self):
+        candidate = self.base / "candidate"
+        candidate.mkdir()
+        (candidate / "AGENTS.md").write_text("umbrella\n")
+        hidden = candidate / ".codegraph" / "hidden"
+        hidden.mkdir(parents=True)
+        git(hidden, "init", "-q")
+        (candidate / "linked").symlink_to(self.repo, target_is_directory=True)
+
+        scope = self.module.discover_scope(
+            candidate, deadline=time.monotonic() + 10
+        )
+
+        self.assertEqual(scope.kind, "none")
+        self.assertEqual(scope.repositories, ())
+
+    def test_discovery_refuses_an_expired_deadline(self):
+        with self.assertRaisesRegex(self.module.UserError, "deadline"):
+            self.module.discover_scope(
+                self.repo, deadline=time.monotonic() - 1
+            )
+
+
+class IndexCommandTests(ControllerCase):
+    def test_initialization_runs_codegraph_before_crg_with_literal_argv(self):
+        module = self.module
+        tools = {
+            "crg": Path("/tools/crg $HOME"),
+            "codegraph": Path("/tools/codegraph;$(touch UNEXPECTED)"),
+        }
+        with patch.object(module, "ensure_local_excludes") as excludes, patch.object(
+            module,
+            "run_child",
+            return_value=subprocess.CompletedProcess([], 0, "", ""),
+        ) as child:
+            module.initialize_indexes_locked(
+                self.repo, tools, force=False, deadline=time.monotonic() + 10
+            )
+
+        self.assertEqual(
+            [call.args[0] for call in child.call_args_list],
+            [
+                [str(tools["codegraph"]), "init", str(self.repo.resolve())],
+                [str(tools["crg"]), "build", "--repo", str(self.repo.resolve())],
+            ],
+        )
+        self.assertTrue(
+            all(call.kwargs["cwd"] == self.repo.resolve() for call in child.call_args_list)
+        )
+        self.assertTrue(
+            all(0 < call.kwargs["timeout"] <= 10 for call in child.call_args_list)
+        )
+        excludes.assert_called_once_with(
+            self.repo.resolve(), deadline=unittest.mock.ANY
+        )
+        self.assertFalse((self.repo / "UNEXPECTED").exists())
+
+    def test_nonforced_initialization_skips_existing_indexes_but_force_rebuilds(self):
+        module = self.module
+        (self.repo / ".codegraph").mkdir()
+        (self.repo / ".code-review-graph").mkdir()
+        tools = {"codegraph": Path("/cg"), "crg": Path("/crg")}
+        with patch.object(module, "ensure_local_excludes"), patch.object(
+            module,
+            "run_child",
+            return_value=subprocess.CompletedProcess([], 0, "", ""),
+        ) as child:
+            module.initialize_indexes_locked(
+                self.repo, tools, force=False, deadline=time.monotonic() + 10
+            )
+            self.assertEqual(child.call_args_list, [])
+            module.initialize_indexes_locked(
+                self.repo, tools, force=True, deadline=time.monotonic() + 10
+            )
+
+        self.assertEqual(
+            [call.args[0] for call in child.call_args_list],
+            [
+                ["/cg", "init", str(self.repo.resolve())],
+                ["/crg", "build", "--repo", str(self.repo.resolve())],
+            ],
+        )
+
+    def test_codegraph_only_umbrella_never_writes_git_excludes(self):
+        module = self.module
+        umbrella = self.base / "umbrella"
+        umbrella.mkdir()
+        with patch.object(module, "ensure_local_excludes") as excludes, patch.object(
+            module,
+            "run_child",
+            return_value=subprocess.CompletedProcess([], 0, "", ""),
+        ) as child:
+            module.initialize_indexes_locked(
+                umbrella,
+                {"codegraph": Path("/cg")},
+                force=False,
+                deadline=time.monotonic() + 10,
+            )
+
+        child.assert_called_once()
+        self.assertEqual(
+            child.call_args.args[0], ["/cg", "init", str(umbrella.resolve())]
+        )
+        excludes.assert_not_called()
+
+    def test_update_project_refuses_missing_indexes(self):
+        for tools in ({}, {"codegraph": Path("/cg")}, {"crg": Path("/crg")}):
+            with self.subTest(tools=tools), patch.object(
+                self.module, "run_child"
+            ) as child:
+                with self.assertRaisesRegex(self.module.UserError, "setup-project"):
+                    self.module.update_indexes_locked(
+                        self.repo, tools, deadline=time.monotonic() + 10
+                    )
+                child.assert_not_called()
+
+    def test_update_runs_codegraph_then_incremental_crg(self):
+        module = self.module
+        (self.repo / ".codegraph").mkdir()
+        (self.repo / ".code-review-graph").mkdir()
+        tools = {"crg": Path("/crg space;$x"), "codegraph": Path("/cg")}
+        with patch.object(module, "ensure_local_excludes"), patch.object(
+            module,
+            "run_child",
+            return_value=subprocess.CompletedProcess([], 0, "", ""),
+        ) as child:
+            module.update_indexes_locked(
+                self.repo, tools, deadline=time.monotonic() + 10
+            )
+
+        self.assertEqual(
+            [call.args[0] for call in child.call_args_list],
+            [
+                ["/cg", "sync", str(self.repo.resolve())],
+                [
+                    "/crg space;$x",
+                    "update",
+                    "--skip-flows",
+                    "--repo",
+                    str(self.repo.resolve()),
+                ],
+            ],
+        )
+
+    def test_crg_only_update_is_incremental(self):
+        module = self.module
+        (self.repo / ".code-review-graph").mkdir()
+        with patch.object(module, "ensure_local_excludes"), patch.object(
+            module,
+            "run_child",
+            return_value=subprocess.CompletedProcess([], 0, "", ""),
+        ) as child:
+            module.update_indexes_locked(
+                self.repo,
+                {"crg": Path("/crg")},
+                deadline=time.monotonic() + 10,
+            )
+
+        child.assert_called_once()
+        self.assertEqual(
+            child.call_args.args[0],
+            [
+                "/crg",
+                "update",
+                "--skip-flows",
+                "--repo",
+                str(self.repo.resolve()),
+            ],
+        )
+
+    def test_local_excludes_preserve_existing_content_and_are_idempotent(self):
+        gitignore = self.repo / ".gitignore"
+        gitignore.write_text("tracked-global-rule\n")
+        exclude_output = git(self.repo, "rev-parse", "--git-path", "info/exclude")
+        exclude = Path(exclude_output)
+        if not exclude.is_absolute():
+            exclude = self.repo / exclude
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        existing = "# existing local rule\nlocal-only"
+        exclude.write_text(existing)
+
+        self.module.ensure_local_excludes(
+            self.repo, deadline=time.monotonic() + 10
+        )
+        once = exclude.read_text()
+        self.module.ensure_local_excludes(
+            self.repo, deadline=time.monotonic() + 10
+        )
+
+        self.assertTrue(once.startswith(existing + "\n"))
+        self.assertEqual(once.count(".codegraph/\n"), 1)
+        self.assertEqual(once.count(".code-review-graph/\n"), 1)
+        self.assertEqual(exclude.read_text(), once)
+        self.assertEqual(gitignore.read_text(), "tracked-global-rule\n")
+
+    def test_remaining_refuses_expired_deadline(self):
+        self.assertGreater(
+            self.module.remaining(time.monotonic() + 1), 0
+        )
+        with self.assertRaisesRegex(self.module.UserError, "deadline"):
+            self.module.remaining(time.monotonic() - 1)
+
+
 if __name__ == "__main__":
     unittest.main()
