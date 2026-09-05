@@ -8,6 +8,8 @@ from typing import Any, Mapping  # noqa: UP035 - preserves existing hints
 
 import yaml
 
+from lockstep.recipe.layout import RecipeDirectory
+
 from ._lowering_child_specialization import (
     _specialize_child_edges,
     _specialize_child_loops,
@@ -136,7 +138,7 @@ class _LoweringCallBundle:
             str, tuple[tuple[str, str, str, str, str, str], ...]
         ],
     ) -> tuple[str, list[tuple[str, bytes]]]:
-        generated_base = f"generated/children/{call_digest}"
+        generated_base = f"{RecipeDirectory.GENERATED_CHILDREN}/{call_digest}"
         generated_path = f"{generated_base}/{resolved.standalone.root_relative_path}"
         specialized_members: list[tuple[str, bytes]] = []
         for source_file in resolved.standalone.files:

@@ -8,6 +8,9 @@
       "env": {
         "LOCKSTEP_PLUGIN_HOST": "codex"
       },
+      "env_vars": [
+        "LOCKSTEP_STATE_DIR"
+      ],
       "cwd": "./",
       "required": true,
       "default_tools_approval_mode": "approve",

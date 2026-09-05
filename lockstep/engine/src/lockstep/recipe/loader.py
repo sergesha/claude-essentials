@@ -12,6 +12,7 @@ from lockstep.recipe.authority import (
     RecipeCandidate,
     StrictRecipeIngress,
 )
+from lockstep.recipe.layout import RecipeDirectory
 
 _SUFFIX = ".recipe.yaml"
 
@@ -87,6 +88,10 @@ class RecipeLoader:
             return {}
         discovered: dict[str, RecipeRef] = {}
         for path in sorted(self._root.rglob(f"*{_SUFFIX}")):
+            # Call-site specializations are dependencies, inspected through
+            # their public roots rather than listed as standalone recipes.
+            if path.relative_to(self._root).is_relative_to(RecipeDirectory.GENERATED_CHILDREN):
+                continue
             ref = self._ref_for_path(path)
             if ref.name in discovered:
                 raise RecipeError(f"duplicate recipe name {ref.name!r}")

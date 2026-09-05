@@ -63,6 +63,7 @@ def test_codex_mcp_contract_is_pinned_to_plugin_root():
         "startup_timeout_sec": 300,
         "tool_timeout_sec": 900,
         "env": {"LOCKSTEP_PLUGIN_HOST": "codex"},
+        "env_vars": ["LOCKSTEP_STATE_DIR"],
     }
 
 
