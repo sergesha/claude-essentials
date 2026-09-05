@@ -4,17 +4,23 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass, replace
+import fcntl
+import hashlib
+import json
 import math
 import os
 from pathlib import Path
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
+import tempfile
 import time
-from typing import Literal, Mapping, Sequence
+from typing import Callable, Iterator, Literal, Mapping, Sequence
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 
@@ -59,11 +65,369 @@ class UserError(Exception):
     """An actionable failure that the CLI reports without a traceback."""
 
 
+class UnusableDataLocation(UserError):
+    """The selected host data directory cannot be used; never fall back."""
+
+
+class CorruptState(UserError):
+    """Existing state cannot be trusted or repaired implicitly."""
+
+
+@dataclass(frozen=True)
+class DataLocation:
+    path: Path
+    source: Literal["PLUGIN_DATA", "CLAUDE_PLUGIN_DATA"]
+
+
+@dataclass(frozen=True)
+class FreshnessMarker:
+    root: str
+    head: str
+    versions: Mapping[str, str]
+    checkout_fingerprint: str
+    index_fingerprints: Mapping[str, str]
+    status: Literal["pending", "success", "failed"]
+
+
+def select_data_location(env: Mapping[str, str], *, read_only: bool) -> DataLocation:
+    source = next(
+        (name for name in ("PLUGIN_DATA", "CLAUDE_PLUGIN_DATA") if env.get(name)),
+        None,
+    )
+    if source is None:
+        raise UnusableDataLocation(
+            "Set PLUGIN_DATA or CLAUDE_PLUGIN_DATA to host plugin storage."
+        )
+    try:
+        path = Path(env[source]).expanduser().resolve()
+        ancestor = path
+        while not ancestor.exists():
+            ancestor = ancestor.parent
+        if not ancestor.is_dir() or not os.access(ancestor, os.R_OK | os.X_OK):
+            raise OSError("storage is not an accessible directory")
+        if not read_only:
+            if not os.access(ancestor, os.W_OK) or not ancestor.stat().st_mode & 0o222:
+                raise OSError("storage is not writable")
+            path.mkdir(parents=True, exist_ok=True)
+        return DataLocation(path, source)
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise UnusableDataLocation(f"Cannot use {source}={env[source]!r}: {exc}") from exc
+
+
+def state_path(root: Path, data: DataLocation) -> Path:
+    key = hashlib.sha256(os.fsencode(str(root.resolve()))).hexdigest()
+    return data.path / (key + ".json")
+
+
+def _validate_marker(root: Path, value: object) -> FreshnessMarker:
+    fields = {
+        "root", "head", "versions", "checkout_fingerprint", "index_fingerprints", "status"
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise CorruptState("Invalid marker schema.")
+    if any(
+        not isinstance(value[name], str)
+        for name in ("root", "head", "checkout_fingerprint", "status")
+    ):
+        raise CorruptState("Invalid marker values.")
+    if value["root"] != str(root.resolve()) or value["status"] not in (
+        "pending", "success", "failed"
+    ):
+        raise CorruptState("Marker root or status mismatch.")
+    for name in ("versions", "index_fingerprints"):
+        mapping = value[name]
+        if not isinstance(mapping, dict) or any(
+            not isinstance(k, str) or not isinstance(v, str)
+            for k, v in mapping.items()
+        ):
+            raise CorruptState("Invalid marker mappings.")
+    if value["status"] == "success":
+        versions, indexes = value["versions"], value["index_fingerprints"]
+        if (
+            not versions or set(versions) != set(indexes)
+            or not set(versions) <= set(TOOLS)
+            or any(not version for version in versions.values())
+            or not re.fullmatch(r"[0-9a-f]{64}", value["checkout_fingerprint"])
+            or any(not re.fullmatch(r"[0-9a-f]{64}", digest) for digest in indexes.values())
+            or (value["head"] and not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value["head"]))
+        ):
+            raise CorruptState("Incomplete successful freshness marker.")
+    return FreshnessMarker(**value)
+
+
+def read_marker(root: Path, data: DataLocation) -> FreshnessMarker | None:
+    path = state_path(root, data)
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise CorruptState(f"Cannot read state at {path}: {exc}") from exc
+    try:
+        with os.fdopen(fd, "r", encoding="utf-8") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise CorruptState(f"State is not a regular file: {path}")
+            return _validate_marker(root, json.load(stream))
+    except (OSError, ValueError, UnicodeError) as exc:
+        raise CorruptState(f"Cannot read state at {path}: {exc}") from exc
+
+
+def write_marker(root: Path, data: DataLocation, marker: FreshnessMarker) -> None:
+    value = asdict(marker)
+    _validate_marker(root, value)
+    temporary = None
+    try:
+        fd, temporary = tempfile.mkstemp(prefix=".marker-", suffix=".tmp", dir=data.path)
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(value, stream, sort_keys=True, separators=(",", ":"))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, state_path(root, data))
+    except OSError as exc:
+        raise UserError(f"Cannot publish state: {exc}") from exc
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+
+
+@contextmanager
+def root_lock(root: Path, data: DataLocation, deadline: float) -> Iterator[None]:
+    """Serialize one canonical checkout; the OS releases ownership on exit.
+
+    Never unlink a lock file: waiters must all keep using the same inode.
+    """
+    remaining(deadline)
+    path = state_path(root, data).with_suffix(".lock")
+    fd = None
+    try:
+        fd = os.open(
+            path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600
+        )
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise UserError(f"Lock is not a regular file: {path}")
+        while True:
+            remaining(deadline)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                time.sleep(min(.02, remaining(deadline)))
+        remaining(deadline)
+        yield
+    except OSError as exc:
+        raise UserError(f"Cannot use root lock {path}: {exc}") from exc
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
 def remaining(deadline: float) -> float:
     timeout = deadline - time.monotonic()
-    if timeout <= 0:
+    if not math.isfinite(timeout) or timeout <= 0:
         raise UserError("Operation deadline has expired.")
     return timeout
+
+
+INDEX_DIRS = {"codegraph": ".codegraph", "crg": ".code-review-graph"}
+CHECKOUT_EXCLUDES = {b".git", b".codegraph", b".code-review-graph"}
+# Actual CodeGraph 1.6.0 runtime names, not suffix patterns. CRG 2.3.8's
+# daemon identity lives in its global home, outside the project index.
+INDEX_TRANSIENTS = {
+    "codegraph": {b"codegraph.lock", b"daemon.pid", b"daemon.sock"},
+    "crg": set(),
+}
+
+
+@contextmanager
+def _parent_fd(root_fd: int, path: bytes) -> Iterator[tuple[int, bytes]]:
+    parts = path.split(b"/")
+    if any(part in (b"", b".", b"..") for part in parts):
+        raise UserError("Invalid fingerprint input path.")
+    current = os.dup(root_fd)
+    try:
+        for part in parts[:-1]:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=current)
+            os.close(current)
+            current = child
+        yield current, parts[-1]
+    finally:
+        os.close(current)
+
+
+def _metadata(value: os.stat_result) -> tuple[int, ...]:
+    identity = (value.st_dev, value.st_ino, value.st_mode)
+    # Directory entry sets are compared explicitly. Transient engine files may
+    # change their parent directory's timestamps without changing its inputs.
+    if stat.S_ISDIR(value.st_mode):
+        return identity
+    return (*identity, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+
+
+def _input_metadata(
+    root_fd: int, paths: Sequence[bytes], deadline: float, *, missing: bool
+) -> dict[bytes, tuple[int, ...] | None]:
+    result = {}
+    for path in paths:
+        remaining(deadline)
+        try:
+            with _parent_fd(root_fd, path) as (parent, name):
+                result[path] = _metadata(os.stat(name, dir_fd=parent, follow_symlinks=False))
+        except FileNotFoundError:
+            if not missing:
+                raise
+            result[path] = None  # A stable tracked deletion is a distinct input.
+    return result
+
+
+def _tree_paths(
+    root_fd: int, deadline: float, *, excluded: set[bytes], transient: set[bytes]
+) -> list[bytes]:
+    paths = []
+
+    def visit(directory: int, prefix: bytes) -> None:
+        remaining(deadline)
+        with os.scandir(directory) as entries:
+            names = []
+            for entry in entries:
+                remaining(deadline)
+                names.append(os.fsencode(entry.name))
+            names.sort()
+        for name in names:
+            remaining(deadline)
+            if name in excluded or (not prefix and name in transient):
+                continue
+            path = prefix + name
+            paths.append(path)
+            metadata = os.stat(name, dir_fd=directory, follow_symlinks=False)
+            if stat.S_ISDIR(metadata.st_mode):
+                child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+                try:
+                    if _metadata(os.fstat(child)) != _metadata(metadata):
+                        raise UserError("Directory changed during fingerprint capture.")
+                    visit(child, path + b"/")
+                finally:
+                    os.close(child)
+    visit(root_fd, b"")
+    return sorted(paths)
+
+
+def _git_paths(root: Path, deadline: float) -> list[bytes]:
+    output = run_child(
+        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+        cwd=root, timeout=remaining(deadline),
+    ).stdout
+    return sorted({
+        path for path in os.fsencode(output).split(b"\0")
+        if path and not CHECKOUT_EXCLUDES.intersection(path.split(b"/"))
+    })
+
+
+def _content_fingerprint(
+    root: Path, deadline: float, enumerate_paths: Callable[[int], list[bytes]],
+    *, missing: bool, directories: bool,
+) -> str:
+    remaining(deadline)
+    try:
+        root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            identity = _metadata(os.fstat(root_fd))
+            paths = enumerate_paths(root_fd)
+            before = _input_metadata(root_fd, paths, deadline, missing=missing)
+            digest = hashlib.sha256()
+            for path in paths:
+                remaining(deadline)
+                digest.update(len(path).to_bytes(8, "big") + path)
+                metadata = before[path]
+                if metadata is None:
+                    digest.update(b"missing\0")
+                    continue
+                mode = metadata[2]
+                digest.update(
+                    str(stat.S_IFMT(mode)).encode() + b":"
+                    + str(mode & 0o111).encode() + b"\0"
+                )
+                with _parent_fd(root_fd, path) as (parent, name):
+                    if _metadata(os.stat(name, dir_fd=parent, follow_symlinks=False)) != metadata:
+                        raise UserError("Input changed during fingerprint capture.")
+                    if stat.S_ISLNK(mode):
+                        target = os.readlink(name, dir_fd=parent)
+                        digest.update(len(target).to_bytes(8, "big") + target)
+                    elif stat.S_ISREG(mode):
+                        if not mode & 0o444:
+                            raise UserError("Unreadable fingerprint input.")
+                        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+                        try:
+                            if _metadata(os.fstat(fd)) != metadata:
+                                raise UserError("Input changed before fingerprint read.")
+                            content = hashlib.sha256()
+                            while True:
+                                remaining(deadline)
+                                chunk = os.read(fd, 1024 * 1024)
+                                if not chunk:
+                                    break
+                                content.update(chunk)
+                            if _metadata(os.fstat(fd)) != metadata:
+                                raise UserError("Input changed during fingerprint read.")
+                            digest.update(content.digest())
+                        finally:
+                            os.close(fd)
+                    elif not (directories and stat.S_ISDIR(mode)):
+                        raise UserError(f"Unsupported fingerprint input: {os.fsdecode(path)!r}")
+            if paths != enumerate_paths(root_fd) or before != _input_metadata(
+                root_fd, paths, deadline, missing=missing
+            ):
+                raise UserError("Inputs changed during fingerprint capture.")
+            if identity != _metadata(os.stat(root, follow_symlinks=False)):
+                raise UserError("Fingerprint root changed during capture.")
+            remaining(deadline)
+            return digest.hexdigest()
+        finally:
+            os.close(root_fd)
+    except OSError as exc:
+        raise UserError(f"Cannot fingerprint {root}: {exc}") from exc
+
+
+def checkout_fingerprint(root: Path, deadline: float) -> str:
+    root = root.resolve()
+    if (root / ".git").exists():
+        return _content_fingerprint(
+            root, deadline, lambda _fd: _git_paths(root, deadline),
+            missing=True, directories=False,
+        )
+    return _content_fingerprint(
+        root, deadline,
+        lambda fd: _tree_paths(fd, deadline, excluded=CHECKOUT_EXCLUDES, transient=set()),
+        missing=False, directories=True,
+    )
+
+
+def index_fingerprint(root: Path, index_name: str, deadline: float) -> str:
+    if index_name not in INDEX_DIRS:
+        raise UserError(f"Unknown index: {index_name}")
+    return _content_fingerprint(
+        root.resolve() / INDEX_DIRS[index_name], deadline,
+        lambda fd: _tree_paths(fd, deadline, excluded=set(), transient=INDEX_TRANSIENTS[index_name]),
+        missing=False, directories=True,
+    )
+
+
+def _head(root: Path, deadline: float) -> str:
+    if not (root / ".git").exists():
+        return ""
+    return run_child(
+        ["git", "rev-parse", "--verify", "HEAD"], cwd=root, timeout=remaining(deadline)
+    ).stdout.strip()
+
+
+def capture_checkout(root: Path, deadline: float) -> tuple[str, str]:
+    head = _head(root, deadline)
+    fingerprint = checkout_fingerprint(root, deadline)
+    if head != _head(root, deadline):
+        raise UserError("HEAD changed during checkout capture.")
+    return head, fingerprint
 
 
 def _has_git_marker(path: Path) -> bool:
@@ -211,7 +575,7 @@ def run_child(
     try:
         process = subprocess.Popen(
             args, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", errors="replace", shell=False,
+            text=False, shell=False,
             start_new_session=True,
         )
     except OSError as exc:
@@ -228,6 +592,10 @@ def run_child(
         _kill_group(process)
         process.wait()
         _wait_group_exit(process)
+    # Preserve raw Git path bytes, including carriage returns and invalid UTF-8;
+    # text-mode universal newline conversion would alias distinct filenames.
+    stdout = stdout.decode("utf-8", errors="surrogateescape")
+    stderr = stderr.decode("utf-8", errors="surrogateescape")
     if timed_out:
         raise UserError(f"{args[0]} timed out after {timeout:g}s.")
     if process.returncode:
@@ -359,6 +727,150 @@ def update_indexes_locked(
         )
 
 
+def capture(root: Path, tools: Mapping[str, Path], deadline: float) -> FreshnessMarker:
+    """Observe a stable checkout and every selected index, without writing state."""
+    root = root.resolve()
+    if not tools or any(name not in TOOLS for name in tools):
+        raise UserError("No valid index selection for capture.")
+    checkout = capture_checkout(root, deadline)
+    fingerprints = {name: index_fingerprint(root, name, deadline) for name in sorted(tools)}
+    if checkout != capture_checkout(root, deadline):
+        raise UserError("Checkout changed during index capture.")
+    if fingerprints != {name: index_fingerprint(root, name, deadline) for name in sorted(tools)}:
+        raise UserError("Indexes changed during capture.")
+    return FreshnessMarker(
+        str(root), checkout[0], {name: TOOLS[name].version for name in tools},
+        checkout[1], fingerprints, "success",
+    )
+
+
+def mutate_project(
+    path: Path, *, operation: Literal["setup", "update"], force: bool, deadline: float
+) -> None:
+    if operation not in ("setup", "update"):
+        raise UserError(f"Unknown project operation: {operation}")
+    scope = discover_scope(path, deadline=deadline)
+    roots = sorted(setup_roots(scope))
+    data = select_data_location(os.environ, read_only=False)
+    for root, engines in roots:
+        with root_lock(root, data, deadline):
+            read_marker(root, data)  # Corrupt state is never repaired implicitly.
+            pending = FreshnessMarker(str(root), "", {}, "", {}, "pending")
+            write_marker(root, data, pending)
+            try:
+                tools = {
+                    name: resolve_verified_tool(TOOLS[name], deadline=deadline)
+                    for name in engines
+                }
+                before = capture_checkout(root, deadline)
+                if operation == "setup":
+                    initialize_indexes_locked(root, tools, force=force, deadline=deadline)
+                update_indexes_locked(root, tools, deadline=deadline)
+                observed = capture(root, tools, deadline)
+                if before != capture_checkout(root, deadline):
+                    raise UserError("Checkout changed during indexing.")
+                write_marker(root, data, observed)
+            except Exception as exc:
+                try:
+                    write_marker(root, data, replace(pending, status="failed"))
+                except Exception as state_error:
+                    raise UserError(f"{exc}; additionally, {state_error}") from exc
+                raise
+
+
+def observe_project(path: Path, *, deadline: float) -> dict[str, object]:
+    """Read-only diagnostic: no locking, storage creation, probes, or repair."""
+    report: dict[str, object] = {
+        "healthy": False,
+        "python": {"version": sys.version.split()[0], "executable": sys.executable},
+        "mise": shutil.which("mise"),
+        "plugin_root": str(PLUGIN_ROOT),
+        "data": None, "scope": None, "indexes": {}, "tools": {},
+        "current_head": None, "stored_head": None,
+    }
+    errors = []
+    scope = None
+    data = None
+    try:
+        scope = discover_scope(path, deadline=deadline)
+        report["scope"] = {"kind": scope.kind, "root": str(scope.root)}
+        if scope.kind == "none":
+            errors.append("No Git repository or umbrella scope.")
+        report["current_head"] = _head(scope.root, deadline)
+    except (UserError, OSError) as exc:
+        errors.append(str(exc))
+    # Report the selected variable even when its path is unusable.
+    source = next(
+        (name for name in ("PLUGIN_DATA", "CLAUDE_PLUGIN_DATA") if os.environ.get(name)),
+        None,
+    )
+    if source:
+        report["data"] = {
+            "source": source, "path": os.environ[source], "writable_best_effort": False
+        }
+    try:
+        data = select_data_location(os.environ, read_only=True)
+        exists = data.path.exists()
+        writable = (
+            exists and os.access(data.path, os.W_OK | os.X_OK)
+            and bool(data.path.stat().st_mode & 0o222)
+        )
+        report["data"] = {
+            "source": data.source, "path": str(data.path), "exists": exists,
+            "readable_best_effort": os.access(data.path, os.R_OK | os.X_OK),
+            "writable_best_effort": writable,
+        }
+        if not exists or not writable:
+            errors.append("Selected plugin storage is missing or not writable (best-effort access check).")
+    except (UserError, OSError) as exc:
+        errors.append(str(exc))
+    engines = ("codegraph",) if scope and scope.kind == "umbrella" else ("codegraph", "crg")
+    tools = {}
+    for name in engines:
+        spec = TOOLS[name]
+        detail = {
+            "required_version": spec.version,
+            "executable": shutil.which(spec.executable), "version": None,
+        }
+        try:
+            tools[name] = resolve_verified_tool(spec, deadline=deadline)
+            detail.update(executable=str(tools[name]), version=spec.version)
+        except (UserError, OSError) as exc:
+            detail["error"] = str(exc)
+            errors.append(str(exc))
+        report["tools"][name] = detail
+        if scope:
+            index = scope.root / INDEX_DIRS[name]
+            report["indexes"][name] = index.is_dir() and not index.is_symlink()
+    if scope and scope.kind != "none" and data:
+        try:
+            before = read_marker(scope.root, data)
+            if before:
+                report["stored_head"] = before.head
+            if len(tools) == len(engines):
+                observed = capture(scope.root, tools, deadline)
+                report["current_head"] = observed.head
+                after = read_marker(scope.root, data)
+                if before != after:
+                    errors.append("State changed during observation.")
+                elif before is None:
+                    errors.append("No freshness state; run setup-project.")
+                elif before.status != "success":
+                    errors.append(f"Stored index operation is {before.status}.")
+                elif before != observed:
+                    errors.append("Stored checkout, HEAD, versions, or index content is stale.")
+            else:
+                errors.append("Cannot establish freshness without all verified tools.")
+        except (UserError, OSError) as exc:
+            errors.append(str(exc))
+    report["healthy"] = not errors
+    report["trust_reason"] = (
+        "; ".join(errors) if errors
+        else "Successful state matches the current checkout and indexes."
+    )
+    return report
+
+
 def install_tools() -> int:
     mise = shutil.which("mise")
     if not mise:
@@ -388,11 +900,33 @@ def main(argv: Sequence[str] | None = None) -> int:
     commands.add_parser("install-tools", help="Explicitly install the tested tool pins")
     server = commands.add_parser("serve", help="Launch a verified MCP server")
     server.add_argument("engine", choices=TOOLS)
+    commands.add_parser("doctor", help="Read-only diagnostics for the current directory")
+    status = commands.add_parser("project-status", help="Read-only project diagnostics")
+    status.add_argument("path", type=Path)
+    for name in ("setup-project", "setup-batch", "update-project", "update-batch"):
+        operation = commands.add_parser(name)
+        operation.add_argument("path", type=Path)
+        if name == "setup-project":
+            operation.add_argument("--force", action="store_true")
     try:
         args = parser.parse_args(argv)
         if args.command == "install-tools":
             return install_tools()
-        return serve(args.engine)
+        if args.command == "serve":
+            return serve(args.engine)
+        if args.command in ("doctor", "project-status"):
+            report = observe_project(
+                Path.cwd() if args.command == "doctor" else args.path,
+                deadline=time.monotonic() + 30,
+            )
+            print(json.dumps(report, sort_keys=True))
+            return 0 if report["healthy"] else 1
+        mutate_project(
+            args.path,
+            operation="setup" if args.command.startswith("setup-") else "update",
+            force=getattr(args, "force", False), deadline=time.monotonic() + 300,
+        )
+        return 0
     except (UserError, OSError) as exc:
         print("code-intel: " + " ".join(str(exc).split()), file=sys.stderr)
         return 1
