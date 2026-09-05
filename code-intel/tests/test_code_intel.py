@@ -10,6 +10,7 @@ from pathlib import Path
 import select
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -447,7 +448,9 @@ class ProjectCase(ControllerCase):
                 "  if time.monotonic() > deadline: sys.exit(8)\n"
                 "  time.sleep(.02)\n"
                 f"index = root / {index!r}\n"
+                "if sys.argv[1] == 'init' and index.is_dir(): sys.exit(0)\n"
                 "index.mkdir(exist_ok=True)\n"
+                "if sys.argv[1] == 'index': (index / 'graph.db').write_text('rebuilt\\n')\n"
                 "with (index / 'graph.db').open('a') as db: db.write('indexed\\n')\n")
         env = patch.dict(os.environ, {"PATH": str(directory) + os.pathsep + os.environ["PATH"]})
         env.start()
@@ -607,7 +610,8 @@ class DoctorTests(ProjectCase):
             result = self.cli("setup-project", self.repo, "--force")
         self.assertEqual(result.returncode, 0, result.stderr)
         commands = [json.loads(line)[1][0] for line in events.read_text().splitlines()]
-        self.assertEqual(commands, ["init", "build", "sync", "update"])
+        self.assertEqual(commands, ["index", "build", "sync", "update"])
+        self.assertTrue((self.repo / ".codegraph/graph.db").read_text().startswith("rebuilt\n"))
 
     def test_capture_is_read_only_and_requires_every_selected_index(self):
         self.require_operations()
@@ -639,6 +643,48 @@ class DoctorTests(ProjectCase):
             return result
         with patch.object(self.module.os, "read", side_effect=mutate), self.assertRaises(self.module.UserError):
             self.module.capture(self.repo, tools, time.monotonic() + 10)
+
+    def test_checkout_and_head_mutations_during_final_index_pass_are_rejected(self):
+        tools = self.install_fake_tools()
+        self.setup_project()
+        capture_index = self.module.index_fingerprint
+        for mutation in ("checkout", "head"):
+            passes = 0
+            def mutate(root, name, deadline):
+                nonlocal passes
+                result = capture_index(root, name, deadline)
+                if name == "crg":
+                    passes += 1
+                    if passes == 2:
+                        if mutation == "checkout":
+                            (root / "source.py").write_text("late edit\n")
+                        else:
+                            git(root, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                                "commit", "--allow-empty", "-qm", "late head")
+                return result
+            with self.subTest(mutation=mutation), patch.object(self.module, "index_fingerprint", side_effect=mutate):
+                with self.assertRaisesRegex(self.module.UserError, "Checkout changed"):
+                    self.module.capture(self.repo, tools, time.monotonic() + 10)
+
+    def test_public_umbrella_setup_initializes_children_before_parent(self):
+        self.install_fake_tools()
+        umbrella = self.base / "umbrella"
+        umbrella.mkdir()
+        children = [umbrella / name for name in ("a-child", "z-child")]
+        for child in children:
+            git(self.base, "clone", "-q", str(self.repo), str(child))
+        events = self.base / "events"
+        with patch.dict(os.environ, {"TOOL_EVENTS": str(events)}):
+            result = self.cli("setup-project", umbrella)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        operations = [(Path(root), args[0]) for root, args in map(json.loads, events.read_text().splitlines())]
+        self.assertEqual(operations, [
+            (root.resolve(), command) for root, commands in (
+                (children[0], ("init", "build", "sync", "update")),
+                (children[1], ("init", "build", "sync", "update")),
+                (umbrella, ("init", "sync")),
+            ) for command in commands
+        ])
 
     def test_healthy_diagnostics_report_facts_without_creating_or_acquiring_locks(self):
         self.require_operations()
@@ -802,8 +848,9 @@ class HookCase(ProjectCase):
                 " if mode == 'prompt-edit': (root / 'source.py').write_text('changed during prompt')\n"
                 " if mode == 'prompt-index': (root / '.codegraph' / 'graph.db').write_text('changed during prompt')\n"
                 " if mode == 'prompt-head': subprocess.run(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-qm', 'during prompt'], check=True)\n"
-                " if mode == 'prompt-malformed': print('not-json'); sys.exit(0)\n"
-                " print(json.dumps({'hookSpecificOutput': {'additionalContext': 'FRESH PROMPT CONTEXT'}, 'discard': 'UNTRUSTED FIELD'}), flush=True)\n"
+                " if mode == 'prompt-malformed': print('unstructured diagnostic'); sys.exit(0)\n"
+                " if mode == 'prompt-empty': sys.exit(0)\n"
+                " print('<codegraph_context note=\"Structural context from CodeGraph for this prompt\">\\nFRESH PROMPT CONTEXT\\n</codegraph_context>', flush=True)\n"
                 " if mode == 'prompt-fail': sys.exit(9)\n"
                 " if mode == 'prompt-sleep': time.sleep(10)\n"
                 " if mode == 'prompt-descendant':\n"
@@ -857,6 +904,23 @@ class HookCase(ProjectCase):
 
 
 class ReadinessTests(HookCase):
+    def test_final_revalidation_rejects_checkout_edit_during_last_index_hash(self):
+        self.warm()
+        capture_index = self.module.index_fingerprint
+        passes = 0
+        def mutate(root, name, deadline):
+            nonlocal passes
+            result = capture_index(root, name, deadline)
+            if name == "crg":
+                passes += 1
+                if passes == 4:
+                    (root / "source.py").write_text("late context-exit edit\n")
+            return result
+        with patch.object(self.module, "index_fingerprint", side_effect=mutate), self.assertRaisesRegex(self.module.UserError, "Checkout changed"):
+            with self.ready():
+                pass
+        self.assertEqual(self.marker().status, "failed")
+
     def test_initializes_in_dependency_order_and_publishes_only_after_context_exit(self):
         self.require_readiness()
         with self.ready() as ready:
@@ -981,7 +1045,7 @@ class ReadinessTests(HookCase):
         self.require_readiness()
         self.warm()
         deadline = time.monotonic() + 2
-        with self.assertRaisesRegex(self.module.UserError, "deadline"):
+        with self.assertRaisesRegex(self.module.UserError, "(?i)deadline"):
             with self.ready(deadline=deadline):
                 time.sleep(max(0, deadline - time.monotonic()) + .01)
         self.assertEqual(self.marker().status, "failed")
@@ -1000,6 +1064,16 @@ class ReadinessTests(HookCase):
 
 
 class HookTests(HookCase):
+    def test_raw_prompt_context_and_empty_noop_preserve_shared_routing(self):
+        for mode, prefix in (("", '<codegraph_context note="Structural context from CodeGraph for this prompt">\nFRESH PROMPT CONTEXT\n</codegraph_context>\n\n'), ("prompt-empty", "")):
+            with self.subTest(mode=mode), patch.dict(os.environ, {"HOOK_MODE": mode}):
+                response = self.hook()
+            self.assertEqual(response, {"hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": prefix + self.module.ROUTING_CONTEXT,
+            }})
+            self.assertEqual(self.marker().status, "success")
+
     def test_directory_sensitive_shims_reject_wrong_versions_at_payload_root(self):
         host_cwd = self.base / "host-cwd"
         host_cwd.mkdir()
@@ -1194,7 +1268,7 @@ class HookTests(HookCase):
                     self.assert_fallback(json.loads(result.stdout), event)
         self.assertEqual(self.commands(), [])
 
-    def test_prompt_context_rejects_non_string_or_missing_nested_context(self):
+    def test_prompt_context_rejects_unstructured_or_json_output(self):
         self.require_hooks()
         self.hook("hook-status")
         runner = self.module.run_child
@@ -1256,6 +1330,200 @@ class HookTests(HookCase):
                             process.communicate(timeout=5)
 
 
+class ExplicitTargetTests(HookCase):
+    def test_explicit_commands_reject_wrong_versions_at_target_root(self):
+        self.warm()
+        for executable in ("codegraph", "code-review-graph"):
+            for command in ("setup-project", "setup-batch", "update-project", "update-batch", "project-status"):
+                self.events.write_text("")
+                with self.subTest(executable=executable, command=command), patch.dict(os.environ, {
+                    "HOOK_WRONG_VERSION_TOOL": executable,
+                    "HOOK_WRONG_VERSION_CWD": str(self.repo.resolve()),
+                }):
+                    result = self.cli(command, self.repo, cwd=self.base)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(executable + " version 9.9.9", result.stdout + result.stderr)
+                self.assertEqual(self.commands(), [])
+
+    def test_explicit_commands_use_canonical_target_when_caller_has_wrong_version(self):
+        alias = self.base / "alias"
+        alias.symlink_to(self.repo, target_is_directory=True)
+        (self.repo / "nested").mkdir()
+        for executable in ("codegraph", "code-review-graph"):
+            for command in ("setup-project", "setup-batch", "update-project", "update-batch", "project-status"):
+                with self.subTest(executable=executable, command=command), patch.dict(os.environ, {
+                    "HOOK_WRONG_VERSION_TOOL": executable,
+                    "HOOK_WRONG_VERSION_CWD": str(self.base.resolve()),
+                }):
+                    result = self.cli(command, alias / "nested", cwd=self.base)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(self.marker().versions, {"codegraph": "1.6.0", "crg": "2.3.8"})
+
+    def test_capture_does_not_stamp_configured_pins_over_observed_versions(self):
+        self.warm()
+        tools = {name: self.module.resolve_verified_tool(spec, deadline=time.monotonic() + 5,
+                  cwd=self.repo) for name, spec in self.module.TOOLS.items()}
+        with patch.dict(os.environ, {"HOOK_VERSION": "9.9.9"}), self.assertRaisesRegex(self.module.UserError, "version 9.9.9"):
+            self.module.capture(self.repo, tools, time.monotonic() + 10)
+
+
+class NoInstallSideEffectsTests(HookCase):
+    def setUp(self):
+        super().setUp()
+        directory = Path(os.environ["PATH"].split(os.pathsep)[0])
+        existing = (directory / "codegraph").read_text().split("\n", 1)[1]
+        self.executable(directory, "codegraph",
+            "import json, os, sys\nfrom pathlib import Path\n"
+            "if os.environ.get('NO_INSTALL_PROBE'):\n"
+            " probe = Path(os.environ['NO_INSTALL_PROBE'])\n"
+            " if not os.environ.get('CODEGRAPH_NO_DOWNLOAD'): (probe / 'download-attempt').touch()\n"
+            " cache = Path(os.environ.get('CODEGRAPH_INSTALL_DIR') or str(probe / 'fallback'))\n"
+            " old = cache / 'bundles' / 'old-version'\n"
+            " if old.is_file(): old.unlink()\n"
+            " if os.environ.get('NODE_DISABLE_COMPILE_CACHE') != '1':\n"
+            "  compiled = Path(os.environ['NODE_COMPILE_CACHE']); compiled.mkdir(exist_ok=True)\n"
+            "  (compiled / 'compiled-bytecode').touch()\n"
+            "if sys.argv[1:2] == ['serve']:\n"
+            " print(json.dumps({'jsonrpc': '2.0', 'id': 1, 'result': {}})); sys.exit(0)\n"
+            + existing)
+        self.probe = self.base / "protected"
+        (self.probe / "fallback/bundles").mkdir(parents=True)
+        self.probe_env = {
+            "NO_INSTALL_PROBE": str(self.probe),
+            "CODEGRAPH_NO_DOWNLOAD": "",
+            "CODEGRAPH_INSTALL_DIR": str(self.probe / "fallback"),
+            "NODE_DISABLE_COMPILE_CACHE": "",
+            "NODE_COMPILE_CACHE": str(self.probe / "compile-cache"),
+        }
+
+    def test_all_noninstall_entrypoints_prevent_launcher_cache_mutations(self):
+        self.warm()
+        cases = [
+            ("doctor",), ("project-status", str(self.repo)),
+            ("setup-project", str(self.repo)), ("setup-batch", str(self.repo)),
+            ("update-project", str(self.repo)), ("update-batch", str(self.repo)),
+            ("hook-status",), ("hook-prompt",), ("hook-update",), ("serve", "codegraph"),
+        ]
+        for args in cases:
+            (self.probe / "download-attempt").unlink(missing_ok=True)
+            (self.probe / "compile-cache/compiled-bytecode").unlink(missing_ok=True)
+            if (self.probe / "compile-cache").exists():
+                (self.probe / "compile-cache").rmdir()
+            (self.probe / "fallback/bundles/old-version").write_text("keep cached fallback")
+            before = snapshot(self.probe)
+            with self.subTest(command=args[0]):
+                result = subprocess.run(
+                    [sys.executable, "-B", str(PACKAGE / "scripts/code_intel.py"), *args],
+                    cwd=self.repo, env={**os.environ, **self.probe_env},
+                    input=json.dumps({"cwd": str(self.repo), "prompt": "explain source", "tool_name": "Write"}),
+                    capture_output=True, text=True, timeout=20,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(snapshot(self.probe), before)
+                if args[0] == "serve":
+                    self.assertEqual(json.loads(result.stdout), {"jsonrpc": "2.0", "id": 1, "result": {}})
+
+    def test_explicit_install_tools_allows_dependency_installation(self):
+        directory = Path(os.environ["PATH"].split(os.pathsep)[0])
+        self.executable(directory, "mise", "pass\n")
+        with patch.dict(os.environ, self.probe_env):
+            self.assertEqual(self.module.install_tools(), 0)
+        self.assertTrue((self.probe / "download-attempt").is_file())
+
+
+class RealCodeGraphTests(ControllerCase):
+    def setUp(self):
+        super().setUp()
+        selected = os.environ.get("CODE_INTEL_REAL_CODEGRAPH")
+        if not selected:
+            self.skipTest("set CODE_INTEL_REAL_CODEGRAPH to the installed pinned 1.6.0 npm launcher")
+        self.launcher = Path(selected).resolve()
+        self.metadata = self.launcher.parent / "package.json"
+        self.assertEqual(json.loads(self.metadata.read_text())["version"], "1.6.0")
+
+    def test_real_missing_optional_bundle_never_downloads_or_prunes_cached_fallback(self):
+        # Exercise the unmodified 1.6.0 npm shim outside its optional dependency.
+        directory = self.base / "isolated launcher"
+        directory.mkdir()
+        binary = directory / "codegraph"
+        shutil.copy2(self.launcher, binary)
+        shutil.copy2(self.metadata, directory / "package.json")
+        probe = self.base / "protected cache"
+        probe.mkdir()
+        network_guard = self.base / "deny-network.js"
+        network_guard.write_text(
+            "require('https').get = function () { require('fs').writeFileSync("
+            + json.dumps(str(probe / "network-attempt"))
+            + ", 'blocked'); throw new Error('test blocked network'); };\n")
+        target = subprocess.run(["node", "-p", "process.platform + '-' + process.arch"],
+            check=True, capture_output=True, text=True).stdout.strip()
+        for cached in (False, True):
+            cache = probe / ("cached" if cached else "uncached")
+            cache.mkdir()
+            if cached:
+                self.executable(cache / f"bundles/{target}-1.6.0/bin", "codegraph", "print('1.6.0')\n")
+                (cache / f"bundles/{target}-1.5.0").mkdir()
+                (cache / f"bundles/{target}-1.5.0/keep").write_text("old bundle must survive")
+            env = {**os.environ, "PATH": str(directory) + os.pathsep + os.environ["PATH"],
+                "CODEGRAPH_NO_DOWNLOAD": "", "CODEGRAPH_INSTALL_DIR": str(cache),
+                "NODE_DISABLE_COMPILE_CACHE": "", "NODE_COMPILE_CACHE": str(probe / "compile-cache"),
+                "NODE_OPTIONS": "--require=" + json.dumps(str(network_guard)), "NODE_PATH": ""}
+            before = snapshot(probe)
+            with self.subTest(cached=cached):
+                result = subprocess.run([sys.executable, "-B", str(PACKAGE / "scripts/code_intel.py"),
+                    "serve", "codegraph"], cwd=self.repo, env=env, capture_output=True, text=True, timeout=15)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, "")
+                self.assertIn("network fallback is disabled", result.stderr)
+                self.assertIn("install-tools", result.stderr)
+                self.assertEqual(snapshot(probe), before)
+
+    def test_real_installed_version_check_does_not_write_node_compile_cache(self):
+        compile_cache = self.base / "compile-cache"
+        before = snapshot(self.base)
+        with patch.dict(os.environ, {"NODE_COMPILE_CACHE": str(compile_cache)}):
+            os.environ.pop("NODE_DISABLE_COMPILE_CACHE", None)
+            result = self.module.run_child([str(self.launcher), "--version"], cwd=self.repo, timeout=15)
+        self.assertEqual(result.stdout.strip(), "1.6.0")
+        self.assertEqual(snapshot(self.base), before)
+
+    def test_real_raw_prompt_and_noop_adapter_contract(self):
+        (self.repo / "source.py").write_text("def traced_function(value):\n    return value + 1\n")
+        self.module.run_child([str(self.launcher), "init", str(self.repo)], cwd=self.repo, timeout=30)
+        directory = self.base / "real-codegraph-bin"
+        self.executable(directory, "code-review-graph", "import sys\nfrom pathlib import Path\n"
+            "if sys.argv[1:] == ['--version']: print('2.3.8')\n"
+            "else: (Path.cwd() / '.code-review-graph').mkdir(exist_ok=True)\n")
+        (directory / "codegraph").symlink_to(self.launcher)
+        for prompt, expected_raw in (("trace callers of traced_function", True), ("", False)):
+            result = self.module.run_child([str(self.launcher), "prompt-hook"], cwd=self.repo, timeout=20,
+                input_text=json.dumps({"cwd": str(self.repo), "prompt": prompt}))
+            with self.subTest(prompt=prompt):
+                self.assertEqual(bool(result.stdout), expected_raw)
+                context = self.module.extract_prompt_context(result.stdout)
+                self.assertEqual(context, result.stdout.strip())
+                if expected_raw:
+                    self.assertIn("<codegraph_context ", context)
+                    self.assertIn("traced_function", context)
+                with patch.dict(os.environ, {"PATH": str(directory) + os.pathsep + os.environ["PATH"]}):
+                    response = self.module.handle_hook("hook-prompt", {"cwd": str(self.repo), "prompt": prompt})
+                adapted = response["hookSpecificOutput"]["additionalContext"]
+                self.assertIn("Use CodeGraph first", adapted)
+                self.assertEqual("<codegraph_context " in adapted, expected_raw)
+
+    def test_real_force_rebuild_recreates_existing_database(self):
+        self.module.run_child([str(self.launcher), "init", str(self.repo)], cwd=self.repo, timeout=30)
+        database = self.repo / ".codegraph/codegraph.db"
+        with contextlib.closing(sqlite3.connect(database)) as connection, connection:
+            connection.execute("CREATE TABLE review_sentinel (value TEXT)")
+        self.module.initialize_indexes_locked(self.repo, {"codegraph": self.launcher},
+            force=True, deadline=time.monotonic() + 30)
+        with contextlib.closing(sqlite3.connect(database)) as connection:
+            names = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        self.assertNotIn("review_sentinel", names)
+        self.assertIn("nodes", names)
+
+
 class ToolContractTests(ControllerCase):
     def test_exact_versions_use_path_before_mise(self):
         module = self.module
@@ -1315,7 +1583,7 @@ class ToolContractTests(ControllerCase):
             ["/tools/mise", "use", "-g", "npm:@colbymchenry/codegraph@1.6.0"],
             ["/tools/mise", "use", "-g", "pipx:code-review-graph@2.3.8"]])
         self.assertEqual([call.args[0].name for call in verify.call_args_list], ["codegraph", "crg"])
-        self.assertTrue(all(call.kwargs == {"cwd": None, "timeout": 300} for call in child.call_args_list))
+        self.assertTrue(all(call.kwargs == {"cwd": None, "timeout": 300, "allow_install": True} for call in child.call_args_list))
         self.assertEqual(rc, 0)
 
     def test_missing_mise_reports_one_actionable_error_on_stderr(self):
@@ -1337,9 +1605,12 @@ class ToolContractTests(ControllerCase):
         module = self.module
         original = Path.cwd()
         for engine, args in (("codegraph", ["serve", "--mcp"]), ("crg", ["serve"])):
-            with self.subTest(engine=engine), patch.object(module, "resolve_verified_tool", return_value=Path("/tools/code graph;$x")), patch.object(module.os, "execv") as execute:
+            with self.subTest(engine=engine), patch.object(module, "resolve_verified_tool", return_value=Path("/tools/code graph;$x")), patch.object(module.os, "execve") as execute:
                 module.main(["serve", engine])
-            execute.assert_called_once_with("/tools/code graph;$x", ["/tools/code graph;$x", *args])
+            self.assertEqual(execute.call_args.args[:2], ("/tools/code graph;$x", ["/tools/code graph;$x", *args]))
+            self.assertEqual(execute.call_args.args[2]["CODEGRAPH_NO_DOWNLOAD"], "1")
+            self.assertEqual(execute.call_args.args[2]["NODE_DISABLE_COMPILE_CACHE"], "1")
+            self.assertEqual(execute.call_args.args[2]["CODEGRAPH_INSTALL_DIR"], os.devnull)
             self.assertEqual(Path.cwd(), original)
 
     def test_installed_hostile_path_preserves_protocol_stdout_and_cwd(self):
@@ -1706,7 +1977,7 @@ class IndexCommandTests(ControllerCase):
         self.assertEqual(
             [call.args[0] for call in child.call_args_list],
             [
-                ["/cg", "init", str(self.repo.resolve())],
+                ["/cg", "index", str(self.repo.resolve())],
                 ["/crg", "build", "--repo", str(self.repo.resolve())],
             ],
         )

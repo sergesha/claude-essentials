@@ -82,6 +82,12 @@ jobs:
           installation = json.loads(Path(sys.argv[3]).read_text(encoding="utf-8"))
           codex_home = Path(sys.argv[4]).resolve()
           workspace = Path(sys.argv[5]).resolve()
+          manifest_paths = [Path(".claude-plugin/plugin.json"), Path(".codex-plugin/plugin.json")]
+          manifests = [json.loads((workspace / "code-intel" / path).read_text()) for path in manifest_paths]
+          expected_version = manifests[1]["version"]
+          assert all(manifest["version"] == expected_version for manifest in manifests), manifests
+          release_state = json.loads((workspace / ".release-please-manifest.json").read_text())
+          assert release_state["code-intel"] == expected_version, release_state
           matching_marketplaces = [item for item in marketplaces if item["name"] == "claude-essentials"]
           assert len(matching_marketplaces) == 1, marketplaces
           assert Path(matching_marketplaces[0]["root"]).resolve() == workspace, matching_marketplaces
@@ -92,9 +98,12 @@ jobs:
               assert record["pluginId"] == "code-intel@claude-essentials", record
               assert record["name"] == "code-intel", record
               assert record["marketplaceName"] == "claude-essentials", record
-              assert record["version"] == "0.1.0", record
+              assert record["version"] == expected_version, record
           installed_path = Path(installation["installedPath"]).resolve()
           assert installed_path != codex_home and installed_path.is_relative_to(codex_home), installation
           assert installed_path.is_dir(), installation
+          for path in manifest_paths:
+              installed_manifest = json.loads((installed_path / path).read_text())
+              assert installed_manifest["version"] == expected_version, installed_manifest
           print(json.dumps(installation, indent=2))
           PY
