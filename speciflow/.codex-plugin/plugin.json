@@ -1,7 +1,7 @@
 {
   "name": "speciflow",
   "description": "Coordinated specification-driven workflow guidance for coding agents.",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "author": {
     "name": "sergesha"
   },
