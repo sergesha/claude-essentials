@@ -10,11 +10,55 @@ import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import pytest
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 
-def test_mcp_worker_reads_captured_task_after_restart_and_completes(tmp_path: Path):
+@pytest.mark.parametrize(
+    ("template", "expected_names"),
+    [
+        ("reviewed-change", ["demo", "demo-review"]),
+        ("parallel-review", ["demo", "demo-architecture-review", "demo-security-review"]),
+    ],
+)
+def test_installed_template_recipes_are_discoverable_over_mcp(
+    tmp_path: Path, template: str, expected_names: list[str],
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    env = {key: value for key, value in os.environ.items() if not key.startswith("LOCKSTEP_")}
+    env["LOCKSTEP_STATE_DIR"] = str(tmp_path / "state")
+    executable = str(Path(sys.executable).with_name("lockstep"))
+    installed = subprocess.run(
+        [executable, "template", "init", template, "demo"], cwd=project, env=env,
+        capture_output=True, text=True, timeout=30,
+    )
+    assert installed.returncode == 0, installed.stdout + installed.stderr
+
+    async def exercise():
+        parameters = StdioServerParameters(
+            command=executable, args=["serve"], cwd=project, env=env,
+        )
+        async with stdio_client(parameters) as (reader, writer):
+            async with ClientSession(reader, writer) as client:
+                await client.initialize()
+                result = await client.call_tool("list_recipes", {})
+                if not isinstance(result, dict):
+                    result = result.model_dump()
+                assert not result.get("isError", result.get("is_error")), result
+                assert [item["text"] for item in result["content"]] == expected_names
+
+    asyncio.run(asyncio.wait_for(exercise(), timeout=30))
+
+
+@pytest.mark.parametrize(
+    ("restore_source", "expected_status"),
+    [(True, "completed"), (False, "escalated")],
+)
+def test_mcp_worker_reads_captured_task_and_observes_result_after_restart(
+    tmp_path: Path, restore_source: bool, expected_status: str,
+):
     project = tmp_path / "project"
     workflows = project / ".lockstep" / "workflows"
     workflows.mkdir(parents=True)
@@ -58,8 +102,8 @@ flow:
         if not isinstance(result, dict):
             result = result.model_dump()
         assert not result.get("isError"), result
-        text = "\n".join(item["text"] for item in result["content"] if item["type"] == "text")
-        return json.loads(text), result
+        values = [json.loads(item["text"]) for item in result["content"] if item["type"] == "text"]
+        return (values if name == "scenario_events" else values[0]), result
 
     async def exercise():
         async with connected() as client:
@@ -83,17 +127,28 @@ flow:
             assert status["evidence_schema"] == {}
             assert status["writes"] == ["review.md"]
             assert status["artifact_contract"]["markdown"]["sections"] == ["Findings"]
-            source.write_text(original)
+            if restore_source:
+                source.write_text(original)
             report = status["artifact_contract"]["path"]
             (project / report).write_text("# Findings\nNo blocking findings.\n")
             completed, _ = await call(client, "scenario_done", {
                 "run_id": run_id, "step": status["step"], "evidence": {"path": report},
             })
-            assert completed["status"] == "completed"
+            assert completed["status"] == expected_status
 
         async with connected() as client:
             status, _ = await call(client, "scenario_status", {"run_id": run_id})
-            assert status["status"] == "completed"
+            assert status["status"] == expected_status
             assert "task" not in status
+            events, _ = await call(client, "scenario_events", {"run_id": run_id})
+            manual_events = [
+                event for event in events
+                if event.get("effect_kind") == "manual"
+            ]
+            assert len(manual_events) == 1
+            if restore_source:
+                assert "fixed_error_code" not in manual_events[0]
+            else:
+                assert manual_events[0]["fixed_error_code"] == "manifest_invalid"
 
     asyncio.run(asyncio.wait_for(exercise(), timeout=60))
