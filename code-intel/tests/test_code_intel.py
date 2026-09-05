@@ -1,4 +1,7 @@
 import contextlib
+import dataclasses
+import errno
+import hashlib
 import importlib.util
 import io
 import json
@@ -71,6 +74,663 @@ class ControllerCase(unittest.TestCase):
         path.write_text(f"#!{sys.executable}\n" + body)
         path.chmod(0o755)
         return path
+
+
+class StateTests(ControllerCase):
+    def api(self):
+        self.assertTrue(hasattr(self.module, "select_data_location"), "state storage is absent")
+        return self.module
+
+    def marker(self, status="pending"):
+        return self.module.FreshnessMarker(str(self.repo.resolve()), "", {}, "", {}, status)
+
+    def test_first_nonempty_variable_never_falls_back(self):
+        m = self.api()
+        occupied = self.base / "occupied"
+        occupied.write_text("file")
+        for read_only in (True, False):
+            with self.subTest(read_only=read_only), self.assertRaises(m.UnusableDataLocation):
+                m.select_data_location({"PLUGIN_DATA": str(occupied), "CLAUDE_PLUGIN_DATA": str(self.data)}, read_only=read_only)
+        self.assertEqual(list(self.data.iterdir()), [])
+
+    def test_absent_environment_is_unusable_and_empty_primary_uses_secondary(self):
+        m = self.api()
+        with self.assertRaises(m.UnusableDataLocation):
+            m.select_data_location({}, read_only=False)
+        data = m.select_data_location({"PLUGIN_DATA": "", "CLAUDE_PLUGIN_DATA": str(self.data)}, read_only=True)
+        self.assertEqual((data.source, data.path), ("CLAUDE_PLUGIN_DATA", self.data.resolve()))
+        preferred = m.select_data_location({"PLUGIN_DATA": str(self.data), "CLAUDE_PLUGIN_DATA": str(self.base / "other")}, read_only=False)
+        self.assertEqual(preferred.source, "PLUGIN_DATA")
+
+    def test_read_only_selection_does_not_create_missing_storage(self):
+        m = self.api()
+        path = self.base / "absent" / "data"
+        before = snapshot(self.base)
+        data = m.select_data_location({"PLUGIN_DATA": str(path)}, read_only=True)
+        self.assertIsNone(m.read_marker(self.repo, data))
+        self.assertEqual(snapshot(self.base), before)
+        m.select_data_location({"PLUGIN_DATA": str(path)}, read_only=False)
+        self.assertTrue(path.is_dir())
+
+    def test_unwritable_storage_is_not_accepted(self):
+        m = self.api()
+        self.data.chmod(0o500)
+        self.addCleanup(self.data.chmod, 0o700)
+        with self.assertRaises(m.UnusableDataLocation):
+            m.select_data_location(os.environ, read_only=False)
+
+    def test_worktrees_have_independent_canonical_digest_keys(self):
+        m = self.api()
+        linked = self.base / "linked"
+        git(self.repo, "worktree", "add", "-qb", "other", str(linked))
+        data = m.select_data_location(os.environ, read_only=True)
+        key = hashlib.sha256(os.fsencode(str(self.repo.resolve()))).hexdigest()
+        self.assertEqual(m.state_path(self.repo, data), self.data.resolve() / (key + ".json"))
+        self.assertNotEqual(m.state_path(self.repo, data), m.state_path(linked, data))
+        alias = self.base / "alias"
+        alias.symlink_to(self.repo, target_is_directory=True)
+        self.assertEqual(m.state_path(alias, data), m.state_path(self.repo, data))
+
+    def test_marker_roundtrip_and_atomic_replacement_preserve_open_reader(self):
+        m = self.api()
+        data = m.select_data_location(os.environ, read_only=False)
+        first = self.marker()
+        m.write_marker(self.repo, data, first)
+        with m.state_path(self.repo, data).open() as reader:
+            m.write_marker(self.repo, data, dataclasses.replace(first, status="failed"))
+            self.assertEqual(json.load(reader)["status"], "pending")
+        self.assertEqual(m.read_marker(self.repo, data).status, "failed")
+        self.assertEqual(len(list(self.data.iterdir())), 1)
+
+    def test_corrupt_schema_root_and_symlink_state_are_rejected(self):
+        m = self.api()
+        data = m.select_data_location(os.environ, read_only=False)
+        state = m.state_path(self.repo, data)
+        malformed = ["not json", "{}", "[]", json.dumps({**dataclasses.asdict(self.marker()), "root": str(self.base)}), json.dumps({**dataclasses.asdict(self.marker()), "versions": []})]
+        for content in malformed:
+            state.write_text(content)
+            with self.subTest(content=content), self.assertRaises(m.CorruptState):
+                m.read_marker(self.repo, data)
+        state.unlink()
+        target = self.base / "target"
+        target.write_text(json.dumps(dataclasses.asdict(self.marker())))
+        state.symlink_to(target)
+        with self.assertRaises(m.CorruptState):
+            m.read_marker(self.repo, data)
+
+    def test_failed_replace_keeps_previous_state_and_removes_temporary_file(self):
+        m = self.api()
+        data = m.select_data_location(os.environ, read_only=False)
+        m.write_marker(self.repo, data, self.marker())
+        before = snapshot(self.data)
+        with patch.object(m.os, "replace", side_effect=OSError("cannot replace")), self.assertRaises(m.UserError):
+            m.write_marker(self.repo, data, self.marker("failed"))
+        self.assertEqual(snapshot(self.data), before)
+
+    def test_incomplete_success_marker_is_corrupt_and_cannot_be_repaired(self):
+        m = self.api()
+        data = m.select_data_location(os.environ, read_only=False)
+        m.state_path(self.repo, data).write_text(json.dumps(dataclasses.asdict(self.marker("success"))))
+        with self.assertRaises(m.CorruptState):
+            m.read_marker(self.repo, data)
+
+
+class FingerprintTests(ControllerCase):
+    def api(self):
+        self.assertTrue(hasattr(self.module, "checkout_fingerprint"), "content capture is absent")
+        return self.module
+
+    def checkout(self):
+        return self.module.checkout_fingerprint(self.repo, time.monotonic() + 10)
+
+    def test_tracked_untracked_edits_and_deletions_change_content_digest(self):
+        self.api()
+        source = self.repo / "source.py"
+        first = self.checkout()
+        source.write_text("value = 2\n")
+        edited = self.checkout()
+        self.assertNotEqual(first, edited)
+        source.unlink()
+        deleted = self.checkout()
+        self.assertNotEqual(edited, deleted)
+        self.assertEqual(deleted, self.checkout())
+        source.write_text("value = 1\n")
+        self.assertEqual(first, self.checkout())
+        extra = self.repo / "new\nfile.py"
+        extra.write_text("new")
+        added = self.checkout()
+        self.assertNotEqual(first, added)
+        extra.write_text("edit")
+        self.assertNotEqual(added, self.checkout())
+        extra.unlink()
+        self.assertEqual(first, self.checkout())
+
+    def test_git_ignored_files_and_indexes_are_excluded_but_tracked_config_is_not(self):
+        self.api()
+        (self.repo / ".gitignore").write_text("ignored/\n")
+        first = self.checkout()
+        for name in ("ignored", ".codegraph", ".code-review-graph"):
+            (self.repo / name).mkdir()
+            (self.repo / name / "data").write_text("noise")
+        self.assertEqual(first, self.checkout())
+        (self.repo / "codegraph.config.json").write_text('{"languages": ["python"]}')
+        self.assertNotEqual(first, self.checkout())
+
+    def test_raw_non_utf8_paths_remain_distinct(self):
+        self.api()
+        path = self.repo / os.fsdecode(b"file-\xff")
+        try:
+            path.write_bytes(b"one")
+        except OSError as exc:
+            if exc.errno not in (errno.EPERM, errno.EILSEQ):
+                raise
+            self.skipTest("filesystem does not permit non-UTF-8 filenames")
+        before = self.checkout()
+        path.rename(self.repo / os.fsdecode(b"file-\xfe"))
+        self.assertNotEqual(before, self.checkout())
+
+    def test_git_carriage_return_paths_are_not_normalized_by_child_output(self):
+        self.api()
+        path = self.repo / "carriage\rreturn"
+        path.write_text("one")
+        before = self.checkout()
+        path.write_text("two")
+        self.assertNotEqual(before, self.checkout())
+
+    def test_child_preserves_raw_git_path_bytes(self):
+        result = self.module.run_child([sys.executable, "-c", "import os; os.write(1, b'file\\r\\n-\\xff\\x00')"], cwd=self.repo, timeout=5)
+        self.assertEqual(os.fsencode(result.stdout), b"file\r\n-\xff\0")
+
+    def test_symlink_targets_are_hashed_without_traversal(self):
+        self.api()
+        external = self.base / "external"
+        external.mkdir()
+        (external / "data").write_text("one")
+        link = self.repo / "link"
+        link.symlink_to(external, target_is_directory=True)
+        before = self.checkout()
+        (external / "data").write_text("two")
+        self.assertEqual(before, self.checkout())
+        link.unlink()
+        link.symlink_to(self.base / "missing")
+        self.assertNotEqual(before, self.checkout())
+
+    def test_tracked_parent_replaced_by_symlink_is_not_followed(self):
+        m = self.api()
+        folder = self.repo / "nested"
+        folder.mkdir()
+        (folder / "file").write_text("inside")
+        git(self.repo, "add", "nested/file")
+        (folder / "file").unlink()
+        folder.rmdir()
+        external = self.base / "external"
+        external.mkdir()
+        (external / "file").write_text("outside")
+        folder.symlink_to(external, target_is_directory=True)
+        with self.assertRaises(m.UserError):
+            self.checkout()
+
+    def test_deadline_unreadable_and_special_files_fail_capture(self):
+        m = self.api()
+        with self.assertRaises(m.UserError):
+            m.checkout_fingerprint(self.repo, time.monotonic() - 1)
+        source = self.repo / "source.py"
+        source.chmod(0)
+        with self.assertRaises(m.UserError):
+            self.checkout()
+        source.chmod(0o600)
+        source.unlink()
+        os.mkfifo(source)
+        with self.assertRaises(m.UserError):
+            self.checkout()
+
+    def test_mutation_during_checkout_read_fails_without_retry(self):
+        m = self.api()
+        read = os.read
+        changed = False
+        def mutate(fd, size):
+            nonlocal changed
+            content = read(fd, size)
+            if not changed and os.fstat(fd).st_ino == (self.repo / "source.py").stat().st_ino:
+                changed = True
+                (self.repo / "source.py").write_text("value = 2\n")
+            return content
+        with patch.object(m.os, "read", side_effect=mutate), self.assertRaises(m.UserError):
+            self.checkout()
+
+    def test_input_added_between_git_enumerations_invalidates_capture(self):
+        m = self.api()
+        runner = m.run_child
+        calls = 0
+        def mutate(argv, **kwargs):
+            nonlocal calls
+            if "ls-files" in argv:
+                calls += 1
+                if calls == 2:
+                    (self.repo / "appeared").write_text("new")
+            return runner(argv, **kwargs)
+        with patch.object(m, "run_child", side_effect=mutate), self.assertRaises(m.UserError):
+            self.checkout()
+        self.assertEqual(calls, 2, "mutation must fail this attempt, not restart")
+
+    def test_head_changes_during_checkout_capture_are_rejected(self):
+        m = self.api()
+        runner = m.run_child
+        def mutate(argv, **kwargs):
+            result = runner(argv, **kwargs)
+            if "ls-files" in argv:
+                git(self.repo, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-qm", "changed")
+            return result
+        with patch.object(m, "run_child", side_effect=mutate), self.assertRaises(m.UserError):
+            m.capture_checkout(self.repo, time.monotonic() + 10)
+
+    def test_index_content_config_and_journals_are_included_transients_excluded(self):
+        m = self.api()
+        for engine, name in (("codegraph", ".codegraph"), ("crg", ".code-review-graph")):
+            directory = self.repo / name
+            directory.mkdir()
+            (directory / "graph.db").write_text("db")
+            capture = lambda: m.index_fingerprint(self.repo, engine, time.monotonic() + 10)
+            for persistent in ("graph.db-wal", "graph.db-journal", "custom.wal", "custom.journal", "config.json", "dependencies.lock"):
+                before = capture()
+                (directory / persistent).write_text("persistent")
+                self.assertNotEqual(before, capture(), persistent)
+            before = capture()
+            transient = ("daemon.pid", "codegraph.lock", "daemon.sock") if engine == "codegraph" else ()
+            for filename in transient:
+                (directory / filename).write_text("transient")
+            self.assertEqual(before, capture())
+
+    def test_index_mutation_during_read_is_rejected(self):
+        m = self.api()
+        directory = self.repo / ".codegraph"
+        directory.mkdir()
+        database = directory / "graph.db"
+        database.write_text("one")
+        read = os.read
+        def mutate(fd, size):
+            value = read(fd, size)
+            database.write_text("two")
+            return value
+        with patch.object(m.os, "read", side_effect=mutate), self.assertRaises(m.UserError):
+            m.index_fingerprint(self.repo, "codegraph", time.monotonic() + 10)
+
+    def test_missing_and_symlink_index_roots_are_rejected(self):
+        m = self.api()
+        with self.assertRaises(m.UserError):
+            m.index_fingerprint(self.repo, "crg", time.monotonic() + 10)
+        (self.repo / ".code-review-graph").symlink_to(self.base, target_is_directory=True)
+        with self.assertRaises(m.UserError):
+            m.index_fingerprint(self.repo, "crg", time.monotonic() + 10)
+
+    def test_directory_enumeration_checks_deadline_before_consuming_all_entries(self):
+        m = self.api()
+        directory = self.repo / ".codegraph"
+        directory.mkdir()
+        for number in range(20):
+            (directory / str(number)).write_text("input")
+        scandir = os.scandir
+        now = 0
+        consumed = 0
+        @contextlib.contextmanager
+        def delayed_entries(fd):
+            def iterator(entries):
+                nonlocal now, consumed
+                for entry in entries:
+                    now += 1
+                    consumed += 1
+                    yield entry
+            with scandir(fd) as entries:
+                yield iterator(entries)
+        with patch.object(m.os, "scandir", delayed_entries), patch.object(m.time, "monotonic", side_effect=lambda: now), self.assertRaises(m.UserError):
+            m.index_fingerprint(self.repo, "codegraph", 3)
+        self.assertLess(consumed, 20, "enumeration ignored its deadline until after reading everything")
+
+    def test_umbrella_content_has_empty_head_and_excludes_nested_administration(self):
+        m = self.api()
+        umbrella = self.base / "umbrella"
+        child = umbrella / "child"
+        child.mkdir(parents=True)
+        git(child, "init", "-q")
+        (child / "source").write_text("one")
+        before = m.capture_checkout(umbrella, time.monotonic() + 10)
+        self.assertEqual(before[0], "")
+        (child / ".git" / "noise").write_text("ignored")
+        (child / ".codegraph").mkdir()
+        (child / ".codegraph" / "db").write_text("ignored")
+        self.assertEqual(before, m.capture_checkout(umbrella, time.monotonic() + 10))
+        (child / "source").write_text("two")
+        self.assertNotEqual(before, m.capture_checkout(umbrella, time.monotonic() + 10))
+
+
+class ProjectCase(ControllerCase):
+    def install_fake_tools(self):
+        directory = self.base / "bin"
+        for engine, name, version, index in (("codegraph", "codegraph", "1.6.0", ".codegraph"), ("crg", "code-review-graph", "2.3.8", ".code-review-graph")):
+            self.executable(directory, name,
+                "import json, os, sys, time\nfrom pathlib import Path\n"
+                f"if sys.argv[1:] == ['--version']:\n print({version!r}); sys.exit(0)\n"
+                "root = Path.cwd()\n"
+                "if os.environ.get('TOOL_EVENTS'):\n"
+                " with open(os.environ['TOOL_EVENTS'], 'a') as log: log.write(json.dumps([str(root), sys.argv[1:]]) + '\\n')\n"
+                "if os.environ.get('TOOL_FAIL'): sys.exit(9)\n"
+                "if os.environ.get('TOOL_EDIT'): (root / 'source.py').write_text('changed during indexing')\n"
+                "if sys.argv[1] == 'sync' and os.environ.get('TOOL_BARRIER'):\n"
+                " barrier = Path(os.environ['TOOL_BARRIER']); (barrier / root.name).touch()\n"
+                " deadline = time.monotonic() + 5\n"
+                " while len(list(barrier.iterdir())) < 2:\n"
+                "  if time.monotonic() > deadline: sys.exit(8)\n"
+                "  time.sleep(.02)\n"
+                f"index = root / {index!r}\n"
+                "index.mkdir(exist_ok=True)\n"
+                "with (index / 'graph.db').open('a') as db: db.write('indexed\\n')\n")
+        env = patch.dict(os.environ, {"PATH": str(directory) + os.pathsep + os.environ["PATH"]})
+        env.start()
+        self.addCleanup(env.stop)
+        return {"codegraph": directory / "codegraph", "crg": directory / "code-review-graph"}
+
+    def require_operations(self):
+        self.assertTrue(hasattr(self.module, "mutate_project"), "locked public operations are absent")
+
+    def setup_project(self, path=None):
+        self.module.mutate_project(path or self.repo, operation="setup", force=False, deadline=time.monotonic() + 15)
+
+    def cli(self, *args, cwd=None):
+        return subprocess.run([sys.executable, "-B", str(PACKAGE / "scripts/code_intel.py"), *map(str, args)], cwd=cwd or self.repo, capture_output=True, text=True, timeout=20)
+
+
+class ConcurrencyTests(ProjectCase):
+    def holder(self, root):
+        source = (
+            "import runpy, sys, time, os\nfrom pathlib import Path\nfrom dataclasses import replace\n"
+            "m = runpy.run_path(sys.argv[1]); root = Path(sys.argv[2]); data = m['select_data_location'](os.environ, read_only=False)\n"
+            "with m['root_lock'](root, data, time.monotonic() + 15):\n"
+            " marker = m['read_marker'](root, data)\n"
+            " if marker: m['write_marker'](root, data, replace(marker, status='pending'))\n"
+            " print('locked', flush=True)\n"
+            " sys.stdin.readline()\n"
+            " if marker: m['write_marker'](root, data, marker)\n"
+        )
+        process = subprocess.Popen([sys.executable, "-B", "-c", source, str(PACKAGE / "scripts/code_intel.py"), str(root)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        def cleanup():
+            if process.poll() is None:
+                process.kill()
+            process.communicate(timeout=5)
+        self.addCleanup(cleanup)
+        self.assertEqual(process.stdout.readline(), "locked\n")
+        return process
+
+    def test_lock_deadline_leaves_holders_marker_untouched_and_exit_releases(self):
+        self.require_operations()
+        self.install_fake_tools()
+        self.setup_project()
+        holder = self.holder(self.repo)
+        data = self.module.select_data_location(os.environ, read_only=True)
+        state = self.module.state_path(self.repo, data)
+        before = state.read_bytes()
+        started = time.monotonic()
+        with self.assertRaises(self.module.UserError):
+            self.module.mutate_project(self.repo, operation="update", force=False, deadline=time.monotonic() + .2)
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertEqual(state.read_bytes(), before)
+        holder.kill()
+        holder.communicate(timeout=5)
+        self.module.mutate_project(self.repo, operation="update", force=False, deadline=time.monotonic() + 10)
+        self.assertEqual(self.module.read_marker(self.repo, data).status, "success")
+
+    def test_nonfinite_deadline_does_not_create_lock_or_marker(self):
+        self.require_operations()
+        data = self.module.select_data_location(os.environ, read_only=True)
+        before = snapshot(self.base)
+        for deadline in (float("inf"), float("nan"), time.monotonic() - 1):
+            with self.subTest(deadline=deadline), self.assertRaises(self.module.UserError):
+                with self.module.root_lock(self.repo, data, deadline):
+                    pass
+        self.assertEqual(snapshot(self.base), before)
+
+    def test_pending_process_diagnostics_preserve_filesystem_and_do_not_wait_on_lock(self):
+        self.require_operations()
+        self.install_fake_tools()
+        self.setup_project()
+        holder = self.holder(self.repo)
+        before = snapshot(self.base)
+        report = self.cli("doctor")
+        self.assertNotEqual(report.returncode, 0)
+        self.assertIn("pending", json.loads(report.stdout)["trust_reason"])
+        self.assertEqual(snapshot(self.base), before)
+        holder.communicate("release\n", timeout=5)
+
+    def test_explicit_setup_and_update_wait_for_hook_equivalent_root_transaction(self):
+        self.require_operations()
+        self.install_fake_tools()
+        self.setup_project()
+        events = self.base / "events"
+        for command in ("setup-project", "update-project"):
+            holder = self.holder(self.repo)
+            events.write_text("")
+            process = subprocess.Popen([sys.executable, "-B", str(PACKAGE / "scripts/code_intel.py"), command, str(self.repo)], env={**os.environ, "TOOL_EVENTS": str(events)}, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                time.sleep(.25)
+                self.assertIsNone(process.poll())
+                self.assertEqual(events.read_text(), "")
+                holder.communicate("release\n", timeout=5)
+                out, err = process.communicate(timeout=15)
+                self.assertEqual(process.returncode, 0, err)
+                self.assertEqual(out, "")
+                self.assertTrue(events.read_text())
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                process.communicate(timeout=5)
+
+    def test_linked_worktree_updates_overlap_without_state_loss(self):
+        self.require_operations()
+        self.install_fake_tools()
+        linked = self.base / "linked"
+        git(self.repo, "worktree", "add", "-qb", "linked", str(linked))
+        self.setup_project()
+        self.setup_project(linked)
+        barrier = self.base / "barrier"
+        barrier.mkdir()
+        processes = [subprocess.Popen([sys.executable, "-B", str(PACKAGE / "scripts/code_intel.py"), "update-project", str(root)], env={**os.environ, "TOOL_BARRIER": str(barrier)}, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for root in (self.repo, linked)]
+        try:
+            for process in processes:
+                _out, err = process.communicate(timeout=15)
+                self.assertEqual(process.returncode, 0, err)
+        finally:
+            for process in processes:
+                if process.poll() is None:
+                    process.kill()
+                process.communicate(timeout=5)
+        data = self.module.select_data_location(os.environ, read_only=True)
+        for root in (self.repo, linked):
+            marker = self.module.read_marker(root, data)
+            self.assertEqual((marker.status, marker.root), ("success", str(root.resolve())))
+        self.assertEqual(len(list(self.data.glob("*.json"))), 2)
+        self.assertEqual(len(list(self.data.glob("*.lock"))), 2)
+
+
+class DoctorTests(ProjectCase):
+    def observe(self):
+        return self.module.observe_project(self.repo, deadline=time.monotonic() + 10)
+
+    def test_doctor_without_state_is_unhealthy_and_read_only(self):
+        self.install_fake_tools()
+        before = snapshot(self.base)
+        result = self.cli("project-status", self.repo)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(result.stdout.startswith("{"), "project-status must report JSON")
+        report = json.loads(result.stdout)
+        self.assertFalse(report["healthy"])
+        self.assertEqual(snapshot(self.base), before)
+
+    def test_missing_data_and_tools_still_produce_read_only_json_diagnostics(self):
+        self.require_operations()
+        before = snapshot(self.base)
+        with patch.dict(os.environ, {"PLUGIN_DATA": str(self.base / "absent")}), patch.object(self.module, "resolve_verified_tool", side_effect=self.module.UserError("missing tool")):
+            report = self.observe()
+        self.assertFalse(report["healthy"])
+        self.assertIn("missing tool", report["trust_reason"])
+        self.assertEqual(snapshot(self.base), before)
+
+    def test_force_setup_cli_reinitializes_existing_indexes(self):
+        self.require_operations()
+        self.install_fake_tools()
+        self.setup_project()
+        events = self.base / "events"
+        with patch.dict(os.environ, {"TOOL_EVENTS": str(events)}):
+            result = self.cli("setup-project", self.repo, "--force")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        commands = [json.loads(line)[1][0] for line in events.read_text().splitlines()]
+        self.assertEqual(commands, ["init", "build", "sync", "update"])
+
+    def test_capture_is_read_only_and_requires_every_selected_index(self):
+        self.require_operations()
+        tools = self.install_fake_tools()
+        self.setup_project()
+        before = snapshot(self.base)
+        marker = self.module.capture(self.repo, tools, time.monotonic() + 10)
+        self.assertEqual(marker.status, "success")
+        self.assertEqual(snapshot(self.base), before)
+        shutil.rmtree(self.repo / ".code-review-graph")
+        with self.assertRaises(self.module.UserError):
+            self.module.capture(self.repo, tools, time.monotonic() + 10)
+
+    def test_mutation_during_second_index_capture_is_rejected(self):
+        self.require_operations()
+        tools = self.install_fake_tools()
+        self.setup_project()
+        database = self.repo / ".codegraph" / "graph.db"
+        inode = database.stat().st_ino
+        read = os.read
+        reads = 0
+        def mutate(fd, size):
+            nonlocal reads
+            result = read(fd, size)
+            if os.fstat(fd).st_ino == inode:
+                reads += 1
+                if reads == 3:
+                    database.write_text("changed on second pass")
+            return result
+        with patch.object(self.module.os, "read", side_effect=mutate), self.assertRaises(self.module.UserError):
+            self.module.capture(self.repo, tools, time.monotonic() + 10)
+
+    def test_healthy_diagnostics_report_facts_without_creating_or_acquiring_locks(self):
+        self.require_operations()
+        self.install_fake_tools()
+        self.setup_project()
+        data = self.module.select_data_location(os.environ, read_only=True)
+        self.module.state_path(self.repo, data).with_suffix(".lock").unlink()
+        before = snapshot(self.base)
+        with patch.object(self.module, "root_lock", side_effect=AssertionError("doctor acquired lock")):
+            report = self.observe()
+        self.assertTrue(report["healthy"], report)
+        self.assertEqual(report["scope"]["kind"], "repository")
+        self.assertEqual(report["current_head"], git(self.repo, "rev-parse", "HEAD"))
+        self.assertEqual(report["stored_head"], report["current_head"])
+        self.assertEqual(report["data"]["source"], "PLUGIN_DATA")
+        self.assertEqual(report["tools"]["codegraph"]["version"], "1.6.0")
+        self.assertEqual(report["tools"]["crg"]["version"], "2.3.8")
+        self.assertTrue(report["python"]["executable"])
+        self.assertEqual(report["plugin_root"], str(PACKAGE.resolve()))
+        self.assertIn("mise", report)
+        self.assertIn("writable_best_effort", report["data"])
+        self.assertEqual(self.cli("doctor").returncode, 0)
+        self.assertEqual(snapshot(self.base), before)
+
+    def test_pending_failed_and_corrupt_states_are_unhealthy_without_repair(self):
+        self.require_operations()
+        self.install_fake_tools()
+        self.setup_project()
+        data = self.module.select_data_location(os.environ, read_only=True)
+        marker = self.module.read_marker(self.repo, data)
+        state = self.module.state_path(self.repo, data)
+        for content in (json.dumps({**dataclasses.asdict(marker), "status": "pending"}), json.dumps({**dataclasses.asdict(marker), "status": "failed"}), "broken"):
+            state.write_text(content)
+            before = snapshot(self.base)
+            self.assertFalse(self.observe()["healthy"])
+            self.assertEqual(snapshot(self.base), before)
+
+    def test_same_head_offline_edits_and_index_changes_are_unhealthy(self):
+        self.require_operations()
+        self.install_fake_tools()
+        self.setup_project()
+        original_head = git(self.repo, "rev-parse", "HEAD")
+        (self.repo / "source.py").write_text("offline edit")
+        self.assertFalse(self.observe()["healthy"])
+        (self.repo / "source.py").write_text("value = 1\n")
+        self.assertTrue(self.observe()["healthy"])
+        (self.repo / ".codegraph" / "graph.db").write_text("changed index")
+        self.assertFalse(self.observe()["healthy"])
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), original_head)
+
+    def test_marker_changed_during_observation_is_unhealthy(self):
+        self.require_operations()
+        self.install_fake_tools()
+        self.setup_project()
+        capture = self.module.capture
+        data = self.module.select_data_location(os.environ, read_only=True)
+        def concurrent(*args, **kwargs):
+            observation = capture(*args, **kwargs)
+            self.module.write_marker(self.repo, data, dataclasses.replace(observation, status="pending"))
+            return observation
+        with patch.object(self.module, "capture", side_effect=concurrent):
+            report = self.observe()
+        self.assertFalse(report["healthy"])
+        self.assertIn("changed", report["trust_reason"].lower())
+
+    def test_failure_and_checkout_mutation_publish_failed_state(self):
+        self.require_operations()
+        self.install_fake_tools()
+        self.setup_project()
+        for flag in ("TOOL_FAIL", "TOOL_EDIT"):
+            with patch.dict(os.environ, {flag: "1"}), self.assertRaises(self.module.UserError):
+                self.module.mutate_project(self.repo, operation="update", force=False, deadline=time.monotonic() + 10)
+            data = self.module.select_data_location(os.environ, read_only=True)
+            self.assertEqual(self.module.read_marker(self.repo, data).status, "failed")
+
+    def test_corrupt_state_prevents_indexing_and_missing_update_indexes_are_not_created(self):
+        self.require_operations()
+        self.install_fake_tools()
+        result = self.cli("update-project", self.repo)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.repo / ".codegraph").exists())
+        self.assertFalse((self.repo / ".code-review-graph").exists())
+        data = self.module.select_data_location(os.environ, read_only=True)
+        state = self.module.state_path(self.repo, data)
+        state.write_text("broken")
+        before = snapshot(self.base)
+        self.assertNotEqual(self.cli("setup-project", self.repo).returncode, 0)
+        self.assertEqual(snapshot(self.base), before)
+
+    def test_failed_state_write_reports_original_index_error_too(self):
+        self.require_operations()
+        self.install_fake_tools()
+        self.setup_project()
+        write = self.module.write_marker
+        def fail(root, data, marker):
+            if marker.status == "failed":
+                raise self.module.UserError("failed state write denied")
+            write(root, data, marker)
+        with patch.object(self.module, "write_marker", side_effect=fail), patch.dict(os.environ, {"TOOL_FAIL": "1"}), self.assertRaisesRegex(self.module.UserError, "status 9.*failed state write denied"):
+            self.module.mutate_project(self.repo, operation="update", force=False, deadline=time.monotonic() + 10)
+
+    def test_batch_setup_and_update_mark_children_and_codegraph_only_umbrella(self):
+        self.require_operations()
+        self.install_fake_tools()
+        umbrella = self.base / "umbrella"
+        umbrella.mkdir()
+        child = umbrella / "child"
+        git(self.base, "clone", "-q", str(self.repo), str(child))
+        self.assertEqual(self.cli("setup-batch", umbrella).returncode, 0)
+        self.assertEqual(self.cli("update-batch", umbrella).returncode, 0)
+        self.assertTrue((umbrella / ".codegraph").is_dir())
+        self.assertFalse((umbrella / ".code-review-graph").exists())
+        data = self.module.select_data_location(os.environ, read_only=True)
+        marker = self.module.read_marker(umbrella, data)
+        self.assertEqual(marker.head, "")
+        self.assertEqual(set(marker.index_fingerprints), {"codegraph"})
+        self.assertTrue(self.module.observe_project(umbrella, deadline=time.monotonic() + 10)["healthy"])
 
 
 class ToolContractTests(ControllerCase):
