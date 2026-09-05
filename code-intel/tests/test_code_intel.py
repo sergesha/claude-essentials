@@ -86,6 +86,77 @@ class StateTests(ControllerCase):
     def marker(self, status="pending"):
         return self.module.FreshnessMarker(str(self.repo.resolve()), "", {}, "", {}, status)
 
+    def successful_value(self):
+        return {
+            "root": str(self.repo.resolve()), "head": git(self.repo, "rev-parse", "HEAD"),
+            "versions": {"codegraph": "1.6.0", "crg": "2.3.8"},
+            "checkout_fingerprint": "a" * 64,
+            "index_fingerprints": {"codegraph": "b" * 64, "crg": "c" * 64},
+            "status": "success", "schema_version": 2, "crg_candidates": [],
+        }
+
+    def test_v2_candidates_roundtrip_and_codegraph_only_null(self):
+        m = self.api()
+        data = m.select_data_location(os.environ, read_only=False)
+        value = self.successful_value()
+        value["crg_candidates"] = ["new\nname.py", "raw-\udcff.py", "tab\tname.py"]
+        state = m.state_path(self.repo, data)
+        state.write_text(json.dumps(value))
+        try:
+            marker = m.read_marker(self.repo, data)
+        except m.CorruptState as exc:
+            self.fail(f"valid v2 candidate history was rejected: {exc}")
+        self.assertEqual(marker.schema_version, 2)
+        self.assertEqual(marker.crg_candidates, ["new\nname.py", "raw-\udcff.py", "tab\tname.py"])
+        m.write_marker(self.repo, data, marker)
+        self.assertEqual(json.loads(state.read_text()), value)
+        value.update(head="", versions={"codegraph": "1.6.0"},
+                     index_fingerprints={"codegraph": "b" * 64}, crg_candidates=None)
+        state.write_text(json.dumps(value))
+        self.assertIsNone(m.read_marker(self.repo, data).crg_candidates)
+
+    def test_invalid_v2_history_is_corrupt_and_preserved(self):
+        m = self.api()
+        data = m.select_data_location(os.environ, read_only=False)
+        state = m.state_path(self.repo, data)
+        changes = [
+            {"schema_version": 3}, {"schema_version": True},
+            {"crg_candidates": ["a.py", "a.py"]}, {"crg_candidates": ["b.py", "a.py"]},
+            {"crg_candidates": [1]}, {"crg_candidates": None}, {"crg_candidates": "a.py"},
+            {"crg_candidates": [""]}, {"crg_candidates": ["/a.py"]},
+            {"crg_candidates": ["../a.py"]}, {"crg_candidates": ["a/./b.py"]},
+            {"crg_candidates": ["a\0b.py"]}, {"unexpected": "field"},
+            {"root": str(self.base)}, {"root": "relative"}, {"head": "--stat"}, {"head": ""},
+        ]
+        for change in changes:
+            with self.subTest(change=change):
+                state.write_text(json.dumps({**self.successful_value(), **change}))
+                before = snapshot(self.base)
+                with self.assertRaises(m.CorruptState):
+                    m.read_marker(self.repo, data)
+                self.assertEqual(snapshot(self.base), before)
+
+    def test_valid_legacy_success_is_stale_without_rewriting(self):
+        m = self.api()
+        directory = self.base / "bin"
+        tools = {}
+        for name, executable, version, index in (
+                ("codegraph", "codegraph", "1.6.0", ".codegraph"),
+                ("crg", "code-review-graph", "2.3.8", ".code-review-graph")):
+            tools[name] = self.executable(directory, executable, f"print({version!r})\n")
+            (self.repo / index).mkdir()
+        observed = m.capture(self.repo, tools, time.monotonic() + 10)
+        legacy = {name: getattr(observed, name) for name in (
+            "root", "head", "versions", "checkout_fingerprint", "index_fingerprints", "status")}
+        data = m.select_data_location(os.environ, read_only=False)
+        m.state_path(self.repo, data).write_text(json.dumps(legacy))
+        before = snapshot(self.base)
+        with patch.dict(os.environ, {"PATH": str(directory) + os.pathsep + os.environ["PATH"]}):
+            report = m.observe_project(self.repo, deadline=time.monotonic() + 10)
+        self.assertFalse(report["healthy"], "legacy history cannot prove rollback readiness")
+        self.assertEqual(snapshot(self.base), before)
+        self.assertEqual(m.read_marker(self.repo, data).schema_version, 1)
+
     def test_first_nonempty_variable_never_falls_back(self):
         m = self.api()
         occupied = self.base / "occupied"
@@ -427,6 +498,67 @@ class FingerprintTests(ControllerCase):
         self.assertEqual(before, m.capture_checkout(umbrella, time.monotonic() + 10))
         (child / "source").write_text("two")
         self.assertNotEqual(before, m.capture_checkout(umbrella, time.monotonic() + 10))
+
+
+class CRGCandidateTests(ControllerCase):
+    def candidates(self, base=None):
+        self.assertTrue(hasattr(self.module, "crg_candidate_paths"), "Git candidate history is absent")
+        return self.module.crg_candidate_paths(
+            self.repo, base or git(self.repo, "rev-parse", "HEAD"), time.monotonic() + 10)
+
+    def test_candidates_keep_deleted_and_both_rename_paths(self):
+        (self.repo / "old name.py").write_text("def keep():\n    return 1\n")
+        git(self.repo, "add", "old name.py")
+        git(self.repo, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+            "commit", "-qm", "rename fixture")
+        head = git(self.repo, "rev-parse", "HEAD")
+        git(self.repo, "mv", "old name.py", "new\nname.py")
+        git(self.repo, "rm", "source.py")
+        (self.repo / "untracked.py").write_text("value = 1\n")
+        self.assertEqual(self.candidates(head), ["new\nname.py", "old name.py", "source.py"])
+
+    def test_staging_existing_untracked_file_changes_candidates_without_content_change(self):
+        (self.repo / "added.py").write_text("value = 2\n")
+        before = self.module.capture_checkout(self.repo, time.monotonic() + 10)
+        self.assertEqual(self.candidates(), [])
+        git(self.repo, "add", "added.py")
+        self.assertEqual(self.candidates(), ["added.py"])
+        self.assertEqual(self.module.capture_checkout(self.repo, time.monotonic() + 10), before)
+
+    def test_literal_nul_records_preserve_native_paths(self):
+        head = git(self.repo, "rev-parse", "HEAD")
+        vectors = [
+            (b"C100\0old.py\0copy.py\0", ["copy.py", "old.py"]),
+            (b"M\0tab\tname.py\0", ["tab\tname.py"]),
+            (b"D\0gone.py\0", ["gone.py"]), (b"", []),
+            (b"M\0raw-\xff.py\0", ["raw-\udcff.py"]),
+            (b"M\0carriage\rname.py\0", ["carriage\rname.py"]),
+        ]
+        for raw, expected in vectors:
+            with self.subTest(raw=raw), patch.object(self.module, "run_child",
+                    return_value=subprocess.CompletedProcess([], 0, raw.decode("utf-8", "surrogateescape"), "")) as child:
+                self.assertEqual(self.candidates(head), expected)
+                self.assertEqual(child.call_args.args[0],
+                    ["git", "--no-optional-locks", "diff", "--name-status", "-z", head, "--"])
+
+    def test_malformed_diff_and_failed_discovery_never_mean_empty(self):
+        head = git(self.repo, "rev-parse", "HEAD")
+        for raw in (b"R100\0old.py\0", b"M\0a.py", b"M\0\0", b"M\0/a.py\0",
+                    b"M\0../escape.py\0", b"M\0a/./b.py\0", b"Q\0a.py\0", b"R\0a.py\0"):
+            with self.subTest(raw=raw), patch.object(self.module, "run_child",
+                    return_value=subprocess.CompletedProcess([], 0, raw.decode(), "")):
+                with self.assertRaises(self.module.UserError):
+                    self.candidates(head)
+        with patch.object(self.module, "run_child", side_effect=self.module.UserError("Git diff failed")):
+            with self.assertRaisesRegex(self.module.UserError, "Git diff failed"):
+                self.candidates(head)
+
+    def test_invalid_base_is_rejected_before_git(self):
+        for base in ("--stat", "HEAD", "a" * 39, "A" * 40):
+            with self.subTest(base=base), patch.object(self.module, "run_child",
+                    side_effect=AssertionError("invalid base reached child process")):
+                with self.assertRaises(self.module.UserError):
+                    self.candidates(base)
 
 
 class ProjectCase(ControllerCase):
@@ -854,6 +986,15 @@ class HookCase(ProjectCase):
                 "root = Path.cwd(); command = sys.argv[1]\n"
                 "with open(os.environ['HOOK_EVENTS'], 'a') as log: log.write(json.dumps([str(root), sys.argv[1:]]) + '\\n')\n"
                 "mode = os.environ.get('HOOK_MODE', '')\n"
+                "if sys.argv[1:4] == ['update', '--base', '4b825dc642cb6eb9a060e54bf8d69288fbee4904']:\n"
+                " if mode == 'repair-fail': sys.exit(9)\n"
+                " if mode == 'repair-edit': (root / 'a.py').write_text('changed during repair')\n"
+                " if mode == 'repair-head': subprocess.run(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-qm', 'during repair'], check=True)\n"
+                " if mode == 'repair-stage': subprocess.run(['git', 'add', 'local.py'], check=True)\n"
+                " if mode == 'repair-descendant':\n"
+                "  writer = 'import os,signal,sys,time\\nfrom pathlib import Path\\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\\nPath(sys.argv[1]).write_text(str(os.getpid()))\\nwhile True:\\n Path(sys.argv[2]).write_text(str(time.monotonic_ns()))\\n time.sleep(.01)\\n'\n"
+                "  subprocess.Popen([sys.executable, '-c', writer, os.environ['HOOK_PID'], str(root / '.code-review-graph/writer')])\n"
+                "  time.sleep(30)\n"
                 "if command == 'sync':\n"
                 " if mode == 'sync-fail': sys.exit(9)\n"
                 " if mode == 'sync-edit': (root / 'source.py').write_text('changed during sync')\n"
@@ -916,6 +1057,411 @@ class HookCase(ProjectCase):
         self.assertNotIn("FRESH PROMPT CONTEXT", json.dumps(response))
         self.assertNotIn("use codegraph first", json.dumps(response).lower())
         self.assertFalse(output.get("block", False))
+
+
+class RollbackReadinessTests(HookCase):
+    EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+    def fixture(self, name="fixture", *, warm=True):
+        self.repo = self.base / name / "repo"
+        self.repo.mkdir(parents=True)
+        git(self.repo, "init", "-q")
+        (self.repo / "a.py").write_text("def stable_a():\n    return 1\n")
+        (self.repo / "b.py").write_text("def stable_b():\n    return 2\n")
+        git(self.repo, "add", "a.py", "b.py")
+        self.commit("fixture")
+        self.events.write_text("")
+        if warm:
+            self.warm()
+
+    def commit(self, message):
+        git(self.repo, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+            "commit", "-qm", message)
+
+    def edit(self, *names):
+        for name in names:
+            with (self.repo / name).open("a") as stream:
+                stream.write("\nvalue = 9\n")
+
+    def sync(self):
+        response = self.hook("hook-update", tool_name="Bash")
+        self.assertNotIn("Code intelligence unavailable", json.dumps(response))
+
+    def prepare_restore(self, name="fixture"):
+        self.fixture(name)
+        self.edit("a.py", "b.py")
+        self.sync()
+        self.assertEqual(self.marker().crg_candidates, ["a.py", "b.py"])
+        git(self.repo, "restore", "--", "a.py")
+        self.events.write_text("")
+
+    @contextlib.contextmanager
+    def trace_children(self):
+        runner = self.module.run_child
+        calls = []
+        def traced(argv, **kwargs):
+            calls.append((list(argv), kwargs))
+            if len(argv) > 1 and argv[1] == "update":
+                self.assertEqual(self.marker().status, "pending")
+            return runner(argv, **kwargs)
+        with patch.object(self.module, "run_child", side_effect=traced):
+            yield calls
+
+    def assert_update(self, base, candidates):
+        rows = map(json.loads, self.events.read_text().splitlines())
+        crg_update_argv = [row[1] for row in rows if row[1][0] == "update"]
+        self.assertEqual(crg_update_argv, [[
+            "update", *([] if base is None else ["--base", base]),
+            "--skip-flows", "--repo", str(self.repo.resolve()),
+        ]])
+        self.assertEqual(self.marker().schema_version, 2)
+        self.assertEqual(self.marker().crg_candidates, candidates)
+        self.assertEqual(self.marker().status, "success")
+
+    def assert_no_empty_tree_write(self, calls):
+        self.assertEqual([argv for argv, _ in calls if "hash-object" in argv], [])
+
+    def test_ordinary_edits_and_commit_use_previous_head(self):
+        for transition in ("clean-edit", "dirty-edit", "dirty-commit"):
+            with self.subTest(transition=transition):
+                self.fixture(transition)
+                previous_head = self.marker().head
+                self.edit("a.py")
+                if transition != "clean-edit":
+                    self.sync()
+                    self.events.write_text("")
+                    if transition == "dirty-edit":
+                        self.edit("a.py")
+                    else:
+                        git(self.repo, "add", "a.py")
+                        self.commit("indexed bytes")
+                with self.trace_children() as calls:
+                    self.sync()
+                self.assert_update(previous_head, [] if transition == "dirty-commit" else ["a.py"])
+                self.assert_no_empty_tree_write(calls)
+                self.assertNotIn("build", self.commands())
+
+    def test_restore_reset_and_restored_deletion_use_empty_tree(self):
+        for transition in ("restore", "reset", "deletion"):
+            with self.subTest(transition=transition):
+                self.fixture(transition)
+                head = self.marker().head
+                if transition == "deletion":
+                    git(self.repo, "rm", "a.py")
+                else:
+                    self.edit("a.py")
+                self.sync()
+                self.assertEqual(self.marker().crg_candidates, ["a.py"])
+                if transition == "deletion":
+                    git(self.repo, "restore", "--source=HEAD", "--staged", "--worktree", "--", "a.py")
+                elif transition == "reset":
+                    git(self.repo, "reset", "--hard", "HEAD")
+                else:
+                    git(self.repo, "restore", "--", "a.py")
+                self.events.write_text("")
+                self.sync()
+                self.assert_update(self.EMPTY_TREE, [])
+                self.assertEqual(self.marker().head, head)
+                self.assertNotIn("build", self.commands())
+
+    def test_branch_switch_base_uses_previous_head_and_omitted_paths(self):
+        for transition, changed_file, expected_base in (
+                ("clean", "b.py", "previous"),
+                ("restored-a", "b.py", self.EMPTY_TREE),
+                ("committed-a", "a.py", "previous")):
+            with self.subTest(transition=transition):
+                self.fixture(transition)
+                previous_head = self.marker().head
+                branch = git(self.repo, "branch", "--show-current")
+                git(self.repo, "switch", "-qc", "other")
+                (self.repo / changed_file).write_text("def other_branch():\n    return 3\n")
+                git(self.repo, "add", changed_file)
+                self.commit("other branch")
+                git(self.repo, "switch", "-q", branch)
+                if transition != "clean":
+                    self.edit("a.py")
+                    self.sync()
+                    git(self.repo, "restore", "--", "a.py")
+                git(self.repo, "switch", "-q", "other")
+                self.events.write_text("")
+                with self.trace_children() as calls:
+                    self.sync()
+                self.assert_update(previous_head if expected_base == "previous" else expected_base, [])
+                self.assertNotEqual(self.marker().head, previous_head)
+                if expected_base == "previous":
+                    self.assert_no_empty_tree_write(calls)
+
+    def test_partial_restore_repairs_every_mutating_entrypoint_before_prompt(self):
+        for command, tool in (("hook-status", None), ("hook-prompt", None),
+                ("hook-update", "Bash"), ("hook-update", "Write"),
+                ("update-project", None), ("update-batch", None)):
+            with self.subTest(command=command, tool=tool):
+                self.fixture(command + str(tool))
+                if command == "update-batch":
+                    self.setup_project(self.repo.parent)
+                self.edit("a.py", "b.py")
+                self.sync()
+                git(self.repo, "restore", "--", "a.py")
+                self.events.write_text("")
+                with self.trace_children() as calls:
+                    if command.startswith("hook"):
+                        response = self.hook(command, **({"tool_name": tool} if tool else {}))
+                        self.assertNotIn("Code intelligence unavailable", json.dumps(response))
+                    else:
+                        target = self.repo.parent if command == "update-batch" else self.repo
+                        self.assertEqual(self.module.main([command, str(target)]), 0)
+                self.assert_update(self.EMPTY_TREE, ["b.py"])
+                empty_commands = [(argv, kwargs) for argv, kwargs in calls if "hash-object" in argv]
+                self.assertEqual([argv for argv, _ in empty_commands],
+                    [["git", "hash-object", "-t", "tree", "-w", "--stdin"]])
+                self.assertEqual(empty_commands[0][1]["input_text"], "")
+                self.assertNotIn("build", self.commands())
+                if command == "hook-prompt":
+                    self.assertEqual(self.commands(), ["sync", "update", "prompt-hook"])
+
+    def test_matching_session_prompt_reuse_but_bash_forces_ordinary_update(self):
+        self.fixture()
+        head = self.marker().head
+        for command in ("hook-status", "hook-prompt"):
+            with self.subTest(command=command), self.trace_children() as calls:
+                self.events.write_text("")
+                self.hook(command)
+                self.assertEqual(self.commands(), [] if command == "hook-status" else ["prompt-hook"])
+                self.assert_no_empty_tree_write(calls)
+        self.events.write_text("")
+        with self.trace_children() as calls:
+            self.sync()
+        self.assert_update(head, [])
+        self.assert_no_empty_tree_write(calls)
+
+    def test_missing_legacy_failed_pending_history_repairs_existing_crg(self):
+        for history in ("missing", "legacy", "failed", "pending"):
+            with self.subTest(history=history):
+                self.fixture(history)
+                data = self.module.select_data_location(os.environ, read_only=True)
+                state = self.module.state_path(self.repo, data)
+                if history == "missing":
+                    state.unlink()
+                elif history == "legacy":
+                    value = json.loads(state.read_text())
+                    del value["schema_version"], value["crg_candidates"]
+                    state.write_text(json.dumps(value))
+                else:
+                    self.module.write_marker(self.repo, data, self.module.FreshnessMarker(
+                        str(self.repo.resolve()), "", {}, "", {}, history))
+                self.sync()
+                self.assert_update(self.EMPTY_TREE, [])
+                self.assertEqual(self.commands(), ["sync", "update"])
+
+    def test_new_or_forced_crg_build_skips_redundant_repair(self):
+        for forced in (False, True):
+            with self.subTest(forced=forced):
+                self.fixture(str(forced), warm=forced)
+                with self.trace_children() as calls:
+                    if forced:
+                        self.assertEqual(self.module.main(["setup-project", str(self.repo), "--force"]), 0)
+                    else:
+                        self.hook("hook-status")
+                self.assert_update(None, [])
+                self.assertEqual(self.commands(), ["init", "build", "sync", "update"])
+                self.assert_no_empty_tree_write(calls)
+
+    def test_explicit_update_missing_crg_fails_without_initialization_or_tree_write(self):
+        self.fixture()
+        shutil.rmtree(self.repo / ".code-review-graph")
+        with self.trace_children() as calls, contextlib.redirect_stderr(io.StringIO()):
+            self.assertNotEqual(self.module.main(["update-project", str(self.repo)]), 0)
+        self.assertEqual(self.commands(), [])
+        self.assertEqual(self.marker().status, "failed")
+        self.assert_no_empty_tree_write(calls)
+        self.assertFalse((self.repo / ".code-review-graph").exists())
+
+    def test_umbrella_root_never_runs_crg_discovery_or_repair(self):
+        self.fixture()
+        umbrella = self.repo.parent.resolve()
+        with self.trace_children() as calls:
+            self.setup_project(umbrella)
+        at_root = [(argv, kwargs) for argv, kwargs in calls if kwargs.get("cwd") == umbrella]
+        self.assertFalse(any("--name-status" in argv or "hash-object" in argv
+                             or Path(argv[0]).name == "code-review-graph" for argv, _ in at_root))
+        self.assertFalse((umbrella / ".git").exists())
+        self.assertIsNone(self.marker(umbrella).crg_candidates)
+        self.assertEqual(self.marker(umbrella).status, "success")
+
+    def test_repair_child_failure_invalidates_hooks_and_explicit_update_then_retries(self):
+        for command in ("hook-prompt", "update-project"):
+            with self.subTest(command=command):
+                self.prepare_restore(command)
+                with patch.dict(os.environ, {"HOOK_MODE": "repair-fail"}):
+                    if command == "hook-prompt":
+                        response = self.hook("hook-prompt")
+                        self.assert_fallback(response)
+                    else:
+                        result = self.cli("update-project", self.repo)
+                        self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(self.marker().status, "failed")
+                self.assertIsNone(self.marker().crg_candidates)
+                self.assertEqual(self.commands(), ["sync", "update"])
+                self.assertNotIn("prompt-hook", self.commands())
+                self.events.write_text("")
+                self.sync()
+                self.assert_update(self.EMPTY_TREE, ["b.py"])
+
+    def test_repair_timeout_reaps_writer_before_next_root_operation(self):
+        self.prepare_restore()
+        pid_path = self.base / "repair-writer.pid"
+        runner = self.module.run_child
+        def bounded(argv, **kwargs):
+            if argv[1:4] == ["update", "--base", self.EMPTY_TREE]:
+                kwargs["timeout"] = min(kwargs["timeout"], .5)
+            return runner(argv, **kwargs)
+        with patch.dict(os.environ, {"HOOK_MODE": "repair-descendant", "HOOK_PID": str(pid_path)}), \
+                patch.object(self.module, "run_child", side_effect=bounded):
+            response = self.hook("hook-prompt")
+        self.assert_fallback(response)
+        self.assertIn("timed out", json.dumps(response))
+        self.assertEqual(self.marker().status, "failed")
+        self.assertEqual(self.commands(), ["sync", "update"])
+        self.assertNotIn("prompt-hook", self.commands())
+        self.assertTrue(pid_path.exists(), "repair writer did not start before timeout")
+        pid = int(pid_path.read_text())
+        self.addCleanup(lambda: self.kill_if_alive(pid))
+        ToolContractTests.assert_process_exited(self, pid)
+        writer = self.repo / ".code-review-graph/writer"
+        before = writer.read_bytes()
+        self.events.write_text("")
+        self.sync()
+        self.assert_update(self.EMPTY_TREE, ["b.py"])
+        self.assertEqual(writer.read_bytes(), before)
+
+    @staticmethod
+    def kill_if_alive(pid):
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, signal.SIGKILL)
+
+    def test_failed_candidate_and_empty_tree_commands_invalidate_and_retry(self):
+        cases = ("candidate-error", "candidate-malformed", "tree-error", "tree-malformed", "tree-wrong-format")
+        for failure in cases:
+            for command in ("hook-prompt", "update-project"):
+                with self.subTest(failure=failure, command=command):
+                    self.prepare_restore(failure + command)
+                    runner = self.module.run_child
+                    def fail(argv, **kwargs):
+                        candidate = "--name-status" in argv
+                        tree = "hash-object" in argv
+                        if (candidate and failure == "candidate-error") or (tree and failure == "tree-error"):
+                            raise self.module.UserError("injected Git command failure")
+                        if candidate and failure == "candidate-malformed":
+                            return subprocess.CompletedProcess(argv, 0, "R100\0old.py\0", "")
+                        if tree and failure in ("tree-malformed", "tree-wrong-format"):
+                            return subprocess.CompletedProcess(argv, 0,
+                                "not-an-object\n" if failure == "tree-malformed" else "a" * 64 + "\n", "")
+                        return runner(argv, **kwargs)
+                    with patch.object(self.module, "run_child", side_effect=fail), contextlib.redirect_stderr(io.StringIO()):
+                        if command == "hook-prompt":
+                            response = self.hook("hook-prompt")
+                            self.assert_fallback(response)
+                        else:
+                            self.assertNotEqual(self.module.main([command, str(self.repo)]), 0)
+                    self.assertEqual(self.marker().status, "failed")
+                    self.assertNotIn("prompt-hook", self.commands())
+                    self.assertEqual(self.commands(), [])
+                    self.events.write_text("")
+                    self.sync()
+                    self.assert_update(self.EMPTY_TREE, ["b.py"])
+
+    def test_unavailable_previous_head_fails_then_retries_with_empty_tree(self):
+        self.prepare_restore()
+        data = self.module.select_data_location(os.environ, read_only=True)
+        self.module.write_marker(self.repo, data, dataclasses.replace(self.marker(), head="1" * 40))
+        response = self.hook("hook-prompt")
+        self.assert_fallback(response)
+        self.assertEqual(self.marker().status, "failed")
+        self.assertNotIn("prompt-hook", self.commands())
+        self.assertEqual(self.commands(), [])
+        self.sync()
+        self.assert_update(self.EMPTY_TREE, ["b.py"])
+
+    def test_file_head_or_index_only_change_during_repair_prevents_success(self):
+        for mode in ("repair-edit", "repair-head", "repair-stage"):
+            for command in ("hook-prompt", "update-project"):
+                with self.subTest(mode=mode, command=command):
+                    self.prepare_restore(mode + command)
+                    (self.repo / "local.py").write_text("value = 5\n")
+                    before = self.module.capture_checkout(self.repo, time.monotonic() + 10)
+                    with patch.dict(os.environ, {"HOOK_MODE": mode}), contextlib.redirect_stderr(io.StringIO()):
+                        if command == "hook-prompt":
+                            response = self.hook("hook-prompt")
+                            self.assert_fallback(response)
+                        else:
+                            self.assertNotEqual(self.module.main([command, str(self.repo)]), 0)
+                    self.assertEqual(self.marker().status, "failed")
+                    self.assertNotIn("prompt-hook", self.commands())
+                    self.assertEqual(self.commands(), ["sync", "update"])
+                    if mode == "repair-stage":
+                        self.assertEqual(self.module.capture_checkout(self.repo, time.monotonic() + 10), before)
+                        self.assertEqual(git(self.repo, "diff", "--cached", "--name-only"), "local.py")
+
+    def test_capture_rejects_staging_between_candidate_observations(self):
+        self.fixture()
+        (self.repo / "local.py").write_text("value = 5\n")
+        runner = self.module.run_child
+        staged = False
+        def stage_after_diff(argv, **kwargs):
+            nonlocal staged
+            result = runner(argv, **kwargs)
+            if "--name-status" in argv and not staged:
+                staged = True
+                git(self.repo, "add", "local.py")
+            return result
+        with patch.object(self.module, "run_child", side_effect=stage_after_diff):
+            response = self.hook("hook-prompt")
+        self.assert_fallback(response)
+        self.assertEqual(self.marker().status, "failed")
+        self.assertEqual(self.commands(), [])
+
+    def test_status_and_doctor_observe_rollback_legacy_and_repair_without_writes(self):
+        self.prepare_restore()
+        data = self.module.select_data_location(os.environ, read_only=True)
+        state = self.module.state_path(self.repo, data)
+        for phase, healthy in (("rollback", False), ("legacy", False), ("repaired", True)):
+            with self.subTest(phase=phase):
+                if phase == "legacy":
+                    value = json.loads(state.read_text())
+                    del value["schema_version"], value["crg_candidates"]
+                    state.write_text(json.dumps(value))
+                elif phase == "repaired":
+                    self.sync()
+                self.events.write_text("")
+                state.with_suffix(".lock").unlink(missing_ok=True)
+                before = snapshot(self.base)
+                for command in ("project-status", "doctor"):
+                    args = [command, str(self.repo)] if command == "project-status" else [command]
+                    result = self.cli(*args)
+                    self.assertEqual(result.returncode, 0 if healthy else 1, result.stderr)
+                    self.assertIs(json.loads(result.stdout)["healthy"], healthy)
+                    self.assertEqual(snapshot(self.base), before)
+                with self.trace_children() as calls:
+                    report = self.module.observe_project(self.repo, deadline=time.monotonic() + 10)
+                self.assertIs(report["healthy"], healthy)
+                self.assert_no_empty_tree_write(calls)
+                self.assertEqual(snapshot(self.base), before)
+
+    def test_repair_contender_leaves_current_lock_owners_marker_untouched(self):
+        self.prepare_restore()
+        holder = ConcurrencyTests.holder(self, self.repo)
+        data = self.module.select_data_location(os.environ, read_only=True)
+        state = self.module.state_path(self.repo, data)
+        before = state.read_bytes()
+        with self.assertRaises(self.module.UserError):
+            with self.ready(deadline=time.monotonic() + .2):
+                self.fail("contender acquired readiness")
+        self.assertEqual(state.read_bytes(), before)
+        self.assertEqual(self.commands(), [])
+        holder.kill()
+        holder.communicate(timeout=5)
+        self.sync()
+        self.assert_update(self.EMPTY_TREE, ["b.py"])
 
 
 class ReadinessTests(HookCase):
@@ -2150,6 +2696,181 @@ class IndexCommandTests(ControllerCase):
         )
         with self.assertRaisesRegex(self.module.UserError, "deadline"):
             self.module.remaining(time.monotonic() - 1)
+
+
+class RealCRGRollbackTests(ControllerCase):
+    def setUp(self):
+        super().setUp()
+        selected = os.environ.get("CODE_INTEL_REAL_CRG")
+        if not selected:
+            self.skipTest("set CODE_INTEL_REAL_CRG to the installed pinned 2.3.8 executable")
+        selected = str(Path(selected).absolute())  # Preserve a supplied mise shim's name.
+        self.repo = self.repo.resolve()
+        from test_packaging import stage_installed_copy
+        self.installed_root = stage_installed_copy(self.base)
+        directory = self.base / "real-crg-bin"
+        self.executable(directory, "code-review-graph",
+            f"import os, sys\nos.execv({selected!r}, [{selected!r}, *sys.argv[1:]])\n")
+        self.executable(directory, "codegraph",
+            "import sys\nfrom pathlib import Path\n"
+            "if sys.argv[1:] == ['--version']: print('1.6.0')\n"
+            "elif sys.argv[1] in ('init', 'index'): (Path.cwd() / '.codegraph').mkdir(exist_ok=True)\n"
+            "elif sys.argv[1] not in ('sync', 'prompt-hook'): sys.exit(9)\n")
+        env = patch.dict(os.environ, {
+            "PATH": str(directory) + os.pathsep + os.environ["PATH"],
+            "CRG_HOME": str(self.base / "crg-home"),
+            "CRG_DATA_DIR": "", "CRG_SERIAL_PARSE": "1",
+            "XDG_CONFIG_HOME": str(self.base / "xdg-config"),
+            "XDG_DATA_HOME": str(self.base / "xdg-data"),
+            "XDG_CACHE_HOME": str(self.base / "xdg-cache"),
+            "XDG_STATE_HOME": str(self.base / "xdg-state"),
+        })
+        env.start()
+        self.addCleanup(env.stop)
+        version = self.module.run_child([selected, "--version"], cwd=self.repo, timeout=15)
+        self.assertEqual(version.stdout.strip(), "code-review-graph 2.3.8")
+
+    def installed(self, command, *, payload=None):
+        args = [sys.executable, "-B", str(self.installed_root / "scripts/code_intel.py"), command]
+        if command in ("update-project", "project-status"):
+            args.append(str(self.repo))
+        outer_timeout = {
+            "hook-status": 75, "hook-prompt": 75, "hook-update": 75,
+            "update-project": 330, "project-status": 330,
+        }[command]
+        return self.module.run_child(
+            args, cwd=self.repo, timeout=outer_timeout,
+            input_text=None if payload is None else json.dumps(payload),
+        )
+
+    def hook_sync(self, command="hook-update"):
+        result = self.installed(command, payload={
+            "cwd": str(self.repo), "tool_name": "Bash", "prompt": "",
+        })
+        self.assertNotIn("Code intelligence unavailable", result.stdout)
+        return result
+
+    def sql(self, statement, args=()):
+        database = self.repo / ".code-review-graph/graph.db"
+        wal = database.with_name(database.name + "-wal")
+        self.assertFalse(wal.exists() and wal.stat().st_size,
+                         "immutable SQL fixture would ignore nonempty WAL")
+        with contextlib.closing(sqlite3.connect(
+                database.as_uri() + "?mode=ro&immutable=1", uri=True)) as connection:
+            return connection.execute(statement, args).fetchall()
+
+    def count_symbol(self, name):
+        return self.sql("SELECT COUNT(*) FROM nodes WHERE name = ?", (name,))[0][0]
+
+    def fixture(self):
+        (self.repo / "a.py").write_text("def stable_a():\n    return 1\n")
+        (self.repo / "b.py").write_text("def stable_b():\n    return 2\n")
+        git(self.repo, "add", "a.py", "b.py")
+        git(self.repo, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+            "commit", "-qm", "rollback fixture")
+        self.hook_sync("hook-status")
+
+    def dirty_a(self):
+        (self.repo / "a.py").write_text("def stable_a():\n    return 1\n\ndef ghost():\n    return 9\n")
+
+    def assert_current_a(self):
+        self.assertEqual(self.count_symbol("ghost"), 0)
+        self.assertEqual(self.sql("SELECT COUNT(*) FROM nodes_fts WHERE name = ?", ("ghost",)), [(0,)])
+        self.assertEqual(self.count_symbol("stable_a"), 1)
+        self.assertEqual(self.sql("SELECT DISTINCT file_hash FROM nodes WHERE file_path = ?",
+                                 (str(self.repo / "a.py"),)),
+                         [(hashlib.sha256((self.repo / "a.py").read_bytes()).hexdigest(),)])
+
+    def partial_restore(self):
+        before_head = git(self.repo, "rev-parse", "HEAD")
+        self.dirty_a()
+        (self.repo / "b.py").write_text("def stable_b():\n    return 2\n\ndef dirty_b():\n    return 8\n")
+        self.hook_sync()
+        self.assertEqual(self.count_symbol("ghost"), 1)
+        self.assertEqual(self.count_symbol("dirty_b"), 1)
+        git(self.repo, "restore", "--", "a.py")
+        self.hook_sync()
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), before_head)
+        self.assert_current_a()
+        self.assertEqual(self.count_symbol("dirty_b"), 1)
+        report = json.loads(self.installed("project-status").stdout)
+        self.assertIs(report["healthy"], True)
+
+    def test_installed_partial_restore_removes_ghost(self):
+        self.fixture()
+        self.partial_restore()
+
+    def test_installed_full_restore_and_reset(self):
+        for operation in (("restore", "--", "a.py"), ("reset", "--hard", "HEAD")):
+            with self.subTest(operation=operation):
+                self.repo = (self.base / operation[0]).resolve()
+                self.repo.mkdir()
+                git(self.repo, "init", "-q")
+                self.fixture()
+                head = git(self.repo, "rev-parse", "HEAD")
+                self.dirty_a()
+                self.hook_sync()
+                self.assertEqual(self.count_symbol("ghost"), 1)
+                git(self.repo, *operation)
+                self.hook_sync()
+                self.assertEqual(git(self.repo, "rev-parse", "HEAD"), head)
+                self.assert_current_a()
+
+    def test_installed_restored_tracked_deletion(self):
+        self.fixture()
+        self.assertEqual(self.count_symbol("stable_a"), 1)
+        git(self.repo, "rm", "a.py")
+        self.hook_sync()
+        self.assertEqual(self.count_symbol("stable_a"), 0)
+        git(self.repo, "restore", "--source=HEAD", "--staged", "--worktree", "--", "a.py")
+        self.installed("update-project")
+        self.assert_current_a()
+
+    def test_installed_restore_survives_branch_switch(self):
+        self.fixture()
+        branch = git(self.repo, "branch", "--show-current")
+        git(self.repo, "switch", "-qc", "other")
+        (self.repo / "b.py").write_text("def other_b():\n    return 3\n")
+        git(self.repo, "add", "b.py")
+        git(self.repo, "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+            "commit", "-qm", "other B")
+        git(self.repo, "switch", "-q", branch)
+        self.dirty_a()
+        self.hook_sync()
+        self.assertEqual(self.count_symbol("ghost"), 1)
+        git(self.repo, "restore", "--", "a.py")
+        git(self.repo, "switch", "-q", "other")
+        self.hook_sync("hook-prompt")
+        self.assert_current_a()
+        self.assertEqual(self.count_symbol("other_b"), 1)
+        self.assertEqual(self.count_symbol("stable_b"), 0)
+
+    def test_installed_repair_preserves_indexed_untracked(self):
+        self.fixture()
+        local = self.repo / "local.py"
+        local.write_text("def untracked_only():\n    return 4\n")
+        git(self.repo, "add", "local.py")
+        self.module.run_child(["code-review-graph", "update", "--skip-flows", "--repo", str(self.repo)],
+                              cwd=self.repo, timeout=300)
+        git(self.repo, "reset", "--", "local.py")
+        row = self.sql("SELECT * FROM nodes WHERE name = ?", ("untracked_only",))
+        self.assertEqual(len(row), 1)
+        before = local.read_bytes()
+        self.partial_restore()
+        self.assertEqual(self.sql("SELECT * FROM nodes WHERE name = ?", ("untracked_only",)), row)
+        self.assertEqual(git(self.repo, "ls-files", "--others", "--exclude-standard"), "local.py")
+        self.assertEqual(local.read_bytes(), before)
+
+    def test_installed_sha256_restore(self):
+        self.repo = (self.base / "sha256").resolve()
+        self.repo.mkdir()
+        result = subprocess.run(["git", "init", "-q", "--object-format=sha256", str(self.repo)],
+                                capture_output=True, text=True, timeout=10)
+        if result.returncode:
+            self.skipTest("Git rejects SHA-256 initialization: " + result.stderr)
+        self.fixture()
+        self.assertEqual(len(git(self.repo, "rev-parse", "HEAD")), 64)
+        self.partial_restore()
 
 
 if __name__ == "__main__":
