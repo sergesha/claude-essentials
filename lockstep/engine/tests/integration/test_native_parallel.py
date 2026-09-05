@@ -12,6 +12,7 @@ from itertools import pairwise
 from pathlib import Path
 
 import pytest
+import yaml
 
 from lockstep.recipe import yamlgraph_adapter as yg
 from lockstep.runtime.effects.descriptors import (
@@ -27,6 +28,7 @@ from lockstep.runtime.effects.models import (
 from lockstep.runtime.effects.owner_policy import RuntimeRequirementIndex
 from lockstep.runtime.effects.owner_provisioning import provision_runtime_snapshot
 from lockstep.runtime.engine import Engine, LockstepError
+from lockstep.runtime import sessions
 from lockstep.runtime.graph_runtime import GraphRuntime
 from lockstep.runtime.providers.codex import CodexRunnerAdapter
 from lockstep.runtime.service import preflight_recipe
@@ -39,6 +41,161 @@ from tests.runtime._runtime_commitment_harness import _runtime_config
 CONTROLLED_EFFECT = (
     Path(__file__).parents[1] / "fixtures" / "controlled_effect_executable.py"
 )
+
+
+@pytest.fixture
+def manual_parallel_paths(tmp_path: Path):
+    project = tmp_path / "project"
+    recipes = project / ".lockstep" / "recipes"
+    recipes.mkdir(parents=True)
+    state = tmp_path / "owner"
+    nodes = {}
+    for step in ("a", "b"):
+        nodes[step] = {
+            "type": "interrupt", "state_key": f"question_{step}",
+            "resume_key": f"answer_{step}", "idempotent": False,
+            "message": {"step": step, "evidence_schema": {"type": "object"}, "lockstep_effect": {
+                "schema": "lockstep.effect/v1", "kind": "manual",
+                "logical_id": step, "runner": None, "inputs": {}, "writes": [],
+                "artifacts": [], "deadline_seconds": None, "scope_state_keys": [],
+                "result_schema": "lockstep.effect-result/v1",
+            }},
+        }
+    (recipes / "manual-parallel.recipe.yaml").write_text(yaml.safe_dump({
+        "version": "1.0", "name": "manual-parallel",
+        "state": {"answer_a": "dict", "answer_b": "dict"}, "nodes": nodes,
+        "edges": [{"from": "START", "to": ["a", "b"]},
+                  {"from": "a", "to": "END"}, {"from": "b", "to": "END"}],
+    }))
+    return project, recipes, state
+
+
+@pytest.mark.parametrize("operation,outcome", [("abort", "ERROR"), ("escalate", "FAIL")])
+@pytest.mark.parametrize("surface", ["service", "cli"])
+def test_public_parallel_manual_control_selects_only_named_branch_after_restart(
+    manual_parallel_paths, monkeypatch: pytest.MonkeyPatch, capsys, operation: str,
+    outcome: str, surface: str,
+) -> None:
+    """Losing the public step selector must not cancel a sibling or wedge the run."""
+    from lockstep import cli
+
+    project, recipes, state = manual_parallel_paths
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(state))
+    command = Engine.command(state, recipes)
+    try:
+        started = command.start("manual-parallel", {}, str(project))
+        run_id = started["run_id"]
+        assert started["parallel_progress"]["pending"] == 2
+        assert {brief["step"] for brief in started["parallel_progress"]["steps"]} == {"a", "b"}
+        sessions.touch(state, run_id, "owner-session", 30)
+        arguments = [run_id, "blocked"] if operation == "escalate" else [run_id]
+        control = getattr(command, operation)
+        with pytest.raises(LockstepError):
+            control(*arguments, session_id="owner-session", project=str(project))
+        with pytest.raises(LockstepError):
+            control(*arguments, step="missing", session_id="owner-session", project=str(project))
+        with pytest.raises(LockstepError, match="session binding"):
+            control(*arguments, step="a", session_id="foreign", project=str(project))
+        records = command.effects.list_for_thread(command.catalog.get(run_id).thread_id)
+        assert all(record.result is None for record in records)
+        if surface == "service":
+            waiting = control(*arguments, step="a", session_id="owner-session", project=str(project))
+        else:
+            capsys.readouterr()
+            assert cli.main(["scenario", operation, *arguments, "--step", "a", "--session-id", "owner-session"]) == 0
+            waiting = json.loads(capsys.readouterr().out)
+        assert waiting["status"] == "awaiting"
+        assert waiting["step"] == "b"
+        with pytest.raises(LockstepError):
+            control(*arguments, step="a", session_id="owner-session", project=str(project))
+        records = command.effects.list_for_thread(command.catalog.get(run_id).thread_id)
+        assert sum(record.result is None for record in records) == 1
+    finally:
+        command.close()
+    restarted = Engine.command(state, recipes)
+    try:
+        completed = getattr(restarted, operation)(
+            *arguments, session_id="owner-session", project=str(project)
+        )
+        assert completed["status"] == "completed"
+        records = restarted.effects.list_for_thread(restarted.catalog.get(run_id).thread_id)
+        assert len(records) == 2
+        assert all(record.phase == "delivered" for record in records)
+        assert all(record.result.outcome == outcome for record in records)
+        if operation == "abort":
+            assert all(record.result.fixed_error_code == "cancelled" for record in records)
+    finally:
+        restarted.close()
+
+
+def test_cli_start_session_completes_manual_run_from_fresh_processes(
+    manual_parallel_paths,
+) -> None:
+    """A CLI-created run must be resumable without a host PostToolUse hook."""
+    import os
+    import subprocess
+    import sys
+
+    project, _recipes, state = manual_parallel_paths
+    environment = dict(os.environ, LOCKSTEP_STATE_DIR=str(state))
+
+    def invoke(*arguments: str):
+        return subprocess.run(
+            [sys.executable, "-m", "lockstep", "scenario", *arguments],
+            cwd=project, env=environment, text=True, capture_output=True, timeout=30,
+        )
+
+    started = invoke("start", "manual-parallel", "--session-id", "cli-session")
+    assert started.returncode == 0, started.stderr
+    run_id = json.loads(started.stdout)["run_id"]
+    rejected = invoke("done", run_id, "a", "--session-id", "foreign")
+    assert rejected.returncode != 0
+    first = invoke("done", run_id, "a", "--session-id", "cli-session")
+    assert first.returncode == 0, first.stderr
+    assert json.loads(first.stdout)["step"] == "b"
+    second = invoke("done", run_id, "b", "--session-id", "cli-session")
+    assert second.returncode == 0, second.stderr
+    assert json.loads(second.stdout)["status"] == "completed"
+
+
+def test_cli_rejects_invalid_start_session_before_admission(
+    manual_parallel_paths, monkeypatch: pytest.MonkeyPatch, capsys,
+) -> None:
+    from lockstep import cli
+
+    project, _recipes, state = manual_parallel_paths
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(state))
+    assert cli.main(["scenario", "start", "manual-parallel", "--session-id", ""]) != 0
+    assert "session identity" in capsys.readouterr().err
+    assert not state.exists()
+
+
+def test_cli_session_binding_failure_reports_already_created_run(
+    manual_parallel_paths, monkeypatch: pytest.MonkeyPatch, capsys,
+) -> None:
+    """A binding write failure must not hide a successful durable admission."""
+    import re
+    from lockstep import cli
+
+    project, recipes, state = manual_parallel_paths
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(state))
+
+    def fail_binding(*_args):
+        raise OSError("binding storage unavailable")
+
+    monkeypatch.setattr(sessions, "touch", fail_binding)
+    assert cli.main(["scenario", "start", "manual-parallel", "--session-id", "owner"]) != 0
+    diagnostic = capsys.readouterr().err
+    match = re.search(r"run (manual-parallel-[a-f0-9]+) was created", diagnostic)
+    assert match is not None, diagnostic
+    observer = Engine.observe(state, recipes)
+    try:
+        assert observer.status(match[1], str(project))["status"] == "awaiting"
+    finally:
+        observer.close()
 
 
 @dataclass(frozen=True)

@@ -28,7 +28,8 @@
       "extra-files": [
         { "type": "toml", "path": "engine/pyproject.toml", "jsonpath": "$.project.version" },
         { "type": "json", "path": ".claude-plugin/plugin.json", "jsonpath": "$.version" },
-        { "type": "generic", "path": "engine/src/lockstep_mcp/__init__.py" }
+        { "type": "json", "path": ".codex-plugin/plugin.json", "jsonpath": "$.version" },
+        { "type": "generic", "path": "engine/src/lockstep/__init__.py" }
       ]
     },
     "speciflow": {

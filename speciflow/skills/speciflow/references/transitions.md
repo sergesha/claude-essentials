@@ -9,8 +9,12 @@ Before proposing the target mutation, compare the authoritative upstream
 artifact with the proposed downstream result read-only and in memory. Identify
 the inspected source revision or the user's approved dirty snapshot, the target
 owner and transition, every applicable approved outcome, requirement,
-constraint, exclusion, and unresolved dependency, and the executable
-downstream path that retains each item. Persist none of this comparison.
+constraint, exclusion, and unresolved dependency, and the target-owned
+refinement that retains each item at the authorized granularity. Require an
+executable downstream path when projecting executable work. For product
+framing or specification work whose implementation is explicitly deferred,
+retain the outcome, prerequisite, and resumption condition without inventing
+execution issues. Persist none of this comparison.
 
 A downstream artifact may refine approved intent with implementation detail,
 but must not narrow or replace an approved outcome, omit required work because

@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.2.3](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.2.2...speciflow-v0.2.3) (2026-09-05)
+
+
+### Bug Fixes
+
+* **speciflow:** route initialization through the bootstrap preview ([#43](https://github.com/sergesha/claude-essentials/issues/43)) ([51d7b43](https://github.com/sergesha/claude-essentials/commit/51d7b437e532bca33950650257986d39d561000e))
+
+## [0.2.2](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.2.1...speciflow-v0.2.2) (2026-09-05)
+
+
+### Bug Fixes
+
+* **speciflow:** preserve native task levels and scoped approvals ([#40](https://github.com/sergesha/claude-essentials/issues/40)) ([4f19a83](https://github.com/sergesha/claude-essentials/commit/4f19a83d26ff47f03d7f2f51c81a353a26b2d8ad))
+
 ## [0.2.1](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.2.0...speciflow-v0.2.1) (2026-09-04)
 
 
