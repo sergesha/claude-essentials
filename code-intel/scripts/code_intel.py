@@ -87,6 +87,8 @@ class FreshnessMarker:
     checkout_fingerprint: str
     index_fingerprints: Mapping[str, str]
     status: Literal["pending", "success", "failed"]
+    schema_version: int = 2
+    crg_candidates: list[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -126,12 +128,36 @@ def state_path(root: Path, data: DataLocation) -> Path:
     return data.path / (key + ".json")
 
 
+def _valid_crg_path(path: object) -> bool:
+    if not isinstance(path, str) or not path or "\0" in path or path.startswith("/"):
+        return False
+    if any(part in ("", ".", "..") for part in path.split("/")):
+        return False
+    try:
+        os.fsencode(path)
+    except UnicodeError:
+        return False
+    return True
+
+
 def _validate_marker(root: Path, value: object) -> FreshnessMarker:
     fields = {
         "root", "head", "versions", "checkout_fingerprint", "index_fingerprints", "status"
     }
-    if not isinstance(value, dict) or set(value) != fields:
+    if not isinstance(value, dict):
         raise CorruptState("Invalid marker schema.")
+    if set(value) == fields:
+        value = {**value, "schema_version": 1, "crg_candidates": None}
+    elif (set(value) != fields | {"schema_version", "crg_candidates"}
+          or type(value["schema_version"]) is not int or value["schema_version"] != 2):
+        raise CorruptState("Invalid marker schema.")
+    candidates = value["crg_candidates"]
+    if candidates is not None and (
+        not isinstance(candidates, list)
+        or any(not _valid_crg_path(path) for path in candidates)
+        or candidates != sorted(set(candidates), key=os.fsencode)
+    ):
+        raise CorruptState("Invalid CRG candidate history.")
     if any(
         not isinstance(value[name], str)
         for name in ("root", "head", "checkout_fingerprint", "status")
@@ -157,6 +183,8 @@ def _validate_marker(root: Path, value: object) -> FreshnessMarker:
             or not re.fullmatch(r"[0-9a-f]{64}", value["checkout_fingerprint"])
             or any(not re.fullmatch(r"[0-9a-f]{64}", digest) for digest in indexes.values())
             or (value["head"] and not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value["head"]))
+            or (value["schema_version"] == 2 and "crg" in versions
+                and (candidates is None or not value["head"]))
         ):
             raise CorruptState("Incomplete successful freshness marker.")
     return FreshnessMarker(**value)
@@ -437,6 +465,41 @@ def capture_checkout(root: Path, deadline: float) -> tuple[str, str]:
     return head, fingerprint
 
 
+def crg_candidate_paths(root: Path, base: str, deadline: float) -> list[str]:
+    """Read native CRG diff candidates, preserving both sides of renames/copies."""
+    if not isinstance(base, str) or not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", base):
+        raise UserError("Invalid Git base for CRG candidate discovery.")
+    output = run_child(
+        ["git", "--no-optional-locks", "diff", "--name-status", "-z", base, "--"],
+        cwd=root, timeout=remaining(deadline),
+    ).stdout.encode("utf-8", "surrogateescape")
+    if not output:
+        return []
+    if not output.endswith(b"\0"):
+        raise UserError("Truncated Git candidate output.")
+    records = output[:-1].split(b"\0")
+    paths = set()
+    position = 0
+    while position < len(records):
+        status = records[position]
+        position += 1
+        scored = re.fullmatch(rb"[RCM]([0-9]{1,3})", status)
+        if status not in (b"A", b"D", b"M", b"T", b"U", b"X", b"B") and not (
+            scored and int(scored[1]) <= 100
+        ):
+            raise UserError("Invalid Git candidate status.")
+        count = 2 if status.startswith((b"R", b"C")) else 1
+        if position + count > len(records):
+            raise UserError("Truncated Git candidate record.")
+        for raw in records[position:position + count]:
+            path = os.fsdecode(raw)
+            if not _valid_crg_path(path):
+                raise UserError("Invalid Git candidate path.")
+            paths.add(path)
+        position += count
+    return sorted(paths, key=os.fsencode)
+
+
 def _has_git_marker(path: Path) -> bool:
     return any((candidate / ".git").exists() for candidate in (path, *path.parents))
 
@@ -715,8 +778,9 @@ def initialize_indexes_locked(
     *,
     force: bool,
     deadline: float,
-) -> None:
+) -> set[str]:
     root = Path(root).resolve()
+    rebuilt = set()
     if "codegraph" in tools and (force or not (root / ".codegraph").is_dir()):
         command = "index" if (root / ".codegraph/codegraph.db").is_file() else "init"
         run_child(
@@ -724,6 +788,7 @@ def initialize_indexes_locked(
             cwd=root,
             timeout=remaining(deadline),
         )
+        rebuilt.add("codegraph")
     if (root / ".git").exists() and tools:
         ensure_local_excludes(root, deadline=deadline)
     if "crg" in tools and (
@@ -734,10 +799,50 @@ def initialize_indexes_locked(
             cwd=root,
             timeout=remaining(deadline),
         )
+        rebuilt.add("crg")
+    return rebuilt
+
+
+def needs_crg_repair(
+    previous: FreshnessMarker | None,
+    candidates_from_previous_head: list[str] | None,
+    *, crg_rebuilt: bool,
+) -> bool:
+    if crg_rebuilt:
+        return False
+    if (previous is None or previous.schema_version != 2
+            or previous.status != "success"
+            or "crg" not in previous.versions
+            or previous.crg_candidates is None):
+        return True
+    return bool(set(previous.crg_candidates) - set(candidates_from_previous_head))
+
+
+def select_crg_base(
+    root: Path, previous: FreshnessMarker | None, *, crg_rebuilt: bool, deadline: float
+) -> str | None:
+    if crg_rebuilt:
+        return None
+    candidates = None
+    if (previous is not None and previous.schema_version == 2
+            and previous.status == "success" and "crg" in previous.versions
+            and previous.crg_candidates is not None):
+        candidates = crg_candidate_paths(root, previous.head, deadline)
+    if not needs_crg_repair(previous, candidates, crg_rebuilt=False):
+        return previous.head
+    head = _head(root, deadline)
+    empty_tree = run_child(
+        ["git", "hash-object", "-t", "tree", "-w", "--stdin"],
+        cwd=root, timeout=remaining(deadline), input_text="",
+    ).stdout.strip()
+    if (not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", empty_tree)
+            or len(empty_tree) != len(head)):
+        raise UserError("Invalid empty-tree object ID from Git.")
+    return empty_tree
 
 
 def update_indexes_locked(
-    root: Path, tools: Mapping[str, Path], *, deadline: float
+    root: Path, tools: Mapping[str, Path], *, deadline: float, crg_base: str | None = None
 ) -> None:
     root = Path(root).resolve()
     required = {"codegraph": ".codegraph", "crg": ".code-review-graph"}
@@ -759,6 +864,7 @@ def update_indexes_locked(
             [
                 str(tools["crg"]),
                 "update",
+                *([] if crg_base is None else ["--base", crg_base]),
                 "--skip-flows",
                 "--repo",
                 str(root),
@@ -778,9 +884,12 @@ def capture(root: Path, tools: Mapping[str, Path], deadline: float) -> Freshness
         for name, path in tools.items()
     }
     checkout = capture_checkout(root, deadline)
+    candidates = crg_candidate_paths(root, checkout[0], deadline) if "crg" in tools else None
     fingerprints = {name: index_fingerprint(root, name, deadline) for name in sorted(tools)}
     if checkout != capture_checkout(root, deadline):
         raise UserError("Checkout changed during index capture.")
+    if candidates != (crg_candidate_paths(root, checkout[0], deadline) if "crg" in tools else None):
+        raise UserError("Git candidates changed during index capture.")
     if fingerprints != {name: index_fingerprint(root, name, deadline) for name in sorted(tools)}:
         raise UserError("Indexes changed during capture.")
     if checkout != capture_checkout(root, deadline):
@@ -788,6 +897,7 @@ def capture(root: Path, tools: Mapping[str, Path], deadline: float) -> Freshness
     return FreshnessMarker(
         str(root), checkout[0], versions,
         checkout[1], fingerprints, "success",
+        crg_candidates=candidates,
     )
 
 
@@ -801,7 +911,7 @@ def mutate_project(
     data = select_data_location(os.environ, read_only=False)
     for root, engines in roots:
         with root_lock(root, data, deadline):
-            read_marker(root, data)  # Corrupt state is never repaired implicitly.
+            previous = read_marker(root, data)  # Corrupt state is never repaired implicitly.
             pending = FreshnessMarker(str(root), "", {}, "", {}, "pending")
             write_marker(root, data, pending)
             try:
@@ -810,12 +920,17 @@ def mutate_project(
                     for name in engines
                 }
                 before = capture_checkout(root, deadline)
+                before_candidates = crg_candidate_paths(root, before[0], deadline) if "crg" in tools else None
+                rebuilt = set()
                 if operation == "setup":
-                    initialize_indexes_locked(root, tools, force=force, deadline=deadline)
-                update_indexes_locked(root, tools, deadline=deadline)
+                    rebuilt = initialize_indexes_locked(root, tools, force=force, deadline=deadline)
+                elif any(not (root / INDEX_DIRS[name]).is_dir() for name in tools):
+                    raise UserError("Missing index; authorize setup-project first.")
+                crg_base = select_crg_base(root, previous, crg_rebuilt="crg" in rebuilt, deadline=deadline) if "crg" in tools else None
+                update_indexes_locked(root, tools, crg_base=crg_base, deadline=deadline)
                 observed = capture(root, tools, deadline)
-                if before != capture_checkout(root, deadline):
-                    raise UserError("Checkout changed during indexing.")
+                if before != capture_checkout(root, deadline) or before_candidates != observed.crg_candidates:
+                    raise UserError("Checkout or Git candidates changed during indexing.")
                 write_marker(root, data, observed)
             except Exception as exc:
                 try:
@@ -856,11 +971,13 @@ def ensure_ready(
             if not reuse:
                 write_marker(root, data, pending)
                 before = capture_checkout(root, deadline)
-                initialize_indexes_locked(root, tools, force=False, deadline=deadline)
-                update_indexes_locked(root, tools, deadline=deadline)
+                before_candidates = crg_candidate_paths(root, before[0], deadline) if "crg" in tools else None
+                rebuilt = initialize_indexes_locked(root, tools, force=False, deadline=deadline)
+                crg_base = select_crg_base(root, previous, crg_rebuilt="crg" in rebuilt, deadline=deadline) if "crg" in tools else None
+                update_indexes_locked(root, tools, crg_base=crg_base, deadline=deadline)
                 observed = capture(root, tools, deadline)
-                if before != capture_checkout(root, deadline):
-                    raise UserError("Checkout changed during indexing.")
+                if before != capture_checkout(root, deadline) or before_candidates != observed.crg_candidates:
+                    raise UserError("Checkout or Git candidates changed during indexing.")
             yield ReadinessResult(root, tools, observed)
             if capture(root, tools, deadline) != observed:
                 raise UserError("Checkout or indexes changed during hook completion.")
