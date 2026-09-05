@@ -450,6 +450,45 @@ def test_public_compiled_managed_step_reaches_real_codex_commit_and_start(
         command.close()
 
 
+def test_start_hook_binds_session_before_managed_workflow_reaches_manual_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A delayed first checkpoint must not lose the host's only binding event."""
+    from lockstep.runtime.hooks import hook_posttool
+
+    project, recipes, state = _public_packaged_reviewed_closure(tmp_path, monkeypatch)
+    first = Engine.command(state, recipes)
+    # Hold background progress at admission; explicit recovery below advances it.
+    first._pump_stop.set()
+    try:
+        started = first.start("release", {}, str(project))
+        assert started["status"] == "starting"
+        run_id = started["run_id"]
+        hook_posttool({
+            "tool_name": "mcp__lockstep__scenario_start",
+            "session_id": "host-session",
+            "tool_input": {"recipe": "release"},
+            "tool_response": {**started, "lockstep_protocol": 1},
+        }, state)
+    finally:
+        first.close()
+
+    restarted = Engine.command(state, recipes)
+    try:
+        restarted.scenario_recover(str(project))
+        status = Engine.observe(state, recipes).status(run_id, str(project))
+        assert status["step"] == "plan"
+        plan = project / status["artifact_contract"]["path"]
+        plan.write_text("# Goal\nA change.\n# Acceptance Criteria\nTests pass.\n# Steps\nImplement.\n")
+        completed = restarted.scenario_done(
+            run_id, status["step"], {"path": str(plan.relative_to(project))},
+            session_id="host-session", project=str(project),
+        )
+        assert completed["step"] == "tests"
+    finally:
+        restarted.close()
+
+
 def test_reviewed_change_survives_restart_and_publishes_only_with_fresh_consent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
