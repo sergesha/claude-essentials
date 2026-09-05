@@ -40,6 +40,23 @@ directory. Stop if the root or binding is uncertain.
 
 ## Approved mutations
 
+For product framing, search native Backlog tasks as well as briefs before
+creation. Inspect configured fields, create or update the framing task through
+the documented CLI, and retain its returned ID in the relevant OpenSpec
+proposal. Read each installed owner's instructions before refining its tasks.
+Keep Backlog acceptance at outcome level, OpenSpec checklists at specification
+level, and executable decomposition and status in Beads. Do not mirror task
+checkmarks or synthesize automatic cross-owner completion.
+
+When specification task authoring is explicitly deferred, keep the reason and
+resumption condition in the current proposal/design. Leave the task artifact
+unwritten; a gate-only or empty tasks file can falsely satisfy native
+artifact-existence checks. If such a placeholder already exists, review its
+contents, preserve the gate in the pending change, and remove only the
+placeholder through the documented artifact-editing interface. A real checklist
+must not be removed to change a dashboard. Native validation alone is not a
+semantic task-content check.
+
 For a cross-owner action, complete the ephemeral preservation contract in
 [transitions.md](transitions.md) before previewing the mutation. Then inspect
 the installed owner's documented lifecycle, current native state, root,
@@ -55,9 +72,10 @@ planning or executable coordination mutation. Review is required for a
 semantic mutation; skip it only for demonstrably read-only or mechanical work
 and name the reason. Approval of semantic intent is not approval of an
 unspecified filesystem or lifecycle operation; unrelated or ambiguous text,
-including `lf`, is not approval. Execute only after unambiguous user approval
-of the exact preview, through the documented owner interface or approved
-integration. Directly edit owner artifacts only when that is the
+including `lf`, is not approval. Execute only with unambiguous user authorization
+covering the concrete preview, through the documented owner interface or
+approved integration. Apply the ownership approval boundary, including prior
+explicit authorization. Directly edit owner artifacts only when that is the
 documented editing interface and the change stays within the artifact's current
 lifecycle state; never use direct edits or generic file operations to simulate
 a create, apply, archive, close, claim, or commit transition. If the installed
@@ -131,11 +149,15 @@ Never copy or reimplement its conversion algorithm, templates, priority or depen
 
 Every OpenSpec task and projected Beads issue must retain one stable approved
 OpenSpec source reference. A review finding is never a task source; missing or
-ambiguous references block that item. Before creation, deduplicate
-automatically only when that source reference matches exactly one native Bead.
-Zero permits an approved create, multiple matches are `ambiguous`. On partial
-creation, report created native IDs and preview only remaining items. Unknown
-output is never retried.
+ambiguous references block that item. Before creation, search native issues
+by source reference and inspect their scopes. A shared reference identifies
+candidate issues, not duplicates: several distinct implementation issues may
+refine one specification task. Reuse a native ID only when its approved work
+and verification match the proposed item unambiguously. Create only a confirmed
+missing item under explicit approval; overlapping or uncertain matches require
+manual resolution. On partial creation, report returned native IDs and preview
+only confirmed remaining items. Unknown output is never retried. Do not add a
+SpeciFlow identity registry or conversion algorithm.
 
 ## Live queries
 
