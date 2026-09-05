@@ -448,10 +448,12 @@ class ProjectCase(ControllerCase):
                 "  if time.monotonic() > deadline: sys.exit(8)\n"
                 "  time.sleep(.02)\n"
                 f"index = root / {index!r}\n"
-                "if sys.argv[1] == 'init' and index.is_dir(): sys.exit(0)\n"
+                f"database = index / {'codegraph.db' if engine == 'codegraph' else 'graph.db'!r}\n"
+                "if sys.argv[1] == 'init' and database.is_file(): sys.exit(0)\n"
+                "if sys.argv[1] == 'index' and not database.is_file(): sys.exit('CodeGraph not initialized')\n"
                 "index.mkdir(exist_ok=True)\n"
-                "if sys.argv[1] == 'index': (index / 'graph.db').write_text('rebuilt\\n')\n"
-                "with (index / 'graph.db').open('a') as db: db.write('indexed\\n')\n")
+                "if sys.argv[1] == 'index': database.write_text('rebuilt\\n')\n"
+                "with database.open('a') as db: db.write('indexed\\n')\n")
         env = patch.dict(os.environ, {"PATH": str(directory) + os.pathsep + os.environ["PATH"]})
         env.start()
         self.addCleanup(env.stop)
@@ -611,7 +613,20 @@ class DoctorTests(ProjectCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         commands = [json.loads(line)[1][0] for line in events.read_text().splitlines()]
         self.assertEqual(commands, ["index", "build", "sync", "update"])
-        self.assertTrue((self.repo / ".codegraph/graph.db").read_text().startswith("rebuilt\n"))
+        self.assertTrue((self.repo / ".codegraph/codegraph.db").read_text().startswith("rebuilt\n"))
+
+    def test_force_setup_initializes_retained_directory_with_missing_database(self):
+        self.install_fake_tools()
+        self.setup_project()
+        database = self.repo / ".codegraph/codegraph.db"
+        database.unlink()
+        events = self.base / "events"
+        with patch.dict(os.environ, {"TOOL_EVENTS": str(events)}):
+            result = self.cli("setup-project", self.repo, "--force")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(database.is_file())
+        commands = [json.loads(line)[1][0] for line in events.read_text().splitlines()]
+        self.assertEqual(commands, ["init", "build", "sync", "update"])
 
     def test_capture_is_read_only_and_requires_every_selected_index(self):
         self.require_operations()
@@ -629,7 +644,7 @@ class DoctorTests(ProjectCase):
         self.require_operations()
         tools = self.install_fake_tools()
         self.setup_project()
-        database = self.repo / ".codegraph" / "graph.db"
+        database = self.repo / ".codegraph" / "codegraph.db"
         inode = database.stat().st_ino
         read = os.read
         reads = 0
@@ -748,7 +763,7 @@ class DoctorTests(ProjectCase):
         self.assertFalse(self.observe()["healthy"])
         (self.repo / "source.py").write_text("value = 1\n")
         self.assertTrue(self.observe()["healthy"])
-        (self.repo / ".codegraph" / "graph.db").write_text("changed index")
+        (self.repo / ".codegraph" / "codegraph.db").write_text("changed index")
         self.assertFalse(self.observe()["healthy"])
         self.assertEqual(git(self.repo, "rev-parse", "HEAD"), original_head)
 
@@ -1523,6 +1538,15 @@ class RealCodeGraphTests(ControllerCase):
         self.assertNotIn("review_sentinel", names)
         self.assertIn("nodes", names)
 
+    def test_real_force_setup_initializes_retained_directory_without_database(self):
+        (self.repo / ".codegraph").mkdir()
+        try:
+            self.module.initialize_indexes_locked(self.repo, {"codegraph": self.launcher},
+                force=True, deadline=time.monotonic() + 30)
+        except self.module.UserError as exc:
+            self.fail(str(exc))
+        self.assertTrue((self.repo / ".codegraph/codegraph.db").is_file())
+
 
 class ToolContractTests(ControllerCase):
     def test_exact_versions_use_path_before_mise(self):
@@ -1959,6 +1983,7 @@ class IndexCommandTests(ControllerCase):
     def test_nonforced_initialization_skips_existing_indexes_but_force_rebuilds(self):
         module = self.module
         (self.repo / ".codegraph").mkdir()
+        (self.repo / ".codegraph/codegraph.db").write_text("existing index")
         (self.repo / ".code-review-graph").mkdir()
         tools = {"codegraph": Path("/cg"), "crg": Path("/crg")}
         with patch.object(module, "ensure_local_excludes"), patch.object(
