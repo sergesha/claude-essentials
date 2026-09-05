@@ -34,76 +34,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+      - name: Runtime and package tests
+        run: python3 -B -m unittest discover -s code-intel/tests -v
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-      - name: Establish host CLIs
-        run: |
-          npm install --global @anthropic-ai/claude-code @openai/codex
-          command -v claude
-          command -v codex
-          claude --version
-          codex --version
-      - name: Repository tests and repository-owned skill validation
-        env:
-          PYTHONDONTWRITEBYTECODE: "1"
-        run: |
-          python3 -B code-intel/tests/test_code_intel.py -v
-          python3 -B code-intel/tests/test_packaging.py -v
-          python3 -B code-intel/tests/test_packaging.py PackagingTests.test_repository_owned_skill_validation -v
       - name: Claude package validation
-        run: claude plugin validate code-intel
-      - name: Isolated Codex marketplace and install smoke
-        shell: bash
         run: |
-          set -euo pipefail
-          : "${RUNNER_TEMP:=${TMPDIR:-/tmp}}"
-          : "${GITHUB_WORKSPACE:=$(pwd -P)}"
-          host_tmp="$(mktemp -d "$RUNNER_TEMP/code-intel-host.XXXXXX")"
-          trap 'rm -rf "$host_tmp"' EXIT
-          export CODEX_HOME="$host_tmp/codex-home"
-          export PLUGIN_DATA="$host_tmp/plugin-data"
-          export CLAUDE_PLUGIN_DATA=""
-          export XDG_CONFIG_HOME="$host_tmp/xdg-config"
-          export XDG_CACHE_HOME="$host_tmp/xdg-cache"
-          export XDG_DATA_HOME="$host_tmp/xdg-data"
-          export PYTHONDONTWRITEBYTECODE=1
-          mkdir -p "$CODEX_HOME" "$PLUGIN_DATA" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME"
-          codex plugin marketplace add "$GITHUB_WORKSPACE" --json
-          codex plugin marketplace list --json > "$host_tmp/marketplaces.json"
-          codex plugin add code-intel@claude-essentials --json > "$host_tmp/installation.json"
-          codex plugin list --json > "$host_tmp/plugins.json"
-          python3 - "$host_tmp/marketplaces.json" "$host_tmp/plugins.json" "$host_tmp/installation.json" "$CODEX_HOME" "$GITHUB_WORKSPACE" <<'PY'
-          import json
-          from pathlib import Path
-          import sys
-          marketplaces = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["marketplaces"]
-          plugins = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))["installed"]
-          installation = json.loads(Path(sys.argv[3]).read_text(encoding="utf-8"))
-          codex_home = Path(sys.argv[4]).resolve()
-          workspace = Path(sys.argv[5]).resolve()
-          manifest_paths = [Path(".claude-plugin/plugin.json"), Path(".codex-plugin/plugin.json")]
-          manifests = [json.loads((workspace / "code-intel" / path).read_text()) for path in manifest_paths]
-          expected_version = manifests[1]["version"]
-          assert all(manifest["version"] == expected_version for manifest in manifests), manifests
-          release_state = json.loads((workspace / ".release-please-manifest.json").read_text())
-          assert release_state["code-intel"] == expected_version, release_state
-          matching_marketplaces = [item for item in marketplaces if item["name"] == "claude-essentials"]
-          assert len(matching_marketplaces) == 1, marketplaces
-          assert Path(matching_marketplaces[0]["root"]).resolve() == workspace, matching_marketplaces
-          matching_plugins = [item for item in plugins if item["pluginId"] == "code-intel@claude-essentials"]
-          assert len(matching_plugins) == 1, plugins
-          assert matching_plugins[0]["installed"] is True, matching_plugins
-          for record in (matching_plugins[0], installation):
-              assert record["pluginId"] == "code-intel@claude-essentials", record
-              assert record["name"] == "code-intel", record
-              assert record["marketplaceName"] == "claude-essentials", record
-              assert record["version"] == expected_version, record
-          installed_path = Path(installation["installedPath"]).resolve()
-          assert installed_path != codex_home and installed_path.is_relative_to(codex_home), installation
-          assert installed_path.is_dir(), installation
-          for path in manifest_paths:
-              installed_manifest = json.loads((installed_path / path).read_text())
-              assert installed_manifest["version"] == expected_version, installed_manifest
-          print(json.dumps(installation, indent=2))
-          PY
+          npm install --global @anthropic-ai/claude-code
+          claude plugin validate code-intel

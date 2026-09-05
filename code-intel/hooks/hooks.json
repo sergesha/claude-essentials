@@ -6,7 +6,7 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/code_intel.py\" hook-status",
-            "timeout": 55
+            "timeout": 300
           }
         ]
       }
@@ -17,7 +17,7 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/code_intel.py\" hook-prompt",
-            "timeout": 55
+            "timeout": 300
           }
         ]
       }
@@ -29,7 +29,7 @@
           {
             "type": "command",
             "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/code_intel.py\" hook-update",
-            "timeout": 55
+            "timeout": 300
           }
         ]
       }
