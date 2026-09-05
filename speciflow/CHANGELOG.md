@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.4](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.2.3...speciflow-v0.2.4) (2026-09-05)
+
+
+### Bug Fixes
+
+* **speciflow:** require concrete initialization previews ([#49](https://github.com/sergesha/claude-essentials/issues/49)) ([e932ab7](https://github.com/sergesha/claude-essentials/commit/e932ab7cb26c7c5cab50d2d6238c1bb1312998eb))
+
 ## [0.2.3](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.2.2...speciflow-v0.2.3) (2026-09-05)
 
 
