@@ -1,0 +1,45 @@
+name: code-intel
+
+on:
+  pull_request:
+    paths:
+      - "code-intel/**"
+      - ".claude-plugin/marketplace.json"
+      - ".agents/plugins/marketplace.json"
+      - "release-please-config.json"
+      - ".release-please-manifest.json"
+      - ".github/workflows/code-intel.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "code-intel/**"
+      - ".claude-plugin/marketplace.json"
+      - ".agents/plugins/marketplace.json"
+      - "release-please-config.json"
+      - ".release-please-manifest.json"
+      - ".github/workflows/code-intel.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Runtime and package tests
+        run: python3 -B -m unittest discover -s code-intel/tests -v
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Claude package validation
+        run: |
+          npm install --global @anthropic-ai/claude-code
+          claude plugin validate code-intel

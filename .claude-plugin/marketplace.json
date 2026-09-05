@@ -31,6 +31,10 @@
       "description": "Coordinated specification-driven workflow guidance for coding agents.",
       "source": "./speciflow",
       "category": "developer-tools"
+    },
+    {
+      "name": "code-intel",
+      "source": "./code-intel"
     }
   ]
 }
