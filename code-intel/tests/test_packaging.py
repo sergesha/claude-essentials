@@ -119,6 +119,19 @@ def read_json(relative):
     return json.loads((REPO / relative).read_text())
 
 
+def snapshot_tree(root):
+    snapshot = {}
+    for path in [root, *root.rglob("*")]:
+        if path.is_symlink():
+            content = ("symlink", os.readlink(path))
+        elif path.is_dir():
+            content = ("directory", None)
+        else:
+            content = ("file", path.read_bytes())
+        snapshot[path.relative_to(root).as_posix()] = (path.lstat().st_mode, content)
+    return snapshot
+
+
 class PackagingTests(unittest.TestCase):
     def setUp(self):
         self.claude = read_json("code-intel/.claude-plugin/plugin.json")
@@ -136,7 +149,11 @@ class PackagingTests(unittest.TestCase):
         subprocess.run(["git", "config", "user.email", "smoke@example.invalid"], cwd=self.consumer_repo, check=True)
         (self.consumer_repo / "source.py").write_text("value = 1\n")
         subprocess.run(["git", "add", "source.py"], cwd=self.consumer_repo, check=True)
-        subprocess.run(["git", "-c", "commit.gpgsign=false", "commit", "-qm", "initial"], cwd=self.consumer_repo, check=True)
+        subprocess.run(
+            ["git", "-c", "commit.gpgsign=false", "-c", "maintenance.auto=false",
+             "-c", "gc.auto=0", "commit", "-qm", "initial"],
+            cwd=self.consumer_repo, check=True,
+        )
         self.bin_dir = self.base / "fake bin"
         self.bin_dir.mkdir()
         write_fake_tool(self.bin_dir, "codegraph", "1.6.0")
@@ -160,6 +177,14 @@ class PackagingTests(unittest.TestCase):
             cwd=cwd or self.consumer_repo, input=None if payload is None else json.dumps(payload),
             capture_output=True, text=True, timeout=20, env=env,
         )
+
+    def assert_installed_project_is_trusted(self):
+        markers = [json.loads(path.read_text()) for path in self.data_dir.glob("*.json")]
+        self.assertTrue(any(marker.get("root") == str(self.consumer_repo.resolve())
+                            and marker.get("status") == "success" for marker in markers), markers)
+        trusted = self.run_installed_copy("project-status", str(self.consumer_repo))
+        self.assertEqual(trusted.returncode, 0, trusted.stderr)
+        self.assertIs(json.loads(trusted.stdout)["healthy"], True)
 
     def test_exact_distributable_file_set(self):
         self.assertEqual(repository_distributable_files(), EXPECTED_DISTRIBUTABLE_FILES)
@@ -193,9 +218,12 @@ class PackagingTests(unittest.TestCase):
     def test_installed_layout_smoke(self):
         self.assertEqual(repository_distributable_files(), EXPECTED_DISTRIBUTABLE_FILES)
         self.setUp_installed_copy()
+        before_doctor = [snapshot_tree(root) for root in (self.consumer_repo, self.data_dir)]
         doctor = self.run_installed_copy("doctor")
         self.assertNotEqual(doctor.returncode, 0)
-        json.loads(doctor.stdout)
+        self.assertIs(json.loads(doctor.stdout)["healthy"], False)
+        self.assertEqual(
+            [snapshot_tree(root) for root in (self.consumer_repo, self.data_dir)], before_doctor)
 
         for engine in ("codegraph", "crg"):
             log = self.base / (engine + ".cwd")
@@ -211,12 +239,7 @@ class PackagingTests(unittest.TestCase):
         self.assertTrue((self.consumer_repo / ".codegraph").is_dir())
         self.assertTrue((self.consumer_repo / ".code-review-graph").is_dir())
 
-        markers = [json.loads(path.read_text()) for path in self.data_dir.glob("*.json")]
-        self.assertTrue(any(marker.get("root") == str(self.consumer_repo.resolve())
-                            and marker.get("status") == "success" for marker in markers))
-        trusted = self.run_installed_copy("project-status", str(self.consumer_repo))
-        self.assertEqual(trusted.returncode, 0, trusted.stderr)
-        json.loads(trusted.stdout)
+        self.assert_installed_project_is_trusted()
 
         prompt = self.run_installed_copy(
             "hook-prompt", payload={"hook_event_name": "UserPromptSubmit",
@@ -256,6 +279,7 @@ class PackagingTests(unittest.TestCase):
                         for item in before) + 1,
                     (tool_name, executable, operation, before, after),
                 )
+            self.assert_installed_project_is_trusted()
 
         self.assertEqual(
             {p.relative_to(self.installed).as_posix() for p in self.installed.rglob("*") if p.is_file()},
@@ -445,6 +469,59 @@ class PackagingTests(unittest.TestCase):
             "codex plugin add code-intel@claude-essentials --json",
         ):
             self.assertIn(command, workflow)
+
+    def test_ci_codex_assertions_validate_structured_installation(self):
+        workflow = (REPO / ".github/workflows/code-intel.yml").read_text()
+        validator = textwrap.dedent(re.search(
+            r"<<'PY'\n(.*?)^          PY$", workflow, re.M | re.S).group(1))
+        with tempfile.TemporaryDirectory(prefix="code-intel validation ") as temporary:
+            base = Path(temporary).resolve()
+            host_home = base / "codex-home"
+            installed_path = host_home / "plugins/cache/claude-essentials/code-intel/0.1.0"
+            installed_path.mkdir(parents=True)
+            marketplace = {"marketplaces": [{
+                "name": "claude-essentials", "root": str(REPO),
+                "marketplaceSource": {"sourceType": "local", "source": str(REPO)},
+            }]}
+            installed = {
+                "pluginId": "code-intel@claude-essentials", "name": "code-intel",
+                "marketplaceName": "claude-essentials", "version": "0.1.0",
+                "installed": True, "enabled": True,
+                "source": {"source": "local", "path": str(PACKAGE)},
+                "marketplaceSource": {"sourceType": "local", "source": str(REPO)},
+                "installPolicy": "AVAILABLE", "authPolicy": "ON_INSTALL",
+            }
+            installation = {
+                "pluginId": "code-intel@claude-essentials", "name": "code-intel",
+                "marketplaceName": "claude-essentials", "version": "0.1.0",
+                "installedPath": str(installed_path), "authPolicy": "ON_INSTALL",
+            }
+
+            def validate(marketplace_records, plugin_records, install_record):
+                paths = [base / name for name in ("marketplaces.json", "plugins.json", "installation.json")]
+                for path, value in zip(paths, (marketplace_records, plugin_records, install_record)):
+                    path.write_text(json.dumps(value))
+                return subprocess.run(
+                    [sys.executable, "-B", "-c", validator, *map(str, paths), str(host_home), str(REPO)],
+                    capture_output=True, text=True, timeout=10,
+                    env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+                )
+
+            valid = validate(marketplace, {"installed": [installed], "available": []}, installation)
+            self.assertEqual(valid.returncode, 0, valid.stderr)
+            invalid_cases = {
+                "wrong listed version": (marketplace, {"installed": [{**installed, "version": "0.2.0"}]}, installation),
+                "wrong added version": (marketplace, {"installed": [installed]}, {**installation, "version": "0.2.0"}),
+                "outside isolated home": (marketplace, {"installed": [installed]}, {**installation, "installedPath": str(REPO)}),
+                "home prefix sibling": (marketplace, {"installed": [installed]}, {**installation, "installedPath": str(base / "codex-home-other/plugin")}),
+                "unrelated installed plugin": (marketplace, {"installed": [{**installed, "pluginId": "other@claude-essentials", "name": "other"}], "available": [installed]}, installation),
+                "unrelated marketplace": ({"marketplaces": [{"name": "other", "root": "claude-essentials"}]}, {"installed": [installed]}, installation),
+                "wrong add identity": (marketplace, {"installed": [installed]}, {**installation, "pluginId": "other@claude-essentials"}),
+            }
+            for reason, records in invalid_cases.items():
+                with self.subTest(reason=reason):
+                    result = validate(*records)
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
 
 
 if __name__ == "__main__":
