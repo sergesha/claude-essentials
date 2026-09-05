@@ -185,6 +185,8 @@ def _validate_marker(root: Path, value: object) -> FreshnessMarker:
             or (value["head"] and not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value["head"]))
             or (value["schema_version"] == 2 and "crg" in versions
                 and (candidates is None or not value["head"]))
+            or (value["schema_version"] == 2 and "crg" not in versions
+                and candidates is not None)
         ):
             raise CorruptState("Incomplete successful freshness marker.")
     return FreshnessMarker(**value)

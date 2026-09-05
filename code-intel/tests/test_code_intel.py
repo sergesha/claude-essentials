@@ -136,6 +136,34 @@ class StateTests(ControllerCase):
                     m.read_marker(self.repo, data)
                 self.assertEqual(snapshot(self.base), before)
 
+    def test_codegraph_only_success_with_candidates_is_corrupt_and_preserved(self):
+        m = self.api()
+        ProjectCase.install_fake_tools(self)
+        m.mutate_project(self.repo, operation="setup", force=False, deadline=time.monotonic() + 15)
+        data = m.select_data_location(os.environ, read_only=True)
+        state = m.state_path(self.repo, data)
+        value = json.loads(state.read_text())
+        del value["versions"]["crg"], value["index_fingerprints"]["crg"]
+        for candidates in (["stale.py"], []):
+            value["crg_candidates"] = candidates
+            for operation in ("read", "status", "mutation"):
+                with self.subTest(candidates=candidates, operation=operation):
+                    original = json.dumps(value).encode()
+                    state.write_bytes(original)
+                    before = snapshot(self.base)
+                    if operation == "read":
+                        with self.assertRaises(m.CorruptState):
+                            m.read_marker(self.repo, data)
+                    elif operation == "status":
+                        report = m.observe_project(self.repo, deadline=time.monotonic() + 10)
+                        self.assertFalse(report["healthy"])
+                    else:
+                        with self.assertRaises(m.CorruptState):
+                            m.mutate_project(self.repo, operation="update", force=False,
+                                             deadline=time.monotonic() + 15)
+                    self.assertEqual(state.read_bytes(), original)
+                    self.assertEqual(snapshot(self.base), before)
+
     def test_valid_legacy_success_is_stale_without_rewriting(self):
         m = self.api()
         directory = self.base / "bin"
