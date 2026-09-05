@@ -161,6 +161,7 @@ SpeciFlow identity registry or conversion algorithm.
 
 ## Live queries
 
-Read `status` live from the four native tools and persist nothing.
-
-Derive `next` live as one non-authoritative action, present it for approval, and persist no recommendation, phase, cursor, or queue.
+Use [diagnostics.md](diagnostics.md) for live `status` and `next`, including
+owner-separated results and the applicable approval boundary. Both reports
+remain read-only: they neither execute a proposed action nor persist
+recommendations, phases, cursors, or queues.
