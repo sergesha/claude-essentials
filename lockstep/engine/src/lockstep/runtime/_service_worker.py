@@ -161,13 +161,14 @@ class _ServiceWorker:
         run_id: str,
         reason: str,
         *,
+        step: str | None = None,
         session_id: str | None,
         project: str,
     ) -> dict[str, Any]:
         checked_reason = validate_reason_payload(reason)
         return self._resume_worker(
             run_id,
-            None,
+            step,
             {
                 "schema": "lockstep.worker-result/v1",
                 "outcome": "FAIL",
@@ -179,11 +180,16 @@ class _ServiceWorker:
         )
 
     def scenario_abort(
-        self, run_id: str, *, session_id: str | None, project: str
+        self,
+        run_id: str,
+        *,
+        step: str | None = None,
+        session_id: str | None,
+        project: str,
     ) -> dict[str, Any]:
         return self._resume_worker(
             run_id,
-            None,
+            step,
             {"schema": "lockstep.worker-result/v1", "outcome": "ABORTED"},
             manual_submission=ManualSubmission.build("ABORTED"),
             session_id=session_id,
@@ -208,12 +214,22 @@ class _ServiceWorker:
         run_id: str,
         reason: str,
         *,
+        step: str | None = None,
         session_id: str | None = None,
         project: str,
     ):
         return self.scenario_escalate(
-            run_id, reason, session_id=session_id, project=project
+            run_id, reason, step=step, session_id=session_id, project=project
         )
 
-    def abort(self, run_id: str, *, session_id: str | None = None, project: str):
-        return self.scenario_abort(run_id, session_id=session_id, project=project)
+    def abort(
+        self,
+        run_id: str,
+        *,
+        step: str | None = None,
+        session_id: str | None = None,
+        project: str,
+    ):
+        return self.scenario_abort(
+            run_id, step=step, session_id=session_id, project=project
+        )

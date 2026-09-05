@@ -49,7 +49,7 @@ from lockstep.recipe.loader import RecipeError, RecipeLoader
 from lockstep.runtime import sessions
 from lockstep.runtime._hook_posttool_decision import (
     _posttool_identity,
-    _worker_awaiting,
+    _bindable_start,
 )
 from lockstep.runtime._hook_pretool_decision import decide_pretool
 from lockstep.runtime._hook_stop_decision import (
@@ -336,13 +336,13 @@ def hook_posttool(stdin_json: dict, state_dir: Path) -> None:
         if identity is None:
             return
         run_id, session_id = identity
-        # Only a real, still worker-awaiting native run is bindable. Native
-        # children have no public run or credential identity.
+        # Bind the newly started root before asynchronous engine work reaches
+        # its first manual step. Native children have no public run identity.
         projected = {
             binding.public_run_id: status
             for binding, status in read_only_statuses(state_dir)
         }
-        if not _worker_awaiting(projected, run_id):
+        if not _bindable_start(projected, run_id):
             return
         sessions.touch(state_dir, run_id, session_id, _session_stale_minutes())
     except Exception:  # noqa: BLE001, S110 - observer hook must fail open

@@ -28,6 +28,25 @@ def _parked(value: object = "Work?") -> NativeSnapshot:
     )
 
 
+def test_worker_brief_reports_declared_checks_without_exposing_internal_state():
+    parked = _parked({
+        "step": "review",
+        "task": "Review the change.",
+        "exit_criterion": "The review is recorded.",
+        "evidence_schema": {"type": "object", "required": ["path"]},
+        "checks": [{"type": "file_exists", "path_from": "path"}],
+        "status": "completed",
+        "private_context": "not a public brief",
+    })
+    public = project_status(_binding(), parked, (), ()).to_dict()
+    assert public["status"] == "awaiting"
+    assert public["task"] == "Review the change."
+    assert public["checks"] == [{"type": "file_exists", "path_from": "path"}]
+    assert "private_context" not in public
+    public["evidence_schema"]["required"].clear()
+    assert project_status(_binding(), parked, (), ()).to_dict()["evidence_schema"]["required"] == ["path"]
+
+
 def test_child_correlation_is_opaque_and_contains_no_native_namespace() -> None:
     coordinate = NativeCoordinate(
         "thread-1", "checkpoint-secret", "child:namespace-secret",

@@ -1,6 +1,9 @@
 # lockstep — design spec
 
-Date: 2026-08-07. Status: implemented; Claude/Codex parity updated 2026-08-19.
+Original design: 2026-08-07; Claude/Codex parity updated 2026-08-19.
+The installed product contract below and the [README](../README.md) describe
+the current interface. Later historical design sections explain earlier
+decisions and are not a substitute for current CLI help or runtime contracts.
 Final home: `sergesha/claude-essentials` (this file moves there with the implementation).
 
 ## Installed product contract
@@ -52,6 +55,15 @@ same-name workflow source is admitted, checked, rendered, estimated, recovered,
 and run without a mode marker. Neither generated nor manual recipe text grants
 effect authority.
 
+The [owner runtime setup](../README.md#owner-runtime-setup) documents executable
+and credential prerequisites, exact requirement listing, and owner-selected
+provisioning. Both packaged templates dispatch managed Codex children through
+the engine. Worker status projects the current admitted interrupt's declared
+task, evidence, artifact, and write contracts; parallel pending briefs appear
+under `parallel_progress.steps`. Overall ownership still controls when work
+may proceed. Shell callers bind a new run with `scenario start --session-id`
+and reuse that identity for mutations; plugin hosts bind through PostToolUse.
+
 ## Problem
 
 Autonomous coding agents (esp. weaker models) drop multi-step processes: skip
@@ -69,10 +81,10 @@ Build **lockstep**: a self-sufficient flow-enforcement plugin.
 - **Engine**: yamlgraph (YAML recipe format, compiled to LangGraph) run inside
   an MCP server. No hand-rolled FSM. LangGraph `interrupt()` + checkpointer
   give durable park/resume between steps.
-- **Control model**: "control, not inversion" — the agent stays a live session
-  doing the work; the engine owns only run state and step transitions. The
-  agent is told exactly one current step + exit criterion; transitions happen
-  only through engine-validated evidence.
+- **Control model**: a host worker performs manual steps; the engine owns run
+  state, validation, recovery, managed child invocation, and runtime effects.
+  Worker instructions come from admitted pending interrupts; transitions happen
+  through validated evidence and durable effect results.
 - **Checkpoints**: SqliteSaver (native LangGraph), one `.db` per run.
   MemorySaver in unit tests only. No Redis, no external services.
 - **Distribution**: the installed plugin files ARE the distribution. Claude
@@ -313,14 +325,16 @@ and compiles ONLY from that snapshot for the run's lifetime. The live file
 in `<project>/.lockstep/recipes/` is agent-writable by definition; without
 the snapshot, a mid-run edit silently swaps the policy the run is judged by
 (and even benign edits desync graph structure from the checkpoint). Profile
-validation runs on the snapshot. README additionally advises consumers to
-deny agent writes to `.lockstep/recipes/**`.
+validation runs on the snapshot. Protect owner state and workflow inputs
+according to the Local unsandboxed single-user threat model; editing the live
+recipe does not replace the admitted run definition.
 
-Subagents (e.g. code review): dispatched by the agent, not the engine. The
-brief instructs "get an independent review, report at `.lockstep/review.md`";
-the exit criterion checks the artifact. Engine-side agent invocation
-(yamlgraph `copilot`-node style) is explicitly rejected — that is inversion
-again, plus keys inside the engine.
+Independent review can be host-performed work when a manual brief requests it.
+The packaged templates instead use declared native child workflows and managed
+Codex invocation by the engine, under exact owner runtime grants. Their result
+artifacts, lineage, and publication receipts pass through the runtime's durable
+validation boundaries. Arbitrary recipe-selected Python or LLM nodes do not
+become executable merely because a recipe declares them.
 
 ## Recipe authoring (instruction skill, v1)
 
@@ -470,9 +484,12 @@ status signal", not "process compliance".
 - Unit: MemorySaver runs of fixture recipes; profile_check on a corpus of
   good/broken recipes; evidence schema accept/reject; example recipes pass
   `validate_recipe`.
-- Integration: uvx-installed server + SQLite + fake agent (script driving the
-  tools) — full cycle start→done→retry→escalate→server-restart→resume
-  (durability proof).
+- Installed distribution: a clean wheel and staged plugin exercise authoring
+  from foreign working directories and installed import/resource isolation.
+- Runtime/integration: controlled fixtures and providers exercise validation,
+  retry, terminal lifecycle, restart/recovery, effects, and publication.
+  These tests do not establish a live authenticated Codex end-to-end review;
+  see the [verification scope](../README.md#development-verification).
 - Hook tests: Stop-hook blocks/passes by exit code.
 
 ## Out of scope (v1)

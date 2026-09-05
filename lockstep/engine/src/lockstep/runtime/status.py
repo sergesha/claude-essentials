@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
@@ -78,6 +79,24 @@ def _child_annotations(
     return (("child_run_id", f"child-{digest.hexdigest()}"),)
 
 
+def _worker_brief(interrupt: NativeInterrupt) -> dict[str, Any]:
+    """Project work instructions from the captured interrupt, not live sources."""
+    value = interrupt.value
+    if not isinstance(value, dict):
+        return {}
+    brief = {
+        key: deepcopy(value[key])
+        for key in (
+            "task", "exit_criterion", "evidence_schema", "checks", "artifact_contract"
+        )
+        if key in value
+    }
+    descriptor = _descriptor(interrupt)
+    if descriptor is not None and descriptor.get("kind") == "manual":
+        brief["writes"] = deepcopy(descriptor.get("writes", []))
+    return brief
+
+
 def _parallel_projection(
     binding: RunBinding, snapshot: NativeSnapshot, effects: object
 ) -> ScenarioStatus | None:
@@ -96,6 +115,7 @@ def _parallel_projection(
     deadlines: list[str | None] = []
     engine_owned = False
     worker_steps: list[str] = []
+    briefs: list[dict[str, Any]] = []
     for interrupt in snapshot.pending:
         raw = _descriptor(interrupt)
         if raw is None:
@@ -103,6 +123,11 @@ def _parallel_projection(
             worker_steps.append(
                 str(value.get("step") or "") if isinstance(value, dict) else ""
             )
+            briefs.append({
+                "step": worker_steps[-1],
+                **_worker_brief(interrupt),
+                **dict(_child_annotations(binding, interrupt)),
+            })
             phases["worker"] = phases.get("worker", 0) + 1
             deadlines.append(None)
             continue
@@ -127,12 +152,21 @@ def _parallel_projection(
         deadlines.append(None if deadline is None else deadline.isoformat())
         if raw.get("kind") != "manual" or phase != "prepared":
             engine_owned = True
+        else:
+            value = interrupt.value
+            briefs.append({
+                "step": value.get("step") or logical_id,
+                **_worker_brief(interrupt),
+                **dict(_child_annotations(binding, interrupt)),
+            })
     progress = {
         "pending": len(snapshot.pending),
         "phases": {key: phases[key] for key in sorted(phases)},
         "operations": operations,
         "deadlines": deadlines,
     }
+    if briefs:
+        progress["steps"] = briefs
     if engine_owned:
         return ScenarioStatus(
             "running",
@@ -205,7 +239,7 @@ def _manual_projection(
         "worker",
         "edit_then_scenario_done",
         step=step or parsed.logical_id,
-        annotations=child_annotations,
+        annotations=(*child_annotations, *_worker_brief(interrupt).items()),
     )
 
 
@@ -274,7 +308,7 @@ def _single_pending_projection(
             "worker",
             "edit_then_scenario_done",
             step=step,
-            annotations=child_annotations,
+            annotations=(*child_annotations, *_worker_brief(interrupt).items()),
         )
     kind = descriptor.get("kind")
     if kind == "manual":

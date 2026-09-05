@@ -32,6 +32,15 @@ Prefer a packaged template for common work:
 - `reviewed-change` for an implemented change followed by independent review.
 - `parallel-review` for independent review branches joined by the parent.
 
+Both templates select Codex for managed reviews, even under a Claude host.
+`reviewed-change` assumes pytest and `src/`/`tests/`; adapt the source contract
+to the target project before compilation. The
+[README owner setup](../../README.md#owner-runtime-setup) contains the exact
+launcher, prerequisites, requirement listing, and provisioning example.
+Compilation and checking do not grant execution authority or validate live
+credentials. Have the owner review the compiled requirements and select grants
+before starting a workflow with managed or pinned effects.
+
 Use a workflow source at `.lockstep/workflows/NAME.workflow.yaml` when the DSL
 can express the contract. Compilation writes the canonical yamlgraph recipe,
 dependency manifest, and source map under `.lockstep/recipes/`.
