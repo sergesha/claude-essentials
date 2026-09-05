@@ -100,18 +100,20 @@ def test_events_whitelist_fields_and_never_expose_state_or_effect_results() -> N
             updated_at=datetime(2026, 8, 21, 12, 0, 1, tzinfo=UTC),
             result={"stdout": secret},
             request_digest=secret,
+            fixed_error_code="manifest_invalid",
         ),
     )
 
     result = project_events(native, effects, limit=10_000)
 
     assert secret not in repr(result)
+    assert result[1]["fixed_error_code"] == "manifest_invalid"
     assert set(result[0]) == {
         "source", "checkpoint_id", "checkpoint_ns", "created_at", "next",
         "pending_count", "error_count",
     }
     assert set(result[1]) == {
-        "source", "effect_id", "effect_kind", "phase", "updated_at",
+        "source", "effect_id", "effect_kind", "phase", "updated_at", "fixed_error_code",
     }
 
 

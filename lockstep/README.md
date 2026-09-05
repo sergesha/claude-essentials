@@ -55,6 +55,19 @@ codex plugin marketplace add /absolute/path/to/claude-essentials --json
 codex plugin add lockstep@claude-essentials --json
 ```
 
+For a custom state location, export an absolute path in the same shell
+used for Lockstep provisioning and for starting Codex from the target project:
+
+```bash
+export LOCKSTEP_STATE_DIR=/absolute/path/to/owner-state
+codex
+```
+
+Restart Codex after changing this value. The host forwards `LOCKSTEP_STATE_DIR`
+to the bundled MCP server; the plugin does not store or choose its value.
+When unset, state defaults to `~/.lockstep`. Keep recipes in the active
+project's `.lockstep/recipes` for the CLI/provisioning/plugin workflow.
+
 Start Codex interactively once and approve the installed hooks when prompted.
 Do not use hook-trust or approval bypass flags for normal operation.
 
@@ -331,8 +344,12 @@ the same durable receipt and cannot retarget the consent.
 
 `LOCKSTEP_STATE_DIR` defaults to `~/.lockstep` and holds durable checkpoints,
 run records, snapshots, artifact metadata, effect journals, consent state, and
-policy bindings. `LOCKSTEP_RECIPES` defaults to the active project's
-`.lockstep/recipes` directory. Keep owner state outside the project and protect
+policy bindings. MCP recipe lookup supports a `LOCKSTEP_RECIPES` override,
+defaulting to the active project's `.lockstep/recipes` directory. This override
+does not relocate CLI authoring, runtime provisioning, scenario, or consent
+operations: those still use project-local recipes. The bundled Codex plugin
+therefore uses the project-local recipe directory, not this override.
+Keep owner state outside the project and protect
 it, the installed plugin, and workflow sources according to the threat model.
 
 The runtime snapshots admitted workflow inputs and uses durable checkpoints and
@@ -340,6 +357,13 @@ journals. After interruption, status and command operations recover the same
 run rather than inventing a new one. Delivered effects and accepted publications
 are replay-safe: the runtime verifies their durable identity and lineage before
 returning an existing result.
+
+To investigate an escalated run, use `lockstep scenario events RUN_ID` or the
+`scenario_events` MCP tool. Failed effect events include `fixed_error_code`
+when a categorized failure was recorded; for example, `manifest_invalid`
+indicates a manifest validation failure. Events do not expose effect results
+or raw exception text. Not every escalation has an effect error code: an
+intentional failure transition or a native task error may have none.
 
 ## Development verification
 
