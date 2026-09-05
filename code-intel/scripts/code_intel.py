@@ -89,6 +89,13 @@ class FreshnessMarker:
     status: Literal["pending", "success", "failed"]
 
 
+@dataclass(frozen=True)
+class ReadinessResult:
+    root: Path
+    tools: Mapping[str, Path]
+    marker: FreshnessMarker
+
+
 def select_data_location(env: Mapping[str, str], *, read_only: bool) -> DataLocation:
     source = next(
         (name for name in ("PLUGIN_DATA", "CLAUDE_PLUGIN_DATA") if env.get(name)),
@@ -556,7 +563,8 @@ def _wait_group_exit(process: subprocess.Popen[str]) -> None:
 
 
 def run_child(
-    argv: Sequence[str], *, cwd: Path | None, timeout: float
+    argv: Sequence[str], *, cwd: Path | None, timeout: float,
+    input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run an argv-only child; finish all group members before returning.
 
@@ -575,6 +583,7 @@ def run_child(
     try:
         process = subprocess.Popen(
             args, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            stdin=subprocess.PIPE if input_text is not None else None,
             text=False, shell=False,
             start_new_session=True,
         )
@@ -582,7 +591,10 @@ def run_child(
         raise UserError(f"Cannot start {args[0]}: {exc}") from exc
     timed_out = False
     try:
-        stdout, stderr = process.communicate(timeout=timeout)
+        stdout, stderr = process.communicate(
+            input=None if input_text is None else input_text.encode("utf-8"),
+            timeout=timeout,
+        )
     except subprocess.TimeoutExpired:
         timed_out = True
         _kill_group(process)
@@ -778,6 +790,138 @@ def mutate_project(
                 raise
 
 
+@contextmanager
+def ensure_ready(
+    path: Path, *, force_sync: bool, deadline: float
+) -> Iterator[ReadinessResult]:
+    """Hold readiness ownership through caller work and final revalidation."""
+    scope = discover_scope(path, deadline=deadline)
+    if scope.kind == "umbrella":
+        raise UserError(
+            "Umbrella scope is not initialized automatically; request authorization for setup-project."
+        )
+    if scope.kind not in ("repository", "worktree"):
+        raise UserError("No Git checkout available.")
+    root = scope.root
+    data = select_data_location(os.environ, read_only=False)
+    with root_lock(root, data, deadline):
+        previous = read_marker(root, data)  # Preserve corruption and another lock owner's state.
+        pending = FreshnessMarker(str(root), "", {}, "", {}, "pending")
+        try:
+            tools = {
+                name: resolve_verified_tool(spec, deadline=deadline)
+                for name, spec in TOOLS.items()
+            }
+            indexes_exist = all((root / name).is_dir() for name in INDEX_DIRS.values())
+            observed = capture(root, tools, deadline) if indexes_exist else None
+            reuse = (
+                not force_sync and previous is not None
+                and previous.status == "success" and previous == observed
+            )
+            if not reuse:
+                write_marker(root, data, pending)
+                before = capture_checkout(root, deadline)
+                initialize_indexes_locked(root, tools, force=False, deadline=deadline)
+                update_indexes_locked(root, tools, deadline=deadline)
+                observed = capture(root, tools, deadline)
+                if before != capture_checkout(root, deadline):
+                    raise UserError("Checkout changed during indexing.")
+            yield ReadinessResult(root, tools, observed)
+            if capture(root, tools, deadline) != observed:
+                raise UserError("Checkout or indexes changed during hook completion.")
+            write_marker(root, data, observed)
+        except Exception as exc:
+            try:
+                write_marker(root, data, replace(pending, status="failed"))
+            except Exception as state_error:
+                raise UserError(f"{exc}; additionally, {state_error}") from exc
+            raise
+
+
+HOOK_EVENTS = {
+    "hook-status": "SessionStart",
+    "hook-prompt": "UserPromptSubmit",
+    "hook-update": "PostToolUse",
+}
+WRITE_TOOLS = {"Bash", "Write", "Edit", "NotebookEdit", "apply_patch"}
+ROUTING_CONTEXT = (
+    "Use CodeGraph first for verbatim symbol source, callers, callees, call paths, "
+    "and dynamic dispatch. Use code-review-graph first for review, blast radius, "
+    "affected flows, architecture, communities, semantic search, and refactoring. "
+    "Fall back to normal file/search tools when the selected graph lacks the answer. "
+    "Do not use an index when readiness is missing, pending, failed, timed out, "
+    "or stale; use normal file/search tools until readiness is established."
+)
+
+
+def hook_response(event: str, text: str) -> dict[str, object]:
+    return {"hookSpecificOutput": {"hookEventName": event, "additionalContext": text}}
+
+
+def _hook_fallback(event: str, error: Exception) -> dict[str, object]:
+    diagnostic = " ".join(str(error).split())[:600]
+    return hook_response(
+        event, f"Code intelligence unavailable: {diagnostic} "
+        "Use normal file/search tools until readiness is established."
+    )
+
+
+def extract_prompt_context(stdout: str) -> str:
+    try:
+        payload = json.loads(stdout)
+        output = payload.get("hookSpecificOutput") if isinstance(payload, dict) else None
+        text = output.get("additionalContext") if isinstance(output, dict) else None
+        if not isinstance(text, str):
+            raise ValueError("missing string additionalContext")
+        return text
+    except (ValueError, RecursionError) as exc:
+        raise UserError("CodeGraph prompt-hook returned malformed context.") from exc
+
+
+def handle_hook(
+    command: str, payload: object, *, cwd: Path | None = None
+) -> dict[str, object]:
+    event = HOOK_EVENTS.get(command, "SessionStart")
+    deadline = time.monotonic() + 45
+    try:
+        if command not in HOOK_EVENTS:
+            raise UserError("Unknown lifecycle hook.")
+        if not isinstance(payload, dict):
+            raise UserError("Hook payload must be a JSON object.")
+        if "cwd" in payload:
+            value = payload["cwd"]
+            if not isinstance(value, str) or not value or "\0" in value:
+                raise UserError("Hook cwd must be a nonempty directory string.")
+            path = Path(value)
+        else:
+            path = cwd if cwd is not None else Path.cwd()
+        if command == "hook-update":
+            tool = payload.get("tool_name", payload.get("toolName"))
+            if not isinstance(tool, str):
+                raise UserError("PostToolUse requires a string tool name.")
+            if tool not in WRITE_TOOLS:
+                return hook_response(event, "")
+        with ensure_ready(path, force_sync=command == "hook-update", deadline=deadline) as ready:
+            text = ROUTING_CONTEXT
+            if command == "hook-prompt":
+                try:
+                    result = run_child(
+                        [str(ready.tools["codegraph"]), "prompt-hook"],
+                        cwd=ready.root, timeout=remaining(deadline),
+                        input_text=json.dumps(payload),
+                    )
+                except UserError as exc:
+                    # Child stdout/stderr may contain provisional graph context.
+                    # Keep it out of fail-open output even on a nonzero exit.
+                    reason = "timed out" if "timed out" in str(exc) else "failed"
+                    raise UserError(f"CodeGraph prompt-hook {reason}.") from exc
+                context = extract_prompt_context(result.stdout)
+                text = context + "\n\n" + text if context else text
+        return hook_response(event, text)
+    except Exception as exc:
+        return _hook_fallback(event, exc)
+
+
 def observe_project(path: Path, *, deadline: float) -> dict[str, object]:
     """Read-only diagnostic: no locking, storage creation, probes, or repair."""
     report: dict[str, object] = {
@@ -901,6 +1045,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     server = commands.add_parser("serve", help="Launch a verified MCP server")
     server.add_argument("engine", choices=TOOLS)
     commands.add_parser("doctor", help="Read-only diagnostics for the current directory")
+    for name in HOOK_EVENTS:
+        commands.add_parser(name, help="Fail-open lifecycle hook")
     status = commands.add_parser("project-status", help="Read-only project diagnostics")
     status.add_argument("path", type=Path)
     for name in ("setup-project", "setup-batch", "update-project", "update-batch"):
@@ -914,6 +1060,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             return install_tools()
         if args.command == "serve":
             return serve(args.engine)
+        if args.command in HOOK_EVENTS:
+            try:
+                response = handle_hook(args.command, json.load(sys.stdin))
+            except Exception as exc:
+                response = _hook_fallback(HOOK_EVENTS[args.command], exc)
+            print(json.dumps(response))
+            return 0
         if args.command in ("doctor", "project-status"):
             report = observe_project(
                 Path.cwd() if args.command == "doctor" else args.path,

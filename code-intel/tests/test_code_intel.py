@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+import select
 import shutil
 import signal
 import subprocess
@@ -772,6 +773,437 @@ class DoctorTests(ProjectCase):
         self.assertEqual(marker.head, "")
         self.assertEqual(set(marker.index_fingerprints), {"codegraph"})
         self.assertTrue(self.module.observe_project(umbrella, deadline=time.monotonic() + 10)["healthy"])
+
+
+class HookCase(ProjectCase):
+    def setUp(self):
+        super().setUp()
+        self.events = self.base / "hook-events"
+        self.events.write_text("")
+        self.prompt_input = self.base / "prompt-input"
+        directory = self.base / "hook-bin"
+        for name, version, index in (("codegraph", "1.6.0", ".codegraph"),
+                                      ("code-review-graph", "2.3.8", ".code-review-graph")):
+            self.executable(directory, name,
+                "import json, os, signal, subprocess, sys, time\nfrom pathlib import Path\n"
+                f"if sys.argv[1:] == ['--version']:\n print(os.environ.get('HOOK_VERSION', {version!r})); sys.exit(0)\n"
+                "root = Path.cwd(); command = sys.argv[1]\n"
+                "with open(os.environ['HOOK_EVENTS'], 'a') as log: log.write(json.dumps([str(root), sys.argv[1:]]) + '\\n')\n"
+                "mode = os.environ.get('HOOK_MODE', '')\n"
+                "if command == 'sync':\n"
+                " if mode == 'sync-fail': sys.exit(9)\n"
+                " if mode == 'sync-edit': (root / 'source.py').write_text('changed during sync')\n"
+                " if mode == 'sync-head': subprocess.run(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-qm', 'during sync'], check=True)\n"
+                "if command == 'prompt-hook':\n"
+                " Path(os.environ['HOOK_INPUT']).write_text(sys.stdin.read())\n"
+                " if mode == 'prompt-edit': (root / 'source.py').write_text('changed during prompt')\n"
+                " if mode == 'prompt-index': (root / '.codegraph' / 'graph.db').write_text('changed during prompt')\n"
+                " if mode == 'prompt-head': subprocess.run(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-qm', 'during prompt'], check=True)\n"
+                " if mode == 'prompt-malformed': print('not-json'); sys.exit(0)\n"
+                " print(json.dumps({'hookSpecificOutput': {'additionalContext': 'FRESH PROMPT CONTEXT'}, 'discard': 'UNTRUSTED FIELD'}), flush=True)\n"
+                " if mode == 'prompt-fail': sys.exit(9)\n"
+                " if mode == 'prompt-sleep': time.sleep(10)\n"
+                " if mode == 'prompt-descendant':\n"
+                "  child = subprocess.Popen([sys.executable, '-c', 'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(10)'])\n"
+                "  Path(os.environ['HOOK_PID']).write_text(str(child.pid)); time.sleep(10)\n"
+                " if mode == 'prompt-barrier':\n"
+                "  with open(os.environ['HOOK_NOTIFY'], 'w') as notify: notify.write('prompt\\n'); notify.flush()\n"
+                "  with open(os.environ['HOOK_RELEASE']) as release: release.readline()\n"
+                " sys.exit(0)\n"
+                f"index = root / {index!r}; index.mkdir(exist_ok=True)\n"
+                "with (index / 'graph.db').open('a') as db: db.write('indexed\\n')\n")
+        env = patch.dict(os.environ, {"PATH": str(directory) + os.pathsep + os.environ["PATH"],
+            "HOOK_EVENTS": str(self.events), "HOOK_INPUT": str(self.prompt_input)})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def require_readiness(self):
+        self.assertTrue(hasattr(self.module, "ensure_ready"), "readiness transaction is absent")
+
+    def require_hooks(self):
+        self.assertTrue(hasattr(self.module, "handle_hook"), "lifecycle adapters are absent")
+
+    def commands(self):
+        return [json.loads(line)[1][0] for line in self.events.read_text().splitlines()]
+
+    def marker(self, root=None):
+        data = self.module.select_data_location(os.environ, read_only=True)
+        return self.module.read_marker(root or self.repo, data)
+
+    def ready(self, root=None, force=False, deadline=None):
+        return self.module.ensure_ready(root or self.repo, force_sync=force,
+            deadline=deadline if deadline is not None else time.monotonic() + 10)
+
+    def warm(self):
+        with self.ready():
+            pass
+        self.events.write_text("")
+
+    def hook(self, command="hook-prompt", *, root=None, **extra):
+        payload = {"cwd": str(root or self.repo), "prompt": "explain source", **extra}
+        return self.module.handle_hook(command, payload)
+
+    def assert_fallback(self, response, event="UserPromptSubmit"):
+        self.assertEqual(set(response), {"hookSpecificOutput"})
+        output = response["hookSpecificOutput"]
+        self.assertEqual(output["hookEventName"], event)
+        self.assertIn("normal file/search tools", output["additionalContext"])
+        self.assertNotIn("FRESH PROMPT CONTEXT", json.dumps(response))
+        self.assertNotIn("use codegraph first", json.dumps(response).lower())
+        self.assertFalse(output.get("block", False))
+
+
+class ReadinessTests(HookCase):
+    def test_initializes_in_dependency_order_and_publishes_only_after_context_exit(self):
+        self.require_readiness()
+        with self.ready() as ready:
+            self.assertEqual(self.marker().status, "pending")
+            self.assertEqual(ready.root, self.repo.resolve())
+            self.assertEqual(set(ready.tools), {"codegraph", "crg"})
+            self.assertEqual(ready.marker.status, "success")
+            with self.assertRaises(dataclasses.FrozenInstanceError):
+                ready.root = self.base
+        self.assertEqual(self.commands(), ["init", "build", "sync", "update"])
+        self.assertEqual(self.marker(), ready.marker)
+
+    def test_matching_marker_reuses_indexes_but_final_capture_still_rejects_edits(self):
+        self.require_readiness()
+        self.warm()
+        with self.ready():
+            pass
+        self.assertEqual(self.commands(), [])
+        with self.assertRaisesRegex(self.module.UserError, "changed"):
+            with self.ready():
+                (self.repo / "source.py").write_text("late edit")
+        self.assertEqual(self.commands(), [])
+        self.assertEqual(self.marker().status, "failed")
+
+    def test_force_sync_updates_even_with_identical_clean_checkout(self):
+        self.require_readiness()
+        self.warm()
+        head = git(self.repo, "rev-parse", "HEAD")
+        with self.ready(force=True):
+            pass
+        self.assertEqual(self.commands(), ["sync", "update"])
+        self.assertEqual(self.marker().head, head)
+        self.assertEqual(git(self.repo, "status", "--porcelain"), "")
+
+    def test_offline_edits_index_changes_and_nonmatching_markers_resynchronize(self):
+        self.require_readiness()
+        self.warm()
+        data = self.module.select_data_location(os.environ, read_only=True)
+        for change in ("source", "index", "pending", "failed", "version"):
+            with self.subTest(change=change):
+                self.events.write_text("")
+                if change == "source":
+                    (self.repo / "source.py").write_text("offline edit")
+                elif change == "index":
+                    (self.repo / ".codegraph" / "graph.db").write_text("offline index")
+                else:
+                    marker = self.marker()
+                    marker = dataclasses.replace(marker, versions={"codegraph": "0.0.1", "crg": "2.3.8"}) if change == "version" else dataclasses.replace(marker, status=change)
+                    self.module.write_marker(self.repo, data, marker)
+                with self.ready():
+                    pass
+                self.assertEqual(self.commands(), ["sync", "update"])
+                self.assertEqual(self.marker().status, "success")
+
+    def test_deleted_indexes_are_recreated(self):
+        self.require_readiness()
+        self.warm()
+        for index, expected in ((".codegraph", ["init", "sync", "update"]),
+                                (".code-review-graph", ["build", "sync", "update"])):
+            with self.subTest(index=index):
+                shutil.rmtree(self.repo / index)
+                self.events.write_text("")
+                with self.ready():
+                    pass
+                self.assertEqual(self.commands(), expected)
+                self.assertEqual(self.marker().status, "success")
+
+    def test_clean_branch_switch_resynchronizes(self):
+        self.require_readiness()
+        self.warm()
+        previous = self.marker().head
+        git(self.repo, "checkout", "-qb", "other")
+        git(self.repo, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "--allow-empty", "-qm", "other")
+        self.assertEqual(git(self.repo, "status", "--porcelain"), "")
+        with self.ready():
+            pass
+        self.assertNotEqual(previous, self.marker().head)
+        self.assertEqual(self.commands(), ["sync", "update"])
+
+    def test_checkout_or_head_change_during_sync_leaves_failed_state(self):
+        self.require_readiness()
+        self.warm()
+        for mode in ("sync-edit", "sync-head", "sync-fail"):
+            with self.subTest(mode=mode), patch.dict(os.environ, {"HOOK_MODE": mode}), self.assertRaises(self.module.UserError):
+                with self.ready(force=True):
+                    self.fail("unstable indexing yielded readiness")
+            self.assertEqual(self.marker().status, "failed")
+
+    def test_tool_verification_failure_invalidates_writable_success(self):
+        self.require_readiness()
+        self.warm()
+        with patch.dict(os.environ, {"HOOK_VERSION": "9.9.9"}), self.assertRaisesRegex(self.module.UserError, "version"):
+            with self.ready():
+                self.fail("unverified tools yielded readiness")
+        self.assertEqual(self.marker().status, "failed")
+        self.assertEqual(self.commands(), [])
+
+    def test_corrupt_state_is_preserved_without_index_commands(self):
+        self.require_readiness()
+        self.warm()
+        data = self.module.select_data_location(os.environ, read_only=True)
+        path = self.module.state_path(self.repo, data)
+        path.write_text("broken state")
+        with self.assertRaises(self.module.CorruptState):
+            with self.ready():
+                pass
+        self.assertEqual(path.read_text(), "broken state")
+        self.assertEqual(self.commands(), [])
+
+    def test_fingerprint_failure_invalidates_writable_success(self):
+        self.require_readiness()
+        self.warm()
+        index = self.repo / ".codegraph" / "graph.db"
+        index.chmod(0)
+        self.addCleanup(index.chmod, 0o600)
+        with self.assertRaisesRegex(self.module.UserError, "Unreadable"):
+            with self.ready():
+                pass
+        self.assertEqual(self.marker().status, "failed")
+
+    def test_context_deadline_expires_without_success_publication(self):
+        self.require_readiness()
+        self.warm()
+        deadline = time.monotonic() + 2
+        with self.assertRaisesRegex(self.module.UserError, "deadline"):
+            with self.ready(deadline=deadline):
+                time.sleep(max(0, deadline - time.monotonic()) + .01)
+        self.assertEqual(self.marker().status, "failed")
+
+    def test_invalidation_error_preserves_original_diagnostic(self):
+        self.require_readiness()
+        self.warm()
+        write = self.module.write_marker
+        def fail(root, data, marker):
+            if marker.status == "failed":
+                raise self.module.UserError("failed state write denied")
+            write(root, data, marker)
+        with patch.object(self.module, "write_marker", side_effect=fail), patch.dict(os.environ, {"HOOK_MODE": "sync-fail"}), self.assertRaisesRegex(self.module.UserError, "status 9.*failed state write denied"):
+            with self.ready(force=True):
+                pass
+
+
+class HookTests(HookCase):
+    def test_session_initializes_and_prompt_preserves_original_payload_and_shared_json(self):
+        self.require_hooks()
+        response = self.module.handle_hook("hook-status", {}, cwd=self.repo)
+        self.assertEqual(response["hookSpecificOutput"]["hookEventName"], "SessionStart")
+        self.assertIn("CodeGraph", response["hookSpecificOutput"]["additionalContext"])
+        self.assertEqual(self.commands(), ["init", "build", "sync", "update"])
+        payload = {"cwd": str(self.repo), "hook_event_name": "UserPromptSubmit", "prompt": "explain source", "session_id": "original"}
+        response = self.module.handle_hook("hook-prompt", payload)
+        self.assertEqual(json.loads(self.prompt_input.read_text()), payload)
+        self.assertEqual(response["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit")
+        text = response["hookSpecificOutput"]["additionalContext"]
+        self.assertIn("FRESH PROMPT CONTEXT", text)
+        self.assertIn("CodeGraph", text)
+        self.assertIn("code-review-graph", text)
+        self.assertNotIn("UNTRUSTED FIELD", json.dumps(response))
+        self.assertEqual(self.commands(), ["init", "build", "sync", "update", "prompt-hook"])
+        self.assertEqual(self.marker().status, "success")
+
+    def test_prompt_bash_and_write_discover_new_worktrees_from_effective_cwd(self):
+        self.require_hooks()
+        for position, (command, tool) in enumerate((("hook-prompt", None), ("hook-update", "Bash"), ("hook-update", "Write"))):
+            with self.subTest(command=command, tool=tool):
+                linked = self.base / ("linked-" + str(position))
+                git(self.repo, "worktree", "add", "-qb", "branch-" + str(position), str(linked))
+                (linked / "nested").mkdir()
+                self.events.write_text("")
+                response = self.hook(command, root=linked / "nested", **({"toolName": tool} if tool else {}))
+                self.assertNotIn("unavailable", json.dumps(response).lower())
+                self.assertEqual(self.marker(linked).root, str(linked.resolve()))
+                self.assertEqual(self.marker(linked).status, "success")
+                expected = ["init", "build", "sync", "update"] + (["prompt-hook"] if tool is None else [])
+                self.assertEqual(self.commands(), expected)
+                self.assertFalse((linked / "nested" / ".codegraph").exists())
+
+    def test_every_bash_and_supported_write_forces_sync_for_same_head_and_clean_checkout(self):
+        self.require_hooks()
+        self.hook("hook-status")
+        head = git(self.repo, "rev-parse", "HEAD")
+        for tool in ("Bash", "Write", "Edit", "NotebookEdit", "apply_patch"):
+            with self.subTest(tool=tool):
+                self.events.write_text("")
+                response = self.hook("hook-update", tool_name=tool, tool_input={"command": "true"})
+                self.assertEqual(response["hookSpecificOutput"]["hookEventName"], "PostToolUse")
+                self.assertEqual(self.commands(), ["sync", "update"])
+                self.assertEqual(self.marker().head, head)
+                self.assertEqual(git(self.repo, "status", "--porcelain"), "")
+
+    def test_bash_restore_reset_and_arbitrary_mutation_resynchronize(self):
+        self.require_hooks()
+        self.hook("hook-status")
+        head = self.marker().head
+        for command in (("restore", "source.py"), ("reset", "--hard", "HEAD"), None):
+            with self.subTest(command=command):
+                (self.repo / "source.py").write_text("modified")
+                if command:
+                    git(self.repo, *command)
+                self.events.write_text("")
+                self.hook("hook-update", tool_name="Bash", tool_input={"command": "arbitrary script"})
+                self.assertEqual(self.commands(), ["sync", "update"])
+                self.assertEqual(self.marker().head, head)
+
+    def test_unsupported_post_tool_is_empty_without_indexing(self):
+        self.require_hooks()
+        response = self.hook("hook-update", tool_name="Read")
+        self.assertEqual(response, {"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": ""}})
+        self.assertEqual(self.commands(), [])
+        self.assertFalse((self.repo / ".codegraph").exists())
+
+    def test_non_git_umbrella_returns_authorization_guidance_without_initializing(self):
+        self.require_hooks()
+        response = self.hook(root=self.base)
+        self.assert_fallback(response)
+        self.assertIn("setup-project", json.dumps(response))
+        self.assertIn("authorization", json.dumps(response))
+        self.assertEqual(self.commands(), [])
+        self.assertFalse((self.base / ".codegraph").exists())
+        self.assertFalse((self.repo / ".codegraph").exists())
+
+    def test_unready_prompt_does_not_invoke_prompt_hook(self):
+        self.require_hooks()
+        self.hook("hook-status")
+        self.events.write_text("")
+        with patch.dict(os.environ, {"HOOK_VERSION": "9.9.9"}):
+            response = self.hook()
+        self.assert_fallback(response)
+        self.assertEqual(self.commands(), [])
+        self.assertEqual(self.marker().status, "failed")
+
+    def test_prompt_mutation_failed_exit_and_bad_output_discard_provisional_context(self):
+        self.require_hooks()
+        self.hook("hook-status")
+        for mode in ("prompt-edit", "prompt-index", "prompt-head", "prompt-fail", "prompt-malformed"):
+            with self.subTest(mode=mode), patch.dict(os.environ, {"HOOK_MODE": mode}):
+                response = self.hook()
+                self.assert_fallback(response)
+                self.assertEqual(self.marker().status, "failed")
+
+    def test_prompt_timeout_discards_stdout_and_reaps_descendants(self):
+        self.require_hooks()
+        self.hook("hook-status")
+        runner = self.module.run_child
+        def bounded(argv, **kwargs):
+            if "prompt-hook" in argv:
+                kwargs["timeout"] = min(kwargs["timeout"], .3)
+            return runner(argv, **kwargs)
+        pid_path = self.base / "descendant-pid"
+        for mode in ("prompt-sleep", "prompt-descendant"):
+            with self.subTest(mode=mode), patch.dict(os.environ, {"HOOK_MODE": mode, "HOOK_PID": str(pid_path)}), patch.object(self.module, "run_child", side_effect=bounded):
+                response = self.hook()
+                self.assert_fallback(response)
+                self.assertIn("timed out", json.dumps(response))
+                self.assertEqual(self.marker().status, "failed")
+        pid = int(pid_path.read_text())
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            pass
+        else:
+            if sys.platform.startswith("linux"):
+                self.assertIn((Path("/proc") / str(pid) / "stat").read_text().rsplit(")", 1)[1].split()[0], {"Z", "X"})
+            else:
+                self.fail("prompt descendant survived cleanup")
+
+    def test_all_hook_children_share_the_finite_overall_deadline(self):
+        self.require_hooks()
+        runner = self.module.run_child
+        start = time.monotonic()
+        expiries = []
+        def inspect(argv, **kwargs):
+            expiries.append(time.monotonic() + kwargs["timeout"])
+            return runner(argv, **kwargs)
+        with patch.object(self.module, "run_child", side_effect=inspect):
+            response = self.hook()
+        self.assertIn("FRESH PROMPT CONTEXT", json.dumps(response))
+        self.assertGreater(len(expiries), 10)
+        self.assertTrue(all(start + 44 < end < start + 46 for end in expiries))
+        self.assertLess(max(expiries) - min(expiries), .1)
+
+    def test_malformed_claude_codex_cli_payloads_exit_zero_with_fallback_json(self):
+        for command, event in (("hook-status", "SessionStart"), ("hook-prompt", "UserPromptSubmit"), ("hook-update", "PostToolUse")):
+            for payload in ("{broken", "[]", "null", '{"cwd": null}', '{"cwd": 42}', '{"cwd": "\\u0000"}'):
+                with self.subTest(command=command, payload=payload):
+                    result = subprocess.run([sys.executable, "-B", str(PACKAGE / "scripts/code_intel.py"), command], input=payload, cwd=self.repo, capture_output=True, text=True, timeout=10)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assert_fallback(json.loads(result.stdout), event)
+        self.assertEqual(self.commands(), [])
+
+    def test_prompt_context_rejects_non_string_or_missing_nested_context(self):
+        self.require_hooks()
+        self.hook("hook-status")
+        runner = self.module.run_child
+        for value in ([], {}, {"hookSpecificOutput": []}, {"hookSpecificOutput": {"additionalContext": 42}}):
+            def output(argv, **kwargs):
+                result = runner(argv, **kwargs)
+                return subprocess.CompletedProcess(argv, 0, json.dumps(value), "") if "prompt-hook" in argv else result
+            with self.subTest(value=value), patch.object(self.module, "run_child", side_effect=output):
+                self.assert_fallback(self.hook())
+                self.assertEqual(self.marker().status, "failed")
+
+    def test_real_hook_cli_holds_lock_until_prompt_completion_against_explicit_commands(self):
+        self.require_hooks()
+        self.hook("hook-status")
+        for command in ("setup-project", "update-project"):
+            with self.subTest(command=command):
+                notify = self.base / (command + "-notify")
+                release = self.base / (command + "-release")
+                os.mkfifo(notify)
+                os.mkfifo(release)
+                notify_fd = os.open(notify, os.O_RDWR | os.O_NONBLOCK)
+                release_fd = os.open(release, os.O_RDWR | os.O_NONBLOCK)
+                env = {**os.environ, "HOOK_MODE": "prompt-barrier", "HOOK_NOTIFY": str(notify), "HOOK_RELEASE": str(release)}
+                hook = subprocess.Popen([sys.executable, "-B", str(PACKAGE / "scripts/code_intel.py"), "hook-prompt"], cwd=self.repo, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                updater = None
+                try:
+                    hook.stdin.write(json.dumps({"cwd": str(self.repo), "prompt": "explain"}))
+                    hook.stdin.close()
+                    hook.stdin = None
+                    self.assertTrue(select.select([notify_fd], [], [], 10)[0], "prompt did not enter barrier")
+                    self.assertEqual(os.read(notify_fd, 100), b"prompt\n")
+                    self.events.write_text("")
+                    updater = subprocess.Popen([sys.executable, "-B", str(PACKAGE / "scripts/code_intel.py"), command, str(self.repo)], cwd=self.repo, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    time.sleep(.25)
+                    self.assertIsNone(updater.poll())
+                    self.assertEqual(self.commands(), [])
+                    data = self.module.select_data_location(os.environ, read_only=True)
+                    state = self.module.state_path(self.repo, data)
+                    before = state.read_bytes()
+                    with self.assertRaises(self.module.UserError):
+                        with self.ready(deadline=time.monotonic() + .2):
+                            pass
+                    self.assertEqual(state.read_bytes(), before)
+                    os.write(release_fd, b"release\n")
+                    out, err = hook.communicate(timeout=15)
+                    self.assertEqual(hook.returncode, 0, err)
+                    self.assertIn("FRESH PROMPT CONTEXT", json.dumps(json.loads(out)))
+                    _out, err = updater.communicate(timeout=15)
+                    self.assertEqual(updater.returncode, 0, err)
+                    self.assertEqual(self.commands(), ["sync", "update"])
+                    self.assertEqual(self.marker().status, "success")
+                finally:
+                    os.close(notify_fd)
+                    os.close(release_fd)
+                    for process in (hook, updater):
+                        if process is not None:
+                            if process.poll() is None:
+                                process.kill()
+                            process.communicate(timeout=5)
 
 
 class ToolContractTests(ControllerCase):
