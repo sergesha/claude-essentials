@@ -619,7 +619,9 @@ def run_child(
     return subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
 
 
-def resolve_verified_tool(spec: ToolSpec, *, deadline: float) -> Path:
+def resolve_verified_tool(
+    spec: ToolSpec, *, deadline: float, cwd: Path | None = None
+) -> Path:
     binary = shutil.which(spec.executable)
     if not binary:
         shim_dir = Path.home() / ".local/share/mise/shims"
@@ -633,7 +635,7 @@ def resolve_verified_tool(spec: ToolSpec, *, deadline: float) -> Path:
     if remaining <= 0:
         raise UserError(f"Deadline expired checking {spec.executable}. {remedy}")
     try:
-        result = run_child([str(path), "--version"], cwd=None, timeout=remaining)
+        result = run_child([str(path), "--version"], cwd=cwd, timeout=remaining)
     except UserError as exc:
         raise UserError(f"Cannot verify {spec.executable}: {exc} {remedy}") from exc
     match = re.fullmatch(
@@ -809,7 +811,7 @@ def ensure_ready(
         pending = FreshnessMarker(str(root), "", {}, "", {}, "pending")
         try:
             tools = {
-                name: resolve_verified_tool(spec, deadline=deadline)
+                name: resolve_verified_tool(spec, deadline=deadline, cwd=root)
                 for name, spec in TOOLS.items()
             }
             indexes_exist = all((root / name).is_dir() for name in INDEX_DIRS.values())
