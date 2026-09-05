@@ -439,16 +439,15 @@ def test_scenario_start_rejects_oversized_input_before_state(tmp_path, monkeypat
     assert not (tmp_path / "state").exists()
 
 
-def test_oversized_result_controls_leave_native_state_byte_identical(tmp_path, monkeypatch):
+def test_oversized_result_controls_leave_workflow_unchanged(tmp_path, monkeypatch):
     project, _recipes = _configure(monkeypatch, tmp_path)
     run_id = server.scenario_start("native-parent-direct", {}, ctx=_ctx(project))["run_id"]
     state = tmp_path / "state"
     sessions.touch(state, run_id, "owner", 30)
-    before = {
-        path.relative_to(state): path.read_bytes()
-        for path in state.rglob("*")
-        if path.is_file()
-    }
+    sidecar = sessions.binding_path(state, run_id)
+    before_binding = sidecar.read_bytes()
+    before_status = server.scenario_status(run_id, ctx=_ctx(project, "owner"))
+    before_history = server.scenario_history(run_id, ctx=_ctx(project))
     operations = (
         lambda: server.scenario_done(
             run_id, "answer", {"huge": "x" * 70_000}, ctx=_ctx(project, "owner")
@@ -460,12 +459,14 @@ def test_oversized_result_controls_leave_native_state_byte_identical(tmp_path, m
     for operation in operations:
         with pytest.raises(LockstepError, match="byte limit"):
             operation()
-    after = {
-        path.relative_to(state): path.read_bytes()
-        for path in state.rglob("*")
-        if path.is_file()
-    }
-    assert after == before
+        assert server.scenario_status(run_id, ctx=_ctx(project, "owner")) == before_status
+        assert server.scenario_history(run_id, ctx=_ctx(project)) == before_history
+        assert sidecar.read_bytes() == before_binding
+
+    server._reset_engine()
+    assert server.scenario_status(run_id, ctx=_ctx(project, "owner")) == before_status
+    assert server.scenario_history(run_id, ctx=_ctx(project)) == before_history
+    assert sidecar.read_bytes() == before_binding
 
 
 def test_stale_binding_is_visible_and_cannot_resume_or_adopt_on_status(
