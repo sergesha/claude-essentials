@@ -487,11 +487,7 @@ def test_stale_binding_is_visible_and_cannot_resume_or_adopt_on_status(
     assert "expired-owner" not in json.dumps(status)
     assert sidecar.read_bytes() == before_binding
 
-    before = {
-        path.relative_to(state): path.read_bytes()
-        for path in state.rglob("*")
-        if path.is_file()
-    }
+    before_history = server.scenario_history(run_id, ctx=_ctx(project))
     operations = (
         lambda: server.scenario_done(
             run_id, "answer", {"answer": "yes"}, ctx=_ctx(project, "expired-owner")
@@ -504,12 +500,14 @@ def test_stale_binding_is_visible_and_cannot_resume_or_adopt_on_status(
     for operation in operations:
         with pytest.raises(LockstepError, match="stale"):
             operation()
-    after = {
-        path.relative_to(state): path.read_bytes()
-        for path in state.rglob("*")
-        if path.is_file()
-    }
-    assert after == before
+        assert server.scenario_status(run_id, ctx=_ctx(project, "expired-owner")) == status
+        assert server.scenario_history(run_id, ctx=_ctx(project)) == before_history
+        assert sidecar.read_bytes() == before_binding
+
+    server._reset_engine()
+    assert server.scenario_status(run_id, ctx=_ctx(project, "expired-owner")) == status
+    assert server.scenario_history(run_id, ctx=_ctx(project)) == before_history
+    assert sidecar.read_bytes() == before_binding
 
 
 def test_validate_recipe_rejects_python_before_import_or_owner_state_mutation(
