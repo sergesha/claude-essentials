@@ -10,6 +10,7 @@ lists is versioned and released independently (see [Versioning](#versioning)).
 
 | Plugin | What it does |
 |---|---|
+| [`code-intel`](code-intel/skills/code-intel/SKILL.md) | Package the CodeGraph and code-review-graph setup skill, MCP servers, and indexing hooks for Claude Code and Codex. |
 | [`continuous-learning`](continuous-learning/) | Capture runtime surprises as they happen, periodically promote them into a project's own versioned skills/docs/commands. Requires a namespaced `redis-memory` connection — see its own README. |
 | [`redis-memory`](redis-memory-mcp/) | Persistent cross-session memory for AI agents — semantic search + KV store with auto-expiry. Moved here from the standalone `sergesha/redis-memory-mcp` repo at v0.5.0. |
 
@@ -37,6 +38,19 @@ installing it also pulls in `redis-memory`. The auto-pulled dependency installs 
 `redis-memory`'s defaults (`mode: dedicated`, no namespace) — since continuous-learning requires
 a namespaced connection (see its README), also run `redis-memory`'s own install with `--config`
 to configure it, either before or after installing `continuous-learning`.
+
+### Code intelligence installation
+
+In Claude Code, add this marketplace as above, then run
+`/plugin install code-intel@claude-essentials`.
+
+In Codex, add this repository with `codex plugin marketplace add <repository-path>`
+and run `codex plugin add code-intel@claude-essentials`.
+
+The plugin requires Python 3.11+ and mise. Ask the bundled `code-intel` skill to
+install the tools, then restart the host. It uses the existing local skill's
+project discovery, initialization, updates, and hooks. Plugin declarations supply
+the host integration; there is no global-config migration step.
 
 ## Versioning
 
