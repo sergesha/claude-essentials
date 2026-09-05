@@ -41,12 +41,14 @@ def _posttool_identity(
     return run_id, session_id
 
 
-def _worker_awaiting(
+def _bindable_start(
     projected: Mapping[str, ScenarioStatus], run_id: str
 ) -> bool:
     status = projected.get(run_id)
     return (
         status is not None
-        and status.status == "awaiting"
-        and status.owner == "worker"
+        and (
+            status.status in {"starting", "running"}
+            or (status.status == "awaiting" and status.owner == "worker")
+        )
     )

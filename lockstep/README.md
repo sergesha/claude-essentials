@@ -27,7 +27,19 @@ The repository ships Claude and Codex plugin manifests. Both start
 `scripts/lockstep-plugin`, which installs the pinned environment and then runs
 the same Python package. From a local checkout root, run
 `scripts/lockstep-install`, then verify that installed environment with
-`uv run --project engine --no-sync lockstep doctor`.
+`uv run --project engine --no-sync lockstep doctor`. Install Python 3.11 or
+newer and `uv` first; installation needs access to the locked dependencies.
+The installer creates `engine/.venv`; it does not add `lockstep` to your PATH.
+For the shell examples below, run this from the **lockstep plugin directory**
+(the directory containing this README), then change to your target project:
+
+```bash
+export LOCKSTEP_PLUGIN_ROOT="$(pwd -P)"
+lockstep() { "$LOCKSTEP_PLUGIN_ROOT/scripts/lockstep-plugin" "$@"; }
+```
+
+The absolute launcher keeps the target project as the working directory. An
+installed plugin uses the same launcher automatically for MCP and hooks.
 
 Claude Code, through the existing marketplace:
 
@@ -138,10 +150,19 @@ It does not gain authority from fields in the YAML.
 
 ## Running a workflow
 
+Before running either packaged template, complete [owner runtime setup](#owner-runtime-setup).
+Both templates use Codex for managed child reviews, including when the parent
+host is Claude. `reviewed-change` assumes a Python project with `src/`, `tests/`,
+and `pytest` available on the configured runner PATH. Its verification checks
+the pinned command's exit status; it does not impose a separate skipped-test
+limit or prove that the tests cover the requested change.
+
 Start a recipe with `scenario_start`, then repeat:
 
 1. Call `scenario_status` and read the current task, exit criterion, and required
    evidence.
+   Worker status includes the admitted task, exit criterion, and declared
+   evidence/check fields. Inspect `artifact_contract` and `writes` when present.
 2. Perform only the current step's work.
 3. Call `scenario_done` with the exact run id, step name, and evidence payload.
 4. If validation fails, use the returned diagnostics and retry that step. If it
@@ -152,6 +173,143 @@ transitions. A terminal status is complete only when returned by the engine.
 `reviewed-change` and `parallel-review` use native child workflow calls and
 runtime effects; their acceptance, lineage, and receipts are durable and
 machine-checked.
+
+When status includes `parallel_progress.steps`, each entry describes eligible
+pending manual work and carries its exact step selector. The overall `owner`
+and `next_action` remain authoritative: while the engine owns the run, follow
+its wait instruction before editing or submitting evidence. For an ambiguous
+abort or escalation, supply the intended `step` to the MCP tool, or `--step`
+to the corresponding CLI command.
+
+For a standalone CLI run, select a worker session when starting and reuse it
+for mutations. This binds only the newly created run; it does not adopt an
+existing session. Run these commands from the same project and use the same
+owner state throughout:
+
+```bash
+lockstep scenario start demo --session-id terminal-worker
+# Copy run_id and the exact current step from the returned status.
+lockstep scenario status RUN_ID
+lockstep scenario done RUN_ID STEP --session-id terminal-worker --evidence '{}'
+```
+
+Replace `{}` with the current step's required evidence. Use
+`lockstep scenario abort RUN_ID --session-id terminal-worker --step STEP` or
+`lockstep scenario escalate RUN_ID 'reason' --session-id terminal-worker --step STEP`
+when that lifecycle transition is intended. In a plugin host, MCP plus its
+PostToolUse hook establishes the host session binding instead.
+
+## Owner runtime setup
+
+Run these commands yourself from the target project after compiling `demo`.
+Provisioning selects executable authority; an agent's report or generated
+configuration does not authorize it. Manual workflows without managed or
+pinned effects do not need runtime grants.
+
+You need an installed Codex executable supporting `exec` and
+`sandbox --permission-profile --include-managed-config`, an explicit model,
+and two distinct owner-only Codex home directories. The managed home must
+already contain your authenticated `auth.json`; the pinned home must contain
+no credentials and have the named permissions profile configured for your
+verification command. Use `codex sandbox --help` to check the installed CLI.
+Lockstep does not create credentials or permissions profiles. The pinned
+provider runs the literal command through Codex's sandbox command, without an
+LLM call; managed child reviews invoke the selected model.
+
+The following shell/Python example prompts for those existing settings,
+discovers the executable and its version locally, and creates private owner
+input files. Keep `LOCKSTEP_STATE_DIR` outside the project and use the same
+value for the plugin host. The input directory also supplies the runner's
+private `TMPDIR`; retain it while this configuration is active.
+
+```bash
+export LOCKSTEP_STATE_DIR="$(python3 -c 'import os; from pathlib import Path; print(Path(os.environ.get("LOCKSTEP_STATE_DIR") or "~/.lockstep").expanduser().resolve())')"
+mkdir -p -m 700 "$LOCKSTEP_STATE_DIR"
+export LOCKSTEP_OWNER_INPUTS="$(mktemp -d "$LOCKSTEP_STATE_DIR/provision.XXXXXX")"
+printf 'Managed Codex home (absolute path): '
+read -r LOCKSTEP_MANAGED_HOME
+printf 'Credential-free pinned Codex home (absolute path): '
+read -r LOCKSTEP_PINNED_HOME
+printf 'Model for managed reviews: '
+read -r LOCKSTEP_RUNNER_MODEL
+printf 'Permissions profile configured in the pinned home: '
+read -r LOCKSTEP_PINNED_PROFILE
+export LOCKSTEP_MANAGED_HOME LOCKSTEP_PINNED_HOME
+export LOCKSTEP_RUNNER_MODEL LOCKSTEP_PINNED_PROFILE
+
+python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+
+root = Path(os.environ['LOCKSTEP_OWNER_INPUTS']).resolve(strict=True)
+executable = shutil.which('codex')
+if executable is None:
+    raise SystemExit('Install Codex and put it on PATH first')
+executable = str(Path(executable).resolve(strict=True))
+common = {
+    'executable': executable,
+    'model': os.environ['LOCKSTEP_RUNNER_MODEL'],
+    'cli_version': subprocess.check_output([executable, '--version'], text=True).strip(),
+    'permission_profile': {'sandbox': 'workspace-write', 'approval': 'never'},
+    'environment': {
+        'PATH': os.environ['PATH'],
+        'LANG': 'C',
+        'LC_ALL': 'C',
+        'TMPDIR': str(root),
+    },
+}
+config = {
+    'schema': 'lockstep.runtime-provision-config/v1',
+    'codex': {**common, 'codex_home': os.environ['LOCKSTEP_MANAGED_HOME']},
+    'pinned': {
+        **common,
+        'codex_home': os.environ['LOCKSTEP_PINNED_HOME'],
+        'pinned_permission_profile': os.environ['LOCKSTEP_PINNED_PROFILE'],
+    },
+}
+with (root / 'config.json').open('x') as output:
+    json.dump(config, output, indent=2)
+PY
+
+lockstep owner list-runtime-requirements --project "$PWD" --recipe demo \
+  > "$LOCKSTEP_OWNER_INPUTS/requirements.json"
+python3 -m json.tool "$LOCKSTEP_OWNER_INPUTS/requirements.json"
+```
+
+Review each requirement's `uses`, runner, and authorities. The next block
+selects **every requirement just listed** for `demo`; run it only when that is
+your intended grant set. For a subset, write only the approved
+`grant_selection_key` strings as a JSON array in `grants.json` instead.
+`--replace-grants` replaces the complete grant set for this owner state; it
+does not append grants, and can revoke grants needed by other runs. For
+multiple recipes in this project, repeat `--recipe NAME` in both commands and
+review the combined inventory. Re-list and provision after changing a workflow
+or selected installation; grants are bound to exact requirements and bindings.
+
+```bash
+python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+root = Path(os.environ['LOCKSTEP_OWNER_INPUTS'])
+requirements = json.loads((root / 'requirements.json').read_text())
+keys = [item['grant_selection_key'] for item in requirements['requirements']]
+with (root / 'grants.json').open('x') as output:
+    json.dump(keys, output, indent=2)
+PY
+lockstep owner provision-runtime --project "$PWD" --recipe demo \
+  --config "$LOCKSTEP_OWNER_INPUTS/config.json" \
+  --replace-grants "$LOCKSTEP_OWNER_INPUTS/grants.json"
+```
+
+Provisioning validates and captures the binding; it does not run a review or
+prove that the selected model, credentials, permissions profile, and project
+dependencies will succeed together. Publication consent remains a separate
+interactive action described below.
 
 ## Artifact publication and consent
 
@@ -195,7 +353,10 @@ uv run --no-sync ruff check --select E9,F63,F7,F82 src tests
 The Ruff command intentionally checks the stable runtime-impact rule subset;
 it is not a claim that the repository has adopted Ruff's full style policy.
 
-The installed-contract suite additionally builds a clean wheel and a staged
-plugin, runs complete template and manual flows from foreign working
-directories, verifies import/resource isolation, and checks active guidance and
-manifests against this contract.
+The installed-contract suite builds a clean wheel and a staged plugin, exercises
+authoring commands from foreign working directories, and verifies installed
+imports and packaged resources. Runtime and integration suites exercise
+workflow, recovery, effect, and publication contracts with controlled fixtures
+and providers. Those checks are not a claim that authenticated Codex reviews
+ran end to end against a real account; that requires a separately authorized
+live run with the owner's selected configuration.

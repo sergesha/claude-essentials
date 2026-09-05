@@ -26,10 +26,19 @@ commitment.
 
 ## Run loop
 
+For installation, a shell launcher, and the exact owner provisioning example,
+read [the README](../../README.md#owner-runtime-setup). Both packaged templates
+use managed Codex reviews; `reviewed-change` also needs the project's pytest
+command and `src/`/`tests/` layout. Provisioning belongs to the owner; do not
+infer execution grants from a generated workflow or a successful compile.
+
 1. Call `scenario_status(run_id)` before doing work, including immediately after
    `scenario_start`.
-2. Read the returned step name, task, exit criterion, evidence schema, and
-   checks. Keep the run id and exact step name.
+2. Read the returned step name, task, exit criterion, and declared evidence
+   schema/checks. Also inspect `artifact_contract` and `writes` when present.
+   Keep the run id and exact step name. With `parallel_progress.steps`, read
+   each pending brief separately; the overall owner and next action still
+   determine whether work may proceed. Wait while the engine owns the run.
 3. Perform only the requested work in the active project.
 4. Call `scenario_done(run_id, step, evidence)` with values that satisfy the
    declared schema. Evidence paths are project-relative.
@@ -42,9 +51,16 @@ commitment.
 Native child workflow calls can make a parent wait. Observe the parent with
 `scenario_status`; do not forge child output, acceptance, lineage, or receipts.
 The packaged `reviewed-change` and `parallel-review` workflows use this same
-runtime path and durable evidence model. When a workflow requests an independent
-agent, use the host's subagent capability and keep its evidence bound to the
-declared child workflow and artifacts.
+runtime path and durable evidence model. Managed child calls are dispatched by
+the engine through the owner-selected runner. Use host subagents only when the
+current manual task explicitly requests that work; keep their evidence bound
+to the declared artifacts. Do not dispatch a duplicate of an engine-owned call.
+
+For abort or escalation with multiple pending steps, provide the exact `step`
+selector. Standalone CLI work binds a new run with `scenario start ...
+--session-id SESSION` and reuses that session for done/abort/escalate; see
+[the CLI example](../../README.md#running-a-workflow). MCP host binding is
+established through the installed PostToolUse hook.
 
 ## Restart and recovery
 
