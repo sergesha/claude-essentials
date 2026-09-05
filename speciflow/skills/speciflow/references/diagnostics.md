@@ -71,8 +71,9 @@ Never persist recommendations, phases, cursors, queues, or derived results.
 For an explicit setup or full-stack initialization request, inspect all
 selected owners and show the complete ordered checklist before asking for the
 first approval. Include only applicable steps: owner dependency installation,
-storage preparation, planning Git init when required, each applicable
-native-owner initialization with its commit effect, and a final live status
+storage initialization (not only read-only resolution), planning Git init when
+required, each applicable native-owner initialization with its commit effect,
+and a final live status
 check. Show the exact source, target, effects, and approval boundary for every
 mutating item.
 
@@ -83,6 +84,27 @@ each concrete item, including applicable prior authorization. When approval
 is missing, ask only for the current item; when
 multiple owner installations are equally valid, present them as an
 `ambiguous` choice.
+
+Distinguish the complete ordered setup outline from its current
+approval-ready mutation. Distinguish observed facts from uninspected details
+in the outline; uninspected details of later items do not gate a fully known
+current item. Before requesting current approval, show the observed literal
+source and target, documented operation, exact payload or configuration,
+filesystem and native-state effects, and the applicable commit behavior. For
+storage preparation, copy the literal `metadata_path` and the complete
+three-field `expected_metadata` JSON returned by `storage.py resolve`.
+
+If any required current-item fact is unavailable, the current response must
+request no mutation approval, including conditional invitations or approval
+for future execution. Do not label the current item approval-ready or claim
+exact values were shown. State the missing fact and next in-scope read-only
+inspection; perform it without extra approval when possible. If inspection is
+unavailable or prohibited, report that limitation without asking mutation
+approval.
+
+Determine an initialization review from the installed version's documented effects,
+not the name `init` or an absent root; unknown effects require read-only
+inspection and may not be labeled mechanical or `Review: skipped`.
 
 A same-owner native init and conditional commit of its exact resulting paths
 may be one previewed action and one approval. Inspect the init result before
