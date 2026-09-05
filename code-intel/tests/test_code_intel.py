@@ -119,6 +119,22 @@ class CodeIntelTests(unittest.TestCase):
                     module.hook_update()
                 run.assert_called_once()
 
+    def test_hook_update_fails_open_when_crg_executable_is_missing(self):
+        module = load_module()
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory)
+            module.subprocess.run(["git", "init", "-q", str(repo)], check=True)
+            (repo / ".codegraph").mkdir()
+            (repo / ".code-review-graph").mkdir()
+            source = repo / "example.py"
+            source.write_text("value = 1\n")
+            payload = {"cwd": str(repo), "tool_name": "Write", "tool_input": {"file_path": str(source)}}
+            with (
+                patch.object(module, "CRG", str(repo / "missing-code-review-graph")),
+                patch("sys.stdin", io.StringIO(json.dumps(payload))),
+            ):
+                self.assertEqual(module.hook_update(), 0)
+
     def test_hook_update_is_fail_open_for_non_object_payload_parts(self):
         module = load_module()
         payloads = (
