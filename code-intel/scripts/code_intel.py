@@ -437,12 +437,15 @@ def hook_update() -> int:
             continue
         if not (repo / ".code-review-graph").is_dir():
             continue
-        subprocess.run(
-            [CRG, "update", "--skip-flows", "--repo", str(repo)],
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
+        try:
+            subprocess.run(
+                [CRG, "update", "--skip-flows", "--repo", str(repo)],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            return 0
     return 0
 
 

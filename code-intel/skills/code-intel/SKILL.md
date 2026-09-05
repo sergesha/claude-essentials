@@ -1,6 +1,6 @@
 ---
 name: code-intel
-description: Use when installing, upgrading, repairing, configuring, checking, initializing, or updating CodeGraph or code-review-graph, including umbrella directories, missing current-project indexes, and Claude Code/Codex integration.
+description: Use when installing, upgrading, repairing, configuring, checking, initializing, or updating CodeGraph or code-review-graph, or using their graphs for code exploration, review, impact analysis, architecture, or refactoring. Includes umbrella directories, missing current-project indexes, and Claude Code/Codex integration.
 ---
 
 # Code Intel Setup
