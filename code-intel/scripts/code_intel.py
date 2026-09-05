@@ -748,28 +748,50 @@ def ensure_local_excludes(root: Path, *, deadline: float) -> None:
         cwd=root,
         timeout=remaining(deadline),
     )
-    output = result.stdout.strip()
+    output = result.stdout.removesuffix("\n")
     if not output:
         raise UserError(f"Cannot locate Git exclude file at {root}.")
     exclude = Path(output)
     if not exclude.is_absolute():
         exclude = root / exclude
+    exclude = exclude.resolve()
+    data = select_data_location(os.environ, read_only=False)
+    lock_directory = data.path / "exclude-locks"
     try:
-        existing = exclude.read_bytes() if exclude.exists() else b""
-        lines = existing.splitlines()
-        missing = [
-            entry
-            for entry in (b".codegraph/", b".code-review-graph/")
-            if entry not in lines
-        ]
-        if not missing:
-            return
-        separator = (
-            b"" if not existing or existing.endswith((b"\n", b"\r")) else b"\n"
-        )
-        updated = existing + separator + b"".join(entry + b"\n" for entry in missing)
-        exclude.parent.mkdir(parents=True, exist_ok=True)
-        exclude.write_bytes(updated)
+        lock_directory.mkdir(mode=0o700, exist_ok=True)
+        if not stat.S_ISDIR(lock_directory.lstat().st_mode):
+            raise UserError(f"Exclude lock directory is not a directory: {lock_directory}")
+        # Worktree transactions remain independent; only this shared Git file's
+        # read/modify/publish is serialized, with its lock in selected plugin data.
+        with root_lock(exclude, DataLocation(lock_directory, data.source), deadline):
+            existing = exclude.read_bytes() if exclude.exists() else b""
+            lines = existing.splitlines()
+            missing = [
+                entry for entry in (b".codegraph/", b".code-review-graph/")
+                if entry not in lines
+            ]
+            if not missing:
+                return
+            separator = b"" if not existing or existing.endswith((b"\n", b"\r")) else b"\n"
+            updated = existing + separator + b"".join(entry + b"\n" for entry in missing)
+            exclude.parent.mkdir(parents=True, exist_ok=True)
+            temporary = None
+            try:
+                fd, temporary = tempfile.mkstemp(prefix=".exclude-", dir=exclude.parent)
+                with os.fdopen(fd, "wb") as stream:
+                    if exclude.exists():
+                        os.fchmod(stream.fileno(), stat.S_IMODE(exclude.stat().st_mode))
+                    stream.write(updated)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                remaining(deadline)
+                os.replace(temporary, exclude)
+            finally:
+                if temporary is not None:
+                    try:
+                        os.unlink(temporary)
+                    except FileNotFoundError:
+                        pass
     except OSError as exc:
         raise UserError(f"Cannot update Git exclude file at {exclude}: {exc}") from exc
 
@@ -896,6 +918,8 @@ def capture(root: Path, tools: Mapping[str, Path], deadline: float) -> Freshness
         raise UserError("Indexes changed during capture.")
     if checkout != capture_checkout(root, deadline):
         raise UserError("Checkout changed during index capture.")
+    if candidates != (crg_candidate_paths(root, checkout[0], deadline) if "crg" in tools else None):
+        raise UserError("Git candidates changed during index capture.")
     return FreshnessMarker(
         str(root), checkout[0], versions,
         checkout[1], fingerprints, "success",

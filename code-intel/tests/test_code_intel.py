@@ -739,6 +739,71 @@ class ConcurrencyTests(ProjectCase):
         self.assertEqual(len(list(self.data.glob("*.json"))), 2)
         self.assertEqual(len(list(self.data.glob("*.lock"))), 2)
 
+    def test_linked_worktree_first_setups_publish_shared_excludes_atomically(self):
+        self.install_fake_tools()
+        linked = self.base / "linked ; worktree"
+        git(self.repo, "worktree", "add", "-qb", "linked", str(linked))
+        exclude = (self.repo / ".git/info/exclude").resolve()
+        existing = b"# user rules\n\xff-local-only\nlast-user-rule"
+        exclude.write_bytes(existing)
+        barrier = self.base / "exclude-barrier"
+        barrier.mkdir()
+        # Expose the real truncate/read race at the filesystem boundary. Atomic
+        # publication never enters the truncating write, so it needs no delay.
+        source = (
+            "import os,runpy,sys,time\nfrom pathlib import Path\n"
+            "m=runpy.run_path(sys.argv[1]); root=Path(sys.argv[2]); target=Path(sys.argv[3]); gate=Path(sys.argv[4]); role=sys.argv[5]\n"
+            "read=Path.read_bytes; write=Path.write_bytes; replace=os.replace; first=True\n"
+            "def wait(*names):\n"
+            " end=time.monotonic()+8\n"
+            " while not any((gate/name).exists() for name in names):\n"
+            "  if time.monotonic()>end: raise RuntimeError('exclude barrier deadline')\n"
+            "  time.sleep(.002)\n"
+            "def delayed_read(path):\n"
+            " global first\n"
+            " if path.resolve()==target and role=='b' and first:\n"
+            "  first=False; wait('truncated','published'); value=read(path); (gate/'read').touch(); wait('written','published'); return value\n"
+            " return read(path)\n"
+            "def delayed_write(path,value):\n"
+            " if path.resolve()==target and role=='a':\n"
+            "  with path.open('wb') as stream:\n"
+            "   (gate/'truncated').touch(); wait('read'); count=stream.write(value)\n"
+            "  (gate/'written').touch(); return count\n"
+            " return write(path,value)\n"
+            "def published(src,dst):\n"
+            " result=replace(src,dst)\n"
+            " if Path(dst).resolve()==target: (gate/'published').touch()\n"
+            " return result\n"
+            "Path.read_bytes=delayed_read; Path.write_bytes=delayed_write; os.replace=published\n"
+            "ensure=m['ensure_local_excludes']\n"
+            "def ordered_excludes(*args,**kwargs):\n"
+            " if role=='b': wait('truncated','published')\n"
+            " return ensure(*args,**kwargs)\n"
+            "m['mutate_project'].__globals__['ensure_local_excludes']=ordered_excludes\n"
+            "m['mutate_project'](root,operation='setup',force=False,deadline=time.monotonic()+15)\n"
+        )
+        processes = [subprocess.Popen(
+            [sys.executable, "-B", "-c", source, str(PACKAGE / "scripts/code_intel.py"),
+             str(root), str(exclude), str(barrier), role], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True,
+        ) for root, role in ((self.repo, "a"), (linked, "b"))]
+        try:
+            for process in processes:
+                _out, err = process.communicate(timeout=20)
+                self.assertEqual(process.returncode, 0, err)
+        finally:
+            for process in processes:
+                if process.poll() is None:
+                    process.kill()
+                process.communicate(timeout=5)
+        self.assertEqual(exclude.read_bytes(), existing + b"\n.codegraph/\n.code-review-graph/\n")
+        data = self.module.select_data_location(os.environ, read_only=True)
+        for root in (self.repo, linked):
+            self.assertEqual(self.module.read_marker(root, data).status, "success")
+        self.assertEqual(len(list(self.data.glob("*.json"))), 2)
+        self.assertEqual(len(list((self.data / "exclude-locks").glob("*.lock"))), 1)
+        self.assertFalse(list(exclude.parent.glob("*.lock")))
+
 
 class DoctorTests(ProjectCase):
     def observe(self):
@@ -1444,6 +1509,30 @@ class RollbackReadinessTests(HookCase):
             return result
         with patch.object(self.module, "run_child", side_effect=stage_after_diff):
             response = self.hook("hook-prompt")
+        self.assert_fallback(response)
+        self.assertEqual(self.marker().status, "failed")
+        self.assertEqual(self.commands(), [])
+
+    def test_staging_during_final_index_pass_cannot_publish_success(self):
+        self.fixture()
+        (self.repo / "local.py").write_text("value = 5\n")
+        before = self.module.capture_checkout(self.repo, time.monotonic() + 10)
+        fingerprint = self.module.index_fingerprint
+        passes = 0
+
+        def stage_after_final_index(root, name, deadline):
+            nonlocal passes
+            result = fingerprint(root, name, deadline)
+            if name == "crg":
+                passes += 1
+                if passes == 2:
+                    git(root, "add", "local.py")
+            return result
+
+        with patch.object(self.module, "index_fingerprint", side_effect=stage_after_final_index):
+            response = self.hook("hook-prompt")
+        self.assertEqual(git(self.repo, "diff", "--cached", "--name-only"), "local.py")
+        self.assertEqual(self.module.capture_checkout(self.repo, time.monotonic() + 10), before)
         self.assert_fallback(response)
         self.assertEqual(self.marker().status, "failed")
         self.assertEqual(self.commands(), [])
