@@ -832,6 +832,10 @@ def write_fake_tool(bin_dir, executable, version):
         NAME = {executable!r}
         VERSION = {version!r}
         args = sys.argv[1:]
+        operation_log = os.environ.get("FAKE_TOOL_LOG")
+        if operation_log and args != ["--version"] and args[:1] != ["serve"]:
+            with open(operation_log, "a", encoding="utf-8") as stream:
+                stream.write(json.dumps({{"tool": NAME, "args": args}}) + "\\n")
         if args == ["--version"]:
             print(NAME + " " + VERSION)
         elif NAME == "codegraph" and args[:1] == ["init"]:
@@ -842,7 +846,10 @@ def write_fake_tool(bin_dir, executable, version):
         elif args[:1] in (["sync"], ["update"]):
             pass
         elif args[:1] == ["prompt-hook"]:
-            print(json.dumps({{"routing": "fresh graph"}}))
+            print(json.dumps({{"hookSpecificOutput": {{
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": "fake prompt context from fresh indexes",
+            }}}}))
         elif args[:1] == ["serve"]:
             Path(os.environ["FAKE_SERVER_LOG"]).write_text(os.getcwd())
         else:
@@ -864,12 +871,18 @@ self.installed = stage_installed_copy(self.base)
 self.consumer_repo = self.base / "unrelated consumer"
 self.consumer_repo.mkdir()
 subprocess.run(["git", "init", "-q"], cwd=self.consumer_repo, check=True)
+subprocess.run(["git", "config", "user.name", "Smoke Test"], cwd=self.consumer_repo, check=True)
+subprocess.run(["git", "config", "user.email", "smoke@example.invalid"], cwd=self.consumer_repo, check=True)
+(self.consumer_repo / "source.py").write_text("value = 1\n")
+subprocess.run(["git", "add", "source.py"], cwd=self.consumer_repo, check=True)
+subprocess.run(["git", "commit", "-qm", "initial"], cwd=self.consumer_repo, check=True)
 self.bin_dir = self.base / "fake bin"
 self.bin_dir.mkdir()
 write_fake_tool(self.bin_dir, "codegraph", "1.6.0")
 write_fake_tool(self.bin_dir, "code-review-graph", "2.3.8")
 self.data_dir = self.base / "plugin data"
 self.data_dir.mkdir()
+self.operation_log = self.base / "fake-tool-operations.jsonl"
 
 def run_installed_copy(self, *args, payload=None, cwd=None, extra_env=None):
     env = {
@@ -877,6 +890,7 @@ def run_installed_copy(self, *args, payload=None, cwd=None, extra_env=None):
         "PATH": str(self.bin_dir) + os.pathsep + os.environ.get("PATH", ""),
         "PLUGIN_DATA": str(self.data_dir),
         "CLAUDE_PLUGIN_DATA": "",
+        "FAKE_TOOL_LOG": str(self.operation_log),
         "PYTHONDONTWRITEBYTECODE": "1",
     }
     env.update(extra_env or {})
@@ -904,16 +918,63 @@ def test_installed_layout_smoke(self):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(log.read_text(), str(self.consumer_repo))
 
-    payloads = (
-        ("hook-status", {"hook_event_name": "SessionStart", "cwd": str(self.consumer_repo)}),
-        ("hook-prompt", {"hook_event_name": "UserPromptSubmit", "prompt": "trace callers", "cwd": str(self.consumer_repo)}),
-        ("hook-update", {"hook_event_name": "PostToolUse", "tool_name": "Write", "tool_input": {"file_path": "source.py"}, "cwd": str(self.consumer_repo)}),
-        ("hook-update", {"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {"command": "true"}, "cwd": str(self.consumer_repo)}),
-    )
-    for command, payload in payloads:
-        completed = self.run_installed_copy(command, payload=payload)
+    status = self.run_installed_copy(
+        "hook-status", payload={"hook_event_name": "SessionStart", "cwd": str(self.consumer_repo)})
+    self.assertEqual(status.returncode, 0, status.stderr)
+    json.loads(status.stdout)
+    self.assertTrue((self.consumer_repo / ".codegraph").is_dir())
+    self.assertTrue((self.consumer_repo / ".code-review-graph").is_dir())
+
+    markers = [json.loads(path.read_text()) for path in self.data_dir.glob("*.json")]
+    self.assertTrue(any(marker.get("root") == str(self.consumer_repo.resolve())
+                        and marker.get("status") == "success" for marker in markers))
+    trusted = self.run_installed_copy("project-status", str(self.consumer_repo))
+    self.assertEqual(trusted.returncode, 0, trusted.stderr)
+    json.loads(trusted.stdout)
+
+    prompt = self.run_installed_copy(
+        "hook-prompt", payload={"hook_event_name": "UserPromptSubmit",
+                                "prompt": "trace callers", "cwd": str(self.consumer_repo)})
+    self.assertEqual(prompt.returncode, 0, prompt.stderr)
+    prompt_response = json.loads(prompt.stdout)
+    prompt_context = prompt_response["hookSpecificOutput"]["additionalContext"]
+    self.assertIn("fake prompt context from fresh indexes", prompt_context)
+    self.assertNotIn("normal file/search tools", prompt_context)
+
+    def operations():
+        if not self.operation_log.exists():
+            return []
+        return [json.loads(line) for line in self.operation_log.read_text().splitlines()]
+
+    initial_operations = operations()
+    self.assertIn(("codegraph", "init"),
+                  {(item["tool"], item["args"][0]) for item in initial_operations})
+    self.assertIn(("codegraph", "sync"),
+                  {(item["tool"], item["args"][0]) for item in initial_operations})
+    self.assertIn(("code-review-graph", "build"),
+                  {(item["tool"], item["args"][0]) for item in initial_operations})
+    self.assertIn(("code-review-graph", "update"),
+                  {(item["tool"], item["args"][0]) for item in initial_operations})
+
+    for tool_name, tool_input in (("Write", {"file_path": "source.py"}),
+                                  ("Bash", {"command": "true"})):
+        before = operations()
+        completed = self.run_installed_copy(
+            "hook-update", payload={"hook_event_name": "PostToolUse",
+                                    "tool_name": tool_name, "tool_input": tool_input,
+                                    "cwd": str(self.consumer_repo)})
         self.assertEqual(completed.returncode, 0, completed.stderr)
         json.loads(completed.stdout)
+        after = operations()
+        for executable, operation in (("codegraph", "sync"),
+                                      ("code-review-graph", "update")):
+            self.assertEqual(
+                sum(item["tool"] == executable and item["args"][0] == operation
+                    for item in after),
+                sum(item["tool"] == executable and item["args"][0] == operation
+                    for item in before) + 1,
+                (tool_name, executable, operation, before, after),
+            )
 
     self.assertEqual(
         {p.relative_to(self.installed).as_posix() for p in self.installed.rglob("*") if p.is_file()},
@@ -977,6 +1038,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          : "${RUNNER_TEMP:=${TMPDIR:-/tmp}}"
+          : "${GITHUB_WORKSPACE:=$(pwd -P)}"
           host_tmp="$(mktemp -d "$RUNNER_TEMP/code-intel-host.XXXXXX")"
           trap 'rm -rf "$host_tmp"' EXIT
           export CODEX_HOME="$host_tmp/codex-home"
@@ -1038,6 +1101,6 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B code-intel/tests/test_packaging.py Packagin
 ```
 
 - [ ] Establish `claude` and `codex` with the workflow's Node/npm step (or use the same pre-provisioned host-validation runner), run `claude plugin validate code-intel`, then run the exact isolated Codex block from `.github/workflows/code-intel.yml`; assert the marketplace list contains `claude-essentials` and the plugin list contains `code-intel@claude-essentials` as encoded there.
-- [ ] Confirm `PackagingTests.test_installed_layout_smoke` stages only `EXPECTED_DISTRIBUTABLE_FILES` under a temporary path containing spaces and shell metacharacters, runs from a separate Git checkout, covers `doctor`, both fake-server `serve` dispatch paths, all three hooks, and both Bash/write `hook-update` payloads, with `PYTHONDONTWRITEBYTECODE=1` throughout.
+- [ ] Confirm `PackagingTests.test_installed_layout_smoke` stages only `EXPECTED_DISTRIBUTABLE_FILES` under a temporary path containing spaces and shell metacharacters, runs from a committed separate Git checkout, covers `doctor`, both fake-server `serve` dispatch paths, all three hooks, and both Bash/write `hook-update` payloads, with `PYTHONDONTWRITEBYTECODE=1` throughout. Its assertions must prove both indexes were created, a success marker remains trusted through `project-status`, prompt output contains the fake fresh-index context rather than fallback text, and each write/Bash event adds one CodeGraph sync and one code-review-graph update operation.
 - [ ] Verify `git diff --check`, verify the exact distribution assertion passes, and inspect `git status --short` to ensure no generated indexes, state, locks, caches, or unrelated marketplace changes are tracked.
 - [ ] Confirm acceptance: both hosts install the same `0.1.0` package; only explicit setup installs exact pins; every lifecycle path either proves fresh checkout-scoped indexes or fails open with fallback guidance; worktrees remain independent; same-root writers serialize; doctor is read-only; and release-please covers both manifests and the changelog.
