@@ -91,6 +91,10 @@ methodology, but no author rationale or preferred verdict. It returns blocking
 defects relative to approved scope separately from scope proposals. Materially
 revised drafts require another review. End review when no approved-scope
 blocker remains; optional scope proposals do not keep it open.
+For an unchanged semantic action whose required review is already complete,
+report `Review: required — completed, no blockers`; proceed under its applicable
+authorization without repeating that review. Completed review is not skipped
+review.
 
 A single owner-scoped action may preview native init followed by a conditional
 commit of exactly the paths that init changed. One approval covers that pair
