@@ -17,6 +17,11 @@ disable-model-invocation: true
 Read [references/ownership.md](references/ownership.md) before coordinating the
 tools. It assigns each concern and closure fact to a native owner.
 
+For a product initiative, use Backlog framing tasks, OpenSpec detailed
+specifications and design-time tasks, and Beads implementation issues at their
+respective granularity. Apply the conditional artifact guidance in ownership;
+an installed tool does not require work to be invented for it.
+
 Before any cross-owner refinement, projection, application, promotion,
 archive, closure, or state report, read
 [references/transitions.md](references/transitions.md). Complete its ephemeral
@@ -31,7 +36,10 @@ For operational requests across the four tools, read [references/operations.md](
 It contains fixed native root selection, planning-Git/Beads-Dolt separation,
 commit guardrails, and the optional pinned OpenSpec-to-Beads preview flow.
 
-For status, next, on-demand visualization, or export requests, read [references/diagnostics.md](references/diagnostics.md).
+For setup, initialization, status, next, on-demand visualization, or export
+requests, read [references/diagnostics.md](references/diagnostics.md). Its
+bootstrap preview covers the complete ordered setup checklist, not only
+storage preparation.
 
 For a user-requested host installation, read [references/installation.md](references/installation.md). It provides one Codex path and one Claude path; SpeciFlow ships no installer, CLI, runtime, or daemon.
 
@@ -39,7 +47,8 @@ For every proposed mutation:
 
 1. Inspect native state.
 2. Propose exactly one concrete next action and explain its effects.
-3. Wait for explicit user approval before mutating anything.
+3. Check explicit user authorization, including applicable earlier instructions.
+   If it covers this action, proceed; otherwise wait for approval.
 
 Before every semantic Backlog, OpenSpec, or Beads mutation, and any related
 planning or executable coordination mutation, state

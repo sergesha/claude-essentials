@@ -55,7 +55,9 @@ scope. Every proposal is advisory, never authorization or stored workflow
 state.
 
 - With one justified candidate, present one action with its owner, reason,
-  expected effect, and an approval question; do not mutate before approval.
+  and expected effect. Apply the ownership approval boundary: ask only when
+  existing explicit authorization does not cover that concrete action. A
+  diagnostic `next` report itself remains read-only and grants no authority.
 - With two or more equally valid candidates, return `ambiguous`, present the
   choices, and ask the user to choose. Do not rank them or mutate.
 - With zero candidates, return the literal `no proposed action`, give the
@@ -76,7 +78,9 @@ mutating item.
 
 The checklist is an ephemeral preview, not SpeciFlow state, a queue, or
 authorization for all steps. Reinspect native state after each approved item
-and update the remaining preview. Ask approval for only the current item; when
+and update the remaining preview. Apply the ownership approval boundary to
+each concrete item, including applicable prior authorization. When approval
+is missing, ask only for the current item; when
 multiple owner installations are equally valid, present them as an
 `ambiguous` choice.
 
@@ -87,6 +91,19 @@ Never combine different owners, dependency installation, storage preparation,
 or planning Git init under that native-owner approval.
 
 ## Views and export
+
+Use the installed owner's built-in views first. Inspect current help for
+Backlog board/browser/overview, OpenSpec view/status/show, and Beads graph/status;
+their availability and flags depend on version. A request for built-in views
+only permits native output, not a custom visualization or third-party viewer.
+
+Explain counts in their native scope: Backlog boards count tasks, not briefs;
+OpenSpec canonical specs and pending change specs are different collections;
+artifact completion can mean file existence rather than approved content;
+Beads graphs contain only issues actually created there. Inspect those native
+contents before interpreting a zero or 100 percent. Report a missing framing
+task or gate-only checklist as a content gap even if CLI health is valid.
+Do not fill an empty view with invented tasks during diagnostics.
 
 On request, render an ephemeral table, tree, or Mermaid view only from the
 native owner outputs or documented CLI capabilities read for that request. Do

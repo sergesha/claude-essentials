@@ -26,7 +26,26 @@ def _observation_result(engine: object, args: argparse.Namespace, project: str) 
 
 def _command_result(engine: object, args: argparse.Namespace, project: str) -> object:
     if args.action == "start":
-        return engine.start(args.recipe, _decode_object(args.input, "input"), project)
+        from lockstep.runtime import config, sessions
+
+        session_id = args.session_id
+        if session_id is not None:
+            sessions._validate_session_identity(session_id)
+        result = engine.start(args.recipe, _decode_object(args.input, "input"), project)
+        if session_id is not None:
+            run_id = result["run_id"]
+            try:
+                binding = sessions.touch(
+                    state_dir(), run_id, session_id, config.session_stale_minutes()
+                )
+                if binding == "foreign":
+                    raise RuntimeError("new run already belongs to another session")
+            except (OSError, ValueError, RuntimeError) as exc:
+                raise support.AuthoringError(
+                    f"run {run_id} was created but session binding failed: {exc}; "
+                    "inspect this run before retrying start"
+                ) from exc
+        return result
     if args.action == "done":
         return engine.done(
             args.run_id,
@@ -39,12 +58,14 @@ def _command_result(engine: object, args: argparse.Namespace, project: str) -> o
         return engine.escalate(
             args.run_id,
             args.reason,
+            step=args.step,
             session_id=args.session_id,
             project=project,
         )
     if args.action == "abort":
         return engine.abort(
             args.run_id,
+            step=args.step,
             session_id=args.session_id,
             project=project,
         )

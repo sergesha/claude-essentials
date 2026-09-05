@@ -240,23 +240,34 @@ def scenario_done(run_id: str, step: str, evidence: dict, ctx: Context | None = 
 
 
 @app.tool()
-def scenario_escalate(run_id: str, reason: str, ctx: Context | None = None) -> dict:
+def scenario_escalate(
+    run_id: str,
+    reason: str,
+    ctx: Context | None = None,
+    *,
+    step: str | None = None,
+) -> dict:
     checked_reason = validate_reason_payload(reason)
     project = _project_for_context(ctx)
     session_id = _session_for_context(ctx)
     _assert_origin(run_id, session_id, project)
     return _mark(_command_for(project).escalate(
-        run_id, checked_reason, session_id=session_id, project=str(project)
+        run_id, checked_reason, step=step, session_id=session_id, project=str(project)
     ))
 
 
 @app.tool()
-def scenario_abort(run_id: str, ctx: Context | None = None) -> dict:
+def scenario_abort(
+    run_id: str,
+    ctx: Context | None = None,
+    *,
+    step: str | None = None,
+) -> dict:
     project = _project_for_context(ctx)
     session_id = _session_for_context(ctx)
     _assert_origin(run_id, session_id, project)
     return _mark(_command_for(project).abort(
-        run_id, session_id=session_id, project=str(project)
+        run_id, step=step, session_id=session_id, project=str(project)
     ))
 
 
