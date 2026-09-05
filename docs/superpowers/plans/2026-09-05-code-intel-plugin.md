@@ -707,17 +707,218 @@ git commit -m "feat: synchronize indexes from lifecycle hooks"
 
 - [ ] **Step 1: Write failing distribution and instruction-contract tests**
 
-Extend `PackagingTests` to assert the exact relative file set under `code-intel/`, skill frontmatter name `code-intel`, implicit invocation, exact pinned dependencies, restart-after-install guidance, explicit umbrella authorization, the four routing/fallback rules, and absence of legacy migration/global-config instructions. Add an installed-layout fixture that copies only the asserted distribution into a temporary directory, runs `doctor`, exercises MCP dispatch with a fake verified binary, and invokes all three hooks from a different CWD. Add an isolated Codex smoke command to CI that sets temporary host data, adds the repository marketplace, and adds `code-intel@claude-essentials`.
+Add `re`, `shutil`, and `textwrap` to the `test_packaging.py` imports, then add this
+exact distribution contract and repository-owned skill validator above
+`PackagingTests`. The Git listing checks source files that would be packaged while
+explicitly ignoring Python bytecode; the installed-layout fixture below copies only
+this allowlist, so pre-existing state, indexes, and caches can never enter the smoke
+test.
 
 ```python
-def test_exact_distributable_file_set(self):
-    actual = {p.relative_to(package).as_posix() for p in package.rglob("*") if p.is_file()}
-    self.assertEqual(actual, EXPECTED_DISTRIBUTABLE_FILES)
+EXPECTED_DISTRIBUTABLE_FILES = frozenset({
+    ".claude-plugin/plugin.json",
+    ".codex-plugin/plugin.json",
+    ".mcp.json",
+    "hooks/hooks.json",
+    "skills/code-intel/SKILL.md",
+    "skills/code-intel/agents/openai.yaml",
+    "scripts/code_intel.py",
+    "tests/test_code_intel.py",
+    "tests/test_packaging.py",
+    "CHANGELOG.md",
+})
 
-def test_installed_layout_keeps_invocation_cwd(self):
-    completed = run_installed_copy("serve", "codegraph", cwd=consumer_repo)
-    self.assertEqual(read_fake_server_cwd(), str(consumer_repo))
-    self.assertEqual(completed.returncode, 0)
+def repository_distributable_files():
+    listed = subprocess.run(
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "--", "code-intel"],
+        cwd=REPO, check=True, capture_output=True, text=True,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+    ).stdout.splitlines()
+    result = set()
+    for path in listed:
+        relative = Path(path).relative_to("code-intel")
+        if "__pycache__" in relative.parts or relative.suffix in {".pyc", ".pyo"}:
+            continue
+        result.add(relative.as_posix())
+    return result
+
+def validate_skill(skill_dir):
+    errors = []
+    text = (skill_dir / "SKILL.md").read_text()
+    lines = text.splitlines()
+    if not lines or lines[0] != "---" or "---" not in lines[1:]:
+        return ["SKILL.md must start with YAML frontmatter"]
+    end = lines.index("---", 1)
+    frontmatter = {}
+    for line in lines[1:end]:
+        key, separator, value = line.partition(":")
+        if separator:
+            frontmatter[key.strip()] = value.strip().strip("\"'")
+    if frontmatter.get("name") != "code-intel":
+        errors.append("frontmatter name must be code-intel")
+    description = frontmatter.get("description", "")
+    if not description or not description.startswith("Use when "):
+        errors.append("frontmatter description must state implicit trigger conditions")
+    if "disable-model-invocation: true" in text:
+        errors.append("the shared skill must allow model invocation")
+    policy = (skill_dir / "agents/openai.yaml").read_text()
+    if not re.search(r"(?m)^\s*allow_implicit_invocation:\s*true\s*$", policy):
+        errors.append("agents/openai.yaml must allow implicit invocation")
+    return errors
+
+def test_exact_distributable_file_set(self):
+    self.assertEqual(repository_distributable_files(), EXPECTED_DISTRIBUTABLE_FILES)
+
+def test_repository_owned_skill_validation(self):
+    self.assertEqual(validate_skill(PACKAGE / "skills/code-intel"), [])
+```
+
+Add explicit instruction-contract assertions. These strings are the stable user
+contract, rather than incidental headings: install exact pins only from
+`install-tools`; restart after installation; obtain authorization before umbrella
+`setup-project`; route symbol/call-path questions to CodeGraph; route review/impact
+questions to code-review-graph; route architecture/semantic/refactoring questions to
+code-review-graph; and fall back to normal file/search tools if the selected graph
+cannot answer. Also reject instructions to migrate `code-intel-setup` or edit
+user-level `CLAUDE.md`, `AGENTS.md`, MCP, or hook configuration.
+
+```python
+def test_skill_instruction_contract(self):
+    skill = (PACKAGE / "skills/code-intel/SKILL.md").read_text()
+    for required in (
+        "npm:@colbymchenry/codegraph@1.6.0",
+        "pipx:code-review-graph@2.3.8",
+        "install-tools",
+        "Restart the host after installation.",
+        "Request authorization before setup-project on a non-Git umbrella.",
+        "Use CodeGraph first for symbol source, callers/callees, call paths, and dynamic dispatch.",
+        "Use code-review-graph first for review, blast radius, impact, and affected flows.",
+        "Use code-review-graph first for architecture, communities, semantic search, and refactoring.",
+        "If the selected graph cannot answer, fall back to normal file/search tools.",
+    ):
+        self.assertIn(required, skill)
+    for prohibited in (
+        "code-intel-setup",
+        "edit CLAUDE.md",
+        "edit AGENTS.md",
+        "edit user MCP configuration",
+        "edit user hook configuration",
+    ):
+        self.assertNotIn(prohibited, skill)
+```
+
+Add these complete staging and fake-server helpers above the test class. The fake
+executables implement version checks, index creation, updates, prompt routing, and
+server launch, so no helper or service is assumed outside this file.
+
+```python
+def stage_installed_copy(destination):
+    installed = destination / "installed plugin ; $x"
+    for relative in EXPECTED_DISTRIBUTABLE_FILES:
+        target = installed / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(PACKAGE / relative, target)
+    return installed
+
+def write_fake_tool(bin_dir, executable, version):
+    path = bin_dir / executable
+    path.write_text(textwrap.dedent(f"""\
+        #!/usr/bin/env python3
+        import json
+        import os
+        from pathlib import Path
+        import sys
+
+        NAME = {executable!r}
+        VERSION = {version!r}
+        args = sys.argv[1:]
+        if args == ["--version"]:
+            print(NAME + " " + VERSION)
+        elif NAME == "codegraph" and args[:1] == ["init"]:
+            (Path(args[1]) / ".codegraph").mkdir(exist_ok=True)
+        elif NAME == "code-review-graph" and args[:1] == ["build"]:
+            root = Path(args[args.index("--repo") + 1])
+            (root / ".code-review-graph").mkdir(exist_ok=True)
+        elif args[:1] in (["sync"], ["update"]):
+            pass
+        elif args[:1] == ["prompt-hook"]:
+            print(json.dumps({{"routing": "fresh graph"}}))
+        elif args[:1] == ["serve"]:
+            Path(os.environ["FAKE_SERVER_LOG"]).write_text(os.getcwd())
+        else:
+            raise SystemExit("unexpected fake-tool argv: " + repr(args))
+        """))
+    path.chmod(0o755)
+    return path
+```
+
+Extend `PackagingTests.setUp` after loading the manifests and add the subprocess
+helper. Every child disables bytecode and receives isolated plugin data; no child
+writes inside the installed package.
+
+```python
+temp = tempfile.TemporaryDirectory(prefix="code intel installed ; ")
+self.addCleanup(temp.cleanup)
+self.base = Path(temp.name)
+self.installed = stage_installed_copy(self.base)
+self.consumer_repo = self.base / "unrelated consumer"
+self.consumer_repo.mkdir()
+subprocess.run(["git", "init", "-q"], cwd=self.consumer_repo, check=True)
+self.bin_dir = self.base / "fake bin"
+self.bin_dir.mkdir()
+write_fake_tool(self.bin_dir, "codegraph", "1.6.0")
+write_fake_tool(self.bin_dir, "code-review-graph", "2.3.8")
+self.data_dir = self.base / "plugin data"
+self.data_dir.mkdir()
+
+def run_installed_copy(self, *args, payload=None, cwd=None, extra_env=None):
+    env = {
+        **os.environ,
+        "PATH": str(self.bin_dir) + os.pathsep + os.environ.get("PATH", ""),
+        "PLUGIN_DATA": str(self.data_dir),
+        "CLAUDE_PLUGIN_DATA": "",
+        "PYTHONDONTWRITEBYTECODE": "1",
+    }
+    env.update(extra_env or {})
+    return subprocess.run(
+        [sys.executable, "-B", str(self.installed / "scripts/code_intel.py"), *args],
+        cwd=cwd or self.consumer_repo, input=None if payload is None else json.dumps(payload),
+        capture_output=True, text=True, timeout=20, env=env,
+    )
+```
+
+Add the complete smoke test. It runs read-only `doctor`, both MCP dispatch paths,
+and all three hook commands from the unrelated checkout; `hook-update` is exercised
+for both write and arbitrary Bash payloads.
+
+```python
+def test_installed_layout_smoke(self):
+    doctor = self.run_installed_copy("doctor")
+    self.assertNotEqual(doctor.returncode, 0)
+    json.loads(doctor.stdout)
+
+    for engine in ("codegraph", "crg"):
+        log = self.base / (engine + ".cwd")
+        completed = self.run_installed_copy(
+            "serve", engine, extra_env={"FAKE_SERVER_LOG": str(log)})
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(log.read_text(), str(self.consumer_repo))
+
+    payloads = (
+        ("hook-status", {"hook_event_name": "SessionStart", "cwd": str(self.consumer_repo)}),
+        ("hook-prompt", {"hook_event_name": "UserPromptSubmit", "prompt": "trace callers", "cwd": str(self.consumer_repo)}),
+        ("hook-update", {"hook_event_name": "PostToolUse", "tool_name": "Write", "tool_input": {"file_path": "source.py"}, "cwd": str(self.consumer_repo)}),
+        ("hook-update", {"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {"command": "true"}, "cwd": str(self.consumer_repo)}),
+    )
+    for command, payload in payloads:
+        completed = self.run_installed_copy(command, payload=payload)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        json.loads(completed.stdout)
+
+    self.assertEqual(
+        {p.relative_to(self.installed).as_posix() for p in self.installed.rglob("*") if p.is_file()},
+        EXPECTED_DISTRIBUTABLE_FILES,
+    )
 ```
 
 - [ ] **Step 2: Run the focused tests and confirm RED**
@@ -728,19 +929,94 @@ Expected: FAIL because the shared skill, agent metadata, exact file contract, an
 
 - [ ] **Step 3: Add the skill and finish authoritative validation**
 
-Write concise host-neutral instructions that map each user intent to the exact CLI, require approval only for `install-tools` and explicit umbrella setup, tell users to restart after install, explain checkout/worktree ownership, and state the four routing/fallback rules verbatim in meaning. Configure `openai.yaml` for implicit invocation. Make CI run unit/packaging tests, the skill validator, Claude plugin validator, and temporary Codex marketplace-add/plugin-add smoke test; do not invoke or modify a generic validator that rejects supported Codex hooks metadata.
+Write concise host-neutral instructions that map each user intent to the exact CLI, require approval only for `install-tools` and explicit umbrella setup, tell users to restart after install, explain checkout/worktree ownership, and include the four exact routing/fallback sentences asserted by `test_skill_instruction_contract`. Configure `openai.yaml` for implicit invocation. Make CI run unit/packaging tests, the skill validator, Claude plugin validator, and temporary Codex marketplace-add/plugin-add smoke test; do not invoke or modify a generic validator that rejects supported Codex hooks metadata.
+
+The repository-owned validator is `test_repository_owned_skill_validation` above;
+CI must invoke it directly and must not depend on a validator installed in a global
+skill directory. Replace `.github/workflows/code-intel.yml` with the following job
+body after its path filters. This follows the repository's GitHub-hosted Ubuntu and
+Python 3.11/3.12 matrix convention, installs Node explicitly, installs both host CLIs
+before using them, and fails immediately if either executable is unavailable. Host
+validation requires no account session: it validates/adds the local checkout only.
+
+```yaml
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Establish host CLIs
+        run: |
+          npm install --global @anthropic-ai/claude-code @openai/codex
+          command -v claude
+          command -v codex
+          claude --version
+          codex --version
+      - name: Repository tests and repository-owned skill validation
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          python3 -B code-intel/tests/test_code_intel.py -v
+          python3 -B code-intel/tests/test_packaging.py -v
+          python3 -B code-intel/tests/test_packaging.py PackagingTests.test_repository_owned_skill_validation -v
+      - name: Claude package validation
+        run: claude plugin validate code-intel
+      - name: Isolated Codex marketplace and install smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          host_tmp="$(mktemp -d "$RUNNER_TEMP/code-intel-host.XXXXXX")"
+          trap 'rm -rf "$host_tmp"' EXIT
+          export CODEX_HOME="$host_tmp/codex-home"
+          export PLUGIN_DATA="$host_tmp/plugin-data"
+          export CLAUDE_PLUGIN_DATA=""
+          export XDG_CONFIG_HOME="$host_tmp/xdg-config"
+          export XDG_CACHE_HOME="$host_tmp/xdg-cache"
+          export XDG_DATA_HOME="$host_tmp/xdg-data"
+          export PYTHONDONTWRITEBYTECODE=1
+          mkdir -p "$CODEX_HOME" "$PLUGIN_DATA" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME"
+          codex plugin marketplace add "$GITHUB_WORKSPACE" --json
+          codex plugin marketplace list --json > "$host_tmp/marketplaces.json"
+          codex plugin add code-intel@claude-essentials --json
+          codex plugin list --json > "$host_tmp/plugins.json"
+          python3 - "$host_tmp/marketplaces.json" "$host_tmp/plugins.json" <<'PY'
+          import json
+          import sys
+          marketplace = json.dumps(json.load(open(sys.argv[1], encoding="utf-8")))
+          plugins = json.dumps(json.load(open(sys.argv[2], encoding="utf-8")))
+          assert "claude-essentials" in marketplace, marketplace
+          assert "code-intel" in plugins and "claude-essentials" in plugins, plugins
+          PY
+```
 
 - [ ] **Step 4: Run the focused tests and validators and confirm GREEN**
 
 Run:
 
 ```bash
-python3 code-intel/tests/test_packaging.py -v
-python3 code-intel/tests/test_code_intel.py -v
+PYTHONDONTWRITEBYTECODE=1 python3 -B code-intel/tests/test_packaging.py -v
+PYTHONDONTWRITEBYTECODE=1 python3 -B code-intel/tests/test_code_intel.py -v
+PYTHONDONTWRITEBYTECODE=1 python3 -B code-intel/tests/test_packaging.py PackagingTests.test_repository_owned_skill_validation -v
 claude plugin validate code-intel
 ```
 
-Run the repository's available skill validator against `code-intel/skills/code-intel`, then execute the exact temporary-host Codex add/install commands encoded in `.github/workflows/code-intel.yml`.
+Then run the exact `Isolated Codex marketplace and install smoke` shell block from
+`.github/workflows/code-intel.yml`. Locally, first establish CLI availability with
+the workflow's `npm install --global @anthropic-ai/claude-code @openai/codex` command,
+or run these host-only gates on the same pre-provisioned runner image. Do not silently
+skip either validator after the commands are available.
 
 Expected: all tests and both host installation/validation paths pass; the installed copy works from an unrelated checkout; the distributed file set is exact.
 
@@ -756,11 +1032,12 @@ git commit -m "docs: add shared code intelligence operating guide"
 - [ ] From a clean test environment with fake pinned binaries available, run the complete standard-library suite:
 
 ```bash
-python3 code-intel/tests/test_code_intel.py -v
-python3 code-intel/tests/test_packaging.py -v
+PYTHONDONTWRITEBYTECODE=1 python3 -B code-intel/tests/test_code_intel.py -v
+PYTHONDONTWRITEBYTECODE=1 python3 -B code-intel/tests/test_packaging.py -v
+PYTHONDONTWRITEBYTECODE=1 python3 -B code-intel/tests/test_packaging.py PackagingTests.test_repository_owned_skill_validation -v
 ```
 
-- [ ] Run the repository skill validator, `claude plugin validate code-intel`, and the isolated Codex marketplace-add/plugin-add smoke test specified by `.github/workflows/code-intel.yml`.
-- [ ] Stage an installed copy under a temporary path containing spaces and shell metacharacters; from a separate Git worktree run `doctor`, both `serve` dispatch paths with fake servers, `hook-status`, `hook-prompt`, and Bash/write `hook-update` payloads.
+- [ ] Establish `claude` and `codex` with the workflow's Node/npm step (or use the same pre-provisioned host-validation runner), run `claude plugin validate code-intel`, then run the exact isolated Codex block from `.github/workflows/code-intel.yml`; assert the marketplace list contains `claude-essentials` and the plugin list contains `code-intel@claude-essentials` as encoded there.
+- [ ] Confirm `PackagingTests.test_installed_layout_smoke` stages only `EXPECTED_DISTRIBUTABLE_FILES` under a temporary path containing spaces and shell metacharacters, runs from a separate Git checkout, covers `doctor`, both fake-server `serve` dispatch paths, all three hooks, and both Bash/write `hook-update` payloads, with `PYTHONDONTWRITEBYTECODE=1` throughout.
 - [ ] Verify `git diff --check`, verify the exact distribution assertion passes, and inspect `git status --short` to ensure no generated indexes, state, locks, caches, or unrelated marketplace changes are tracked.
 - [ ] Confirm acceptance: both hosts install the same `0.1.0` package; only explicit setup installs exact pins; every lifecycle path either proves fresh checkout-scoped indexes or fails open with fallback guidance; worktrees remain independent; same-root writers serialize; doctor is read-only; and release-please covers both manifests and the changelog.
