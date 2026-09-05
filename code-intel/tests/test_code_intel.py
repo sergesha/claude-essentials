@@ -174,6 +174,17 @@ class StateTests(ControllerCase):
         with self.assertRaises(m.CorruptState):
             m.read_marker(self.repo, data)
 
+    def test_marker_parser_recursion_is_reported_as_corrupt_state(self):
+        m = self.api()
+        data = m.select_data_location(os.environ, read_only=False)
+        m.state_path(self.repo, data).write_text("[" * 2000 + "]" * 2000)
+        with patch.object(m.json, "load", side_effect=RecursionError("JSON nesting is too deep")):
+            try:
+                with self.assertRaises(m.CorruptState):
+                    m.read_marker(self.repo, data)
+            except RecursionError:
+                self.fail("Malformed marker parser recursion escaped CorruptState handling")
+
 
 class FingerprintTests(ControllerCase):
     def api(self):
@@ -240,6 +251,19 @@ class FingerprintTests(ControllerCase):
     def test_child_preserves_raw_git_path_bytes(self):
         result = self.module.run_child([sys.executable, "-c", "import os; os.write(1, b'file\\r\\n-\\xff\\x00')"], cwd=self.repo, timeout=5)
         self.assertEqual(os.fsencode(result.stdout), b"file\r\n-\xff\0")
+
+    def test_git_path_bytes_are_independent_of_filesystem_encoding(self):
+        m = self.api()
+        output = subprocess.CompletedProcess([], 0, "caf\u00e9.py\0raw-\udcff.py\0", "")
+        def ascii_fsencode(path):
+            value = os.fspath(path)
+            return value if isinstance(value, bytes) else value.encode("ascii", "surrogateescape")
+        with patch.object(m, "run_child", return_value=output), patch.object(m.os, "fsencode", side_effect=ascii_fsencode):
+            try:
+                paths = m._git_paths(self.repo, time.monotonic() + 10)
+            except UnicodeEncodeError:
+                self.fail("Git output was reconstructed through the ASCII filesystem encoding")
+        self.assertEqual(paths, [b"caf\xc3\xa9.py", b"raw-\xff.py"])
 
     def test_symlink_targets_are_hashed_without_traversal(self):
         self.api()
@@ -650,6 +674,23 @@ class DoctorTests(ProjectCase):
             before = snapshot(self.base)
             self.assertFalse(self.observe()["healthy"])
             self.assertEqual(snapshot(self.base), before)
+
+    def test_marker_parser_recursion_emits_unhealthy_json_without_writes(self):
+        self.require_operations()
+        self.install_fake_tools()
+        self.setup_project()
+        before = snapshot(self.base)
+        output = io.StringIO()
+        with patch.object(self.module.json, "load", side_effect=RecursionError("JSON nesting is too deep")), contextlib.redirect_stdout(output):
+            try:
+                rc = self.module.main(["project-status", str(self.repo)])
+            except RecursionError:
+                self.fail("project-status raised parser recursion instead of reporting unhealthy JSON")
+        self.assertNotEqual(rc, 0)
+        report = json.loads(output.getvalue())
+        self.assertFalse(report["healthy"])
+        self.assertIn("JSON nesting is too deep", report["trust_reason"])
+        self.assertEqual(snapshot(self.base), before)
 
     def test_same_head_offline_edits_and_index_changes_are_unhealthy(self):
         self.require_operations()
