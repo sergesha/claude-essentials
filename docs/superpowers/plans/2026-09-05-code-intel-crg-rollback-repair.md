@@ -148,7 +148,7 @@ This selection uses successful plugin history. The existing generic index-finger
 
 Break caught: the dispatcher runs CRG successfully but an already restored tracked file is omitted from its candidate set. A command-count-only fake would miss this bug; use real CRG and independently inspect SQLite after supervised processes exit.
 
-Append `RealCRGRollbackTests(ControllerCase)` in `test_code_intel.py`. In its `setUp`, require opt-in `CODE_INTEL_REAL_CRG`; skip with an explicit reason if absent, fail if a supplied executable is not version 2.3.8. Stage the complete installed-layout copy using the existing helper. Put an executable wrapper/symlink named `code-review-graph` in a temporary PATH directory pointing to that supplied executable, and a tiny CodeGraph boundary fake there which returns `1.6.0`, creates its local index on `init`, accepts `sync`, and returns empty stdout for `prompt-hook`. This keeps the engine under repair real; the unrelated engine's native behavior is already covered elsewhere.
+Append `RealCRGRollbackTests(ControllerCase)` in `test_code_intel.py`. In its `setUp`, require opt-in `CODE_INTEL_REAL_CRG`; skip with an explicit reason if absent, fail if a supplied executable is not version 2.3.8. Set fixture-local `CRG_HOME` before launching any CRG child, including `--version`, so its registry and other home state cannot reach the user's installation. Stage the complete installed-layout copy using the existing helper. Put an executable wrapper/symlink named `code-review-graph` in a temporary PATH directory pointing to that supplied executable, and a tiny CodeGraph boundary fake there which returns `1.6.0`, creates its local index on `init`, accepts `sync`, and returns empty stdout for `prompt-hook`. This keeps the engine under repair real; the unrelated engine's native behavior is already covered elsewhere.
 
 Use these concrete setup/helpers and assertion shape (class members use the existing `ControllerCase` fixture and `executable` helper):
 
@@ -160,8 +160,6 @@ def setUp(self):
         self.skipTest("set CODE_INTEL_REAL_CRG to the installed pinned 2.3.8 executable")
     selected = str(Path(selected).absolute())  # Preserve a supplied mise shim's name.
     self.repo = self.repo.resolve()
-    version = self.module.run_child([selected, "--version"], cwd=self.repo, timeout=15)
-    self.assertEqual(version.stdout.strip(), "code-review-graph 2.3.8")
     from test_packaging import stage_installed_copy
     self.installed_root = stage_installed_copy(self.base)
     directory = self.base / "real-crg-bin"
@@ -174,6 +172,7 @@ def setUp(self):
         "elif sys.argv[1] not in ('sync', 'prompt-hook'): sys.exit(9)\n")
     env = patch.dict(os.environ, {
         "PATH": str(directory) + os.pathsep + os.environ["PATH"],
+        "CRG_HOME": str(self.base / "crg-home"),
         "CRG_DATA_DIR": "", "CRG_SERIAL_PARSE": "1",
         "XDG_CONFIG_HOME": str(self.base / "xdg-config"),
         "XDG_DATA_HOME": str(self.base / "xdg-data"),
@@ -182,13 +181,19 @@ def setUp(self):
     })
     env.start()
     self.addCleanup(env.stop)
+    version = self.module.run_child([selected, "--version"], cwd=self.repo, timeout=15)
+    self.assertEqual(version.stdout.strip(), "code-review-graph 2.3.8")
 
 def installed(self, command, *, payload=None):
     args = [sys.executable, "-B", str(self.installed_root / "scripts/code_intel.py"), command]
     if command in ("update-project", "project-status"):
         args.append(str(self.repo))
+    outer_timeout = {
+        "hook-status": 75, "hook-prompt": 75, "hook-update": 75,
+        "update-project": 330, "project-status": 330,
+    }[command]
     return self.module.run_child(
-        args, cwd=self.repo, timeout=45,
+        args, cwd=self.repo, timeout=outer_timeout,
         input_text=None if payload is None else json.dumps(payload),
     )
 
@@ -237,6 +242,8 @@ def test_installed_partial_restore_removes_ghost(self):
     self.assertIs(report["healthy"], True)
 ```
 
+The installed-process outer deadlines deliberately exceed the product deadlines: 75 seconds for a hook allows its 45-second inner budget plus a 30-second margin; 330 seconds for explicit update allows its 300-second inner budget plus the same margin. The margin covers interpreter startup, the inner supervisor's descendant cleanup, and response serialization before the outer supervisor can intervene. Read-only `project-status` also receives the 330-second outer cap. These are test-harness limits only; do not alter product deadlines or shorten an outer limit to match its inner budget.
+
 Keep the remaining real cases in the same class, using the same installed CLI and SQL helpers. These are literal fixtures and expected outcomes, not source-text assertions:
 
 | Test method | Arrange / operation | Required independent result |
@@ -247,7 +254,7 @@ Keep the remaining real cases in the same class, using the same installed CLI an
 | `test_installed_repair_preserves_indexed_untracked` | Create `local.py` with `untracked_only`; temporarily stage it and run native CRG update to index it; unstage with `git reset -- local.py`; record its full node row; then run the partial restore fixture | Exact row for `untracked_only` unchanged; file still untracked and byte-identical; ghost 0 |
 | `test_installed_sha256_restore` | Create a separate temporary repo with `git init --object-format=sha256`, make `self.repo` refer to it, run same partial restore sequence | 64-character HEAD; same SQL results. Skip only when Git rejects SHA-256 initialization |
 
-Before immutable SQL reads, all writers must have exited and there must be no nonempty `graph.db-wal`; otherwise fail the fixture with a diagnostic instead of ignoring committed WAL contents. Keep fixture-specific environment overrides local to the test, including plugin data, `CRG_DATA_DIR` if needed to ensure root-local storage, and XDG directories; do not copy credentials or install tools. Treat a staged-installed copy as installed-layout verification, not a new marketplace installation.
+Before immutable SQL reads, all writers must have exited and there must be no nonempty `graph.db-wal`; otherwise fail the fixture with a diagnostic instead of ignoring committed WAL contents. Keep fixture-specific environment overrides local to the test, including plugin data, `CRG_HOME`, `CRG_DATA_DIR` if needed to ensure root-local storage, and XDG directories; do not copy credentials or install tools. Treat a staged-installed copy as installed-layout verification, not a new marketplace installation.
 
 - [ ] **Step 2: Run the red real regression and preserve its result.**
 
@@ -306,10 +313,12 @@ Put these cases in `RollbackReadinessTests(HookCase)`. Use the existing `HookCas
 For example, after `warm()`, index dirty A and B through a real `hook-update`, restore A, clear the event log, and execute another Bash hook:
 
 ```python
-self.assertEqual(crg_update_argv, [
+crg_update_argv = [row[1] for row in map(json.loads, self.events.read_text().splitlines())
+                   if row[1][0] == "update"]
+self.assertEqual(crg_update_argv, [[
     "update", "--base", "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
     "--skip-flows", "--repo", str(self.repo.resolve()),
-])
+]])
 self.assertEqual(self.marker().crg_candidates, ["b.py"])
 self.assertEqual(self.marker().status, "success")
 ```
