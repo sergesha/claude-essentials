@@ -230,8 +230,57 @@ class ToolContractTests(ControllerCase):
     def assert_process_exited(self, pid):
         result = subprocess.run(["ps", "-p", str(pid), "-o", "stat="],
                                 capture_output=True, text=True, timeout=5)
-        self.assertTrue(result.returncode != 0 or result.stdout.strip().startswith("Z"),
+        self.assertEqual(result.stderr, "", f"cannot inspect writer {pid}: {result.stderr}")
+        self.assertIn(result.returncode, (0, 1), f"ps inspection failed: {result.returncode}")
+        absent = result.returncode == 1 and not result.stdout.strip()
+        zombie = result.returncode == 0 and result.stdout.strip().startswith("Z")
+        self.assertTrue(absent or zombie,
                         f"writer {pid} still running: {result.stdout}")
+
+    def test_linux_group_inspection_handles_hidden_processes_conservatively(self):
+        proc = self.base / "proc"
+        (proc / "42001").mkdir(parents=True)
+        (proc / "42002").mkdir()
+        (proc / "42002/stat").write_text("42002 (writer) Z 1 42000 42000")
+        read_text = Path.read_text
+
+        def read_stat(path, *args, **kwargs):
+            if path == proc / "42001/stat":
+                raise PermissionError("hidden by hidepid=1")
+            return read_text(path, *args, **kwargs)
+
+        for membership, running in (
+            (90000, False),  # An inaccessible unrelated process is harmless.
+            (42000, True),  # An inaccessible target is not proof of exit.
+            (PermissionError("cannot inspect group"), True),
+            (ProcessLookupError("process exited"), False),
+        ):
+            with self.subTest(membership=membership), patch.object(
+                self.module.sys, "platform", "linux"
+            ), patch.object(self.module.os, "killpg"), patch.object(
+                self.module, "Path", return_value=proc
+            ), patch.object(Path, "read_text", read_stat), patch.object(
+                self.module.os, "getpgid",
+                side_effect=membership if isinstance(membership, Exception) else None,
+                return_value=membership,
+            ):
+                self.assertEqual(self.module._group_running(42000), running)
+
+    def test_process_exit_assertion_rejects_inspection_errors(self):
+        for rc, out, err in ((1, "", "ps: operation not permitted"),
+                             (1, "", "ps: unsupported option"),
+                             (2, "", ""), (-9, "", ""), (0, "", ""),
+                             (0, "S\n", "")):
+            with self.subTest(rc=rc, out=out, err=err), patch.object(
+                subprocess, "run", return_value=subprocess.CompletedProcess([], rc, out, err)
+            ):
+                with self.assertRaises(AssertionError):
+                    self.assert_process_exited(42000)
+        for rc, out in ((1, ""), (0, "Z\n")):
+            with self.subTest(rc=rc, out=out), patch.object(
+                subprocess, "run", return_value=subprocess.CompletedProcess([], rc, out, "")
+            ):
+                self.assert_process_exited(42000)
 
     def check_descendant_cleanup(self, parent_exits):
         pid_file = self.base / "writer.pid"
