@@ -102,10 +102,9 @@ def write_fake_tool(bin_dir, executable, version):
         elif args[:1] in (["sync"], ["update"]):
             pass
         elif args[:1] == ["prompt-hook"]:
-            print(json.dumps({{"hookSpecificOutput": {{
-                "hookEventName": "UserPromptSubmit",
-                "additionalContext": "fake prompt context from fresh indexes",
-            }}}}))
+            print('<codegraph_context note="Structural context from CodeGraph for this prompt">')
+            print("fake prompt context from fresh indexes")
+            print("</codegraph_context>")
         elif args[:1] == ["serve"]:
             Path(os.environ["FAKE_SERVER_LOG"]).write_text(os.getcwd())
         else:
@@ -421,7 +420,8 @@ class PackagingTests(unittest.TestCase):
             {item["path"] for item in extra},
             {".claude-plugin/plugin.json", ".codex-plugin/plugin.json"},
         )
-        self.assertEqual(release_state["code-intel"], "0.1.0")
+        self.assertEqual(release_state["code-intel"], self.claude["version"])
+        self.assertEqual(release_state["code-intel"], self.codex["version"])
         self.assertTrue(
             all(
                 item["type"] == "json" and item["jsonpath"] == "$.version"
@@ -471,29 +471,44 @@ class PackagingTests(unittest.TestCase):
             self.assertIn(command, workflow)
 
     def test_ci_codex_assertions_validate_structured_installation(self):
+        self.assert_ci_installation_validation(self.codex["version"])
+
+    def test_ci_accepts_simulated_release_bump_and_rejects_metadata_mismatch(self):
+        self.assert_ci_installation_validation("0.2.0")
+
+    def assert_ci_installation_validation(self, version):
         workflow = (REPO / ".github/workflows/code-intel.yml").read_text()
         validator = textwrap.dedent(re.search(
             r"<<'PY'\n(.*?)^          PY$", workflow, re.M | re.S).group(1))
         with tempfile.TemporaryDirectory(prefix="code-intel validation ") as temporary:
             base = Path(temporary).resolve()
             host_home = base / "codex-home"
-            installed_path = host_home / "plugins/cache/claude-essentials/code-intel/0.1.0"
+            workspace = base / "workspace"
+            for host, manifest in (("claude", self.claude), ("codex", self.codex)):
+                target = workspace / f"code-intel/.{host}-plugin/plugin.json"
+                target.parent.mkdir(parents=True)
+                target.write_text(json.dumps({**manifest, "version": version}))
+            release_state = workspace / ".release-please-manifest.json"
+            release_state.write_text(json.dumps({"code-intel": version}))
+            installed_path = host_home / "plugins/cache/claude-essentials/code-intel" / version
             installed_path.mkdir(parents=True)
+            shutil.copytree(workspace / "code-intel/.codex-plugin", installed_path / ".codex-plugin")
+            shutil.copytree(workspace / "code-intel/.claude-plugin", installed_path / ".claude-plugin")
             marketplace = {"marketplaces": [{
-                "name": "claude-essentials", "root": str(REPO),
-                "marketplaceSource": {"sourceType": "local", "source": str(REPO)},
+                "name": "claude-essentials", "root": str(workspace),
+                "marketplaceSource": {"sourceType": "local", "source": str(workspace)},
             }]}
             installed = {
                 "pluginId": "code-intel@claude-essentials", "name": "code-intel",
-                "marketplaceName": "claude-essentials", "version": "0.1.0",
+                "marketplaceName": "claude-essentials", "version": version,
                 "installed": True, "enabled": True,
-                "source": {"source": "local", "path": str(PACKAGE)},
-                "marketplaceSource": {"sourceType": "local", "source": str(REPO)},
+                "source": {"source": "local", "path": str(workspace / "code-intel")},
+                "marketplaceSource": {"sourceType": "local", "source": str(workspace)},
                 "installPolicy": "AVAILABLE", "authPolicy": "ON_INSTALL",
             }
             installation = {
                 "pluginId": "code-intel@claude-essentials", "name": "code-intel",
-                "marketplaceName": "claude-essentials", "version": "0.1.0",
+                "marketplaceName": "claude-essentials", "version": version,
                 "installedPath": str(installed_path), "authPolicy": "ON_INSTALL",
             }
 
@@ -502,7 +517,7 @@ class PackagingTests(unittest.TestCase):
                 for path, value in zip(paths, (marketplace_records, plugin_records, install_record)):
                     path.write_text(json.dumps(value))
                 return subprocess.run(
-                    [sys.executable, "-B", "-c", validator, *map(str, paths), str(host_home), str(REPO)],
+                    [sys.executable, "-B", "-c", validator, *map(str, paths), str(host_home), str(workspace)],
                     capture_output=True, text=True, timeout=10,
                     env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
                 )
@@ -510,8 +525,8 @@ class PackagingTests(unittest.TestCase):
             valid = validate(marketplace, {"installed": [installed], "available": []}, installation)
             self.assertEqual(valid.returncode, 0, valid.stderr)
             invalid_cases = {
-                "wrong listed version": (marketplace, {"installed": [{**installed, "version": "0.2.0"}]}, installation),
-                "wrong added version": (marketplace, {"installed": [installed]}, {**installation, "version": "0.2.0"}),
+                "wrong listed version": (marketplace, {"installed": [{**installed, "version": "9.8.7"}]}, installation),
+                "wrong added version": (marketplace, {"installed": [installed]}, {**installation, "version": "9.8.7"}),
                 "outside isolated home": (marketplace, {"installed": [installed]}, {**installation, "installedPath": str(REPO)}),
                 "home prefix sibling": (marketplace, {"installed": [installed]}, {**installation, "installedPath": str(base / "codex-home-other/plugin")}),
                 "unrelated installed plugin": (marketplace, {"installed": [{**installed, "pluginId": "other@claude-essentials", "name": "other"}], "available": [installed]}, installation),
@@ -522,6 +537,16 @@ class PackagingTests(unittest.TestCase):
                 with self.subTest(reason=reason):
                     result = validate(*records)
                     self.assertNotEqual(result.returncode, 0, result.stdout)
+            for path in (release_state, workspace / "code-intel/.claude-plugin/plugin.json",
+                         installed_path / ".codex-plugin/plugin.json", installed_path / ".claude-plugin/plugin.json"):
+                original = path.read_text()
+                modified = json.loads(original)
+                modified["code-intel" if path == release_state else "version"] = "9.8.7"
+                path.write_text(json.dumps(modified))
+                with self.subTest(metadata=str(path)):
+                    result = validate(marketplace, {"installed": [installed]}, installation)
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                path.write_text(original)
 
 
 if __name__ == "__main__":

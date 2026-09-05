@@ -124,7 +124,8 @@ def test_release_please_updates_both_manifest_versions(self):
     self.assertEqual({item["path"] for item in extra}, {
         ".claude-plugin/plugin.json", ".codex-plugin/plugin.json"
     })
-    self.assertEqual(release_state["code-intel"], "0.1.0")
+    self.assertEqual(release_state["code-intel"], self.claude["version"])
+    self.assertEqual(release_state["code-intel"], self.codex["version"])
     self.assertTrue(all(item["type"] == "json" and item["jsonpath"] == "$.version" for item in extra))
     self.assertEqual(release_config["packages"]["code-intel"]["changelog-path"], "CHANGELOG.md")
 ```
@@ -278,9 +279,12 @@ def test_install_tools_uses_exact_pins(self):
 def test_serve_preserves_cwd_and_never_uses_shell(self):
     module = self.module
     original = Path.cwd()
-    with patch.object(module, "resolve_verified_tool", return_value=Path("/tools/code graph;$x")), patch.object(module.os, "execv") as execute:
+    with patch.object(module, "resolve_verified_tool", return_value=Path("/tools/code graph;$x")), patch.object(module.os, "execve") as execute:
         module.main(["serve", "codegraph"])
-    execute.assert_called_once_with("/tools/code graph;$x", ["/tools/code graph;$x", "serve", "--mcp"])
+    self.assertEqual(execute.call_args.args[:2], ("/tools/code graph;$x", ["/tools/code graph;$x", "serve", "--mcp"]))
+    self.assertEqual(execute.call_args.args[2]["CODEGRAPH_NO_DOWNLOAD"], "1")
+    self.assertEqual(execute.call_args.args[2]["NODE_DISABLE_COMPILE_CACHE"], "1")
+    self.assertEqual(execute.call_args.args[2]["CODEGRAPH_INSTALL_DIR"], os.devnull)
     self.assertEqual(Path.cwd(), original)
 ```
 
@@ -308,15 +312,15 @@ def install_tools():
     if not mise:
         raise UserError("Install mise, then invoke install-tools explicitly.")
     for spec in TOOLS.values():
-        run_child([mise, "use", "-g", spec.mise_package], cwd=None, timeout=300)
+        run_child([mise, "use", "-g", spec.mise_package], cwd=None, timeout=300, allow_install=True)
     for spec in TOOLS.values():
-        resolve_verified_tool(spec, deadline=time.monotonic() + 10)
+        resolve_verified_tool(spec, deadline=time.monotonic() + 10, allow_install=True)
     return 0
 
 def serve(engine):
     binary = str(resolve_verified_tool(TOOLS[engine], deadline=time.monotonic() + 10))
     args = [binary, "serve"] + (["--mcp"] if engine == "codegraph" else [])
-    os.execv(binary, args)
+    os.execve(binary, args, child_environment())
     return 0
 ```
 
@@ -328,7 +332,11 @@ and a deadline short enough to observe timeout; record the writer PID and verify
 it no longer runs after return. Successful direct-child exit with surviving group
 members must not leave writers behind either. Platform-specific supervision must
 offer the same guarantee on supported platforms. Never feed protocol output through
-the captured-output runner: `serve` uses `execv`, preserves CWD, and inherits stdout.
+the captured-output runner: `serve` uses `execve`, preserves CWD, and inherits stdout.
+All non-install child environments set `CODEGRAPH_NO_DOWNLOAD=1`,
+`NODE_DISABLE_COMPILE_CACHE=1`, and `CODEGRAPH_INSTALL_DIR=os.devnull`; the last
+setting prevents 1.6.0's cached-fallback branch from pruning older bundles before
+checking the download flag. Only `install-tools` passes `allow_install=True`.
 
 - [ ] **Step 4: Run the focused tests and confirm GREEN**
 
@@ -409,7 +417,9 @@ def update_indexes_locked(root, tools, *, deadline):
 `remaining(deadline: float) -> float` returns `deadline - time.monotonic()` or raises
 `UserError` at/below zero. Initialization uses `[codegraph, "init", str(root)]`,
 then `[crg, "build", "--repo", str(root)]` for missing selected engines. Explicit
-`--force` re-runs these build commands; it never recursively deletes the checkout.
+`--force` uses `[codegraph, "index", str(root)]` for an existing CodeGraph index
+and re-runs CRG `build`. CodeGraph 1.6.0 `init` on an existing database is a no-op;
+missing indexes still use `init`. Never recursively delete the checkout.
 Umbrellas select only CodeGraph. Avoid CRG global registration/configuration writes.
 Use `git rev-parse --git-path info/exclude`, resolve relative output against the
 checkout root, preserve existing content, and append each missing generated-directory
@@ -489,6 +499,11 @@ Compare input sets and per-file metadata before/after reads; an unreadable input
 any observed mutation invalidates capture. Index journals/WAL are persistent inputs;
 never blanket-exclude `*.wal` or `*.journal`. Exclude transient engine lock/PID files
 by their actual names and test both included journals and excluded transient files.
+After the final index fingerprint pass, recheck the checkout fingerprint and HEAD
+again before returning a successful capture; a late source edit must invalidate it.
+Capture versions from actual tool output in the canonical target root, including
+explicit setup/update and read-only project-status. Never stamp configured pins
+into a marker in place of observations.
 
 Use this marker-path implementation and public-operation control skeleton:
 
@@ -506,7 +521,7 @@ def mutate_project(path, *, operation, force, deadline):
             pending = FreshnessMarker(str(root), "", {}, "", {}, "pending")
             write_marker(root, data, pending)
             try:
-                tools = {name: resolve_verified_tool(TOOLS[name], deadline=deadline) for name in engines}
+                tools = {name: resolve_verified_tool(TOOLS[name], deadline=deadline, cwd=root) for name in engines}
                 before = capture_checkout(root, deadline)
                 if operation == "setup":
                     initialize_indexes_locked(root, tools, force=force, deadline=deadline)
@@ -528,8 +543,9 @@ their independent normal markers. Hook paths never create umbrella state/indexes
 Failure to write failed state must retain/report the original error too; failure to
 acquire a lock must never write another holder's marker. The skeleton's `previous`
 read validates state before mutation; missing and valid pending/failed markers permit
-recovery, corrupt state does not. Each batch root is locked independently in sorted
-order and released before the next, avoiding nested-lock deadlocks. Add real process
+recovery, corrupt state does not. Preserve `setup_roots` order: sorted children,
+then the umbrella. Each root is locked independently and released before the next,
+avoiding nested-lock deadlocks. Add real process
 tests where explicit setup/update and a hook compete for one root, and where different
 worktrees complete concurrently without state loss.
 
@@ -619,7 +635,7 @@ def ensure_ready(path, *, force_sync, deadline):
         previous = read_marker(root, data)  # Corruption fails without overwriting it.
         pending = FreshnessMarker(str(root), "", {}, "", {}, "pending")
         try:
-            tools = {name: resolve_verified_tool(spec, deadline=deadline) for name, spec in TOOLS.items()}
+            tools = {name: resolve_verified_tool(spec, deadline=deadline, cwd=root) for name, spec in TOOLS.items()}
             indexes_exist = all((root / name).is_dir() for name in (".codegraph", ".code-review-graph"))
             observed = capture(root, tools, deadline) if indexes_exist else None
             reuse = (not force_sync and previous is not None and
@@ -665,9 +681,11 @@ must return the authorization guidance above without invoking any index command.
 
 Within `with ensure_ready(...) as ready`, run CodeGraph prompt-hook only for prompt
 submission, using `[str(ready.tools["codegraph"]), "prompt-hook"]`, current root CWD,
-the original payload JSON as stdin, and the remaining deadline. Extract only the
-string `hookSpecificOutput.additionalContext` from its valid JSON via
-`extract_prompt_context`; malformed output fails open. Append the routing text below.
+the original payload JSON as stdin, and the remaining deadline. CodeGraph 1.6.0
+returns raw `<codegraph_context ...>...</codegraph_context>` text, or zero-exit
+empty stdout for a no-op. `extract_prompt_context` accepts those forms; unstructured
+output fails open. Append routing to the raw context (or emit routing alone for a
+no-op) inside this plugin's own `hookSpecificOutput.additionalContext` JSON.
 Return the assembled host response only AFTER the `with` exits successfully. Catch
 exceptions outside it, discard assembled prompt output, and return fallback guidance.
 
@@ -846,10 +864,9 @@ def write_fake_tool(bin_dir, executable, version):
         elif args[:1] in (["sync"], ["update"]):
             pass
         elif args[:1] == ["prompt-hook"]:
-            print(json.dumps({{"hookSpecificOutput": {{
-                "hookEventName": "UserPromptSubmit",
-                "additionalContext": "fake prompt context from fresh indexes",
-            }}}}))
+            print('<codegraph_context note="Structural context from CodeGraph for this prompt">')
+            print("fake prompt context from fresh indexes")
+            print("</codegraph_context>")
         elif args[:1] == ["serve"]:
             Path(os.environ["FAKE_SERVER_LOG"]).write_text(os.getcwd())
         else:
@@ -1102,4 +1119,4 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B code-intel/tests/test_packaging.py Packagin
 - [ ] Establish `claude` and `codex` with the workflow's Node/npm step (or use the same pre-provisioned host-validation runner), run `claude plugin validate code-intel`, then run the exact isolated Codex block from `.github/workflows/code-intel.yml`; assert the marketplace list contains `claude-essentials` and the plugin list contains `code-intel@claude-essentials` as encoded there.
 - [ ] Confirm `PackagingTests.test_installed_layout_smoke` stages only `EXPECTED_DISTRIBUTABLE_FILES` under a temporary path containing spaces and shell metacharacters, runs from a committed separate Git checkout, covers `doctor`, both fake-server `serve` dispatch paths, all three hooks, and both Bash/write `hook-update` payloads, with `PYTHONDONTWRITEBYTECODE=1` throughout. Its assertions must prove both indexes were created, a success marker remains trusted through `project-status`, prompt output contains the unique fake fresh-index context, and each write/Bash event adds one CodeGraph sync and one code-review-graph update operation.
 - [ ] Verify `git diff --check`, verify the exact distribution assertion passes, and inspect `git status --short` to ensure no generated indexes, state, locks, caches, or unrelated marketplace changes are tracked.
-- [ ] Confirm acceptance: both hosts install the same `0.1.0` package; only explicit setup installs exact pins; every lifecycle path either proves fresh checkout-scoped indexes or fails open with fallback guidance; worktrees remain independent; same-root writers serialize; doctor is read-only; and release-please covers both manifests and the changelog.
+- [ ] Confirm acceptance: both hosts install the current manifest version (initially `0.1.0`); verify source manifests, release-please state, structured installed records, and installed manifests have equal versions, including a simulated release bump; only `install-tools` installs exact pins; every lifecycle path either proves fresh checkout-scoped indexes or fails open with fallback guidance; worktrees remain independent; same-root writers serialize; doctor is read-only; and release-please covers both manifests and the changelog.

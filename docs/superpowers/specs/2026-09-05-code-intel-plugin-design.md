@@ -80,6 +80,14 @@ invokes `mise use -g` for the two pinned packages, verifies both versions, and
 returns a non-zero status if `mise` is absent or either version differs.
 Lifecycle hooks never invoke this operation.
 
+Every non-install child and MCP launch sets `CODEGRAPH_NO_DOWNLOAD=1`,
+`NODE_DISABLE_COMPILE_CACHE=1`, and `CODEGRAPH_INSTALL_DIR` to `os.devnull`.
+CodeGraph 1.6.0 otherwise uses and prunes cached fallback bundles before checking
+its download flag. An unavailable optional platform bundle must fail with an
+installation diagnostic without creating cache files. Only `install-tools`
+permits dependency installation. Directory-sensitive tool versions are observed
+in each canonical target root and those observed versions populate freshness state.
+
 MCP launch commands call `code_intel.py serve codegraph` or
 `code_intel.py serve crg`. The dispatcher resolves the binaries from `PATH`
 first and then from the standard mise shim directory. If a binary is absent,
@@ -187,7 +195,8 @@ checkout's local Git exclude file. It never edits the repository `.gitignore`.
 - `SessionStart` calls `hook-status` for verification and the shared readiness
   procedure. Its concise stdout becomes session context.
 - `UserPromptSubmit` calls `hook-prompt`. It combines CodeGraph's
-  `prompt-hook` response with the shared CodeGraph/CRG routing instructions
+  raw `<codegraph_context ...>...</codegraph_context>` response (or successful
+  empty stdout for a no-op) with the shared CodeGraph/CRG routing instructions
   only after the shared readiness procedure establishes freshness.
 - `PostToolUse` calls `hook-update` after Bash and supported write tools.
 
@@ -254,6 +263,10 @@ initialization applies only to a normal Git repository or linked worktree. A
 recognized non-Git umbrella reports the missing scope and directs the agent to
 request authorization for `setup-project`.
 
+Explicit `setup-project --force` rebuilds an existing CodeGraph index with
+`codegraph index`; `codegraph init` is reserved for a missing index because
+1.6.0 treats init on an existing database as a no-op. CRG rebuilds with `build`.
+
 ## Installation and Release
 
 Claude Code installation remains:
@@ -278,6 +291,9 @@ plugin hooks where the host requires trust approval.
 the package changelog share its version. A dedicated CI workflow runs on
 changes to the plugin, both marketplace files, release metadata, and its own
 workflow.
+Validation derives the expected version from the current package manifests and
+requires parity with release-please state and both installed host manifests.
+The initial version remains `0.1.0`; later release bumps must pass the same gates.
 
 ## Verification
 

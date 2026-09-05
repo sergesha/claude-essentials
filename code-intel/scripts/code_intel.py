@@ -562,13 +562,26 @@ def _wait_group_exit(process: subprocess.Popen[str]) -> None:
         time.sleep(0.01)
 
 
+def child_environment(*, allow_install: bool = False) -> dict[str, str]:
+    env = dict(os.environ)
+    if not allow_install:
+        env.update(
+            CODEGRAPH_NO_DOWNLOAD="1",
+            NODE_DISABLE_COMPILE_CACHE="1",
+            # 1.6.0 tries cached bundles and prunes siblings BEFORE checking
+            # NO_DOWNLOAD. A device cannot contain its bundles/ directory.
+            CODEGRAPH_INSTALL_DIR=os.devnull,
+        )
+    return env
+
+
 def run_child(
     argv: Sequence[str], *, cwd: Path | None, timeout: float,
-    input_text: str | None = None,
+    input_text: str | None = None, allow_install: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Run an argv-only child; finish all group members before returning.
 
-    MCP servers must use execv instead: this runner captures command output.
+    MCP servers must use execve instead: this runner captures command output.
     Supported platforms are macOS and Linux; unsupported systems fail closed.
     """
     if isinstance(argv, (str, bytes)) or not argv or not all(
@@ -585,7 +598,7 @@ def run_child(
             args, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             stdin=subprocess.PIPE if input_text is not None else None,
             text=False, shell=False,
-            start_new_session=True,
+            start_new_session=True, env=child_environment(allow_install=allow_install),
         )
     except OSError as exc:
         raise UserError(f"Cannot start {args[0]}: {exc}") from exc
@@ -620,7 +633,8 @@ def run_child(
 
 
 def resolve_verified_tool(
-    spec: ToolSpec, *, deadline: float, cwd: Path | None = None
+    spec: ToolSpec, *, deadline: float, cwd: Path | None = None,
+    allow_install: bool = False,
 ) -> Path:
     binary = shutil.which(spec.executable)
     if not binary:
@@ -631,11 +645,23 @@ def resolve_verified_tool(
         raise UserError(f"Missing {spec.executable} {spec.version}. {remedy}")
     # Keep the shim name: resolving its symlink would change argv[0] to mise.
     path = Path(binary).absolute()
+    verified_version(spec, path, deadline=deadline, cwd=cwd, allow_install=allow_install)
+    return path
+
+
+def verified_version(
+    spec: ToolSpec, path: Path, *, deadline: float, cwd: Path | None = None,
+    allow_install: bool = False,
+) -> str:
+    """Return the observed, validated version in this target's tool environment."""
+    remedy = "Run install-tools explicitly, then start a new host session."
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise UserError(f"Deadline expired checking {spec.executable}. {remedy}")
     try:
-        result = run_child([str(path), "--version"], cwd=cwd, timeout=remaining)
+        result = run_child(
+            [str(path), "--version"], cwd=cwd, timeout=remaining, allow_install=allow_install
+        )
     except UserError as exc:
         raise UserError(f"Cannot verify {spec.executable}: {exc} {remedy}") from exc
     match = re.fullmatch(
@@ -647,7 +673,7 @@ def resolve_verified_tool(
         raise UserError(
             f"{spec.executable} version {match[1]} does not match required {spec.version}. {remedy}"
         )
-    return path
+    return match[1]
 
 
 def ensure_local_excludes(root: Path, *, deadline: float) -> None:
@@ -692,8 +718,9 @@ def initialize_indexes_locked(
 ) -> None:
     root = Path(root).resolve()
     if "codegraph" in tools and (force or not (root / ".codegraph").is_dir()):
+        command = "index" if (root / ".codegraph").is_dir() else "init"
         run_child(
-            [str(tools["codegraph"]), "init", str(root)],
+            [str(tools["codegraph"]), command, str(root)],
             cwd=root,
             timeout=remaining(deadline),
         )
@@ -746,14 +773,20 @@ def capture(root: Path, tools: Mapping[str, Path], deadline: float) -> Freshness
     root = root.resolve()
     if not tools or any(name not in TOOLS for name in tools):
         raise UserError("No valid index selection for capture.")
+    versions = {
+        name: verified_version(TOOLS[name], path, deadline=deadline, cwd=root)
+        for name, path in tools.items()
+    }
     checkout = capture_checkout(root, deadline)
     fingerprints = {name: index_fingerprint(root, name, deadline) for name in sorted(tools)}
     if checkout != capture_checkout(root, deadline):
         raise UserError("Checkout changed during index capture.")
     if fingerprints != {name: index_fingerprint(root, name, deadline) for name in sorted(tools)}:
         raise UserError("Indexes changed during capture.")
+    if checkout != capture_checkout(root, deadline):
+        raise UserError("Checkout changed during index capture.")
     return FreshnessMarker(
-        str(root), checkout[0], {name: TOOLS[name].version for name in tools},
+        str(root), checkout[0], versions,
         checkout[1], fingerprints, "success",
     )
 
@@ -764,7 +797,7 @@ def mutate_project(
     if operation not in ("setup", "update"):
         raise UserError(f"Unknown project operation: {operation}")
     scope = discover_scope(path, deadline=deadline)
-    roots = sorted(setup_roots(scope))
+    roots = setup_roots(scope)
     data = select_data_location(os.environ, read_only=False)
     for root, engines in roots:
         with root_lock(root, data, deadline):
@@ -773,7 +806,7 @@ def mutate_project(
             write_marker(root, data, pending)
             try:
                 tools = {
-                    name: resolve_verified_tool(TOOLS[name], deadline=deadline)
+                    name: resolve_verified_tool(TOOLS[name], deadline=deadline, cwd=root)
                     for name in engines
                 }
                 before = capture_checkout(root, deadline)
@@ -869,15 +902,11 @@ def _hook_fallback(event: str, error: Exception) -> dict[str, object]:
 
 
 def extract_prompt_context(stdout: str) -> str:
-    try:
-        payload = json.loads(stdout)
-        output = payload.get("hookSpecificOutput") if isinstance(payload, dict) else None
-        text = output.get("additionalContext") if isinstance(output, dict) else None
-        if not isinstance(text, str):
-            raise ValueError("missing string additionalContext")
+    # CodeGraph 1.6.0 emits raw context or empty stdout for a successful no-op.
+    text = stdout.strip()
+    if not text or re.fullmatch(r"<codegraph_context(?:\s[^>]*)?>[\s\S]*</codegraph_context>", text):
         return text
-    except (ValueError, RecursionError) as exc:
-        raise UserError("CodeGraph prompt-hook returned malformed context.") from exc
+    raise UserError("CodeGraph prompt-hook returned malformed context.")
 
 
 def handle_hook(
@@ -979,8 +1008,10 @@ def observe_project(path: Path, *, deadline: float) -> dict[str, object]:
             "executable": shutil.which(spec.executable), "version": None,
         }
         try:
-            tools[name] = resolve_verified_tool(spec, deadline=deadline)
-            detail.update(executable=str(tools[name]), version=spec.version)
+            target = scope.root if scope else path.resolve()
+            tools[name] = resolve_verified_tool(spec, deadline=deadline, cwd=target)
+            version = verified_version(spec, tools[name], deadline=deadline, cwd=target)
+            detail.update(executable=str(tools[name]), version=version)
         except (UserError, OSError) as exc:
             detail["error"] = str(exc)
             errors.append(str(exc))
@@ -1022,16 +1053,16 @@ def install_tools() -> int:
     if not mise:
         raise UserError("Install mise, then invoke install-tools explicitly.")
     for spec in TOOLS.values():
-        run_child([mise, "use", "-g", spec.mise_package], cwd=None, timeout=300)
+        run_child([mise, "use", "-g", spec.mise_package], cwd=None, timeout=300, allow_install=True)
     for spec in TOOLS.values():
-        resolve_verified_tool(spec, deadline=time.monotonic() + 10)
+        resolve_verified_tool(spec, deadline=time.monotonic() + 10, allow_install=True)
     return 0
 
 
 def serve(engine: str) -> int:
     binary = str(resolve_verified_tool(TOOLS[engine], deadline=time.monotonic() + 10))
     args = [binary, "serve"] + (["--mcp"] if engine == "codegraph" else [])
-    os.execv(binary, args)
+    os.execve(binary, args, child_environment())
     return 0
 
 
