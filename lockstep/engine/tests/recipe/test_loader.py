@@ -42,6 +42,32 @@ def test_loader_rejects_duplicate_logical_names(tmp_path):
         RecipeLoader(tmp_path).discover()
 
 
+def test_loader_discovers_nested_public_recipes(tmp_path):
+    write_recipe(tmp_path / "nested" / "review.recipe.yaml", name="review")
+    write_recipe(tmp_path / "generated" / "other" / "release.recipe.yaml", name="release")
+
+    assert sorted(RecipeLoader(tmp_path).discover()) == ["release", "review"]
+
+
+def test_discovery_validates_dependencies_without_listing_call_site_specializations(tmp_path):
+    child = tmp_path / "generated" / "children" / "call-site" / "review.recipe.yaml"
+    write_recipe(child, name="review-specialized")
+    (tmp_path / "release.recipe.yaml").write_text(yaml.safe_dump({
+        "name": "release",
+        "nodes": {"review": {
+            "type": "subgraph", "graph": "generated/children/call-site/review.recipe.yaml",
+            "mode": "direct",
+        }},
+        "edges": [],
+    }))
+    loader = RecipeLoader(tmp_path)
+    assert sorted(loader.discover()) == ["release"]
+
+    child.write_text("name: review\nname: hidden\nnodes: {}\nedges: []\n")
+    with pytest.raises(RecipeError, match="duplicate mapping key"):
+        loader.discover()
+
+
 def test_loader_rejects_symlink_that_escapes_recipe_root(tmp_path):
     outside = tmp_path / "outside" / "release.recipe.yaml"
     write_recipe(outside, name="release")

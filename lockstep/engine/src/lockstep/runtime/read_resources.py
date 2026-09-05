@@ -45,6 +45,7 @@ class ProjectedEffect:
     phase: EffectPhase
     deadline_at: datetime | None
     updated_at: datetime
+    fixed_error_code: str | None = None
 
 
 class ProjectedEffects:
@@ -222,7 +223,7 @@ class RuntimeReadResources:
             rows = connection.execute(
                 "SELECT effect_id, thread_id, checkpoint_ns, checkpoint_id, "
                 "task_id, interrupt_id, descriptor_digest, effect_kind, phase, "
-                "deadline_at, updated_at FROM effects WHERE thread_id = ? "
+                "deadline_at, updated_at, fixed_error_code FROM effects WHERE thread_id = ? "
                 "ORDER BY created_at, effect_id LIMIT ?",
                 (thread_id, limit + 1),
             ).fetchall()
@@ -242,6 +243,7 @@ class RuntimeReadResources:
                         None if row[9] is None else _timestamp(row[9])
                     ),
                     updated_at=_timestamp(row[10]),
+                    fixed_error_code=row[11],
                 )
                 for row in rows
             )
