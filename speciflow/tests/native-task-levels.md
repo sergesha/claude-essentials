@@ -7,6 +7,10 @@ to state the concrete next action, native owner, required authorization,
 artifacts affected, and verification. Do not give it the expected observations
 until scoring. No real Beads issue creation or Claude Code session is required.
 
+For routing case 13, provide only the entrypoint path initially and let the
+agent follow its reference links. Preloading every reference would hide a
+missing route.
+
 Score the proposed action and resulting artifact shape, not wording matches.
 Every applicable expected observation must hold. Package/storage tests do not
 substitute for these evaluations. Record actual results in review evidence.
@@ -134,3 +138,19 @@ previously explicitly authorized with unchanged effects. Report the result.
 Expected: report the advisory action and applicable existing authorization
 without asking again. The next report remains read-only; it neither executes
 the mutation nor expands authority to other actions.
+
+## 13. Initialization reaches the bootstrap checklist
+
+Prompt: Start from SKILL.md and its applicable reference routes. The user asks
+to fully initialize Backlog.md, OpenSpec, and Beads for an existing clean
+product Git repository and to show the proposed work. All dependencies are
+installed. Storage resolves to a unique external data root, but its metadata,
+planning Git, and all native owner roots are absent. No mutations are approved.
+
+Expected: read the bootstrap guidance and present the complete ordered
+applicable checklist before asking for approval of its first concrete item:
+storage preparation, planning Git initialization, selected native owner
+initializations with their commit effects, and final live diagnostics. Keep
+planning Git separate from Beads/Dolt and the product repository. Do not stop
+the preview at storage, invent dependency installations, mutate anything, or
+treat the checklist as approval for all its items.
