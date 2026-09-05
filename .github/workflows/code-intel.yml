@@ -71,13 +71,30 @@ jobs:
           mkdir -p "$CODEX_HOME" "$PLUGIN_DATA" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_DATA_HOME"
           codex plugin marketplace add "$GITHUB_WORKSPACE" --json
           codex plugin marketplace list --json > "$host_tmp/marketplaces.json"
-          codex plugin add code-intel@claude-essentials --json
+          codex plugin add code-intel@claude-essentials --json > "$host_tmp/installation.json"
           codex plugin list --json > "$host_tmp/plugins.json"
-          python3 - "$host_tmp/marketplaces.json" "$host_tmp/plugins.json" <<'PY'
+          python3 - "$host_tmp/marketplaces.json" "$host_tmp/plugins.json" "$host_tmp/installation.json" "$CODEX_HOME" "$GITHUB_WORKSPACE" <<'PY'
           import json
+          from pathlib import Path
           import sys
-          marketplace = json.dumps(json.load(open(sys.argv[1], encoding="utf-8")))
-          plugins = json.dumps(json.load(open(sys.argv[2], encoding="utf-8")))
-          assert "claude-essentials" in marketplace, marketplace
-          assert "code-intel" in plugins and "claude-essentials" in plugins, plugins
+          marketplaces = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))["marketplaces"]
+          plugins = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))["installed"]
+          installation = json.loads(Path(sys.argv[3]).read_text(encoding="utf-8"))
+          codex_home = Path(sys.argv[4]).resolve()
+          workspace = Path(sys.argv[5]).resolve()
+          matching_marketplaces = [item for item in marketplaces if item["name"] == "claude-essentials"]
+          assert len(matching_marketplaces) == 1, marketplaces
+          assert Path(matching_marketplaces[0]["root"]).resolve() == workspace, matching_marketplaces
+          matching_plugins = [item for item in plugins if item["pluginId"] == "code-intel@claude-essentials"]
+          assert len(matching_plugins) == 1, plugins
+          assert matching_plugins[0]["installed"] is True, matching_plugins
+          for record in (matching_plugins[0], installation):
+              assert record["pluginId"] == "code-intel@claude-essentials", record
+              assert record["name"] == "code-intel", record
+              assert record["marketplaceName"] == "claude-essentials", record
+              assert record["version"] == "0.1.0", record
+          installed_path = Path(installation["installedPath"]).resolve()
+          assert installed_path != codex_home and installed_path.is_relative_to(codex_home), installation
+          assert installed_path.is_dir(), installation
+          print(json.dumps(installation, indent=2))
           PY
