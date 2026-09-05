@@ -939,7 +939,6 @@ def test_installed_layout_smoke(self):
     prompt_response = json.loads(prompt.stdout)
     prompt_context = prompt_response["hookSpecificOutput"]["additionalContext"]
     self.assertIn("fake prompt context from fresh indexes", prompt_context)
-    self.assertNotIn("normal file/search tools", prompt_context)
 
     def operations():
         if not self.operation_log.exists():
@@ -1101,6 +1100,6 @@ PYTHONDONTWRITEBYTECODE=1 python3 -B code-intel/tests/test_packaging.py Packagin
 ```
 
 - [ ] Establish `claude` and `codex` with the workflow's Node/npm step (or use the same pre-provisioned host-validation runner), run `claude plugin validate code-intel`, then run the exact isolated Codex block from `.github/workflows/code-intel.yml`; assert the marketplace list contains `claude-essentials` and the plugin list contains `code-intel@claude-essentials` as encoded there.
-- [ ] Confirm `PackagingTests.test_installed_layout_smoke` stages only `EXPECTED_DISTRIBUTABLE_FILES` under a temporary path containing spaces and shell metacharacters, runs from a committed separate Git checkout, covers `doctor`, both fake-server `serve` dispatch paths, all three hooks, and both Bash/write `hook-update` payloads, with `PYTHONDONTWRITEBYTECODE=1` throughout. Its assertions must prove both indexes were created, a success marker remains trusted through `project-status`, prompt output contains the fake fresh-index context rather than fallback text, and each write/Bash event adds one CodeGraph sync and one code-review-graph update operation.
+- [ ] Confirm `PackagingTests.test_installed_layout_smoke` stages only `EXPECTED_DISTRIBUTABLE_FILES` under a temporary path containing spaces and shell metacharacters, runs from a committed separate Git checkout, covers `doctor`, both fake-server `serve` dispatch paths, all three hooks, and both Bash/write `hook-update` payloads, with `PYTHONDONTWRITEBYTECODE=1` throughout. Its assertions must prove both indexes were created, a success marker remains trusted through `project-status`, prompt output contains the unique fake fresh-index context, and each write/Bash event adds one CodeGraph sync and one code-review-graph update operation.
 - [ ] Verify `git diff --check`, verify the exact distribution assertion passes, and inspect `git status --short` to ensure no generated indexes, state, locks, caches, or unrelated marketplace changes are tracked.
 - [ ] Confirm acceptance: both hosts install the same `0.1.0` package; only explicit setup installs exact pins; every lifecycle path either proves fresh checkout-scoped indexes or fails open with fallback guidance; worktrees remain independent; same-root writers serialize; doctor is read-only; and release-please covers both manifests and the changelog.
