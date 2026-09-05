@@ -36,7 +36,10 @@ For operational requests across the four tools, read [references/operations.md](
 It contains fixed native root selection, planning-Git/Beads-Dolt separation,
 commit guardrails, and the optional pinned OpenSpec-to-Beads preview flow.
 
-For status, next, on-demand visualization, or export requests, read [references/diagnostics.md](references/diagnostics.md).
+For setup, initialization, status, next, on-demand visualization, or export
+requests, read [references/diagnostics.md](references/diagnostics.md). Its
+bootstrap preview covers the complete ordered setup checklist, not only
+storage preparation.
 
 For a user-requested host installation, read [references/installation.md](references/installation.md). It provides one Codex path and one Claude path; SpeciFlow ships no installer, CLI, runtime, or daemon.
 
