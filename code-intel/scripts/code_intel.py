@@ -718,7 +718,7 @@ def initialize_indexes_locked(
 ) -> None:
     root = Path(root).resolve()
     if "codegraph" in tools and (force or not (root / ".codegraph").is_dir()):
-        command = "index" if (root / ".codegraph").is_dir() else "init"
+        command = "index" if (root / ".codegraph/codegraph.db").is_file() else "init"
         run_child(
             [str(tools["codegraph"]), command, str(root)],
             cwd=root,
