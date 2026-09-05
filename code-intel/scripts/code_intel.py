@@ -168,7 +168,7 @@ def read_marker(root: Path, data: DataLocation) -> FreshnessMarker | None:
             if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
                 raise CorruptState(f"State is not a regular file: {path}")
             return _validate_marker(root, json.load(stream))
-    except (OSError, ValueError, UnicodeError) as exc:
+    except (OSError, ValueError, UnicodeError, RecursionError) as exc:
         raise CorruptState(f"Cannot read state at {path}: {exc}") from exc
 
 
@@ -320,7 +320,7 @@ def _git_paths(root: Path, deadline: float) -> list[bytes]:
         cwd=root, timeout=remaining(deadline),
     ).stdout
     return sorted({
-        path for path in os.fsencode(output).split(b"\0")
+        path for path in output.encode("utf-8", errors="surrogateescape").split(b"\0")
         if path and not CHECKOUT_EXCLUDES.intersection(path.split(b"/"))
     })
 
