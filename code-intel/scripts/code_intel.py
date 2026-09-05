@@ -60,6 +60,18 @@ def _group_running(pgid: int) -> bool:
                 fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
             except (FileNotFoundError, ProcessLookupError):
                 continue
+            except PermissionError:
+                # hidepid=1 can expose unrelated PID directories but deny stat.
+                # Skip only proven nonmembers or PIDs that have since exited.
+                try:
+                    member_group = os.getpgid(int(entry.name))
+                except ProcessLookupError:
+                    continue
+                except PermissionError:
+                    return True
+                if member_group == pgid:
+                    return True
+                continue
             if int(fields[2]) == pgid and fields[0] not in {"Z", "X"}:
                 return True
         return False
