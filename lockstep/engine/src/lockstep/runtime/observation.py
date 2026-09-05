@@ -63,8 +63,8 @@ def project_events(
         }
         for item in native
     ]
-    observed.extend(
-        {
+    for item in effects:
+        event = {
             "source": "effect",
             "effect_id": item.effect_id,
             "effect_kind": item.effect_kind,
@@ -75,8 +75,9 @@ def project_events(
                 else item.updated_at
             ),
         }
-        for item in effects
-    )
+        if (code := getattr(item, "fixed_error_code", None)) is not None:
+            event["fixed_error_code"] = code
+        observed.append(event)
     return observed
 
 
