@@ -786,7 +786,10 @@ class HookCase(ProjectCase):
                                       ("code-review-graph", "2.3.8", ".code-review-graph")):
             self.executable(directory, name,
                 "import json, os, signal, subprocess, sys, time\nfrom pathlib import Path\n"
-                f"if sys.argv[1:] == ['--version']:\n print(os.environ.get('HOOK_VERSION', {version!r})); sys.exit(0)\n"
+                "if sys.argv[1:] == ['--version']:\n"
+                f" version = os.environ.get('HOOK_VERSION', {version!r})\n"
+                f" if os.environ.get('HOOK_WRONG_VERSION_TOOL') == {name!r} and str(Path.cwd()) == os.environ.get('HOOK_WRONG_VERSION_CWD'): version = '9.9.9'\n"
+                " print(version); sys.exit(0)\n"
                 "root = Path.cwd(); command = sys.argv[1]\n"
                 "with open(os.environ['HOOK_EVENTS'], 'a') as log: log.write(json.dumps([str(root), sys.argv[1:]]) + '\\n')\n"
                 "mode = os.environ.get('HOOK_MODE', '')\n"
@@ -997,6 +1000,53 @@ class ReadinessTests(HookCase):
 
 
 class HookTests(HookCase):
+    def test_directory_sensitive_shims_reject_wrong_versions_at_payload_root(self):
+        host_cwd = self.base / "host-cwd"
+        host_cwd.mkdir()
+        for executable in ("codegraph", "code-review-graph"):
+            with self.subTest(executable=executable):
+                self.events.write_text("")
+                result = subprocess.run(
+                    [sys.executable, "-B", str(PACKAGE / "scripts/code_intel.py"), "hook-prompt"],
+                    input=json.dumps({"cwd": str(self.repo), "prompt": "explain source"}),
+                    cwd=host_cwd, env={**os.environ,
+                        "HOOK_WRONG_VERSION_TOOL": executable,
+                        "HOOK_WRONG_VERSION_CWD": str(self.repo.resolve())},
+                    capture_output=True, text=True, timeout=15,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assert_fallback(json.loads(result.stdout))
+                self.assertIn(executable + " version 9.9.9", result.stdout)
+                self.assertEqual(self.commands(), [])
+                self.assertEqual(self.marker().status, "failed")
+                self.assertFalse(self.prompt_input.exists())
+                self.assertFalse((self.repo / ".codegraph").exists())
+
+    def test_directory_sensitive_shims_accept_pins_at_canonical_payload_root(self):
+        host_cwd = self.base / "host-cwd"
+        host_cwd.mkdir()
+        nested = self.repo / "nested"
+        nested.mkdir()
+        alias = self.base / "alias"
+        alias.symlink_to(self.repo, target_is_directory=True)
+        for executable in ("codegraph", "code-review-graph"):
+            with self.subTest(executable=executable):
+                self.events.write_text("")
+                result = subprocess.run(
+                    [sys.executable, "-B", str(PACKAGE / "scripts/code_intel.py"), "hook-prompt"],
+                    input=json.dumps({"cwd": str(alias / "nested"), "prompt": "explain source"}),
+                    cwd=host_cwd, env={**os.environ,
+                        "HOOK_WRONG_VERSION_TOOL": executable,
+                        "HOOK_WRONG_VERSION_CWD": str(host_cwd.resolve())},
+                    capture_output=True, text=True, timeout=15,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("FRESH PROMPT CONTEXT", result.stdout)
+                self.assertEqual(self.marker().status, "success")
+                self.assertEqual(self.marker().root, str(self.repo.resolve()))
+                self.assertTrue(all(json.loads(line)[0] == str(self.repo.resolve())
+                    for line in self.events.read_text().splitlines()))
+
     def test_session_initializes_and_prompt_preserves_original_payload_and_shared_json(self):
         self.require_hooks()
         response = self.module.handle_hook("hook-status", {}, cwd=self.repo)
