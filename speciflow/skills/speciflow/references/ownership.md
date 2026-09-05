@@ -15,6 +15,19 @@ status or OpenSpec design approval.
 
 ## Native artifacts and granularity
 
+Select owners before checking their availability:
+
+- Backlog, OpenSpec, and Beads are selected by an explicit request for that
+  owner or by the concern it owns within the applicable approved project work.
+- Superpowers is selected when explicitly requested or when a native skill
+  trigger applies to the bounded activity, including read-only verification.
+  Check that applicable skill closure even when no project task belongs to it.
+
+Installed CLIs, absent native roots, and the four-tool list do not by themselves
+select owners. Diagnostics report unselected owners as `N/A`; a missing required
+interface makes a selected owner `broken`. If involvement is unclear from the
+requested work, clarify that scope rather than selecting all four by default.
+
 Use selected tools to the extent the work needs:
 
 | Concern | Native representation |
