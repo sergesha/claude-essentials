@@ -15,9 +15,13 @@ from lockstep.runtime.graph_runtime import (
     NativeCoordinateRejected,
     NativeHistoryLimitExceeded,
 )
+from lockstep.runtime.legacy_manual_evidence import validated_manual_evidence
 from lockstep.runtime.providers.manual import ManualSubmission
 from lockstep.runtime.status import project_status
-from lockstep.runtime.validator_execution import validate_manual_checks
+from lockstep.runtime.validator_execution import (
+    validate_manual_artifact_contract,
+    validate_manual_checks,
+)
 
 
 class WorkerSubmissionService:
@@ -84,6 +88,10 @@ class WorkerSubmissionService:
         if not errors:
             errors.extend(
                 validate_manual_checks(value.get("checks"), evidence, project)
+            )
+        if not errors:
+            errors.extend(
+                validate_manual_artifact_contract(value.get("artifact_contract"), project)
             )
         if errors:
             raise LockstepError("manual evidence rejected: " + "; ".join(errors))
@@ -152,10 +160,23 @@ class WorkerSubmissionService:
                             manual_submission,
                             session_id,
                         )
+                    resume_payload = dict(result)
+                    if (
+                        manual_submission is not None
+                        and manual_submission.kind == "done"
+                        and isinstance(interrupt.value, dict)
+                        and (
+                            "checks" in interrupt.value
+                            or "evidence_schema" in interrupt.value
+                        )
+                    ):
+                        resume_payload = validated_manual_evidence(
+                            interrupt.value, result, project
+                        )
                     snapshot = self._runtime.resume(
                         run_id,
                         interrupt.coordinate,
-                        {interrupt.coordinate.interrupt_id: dict(result)},
+                        {interrupt.coordinate.interrupt_id: resume_payload},
                     )
             except PermissionError as exc:
                 raise LockstepError(str(exc)) from exc
