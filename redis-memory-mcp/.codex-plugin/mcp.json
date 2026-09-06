@@ -2,6 +2,7 @@
   "mcpServers": {
     "redis-memory-mcp": {
       "command": "bash",
+      "startup_timeout_sec": 300,
       "args": [
         "-c",
         "t=$(mktemp) && curl -fsSL https://raw.githubusercontent.com/sergesha/claude-essentials/main/redis-memory-mcp/start.sh -o \"$t\" && exec bash \"$t\""

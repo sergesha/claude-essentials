@@ -96,6 +96,9 @@ export NAMESPACE=my-project
 codex
 ```
 
+The first start may download and build the bridge image. Codex allows up to five
+minutes for that startup; memory remains optional if the backend is unavailable.
+
 Keep the same namespace (or leave it unset for the existing shared/base area)
 to access existing memories. The URLs must be reachable from the bridge
 container: `localhost` there is not the host. For other layouts use the existing
