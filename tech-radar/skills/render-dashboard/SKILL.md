@@ -30,10 +30,12 @@ Optional argument: a path to a `reports/radar-<stamp>.json`. Default:
 
 ## Flow
 
-Run the script from the project root (one command — do not hand-write HTML):
+Resolve `render.py` relative to the directory containing this loaded `SKILL.md`.
+Keep the project root as the current working directory so reports are read and
+written there (one command — do not hand-write HTML):
 
 ```
-python3 plugin/skills/render-dashboard/render.py [reports/radar-<stamp>.json]
+python3 "<resolved render-dashboard skill directory>/render.py" [reports/radar-<stamp>.json]
 ```
 
 It derives `{stamp}` from the data's `generated_at`, writes

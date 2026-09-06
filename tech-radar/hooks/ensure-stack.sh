@@ -3,7 +3,8 @@
 # Invariant: $CLAUDE_PLUGIN_ROOT is a read-only source; everything mutable
 # lives ONLY in $CLAUDE_PLUGIN_DATA (survives claude plugin install/update).
 #
-# Two strategies, chosen by TECH_RADAR_STACK (auto|quadlet|compose, default auto):
+# Strategies chosen by TECH_RADAR_STACK (auto|quadlet|compose|external,
+# default auto). external leaves a premanaged backend completely untouched.
 #   quadlet — podman + a reachable systemd user manager. Units rendered into
 #             ~/.config/containers/systemd/, so systemd supervises the stack:
 #             restart on failure, start on boot (with linger), and every start
@@ -11,6 +12,17 @@
 #             port-forwarder to go dead behind a formally-"Up" container.
 #   compose — any docker CLI with compose (macOS Docker Desktop, Docker CE).
 set -u
+
+# A premanaged backend must remain a true no-op: do not require host-provided
+# plugin paths, create logs/config, probe tools, or inspect fixed-name containers.
+[ "${TECH_RADAR_STACK:-auto}" = external ] && exit 0
+
+# Claude and Codex keep plugin data under different host-owned directories.
+# This explicit cross-host override lets both clients reuse one existing mount.
+if [ -n "${TECH_RADAR_DATA_DIR:-}" ]; then
+  CLAUDE_PLUGIN_DATA="$TECH_RADAR_DATA_DIR"
+  export CLAUDE_PLUGIN_DATA
+fi
 : "${CLAUDE_PLUGIN_ROOT:?}" "${CLAUDE_PLUGIN_DATA:?}"
 mkdir -p "$CLAUDE_PLUGIN_DATA/searxng"
 # crude rotation: an unbounded append-log grows forever

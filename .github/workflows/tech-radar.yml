@@ -1,0 +1,41 @@
+name: tech-radar
+
+on:
+  pull_request:
+    paths:
+      - "tech-radar/**"
+      - ".agents/plugins/marketplace.json"
+      - ".claude-plugin/marketplace.json"
+      - "release-please-config.json"
+      - ".release-please-manifest.json"
+      - ".github/workflows/tech-radar.yml"
+  push:
+    branches: [main]
+    paths:
+      - "tech-radar/**"
+      - ".agents/plugins/marketplace.json"
+      - ".claude-plugin/marketplace.json"
+      - "release-please-config.json"
+      - ".release-please-manifest.json"
+      - ".github/workflows/tech-radar.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  plugin-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Non-destructive runtime and package tests
+        run: python3 -B -m unittest discover -s tech-radar/tests -v
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Claude package validation
+        run: |
+          npm install --global @anthropic-ai/claude-code
+          claude plugin validate tech-radar
