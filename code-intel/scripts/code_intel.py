@@ -353,28 +353,40 @@ def hook_prompt(codegraph: str = CODEGRAPH) -> int:
     return 0
 
 
-def install_tools() -> int:
-    npm = shutil.which("npm")
-    uv = shutil.which("uv")
-    pipx = shutil.which("pipx") if not uv else None
-    if not npm or not (uv or pipx):
-        missing = [name for name, present in (("npm", npm), ("uv or pipx", uv or pipx)) if not present]
+def install_tools(*, upgrade: bool = False) -> int:
+    need_codegraph = upgrade or shutil.which("codegraph") is None
+    need_crg = upgrade or shutil.which("code-review-graph") is None
+    if not (need_codegraph or need_crg):
+        print("Code intelligence tools are already available on PATH.")
+        return 0
+    npm = shutil.which("npm") if need_codegraph else None
+    uv = shutil.which("uv") if need_crg else None
+    pipx = shutil.which("pipx") if need_crg and not uv else None
+    missing = []
+    if need_codegraph and not npm:
+        missing.append("npm")
+    if need_crg and not (uv or pipx):
+        missing.append("uv or pipx")
+    if missing:
         print(
             f"missing installer: {', '.join(missing)}; install it on PATH or provision "
             "codegraph and code-review-graph on PATH manually",
             file=sys.stderr,
         )
         return 127
-    commands = [
-        [npm, "install", "--global", "@colbymchenry/codegraph"],
-        [uv, "tool", "install", "--upgrade", "code-review-graph"]
-        if uv else [pipx, "install", "--force", "code-review-graph"],
-    ]
+    commands = []
+    if need_codegraph:
+        commands.append([npm, "install", "--global", "@colbymchenry/codegraph"])
+    if need_crg:
+        commands.append(
+            [uv, "tool", "install", "--upgrade", "code-review-graph"]
+            if uv else [pipx, "install", "--force", "code-review-graph"]
+        )
     return sum(1 for command in commands if run(command) != 0)
 
 
 def upgrade(base: Path) -> int:
-    errors = install_tools()
+    errors = install_tools(upgrade=True)
     if errors:
         return errors
     return status(base)
@@ -504,6 +516,16 @@ def hook_umbrella(cwd: Path) -> Path | None:
 
 
 def hook_status() -> int:
+    missing = [name for name in ("codegraph", "code-review-graph") if shutil.which(name) is None]
+    if missing:
+        print(
+            f"Code intelligence: missing tools on PATH: {', '.join(missing)}. "
+            "Invoke the code-intel skill and offer to install the missing tools. "
+            "Ask the user for consent; only after approval run install-tools, then "
+            "verify both commands on PATH and restart the host to reconnect MCP. "
+            "Do not install without approval."
+        )
+        return 0
     try:
         payload = json.load(sys.stdin)
     except (json.JSONDecodeError, OSError):
