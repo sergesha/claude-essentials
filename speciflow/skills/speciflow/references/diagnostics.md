@@ -18,6 +18,14 @@ observed. Adapt the cells to the actual evidence. For selected Superpowers,
 the root is its observed installed closure path. Read time is an observed
 timestamp; when unavailable, its cell is `not observed`.
 
+Bind report evidence to the requested target. Instructions read to guide the
+acting agent are not evidence of another target's installed paths, versions,
+or read times. When the request limits the report to supplied snapshot or
+simulated observations, fill target facts only from that evidence and identify the
+report as snapshot-based, not a new live check. Unavailable target metadata
+stays `not observed`; do not substitute ambient host observations. For a live
+local target, its actually observed local paths remain valid evidence.
+
 Fill every cell from current observations and the selection rules in
 [ownership.md](ownership.md). The Superpowers selection reason evaluates the
 native trigger for the current activity, including read-only verification,
