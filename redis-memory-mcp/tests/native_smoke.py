@@ -43,7 +43,7 @@ def check_wheel(wheel: Path) -> None:
 
 
 def result_text(result) -> str:
-    assert not result.isError, f"MCP tool failed: {result}"
+    assert not result.is_error, f"MCP tool failed: {result}"
     return "\n".join(block.text for block in result.content if hasattr(block, "text"))
 
 
@@ -67,14 +67,13 @@ async def check_executable(executable: str, redis_kv: bool) -> None:
                 assert names == EXPECTED_TOOLS, f"unexpected MCP tools: {names}"
 
                 if redis_kv:
-                    created = False
+                    cleanup_required = True
                     try:
                         stored = result_text(
                             await session.call_tool(
                                 "kv_set", {"key": key, "value": value, "ttl_days": 1}
                             )
                         )
-                        created = True
                         assert key in stored and value in stored
 
                         fetched = result_text(
@@ -85,11 +84,13 @@ async def check_executable(executable: str, redis_kv: bool) -> None:
                         deleted = result_text(
                             await session.call_tool("kv_delete", {"key": key})
                         )
-                        created = False
                         assert deleted == f"Deleted kv[{key}]"
+                        cleanup_required = False
                     finally:
-                        if created:
-                            await session.call_tool("kv_delete", {"key": key})
+                        if cleanup_required:
+                            result_text(
+                                await session.call_tool("kv_delete", {"key": key})
+                            )
 
     suffix = " and Redis KV" if redis_kv else ""
     print(f"Native wheel, MCP handshake and {len(names)} tools{suffix}: OK")
