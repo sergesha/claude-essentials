@@ -43,3 +43,15 @@ jobs:
         run: |
           npm install --global @anthropic-ai/claude-code
           claude plugin validate code-intel
+      - name: Claude installed plugin validation
+        env:
+          CLAUDE_CONFIG_DIR: ${{ runner.temp }}/code-intel-claude
+        run: |
+          claude plugin marketplace add "$GITHUB_WORKSPACE"
+          claude plugin install code-intel@claude-essentials --scope user
+          claude plugin list --json | python3 -c '
+          import json, sys
+          plugin = next(p for p in json.load(sys.stdin) if p["id"] == "code-intel@claude-essentials")
+          assert plugin["enabled"], plugin
+          assert not plugin.get("errors"), plugin["errors"]
+          '
