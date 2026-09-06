@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.2](https://github.com/sergesha/claude-essentials/compare/code-intel-v0.2.1...code-intel-v0.2.2) (2026-09-06)
+
+
+### Bug Fixes
+
+* **code-intel:** avoid duplicate Claude hook loading ([#55](https://github.com/sergesha/claude-essentials/issues/55)) ([b479979](https://github.com/sergesha/claude-essentials/commit/b47997920a3b8b31ef71abfa2d800e092765f34c))
+
 ## [0.2.1](https://github.com/sergesha/claude-essentials/compare/code-intel-v0.2.0...code-intel-v0.2.1) (2026-09-06)
 
 
