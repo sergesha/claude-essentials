@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "searxng-mcp": {
+      "command": "sh",
+      "args": [
+        "-c",
+        "export SEARXNG_URL=\"${SEARXNG_URL:-http://localhost:8888}\" CACHE_URL=\"${CACHE_URL:-redis://localhost:6381}\"; exec npx -y @tadmstr/searxng-mcp"
+      ],
+      "env_vars": [
+        "SEARXNG_URL",
+        "CACHE_URL"
+      ],
+      "startup_timeout_sec": 300
+    }
+  }
+}

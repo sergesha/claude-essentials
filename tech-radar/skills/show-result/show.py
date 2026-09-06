@@ -67,7 +67,7 @@ def main():
     runs = [(parse_stamp(p.name), p) for p in REPORTS.glob("radar-*.json") if p.name != "radar-latest.json"]
     runs = [(dt, p) for dt, p in runs if dt]
     if not runs:
-        sys.exit("No stored results found. Run /tech-radar:collect-news first.")
+        sys.exit("No stored results found. Invoke the collect-news skill first.")
 
     if date:
         target = parse_target(date)
