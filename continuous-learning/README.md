@@ -73,6 +73,8 @@ collector or a Stop-hook enforcer. The agent performs capture and checkpoints
 using that instruction. Memory unavailability remains best-effort and does not
 block the main task. These are the existing behavior and limitations on both
 clients; manually invoking the skill is not a substitute for enabling the hook.
+Host tool permissions still apply: installing the plugin does not bypass approval
+requirements for memory writes or project changes.
 
 For cross-client reuse, use the same Redis database and namespace. Learned project
 documentation is reused from git; unprocessed findings remain in the same Redis
