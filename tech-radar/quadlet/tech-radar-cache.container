@@ -1,0 +1,19 @@
+# Quadlet unit template — hooks/ensure-stack.sh installs this into
+# ~/.config/containers/systemd/. Losing the cache is harmless (search cache
+# only; redis-memory state lives in a separate backend).
+[Unit]
+Description=tech-radar Dragonfly search cache
+
+[Container]
+Image=docker.dragonflydb.io/dragonflydb/dragonfly:latest
+ContainerName=tech-radar-cache
+PublishPort=127.0.0.1:6381:6379
+Exec=--maxmemory=512mb --save_schedule= --proactor_threads=1
+Ulimit=memlock=-1
+
+[Service]
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

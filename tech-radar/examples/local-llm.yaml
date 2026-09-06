@@ -1,0 +1,50 @@
+name: "Local & On-Device LLM Inference"
+
+description: |
+  Running large language models locally and on-device: edge inference, local
+  model runtimes (llama.cpp, Ollama, vLLM, MLX), quantization and GGUF, small
+  language models (SLMs), private/offline LLMs, and the techniques that make
+  on-device inference fast and memory-efficient.
+
+# No positioning: this is a test topic outside the a2adapt domain, so `stance`
+# classification is skipped for its items.
+
+keywords:
+  - "on-device LLM"
+  - "local LLM inference"
+  - "llama.cpp"
+  - "Ollama"
+  - "GGUF quantization"
+  - "small language model"
+  - "edge AI inference"
+  - "MLX Apple silicon"
+
+queries:
+  - "local LLM inference news"
+  - "on-device LLM quantization"
+  - "llama.cpp Ollama update"
+  - "small language model release"
+  - "edge AI LLM inference framework"
+
+languages:
+  - en
+  - ru
+
+schedule: "daily"
+
+output_lang: "en"
+
+redis_tags:
+  - "tech-radar"
+  - "local-llm"
+
+sources:
+  - habr.com
+  - medium.com
+
+research_keywords:
+  - "post-training quantization"
+  - "speculative decoding"
+  - "KV cache compression"
+  - "mixture of experts"
+  - "model distillation"

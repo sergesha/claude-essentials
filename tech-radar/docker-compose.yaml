@@ -1,0 +1,26 @@
+name: tech-radar
+
+services:
+  searxng:
+    image: searxng/searxng:2026.7.3-747cec4c2
+    container_name: tech-radar-searxng
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8888:8080"
+    volumes:
+      # stable path (survives plugin updates), read-only: the container must
+      # neither write here nor chown it
+      - ${CLAUDE_PLUGIN_DATA:-.}/searxng:/etc/searxng:ro
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8888/
+      - FORCE_OWNERSHIP=false   # entrypoint default chown -R's the mount
+
+  cache:
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:latest
+    container_name: tech-radar-cache
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6381:6379"
+    command: ["--maxmemory=512mb", "--save_schedule=", "--proactor_threads=1"]
+    ulimits:
+      memlock: -1
