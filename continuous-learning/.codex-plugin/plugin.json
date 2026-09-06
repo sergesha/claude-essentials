@@ -1,8 +1,10 @@
 {
   "name": "continuous-learning",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Capture runtime findings and promote them into versioned project documentation.",
-  "author": { "name": "sergesha" },
+  "author": {
+    "name": "sergesha"
+  },
   "homepage": "https://github.com/sergesha/claude-essentials",
   "repository": "https://github.com/sergesha/claude-essentials",
   "license": "MIT",
