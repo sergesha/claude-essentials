@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1](https://github.com/sergesha/claude-essentials/compare/redis-memory-mcp-v0.9.0...redis-memory-mcp-v0.9.1) (2026-09-06)
+
+
+### Bug Fixes
+
+* **redis-memory-mcp:** support native Python installation ([#72](https://github.com/sergesha/claude-essentials/issues/72)) ([fdf9d43](https://github.com/sergesha/claude-essentials/commit/fdf9d4371efa63ff316bf7c4362acc684eb14d70))
+
 ## [0.9.0](https://github.com/sergesha/claude-essentials/compare/redis-memory-mcp-v0.8.1...redis-memory-mcp-v0.9.0) (2026-09-06)
 
 

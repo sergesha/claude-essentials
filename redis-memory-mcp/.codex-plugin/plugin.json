@@ -1,6 +1,6 @@
 {
   "name": "redis-memory",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "Persistent cross-session semantic and key-value memory using Redis.",
   "author": {
     "name": "sergesha"
