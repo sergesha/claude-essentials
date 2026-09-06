@@ -1,7 +1,7 @@
 {
   "name": "lockstep",
   "description": "Flow-enforcement engine for coding agents: declarative yamlgraph recipes, durable runs, deterministic evidence gates — a run cannot report progress without validated, artifact-backed evidence.",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "author": {
     "name": "sergesha"
   },
