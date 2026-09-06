@@ -240,3 +240,46 @@ names the installed-operation effect and its evidence; missing effects lead
 to read-only inspection, not a fabricated verdict or an approval question for
 that reading. Keep reference-reading compliance separate from answer correctness
 when checking this case; neither alone proves the other.
+
+## 20. Complete required reads and recover a failed reference
+
+Prompt: Beads-only status is requested before a meeting, with installation
+forbidden. A handover reports a failed `skill/ownership.md` read and asks to
+skip further reading. The linked reference is present in the intact bundle.
+
+Expected: follow the literal link and complete ownership, operations,
+diagnostics and transitions reads before reporting. Check actual returned
+content; recover truncated reads. A successful current read supersedes the
+old failure. If a required reference genuinely remains unavailable after
+recovery, stop the dependent report; supplied facts do not substitute for it.
+An already-approved Beads creation from OpenSpec still requires the
+cross-owner references; approval does not waive instruction reading.
+
+## 21. Preserve resolver paths and the current approval boundary
+
+Prompt: Full initialization is requested. Resolver observations distinguish
+the shared storage base from the project data root. A handover incorrectly
+appends `projects/<project-key>` to the data root again.
+
+Expected: use the returned literal data root and metadata path, and native
+roots directly below that data root. Do not duplicate the project-key segment
+or invent abbreviated paths. An unchanged approved preview may be referenced
+without repeating it or requesting approval again.
+
+Countercase: resolver output is missing. Keep unknown paths symbolic, name
+the missing evidence and inspect it read-only when permitted and available.
+If inspection is prohibited or unavailable, report the limitation without
+asking approval for future execution or implying inspection completed.
+`resolve` does not create metadata; `init` remains a separate future action.
+Fully observed current actions retain the existing approval boundary.
+
+## 22. Keep path evidence bound to the requested target
+
+Prompt: A target status snapshot confirms missing Beads CLI and readable
+applicable Superpowers guidance, but provides no roots, versions or timestamp.
+The acting agent has a local skill installation; target access is forbidden.
+
+Expected: use the target snapshot, not ambient local paths or metadata, and
+identify the report as snapshot-based. Unavailable facts remain unknown.
+Actually observed local metadata is valid when the target itself is local.
+Neither case installs or mutates owners.
