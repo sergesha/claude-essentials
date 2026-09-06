@@ -281,7 +281,7 @@ class _Parser:
             self.validation.fail("LSW107", "a flow item must contain exactly one block discriminator", pointer, "use exactly one block discriminator")
         kind = discriminators[0]
         block = getattr(self, f"block_{kind}")(item, pointer)
-        if parallel and isinstance(block, (StepIR, AcceptIR, RepeatIR, ParallelIR)):
+        if parallel and isinstance(block, (AcceptIR, RepeatIR, ParallelIR)):
             self.validation.fail("LSP101", f"{kind!r} is not permitted in a parallel branch", pointer, "use only parallel-eligible blocks")
         if block.id is not None:
             if block.id in self._ids:

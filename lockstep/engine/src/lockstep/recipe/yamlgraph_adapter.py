@@ -62,6 +62,11 @@ string per edge, evaluated by `yamlgraph.utils.conditions.evaluate_condition`
 `type: conditional` + a `conditions:` list is a different edge shape
 (`EdgeShape.ROUTER_CONDITIONAL`) and is not used here.
 
+The local native-join dependency patch also accepts an unconditional edge with
+`from: [a, b]` and one target. It delegates to LangGraph's all-source barrier;
+separate string-source edges remain OR edges and are not equivalent when
+branches have different lengths.
+
 Validation
 ----------
 `yamlgraph graph validate`/`lint` exist as CLI subcommands, but their
@@ -750,6 +755,28 @@ edges:
 '''
 
 
+_PROBE_JOIN = '''
+version: "1.0"
+name: probe-join
+state: {left_done: bool, right_done: bool, answer: str}
+nodes:
+  left: {type: passthrough, output: {left_done: true}}
+  right_first: {type: passthrough}
+  right: {type: passthrough, output: {right_done: true}}
+  joined:
+    type: interrupt
+    message: Both branches complete?
+    state_key: question
+    resume_key: answer
+    idempotent: false
+edges:
+  - {from: START, to: [left, right_first]}
+  - {from: right_first, to: right}
+  - {from: [left, right], to: joined}
+  - {from: joined, to: END}
+'''
+
+
 def probe_native_capabilities() -> None:
     """Raise unless the installed yamlgraph satisfies Lockstep's native gate."""
 
@@ -816,6 +843,21 @@ def probe_native_capabilities() -> None:
         invoke_app.close()
         assert completed_a.pending == ()
         assert completed_b.pending == ()
+
+        join = root / "join.yaml"
+        join.write_text(_PROBE_JOIN)
+        with _open_native_path(join) as join_app:
+            parked_join = join_app.invoke({}, thread_id="probe-join")
+            assert parked_join.values["left_done"] is True
+            assert parked_join.values["right_done"] is True
+            assert len(parked_join.pending) == 1
+            completed_join = join_app.resume(
+                thread_id="probe-join",
+                results_by_interrupt_id={
+                    parked_join.pending[0].coordinate.interrupt_id: "yes"
+                },
+            )
+            assert completed_join.pending == ()
 
 
 def _validate_path(recipe_path: Path) -> tuple[bool, str]:

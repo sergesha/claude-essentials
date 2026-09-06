@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import PurePosixPath
 from typing import Any, Literal
-from collections.abc import Mapping
 
 
 @dataclass(frozen=True)
@@ -106,6 +106,18 @@ class ArtifactDescriptor:
 
 
 @dataclass(frozen=True)
+class ManualParallelContract:
+    """Immutable cooperative write surface of one authored parallel block."""
+
+    id: str
+    branch: str
+    writes: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"id": self.id, "branch": self.branch, "writes": list(self.writes)}
+
+
+@dataclass(frozen=True)
 class EffectDescriptor:
     schema: str
     kind: str
@@ -119,6 +131,7 @@ class EffectDescriptor:
     result_schema: str
     canonical_json: bytes
     digest: str
+    parallel: ManualParallelContract | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -154,6 +167,7 @@ class EffectDescriptor:
             "deadline_seconds": self.deadline_seconds,
             "scope_state_keys": list(self.scope_state_keys),
             "result_schema": self.result_schema,
+            **({"parallel": self.parallel.to_dict()} if self.parallel is not None else {}),
         }
 
 

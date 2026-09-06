@@ -46,12 +46,14 @@ class _LoweringGraphValidation:
             if not isinstance(edge, dict) or set(edge) - {"from", "to", "condition"}:
                 raise ValueError("invalid graph fragment edge")
             source, target = edge.get("from"), edge.get("to")
-            if source not in plan.local_names or target not in plan.local_names:
+            sources = source if isinstance(source, list) else [source]
+            if any(item not in plan.local_names for item in sources) or target not in plan.local_names:
                 raise ValueError("graph fragment edges must remain inside the fragment")
-            adjacency[source].add(target)
-            edges_by_source[source].append(edge)
+            for item in sources:
+                adjacency[item].add(target)
+                edges_by_source[item].append(edge)
             self.edge(
-                names.node(source),
+                [names.node(item) for item in sources] if isinstance(source, list) else names.node(source),
                 names.node(target),
                 names.condition(edge.get("condition")),
             )
@@ -170,7 +172,7 @@ class _LoweringGraphValidation:
             possible_targets = {
                 edge["to"]
                 for edge in edge_records
-                if edge.get("from") == current
+                if current in (edge["from"] if isinstance(edge.get("from"), list) else [edge.get("from")])
                 and _condition_may_match_outcome(
                     edge.get("condition"), resume_key, outcome_name.upper()
                 )

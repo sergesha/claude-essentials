@@ -59,17 +59,16 @@ def _provision_binding(
         )
     string_fields = ("executable", "model", "cli_version", "codex_home")
     if any(
-        not isinstance(value[field], str)
-        or not value[field]
-        or "\x00" in value[field]
+        not isinstance(value[field], str) or not value[field] or "\x00" in value[field]
         for field in string_fields
     ):
         raise ValueError(
             f"runtime provision {label} paths and identities must be non-empty strings"
         )
-    if not Path(value["executable"]).is_absolute() or not Path(
-        value["codex_home"]
-    ).is_absolute():
+    if (
+        not Path(value["executable"]).is_absolute()
+        or not Path(value["codex_home"]).is_absolute()
+    ):
         raise ValueError(f"runtime provision {label} paths must be absolute")
     profile = value["permission_profile"]
     if not isinstance(profile, dict) or profile != {
@@ -112,20 +111,32 @@ def _provision_binding(
 def parse_runtime_provision_documents(
     config_bytes: bytes,
     replacement_bytes: bytes,
-) -> tuple[dict[str, object], dict[str, object], tuple[str, ...]]:
+) -> tuple[dict[str, object] | None, dict[str, object] | None, tuple[str, ...]]:
     """Parse both untrusted provisioning documents into one closed domain."""
 
     config = _json_document(config_bytes, label="provision config")
     if not isinstance(config, dict):
         raise ValueError("runtime provision config must be a JSON object")
     if (
-        set(config) != {"schema", "codex", "pinned"}
-        or config["schema"] != "lockstep.runtime-provision-config/v1"
+        not set(config) <= {"schema", "codex", "pinned"}
+        or config.get("schema") != "lockstep.runtime-provision-config/v1"
     ):
         raise ValueError("runtime provision config must use the exact config schema")
-    codex = _provision_binding(config["codex"], label="codex", pinned=False)
-    pinned = _provision_binding(config["pinned"], label="pinned", pinned=True)
-    if codex["codex_home"] == pinned["codex_home"]:
+    codex = (
+        _provision_binding(config["codex"], label="codex", pinned=False)
+        if "codex" in config
+        else None
+    )
+    pinned = (
+        _provision_binding(config["pinned"], label="pinned", pinned=True)
+        if "pinned" in config
+        else None
+    )
+    if (
+        codex is not None
+        and pinned is not None
+        and codex["codex_home"] == pinned["codex_home"]
+    ):
         raise ValueError("runtime provision Codex homes must differ")
 
     replacement = _json_document(replacement_bytes, label="replacement grants")

@@ -78,6 +78,7 @@ class _Builder(
         self.outcome_targets: dict[str, str] = dict(self.terminals)
         self.capture_aborted_effects = False
         self.inside_parallel_branch = False
+        self.manual_parallel: dict[str, Any] | None = None
 
 
 def lower_workflow(

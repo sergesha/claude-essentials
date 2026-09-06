@@ -12,8 +12,8 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from lockstep.runtime.effects.models import (
-    AcceptDescriptor,
     AcceptanceResult,
+    AcceptDescriptor,
     ArtifactDescriptor,
     DecisionCase,
     DecisionDescriptor,
@@ -21,9 +21,10 @@ from lockstep.runtime.effects.models import (
     DecisionSpec,
     EffectDescriptor,
     EffectResult,
-    RunnerDescriptor,
+    ManualParallelContract,
     PublishDescriptor,
     PublishItem,
+    RunnerDescriptor,
     RuntimeInputSelector,
     ScopeDescriptor,
     ScopeResult,
@@ -243,6 +244,21 @@ def _artifacts(value: object) -> tuple[ArtifactDescriptor, ...]:
     return tuple(parsed)
 
 
+def parse_manual_parallel(value: object) -> ManualParallelContract:
+    """Parse the digest-bound aggregate without replacing a step's own writes."""
+    raw = _bounded_mapping(value, "manual parallel contract")
+    keys = {"id", "branch", "writes"}
+    _closed(raw, keys, keys, "manual parallel contract")
+    writes = tuple(
+        _write_path(item) for item in _string_list(raw["writes"], "parallel writes")
+    )
+    return ManualParallelContract(
+        _name(raw["id"], "parallel id"),
+        _name(raw["branch"], "parallel branch"),
+        writes,
+    )
+
+
 def parse_effect_descriptor(
     value: object,
     *,
@@ -300,8 +316,9 @@ def parse_effect_descriptor(
         "deadline_seconds",
         "scope_state_keys",
         "result_schema",
+        "parallel",
     }
-    required = allowed - {"scope_state_keys"}
+    required = allowed - {"scope_state_keys", "parallel"}
     _closed(raw, allowed, required, "effect descriptor")
     runner = _runner(raw["runner"])
     if kind != "manual" and runner is None:
@@ -322,6 +339,12 @@ def parse_effect_descriptor(
     writes = tuple(_write_path(item) for item in writes_raw)
     if len(set(writes)) != len(writes):
         raise ValueError("writes must not contain duplicates")
+    parallel = parse_manual_parallel(raw["parallel"]) if "parallel" in raw else None
+    if parallel is not None:
+        if kind != "manual" or runner is not None:
+            raise ValueError("parallel write contract requires an unmanaged manual effect")
+        if any(write not in parallel.writes for write in writes):
+            raise ValueError("parallel writes must include every declared manual write")
     artifacts = _artifacts(raw["artifacts"])
     for artifact in artifacts:
         if artifact.source_path.endswith("/") or not any(
@@ -346,6 +369,7 @@ def parse_effect_descriptor(
         result_schema=raw["result_schema"],
         canonical_json=canonical,
         digest=hashlib.sha256(canonical).hexdigest(),
+        parallel=parallel,
     )
     _verify_expected_digest(parsed.digest, expected_digest)
     _verify_known_state_keys(

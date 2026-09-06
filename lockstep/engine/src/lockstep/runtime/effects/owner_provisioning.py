@@ -20,12 +20,12 @@ from lockstep.runtime.providers.pinned import pinned_runner_binding_digest
 
 @dataclass(frozen=True, slots=True)
 class CapturedRuntimeBindings:
-    """One validation pass over both snapshot-selected installations."""
+    """One validation pass over the snapshot-selected installations."""
 
-    codex_installation: CodexInstallationBinding
-    pinned_installation: CodexInstallationBinding
-    codex_facts: _RuntimeBindingFacts
-    pinned_facts: _RuntimeBindingFacts
+    codex_installation: CodexInstallationBinding | None
+    pinned_installation: CodexInstallationBinding | None
+    codex_facts: _RuntimeBindingFacts | None
+    pinned_facts: _RuntimeBindingFacts | None
 
 
 def _provision_projects(
@@ -77,10 +77,10 @@ def _capture_provision_binding(member: dict[str, object]):
         raise ValueError(str(exc)) from exc
 
 
-def _validate_provision_tmpdir(
-    binding: object, *, projects: tuple[Path, ...]
-) -> None:
-    error = "TMPDIR must be an absolute non-symlink owner-only directory outside project"
+def _validate_provision_tmpdir(binding: object, *, projects: tuple[Path, ...]) -> None:
+    error = (
+        "TMPDIR must be an absolute non-symlink owner-only directory outside project"
+    )
     environment = dict(binding.environment)  # type: ignore[attr-defined]
     supplied = Path(environment["TMPDIR"])
     if not supplied.is_absolute() or supplied.is_symlink():
@@ -121,25 +121,37 @@ def _runtime_binding_facts(
 
 def validate_runtime_provision_inputs(
     *,
-    codex: dict[str, object],
-    pinned: dict[str, object],
+    codex: dict[str, object] | None,
+    pinned: dict[str, object] | None,
     replacement_keys: tuple[str, ...],
     index: RuntimeRequirementIndex | RuntimeProvisioningInventory,
     project: Path,
-) -> tuple[_RuntimeBindingFacts, _RuntimeBindingFacts]:
-    """Capture and normalize both bindings after closed input validation."""
+) -> tuple[_RuntimeBindingFacts | None, _RuntimeBindingFacts | None]:
+    """Capture supplied bindings and require each inventory-selected runner."""
 
     projects = _provision_projects(index, project)
-    codex_binding = _capture_provision_binding(codex)
-    pinned_binding = _capture_provision_binding(pinned)
-    if codex_binding.codex_home == pinned_binding.codex_home:
+    required = {requirement.runner_selector for requirement in index.requirements}
+    for selector, configured in (("codex", codex), ("pinned", pinned)):
+        if selector in required and configured is None:
+            raise ValueError(f"runtime inventory requires {selector} binding")
+    codex_binding = _capture_provision_binding(codex) if codex is not None else None
+    pinned_binding = _capture_provision_binding(pinned) if pinned is not None else None
+    if (
+        codex_binding is not None
+        and pinned_binding is not None
+        and codex_binding.codex_home == pinned_binding.codex_home
+    ):
         raise ValueError("runtime provision Codex homes must differ")
-    if codex_binding.credential_identity_digest is None:
+    if codex_binding is not None and codex_binding.credential_identity_digest is None:
         raise ValueError("runtime codex binding requires an owner credential auth.json")
-    if pinned_binding.credential_identity_digest is not None:
+    if (
+        pinned_binding is not None
+        and pinned_binding.credential_identity_digest is not None
+    ):
         raise ValueError("runtime pinned binding must be credential-free")
-    _validate_provision_tmpdir(codex_binding, projects=projects)
-    _validate_provision_tmpdir(pinned_binding, projects=projects)
+    for binding in (codex_binding, pinned_binding):
+        if binding is not None:
+            _validate_provision_tmpdir(binding, projects=projects)
     inventory_keys = {
         requirement.grant_selection_key for requirement in index.requirements
     }
@@ -148,7 +160,9 @@ def validate_runtime_provision_inputs(
             "runtime replacement grant key is outside the static runtime inventory"
         )
     return (
-        _runtime_binding_facts(codex_binding, pinned_permission_profile=None),
+        _runtime_binding_facts(codex_binding, pinned_permission_profile=None)
+        if codex_binding is not None
+        else None,
         _runtime_binding_facts(
             pinned_binding,
             pinned_permission_profile=pinned["pinned_permission_profile"],
@@ -156,7 +170,9 @@ def validate_runtime_provision_inputs(
                 pinned_binding.digest,
                 pinned["pinned_permission_profile"],
             ),
-        ),
+        )
+        if pinned_binding is not None and pinned is not None
+        else None,
     )
 
 
@@ -164,7 +180,7 @@ def capture_runtime_snapshot_bindings(
     snapshot: OwnerRuntimeSnapshot,
     *,
     project: Path,
-) -> tuple[_RuntimeBindingFacts, _RuntimeBindingFacts]:
+) -> tuple[_RuntimeBindingFacts | None, _RuntimeBindingFacts | None]:
     """Capture each configured installation once and reject binding drift."""
 
     captured = capture_runtime_execution_bindings(snapshot, project=project)
@@ -188,19 +204,36 @@ def capture_runtime_execution_bindings(
             "environment": dict(binding.environment),
         }
 
-    codex_binding = _capture_provision_binding(member(snapshot.codex))
-    pinned_binding = _capture_provision_binding(member(snapshot.pinned))
+    codex_binding = (
+        _capture_provision_binding(member(snapshot.codex))
+        if snapshot.codex is not None
+        else None
+    )
+    pinned_binding = (
+        _capture_provision_binding(member(snapshot.pinned))
+        if snapshot.pinned is not None
+        else None
+    )
     projects = (project.resolve(strict=True),)
-    _validate_provision_tmpdir(codex_binding, projects=projects)
-    _validate_provision_tmpdir(pinned_binding, projects=projects)
-    codex = _runtime_binding_facts(codex_binding, pinned_permission_profile=None)
-    pinned = _runtime_binding_facts(
-        pinned_binding,
-        pinned_permission_profile=snapshot.pinned.pinned_permission_profile,
-        binding_digest=pinned_runner_binding_digest(
-            pinned_binding.digest,
-            snapshot.pinned.pinned_permission_profile,
-        ),
+    for binding in (codex_binding, pinned_binding):
+        if binding is not None:
+            _validate_provision_tmpdir(binding, projects=projects)
+    codex = (
+        _runtime_binding_facts(codex_binding, pinned_permission_profile=None)
+        if codex_binding is not None
+        else None
+    )
+    pinned = (
+        _runtime_binding_facts(
+            pinned_binding,
+            pinned_permission_profile=snapshot.pinned.pinned_permission_profile,
+            binding_digest=pinned_runner_binding_digest(
+                pinned_binding.digest,
+                snapshot.pinned.pinned_permission_profile,
+            ),
+        )
+        if pinned_binding is not None and snapshot.pinned is not None
+        else None
     )
     if codex != snapshot.codex or pinned != snapshot.pinned:
         raise ValueError("owner runtime binding changed after provisioning")
@@ -215,8 +248,8 @@ def capture_runtime_execution_bindings(
 def provision_runtime_snapshot(
     *,
     state_dir: Path,
-    codex: dict[str, object],
-    pinned: dict[str, object],
+    codex: dict[str, object] | None,
+    pinned: dict[str, object] | None,
     replacement_keys: tuple[str, ...],
     index: RuntimeRequirementIndex | RuntimeProvisioningInventory,
     project: Path,

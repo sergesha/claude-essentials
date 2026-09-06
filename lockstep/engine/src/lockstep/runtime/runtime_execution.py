@@ -131,7 +131,9 @@ class OwnerRuntimeEffectAuthority:
             (item.grant_selection_key, digest)
             for item, digest in RuntimeRequirementIndex(
                 binding.project_identity, (requirement,)
-            ).bind(snapshot).entries
+            )
+            .bind(snapshot)
+            .entries
         )
         digest = bound[requirement.grant_selection_key]
         grants = {item.grant_selection_key: item for item in snapshot.grants}
@@ -139,11 +141,14 @@ class OwnerRuntimeEffectAuthority:
         if grant is None or grant.requirement_digest != digest:
             raise ValueError("current owner runtime grant is unavailable")
         expected_binding = (
-            snapshot.codex.binding_digest
+            snapshot.codex
             if requirement.runner_selector == "codex"
-            else snapshot.pinned.binding_digest
+            else snapshot.pinned
         )
-        if intent.runner_binding_digest != expected_binding:
+        if (
+            expected_binding is None
+            or intent.runner_binding_digest != expected_binding.binding_digest
+        ):
             raise ValueError("effect intent uses a different owner runner binding")
         return requirement, digest, grant
 
@@ -198,7 +203,9 @@ class OwnerRuntimeEffectAuthority:
             intent = self._intent(request)
             expected_grant = self._resolve_current(intent)
             if expected_grant != grant or intent.bind_grant(grant) != request:
-                raise ValueError("effect commitment differs from current owner authority")
+                raise ValueError(
+                    "effect commitment differs from current owner authority"
+                )
             yield
 
 
@@ -240,34 +247,42 @@ def build_runtime_execution_composition(
     captured = context.bindings
     snapshot = context.snapshot
     workspaces = LocalGitWorkspaceProvider(state_dir, snapshots, blobs)
-    codex = CodexRunnerAdapter(
-        owner_state_dir=state_dir,
-        installation=lambda: captured.codex_installation,
-        decision_gate=CodexLaunchDecisionGate(
-            snapshot.codex.binding_digest, generation=snapshot.config_generation
-        ),
-        workspaces=workspaces,
-        blobs=blobs,
-        sandbox=CodexSandboxAttestor(
-            cli_version=captured.codex_installation.cli_version
-        ),
-    )
-    pinned = PinnedRunnerAdapter(
-        owner_state_dir=state_dir,
-        installation=lambda: captured.pinned_installation,
-        decision_gate=CodexLaunchDecisionGate(
-            pinned_runner_binding_digest(
-                captured.pinned_installation.digest,
-                snapshot.pinned.pinned_permission_profile,
+    codex = (
+        CodexRunnerAdapter(
+            owner_state_dir=state_dir,
+            installation=lambda: captured.codex_installation,
+            decision_gate=CodexLaunchDecisionGate(
+                snapshot.codex.binding_digest, generation=snapshot.config_generation
             ),
-            generation=snapshot.config_generation,
-        ),
-        workspaces=workspaces,
-        blobs=blobs,
-        sandbox=CodexSandboxAttestor(
-            cli_version=captured.pinned_installation.cli_version
-        ),
-        permission_profile=snapshot.pinned.pinned_permission_profile,
+            workspaces=workspaces,
+            blobs=blobs,
+            sandbox=CodexSandboxAttestor(
+                cli_version=captured.codex_installation.cli_version
+            ),
+        )
+        if captured.codex_installation is not None and snapshot.codex is not None
+        else None
+    )
+    pinned = (
+        PinnedRunnerAdapter(
+            owner_state_dir=state_dir,
+            installation=lambda: captured.pinned_installation,
+            decision_gate=CodexLaunchDecisionGate(
+                pinned_runner_binding_digest(
+                    captured.pinned_installation.digest,
+                    snapshot.pinned.pinned_permission_profile,
+                ),
+                generation=snapshot.config_generation,
+            ),
+            workspaces=workspaces,
+            blobs=blobs,
+            sandbox=CodexSandboxAttestor(
+                cli_version=captured.pinned_installation.cli_version
+            ),
+            permission_profile=snapshot.pinned.pinned_permission_profile,
+        )
+        if captured.pinned_installation is not None and snapshot.pinned is not None
+        else None
     )
     authority = OwnerRuntimeEffectAuthority(
         state_dir=state_dir,

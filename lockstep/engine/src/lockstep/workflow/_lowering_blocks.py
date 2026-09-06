@@ -19,6 +19,8 @@ class _LoweringBlocks:
         retry_limit: int | None,
         failure_target: str | None,
     ) -> _Fragment:
+        if self.active_scope_state_keys:
+            raise ValueError("unmanaged manual steps cannot join a bounded scope")
         logical = block.id or block.step
         result_key = f"{logical.replace('-', '_')}_result"
         artifact = block.artifact
@@ -43,6 +45,8 @@ class _LoweringBlocks:
             "scope_state_keys": [],
             "result_schema": "lockstep.effect-result/v1",
         }
+        if self.manual_parallel is not None:
+            descriptor["parallel"] = self.manual_parallel
         message = {
             "step": block.step,
             "task": block.task,

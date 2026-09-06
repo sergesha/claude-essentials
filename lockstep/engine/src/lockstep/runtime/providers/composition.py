@@ -10,14 +10,18 @@ from lockstep.runtime.providers.pinned import PinnedRunnerAdapter
 
 @dataclass(frozen=True, slots=True)
 class ReleasedRunnerComposition:
-    """Exactly the two runner adapters released by this distribution."""
+    """Configured adapters drawn from the two released runner types."""
 
-    codex: CodexRunnerAdapter
-    pinned: PinnedRunnerAdapter
+    codex: CodexRunnerAdapter | None
+    pinned: PinnedRunnerAdapter | None
 
     def resolve(self, selector: str) -> CodexRunnerAdapter | PinnedRunnerAdapter:
         if selector == "codex":
+            if self.codex is None:
+                raise ValueError("owner runtime codex runner is unavailable")
             return self.codex
         if selector == "pinned":
+            if self.pinned is None:
+                raise ValueError("owner runtime pinned runner is unavailable")
             return self.pinned
         raise ValueError(f"unsupported runner selector: {selector!r}")

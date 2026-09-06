@@ -355,7 +355,10 @@ def _manual_graph_analysis(document: Mapping[str, Any]) -> _ManualGraphAnalysis:
             continue
         source_name, raw_targets = edge.get("from"), edge.get("to")
         targets = raw_targets if isinstance(raw_targets, list) else [raw_targets]
-        if isinstance(source_name, str):
+        sources = source_name if isinstance(source_name, list) else [source_name]
+        for source_name in sources:
+            if not isinstance(source_name, str):
+                continue
             for target_name in targets:
                 if not isinstance(target_name, str):
                     continue

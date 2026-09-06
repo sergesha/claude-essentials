@@ -336,10 +336,18 @@ def _validate_fragment_edges(edges: tuple[Any, ...]) -> None:
         if (
             not isinstance(edge, Mapping)
             or set(edge) - {"from", "to", "condition"}
-            or not isinstance(edge.get("from"), str)
             or not isinstance(edge.get("to"), str)
             or ("condition" in edge and not isinstance(edge["condition"], str))
         ):
+            raise ValueError("fragment edge is not closed")
+        source = edge.get("from")
+        if isinstance(source, (list, tuple)):
+            if (
+                not source or any(not isinstance(item, str) or not item for item in source)
+                or len(set(source)) != len(source) or "condition" in edge
+            ):
+                raise ValueError("fragment join requires distinct sources and no condition")
+        elif not isinstance(source, str):
             raise ValueError("fragment edge is not closed")
 
 
