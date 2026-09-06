@@ -1,0 +1,12 @@
+{
+  "name": "redis-memory",
+  "version": "0.8.1",
+  "description": "Persistent cross-session semantic and key-value memory using Redis.",
+  "author": { "name": "sergesha" },
+  "homepage": "https://github.com/sergesha/claude-essentials",
+  "repository": "https://github.com/sergesha/claude-essentials",
+  "license": "MIT",
+  "skills": "./skills/",
+  "hooks": "./hooks/project-init.json",
+  "mcpServers": "./.codex-plugin/mcp.json"
+}
