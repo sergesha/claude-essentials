@@ -13,7 +13,7 @@ working directory in the target project.
 
 ## Operations
 
-- Install tools: `python3 "$CODE_INTEL" install-tools`
+- Install missing tools: `python3 "$CODE_INTEL" install-tools`
 - Upgrade tools and check the installation: `python3 "$CODE_INTEL" upgrade --base BASE`
 - Initialize one project or umbrella: `python3 "$CODE_INTEL" setup-project PATH`
 - Initialize all eligible projects: `python3 "$CODE_INTEL" setup-batch BASE`
@@ -36,8 +36,24 @@ Explicit `setup-project` on an umbrella initializes every non-excluded nested Gi
 
 ## Session-start discovery
 
-Claude Code and Codex use the same plugin `SessionStart` command. In a Git
-repository or linked worktree, it automatically initializes both indexes when
+Claude Code and Codex use the same plugin `SessionStart` command. It first checks
+whether `codegraph` and `code-review-graph` are available on PATH, even outside a
+Git repository or when indexes already exist. If a tool is missing, it reports
+the missing commands and asks the agent to offer installation; it does not run
+installers or initialize indexes.
+
+On that notification, tell the user which tools are missing and offer to install
+them. After consent, run `install-tools` yourself; do not make the user discover
+or type the installation command. An explicit request to install is consent.
+If they decline, continue with normal search/file tools without installing.
+If prerequisites for installation are missing, explain the reported prerequisite
+and agree on provisioning it or using the user's preferred installer.
+After installation, verify tool availability with `status --base PATH`, resume
+the requested project setup, and ask the user to restart the host for MCP pickup.
+Do not claim MCP is connected until the host confirms it.
+
+When both tools are available, in a Git repository or linked worktree it
+automatically initializes both indexes when
 either is missing. The prompt and post-tool hooks provide the same repair path,
 so a worktree opened after session start is covered. Hooks remain fail-open.
 
@@ -64,8 +80,11 @@ package-manager-specific paths. Existing installations from any manager work
 when their executables are available in the host's environment.
 
 For automated provisioning, `install-tools` and `upgrade` use npm for CodeGraph
-and an available uv or pipx for code-review-graph. They do not install package
-managers. Alternatively install the tools with the user's preferred manager.
+and an available uv or pipx for code-review-graph. `install-tools` installs only
+missing tools and leaves existing installations unchanged; `upgrade` explicitly
+updates both. They check only the installers needed for the requested work and
+do not install package managers. Alternatively install the tools with the user's
+preferred manager.
 Ensure both commands are on the PATH inherited by Claude Code/Codex, including
 when launched as desktop applications, then restart the host.
 `status` checks tool versions, the CRG registry, and discovered CodeGraph indexes.
