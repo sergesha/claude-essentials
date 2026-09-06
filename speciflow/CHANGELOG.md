@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.6](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.2.5...speciflow-v0.2.6) (2026-09-06)
+
+
+### Bug Fixes
+
+* **speciflow:** preserve instruction reads and exact path previews ([#69](https://github.com/sergesha/claude-essentials/issues/69)) ([3860b22](https://github.com/sergesha/claude-essentials/commit/3860b225d5e3ceef9b7bd8bed26b3a75edd5c190))
+
 ## [0.2.5](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.2.4...speciflow-v0.2.5) (2026-09-06)
 
 
