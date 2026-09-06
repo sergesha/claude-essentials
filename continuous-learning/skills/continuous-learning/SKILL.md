@@ -10,6 +10,12 @@ versioned docs. **Memory holds only OPEN findings; git is the only record of wha
 and fixed.** A finding's presence in memory *is* its "open" status — there is no other status,
 and nothing stays in memory once it's handled.
 
+## Invocation
+
+Claude Code: `/learn [--dry-run]`. Codex: `$continuous-learning promote [--dry-run]`.
+Both invoke the same promotion workflow below; capture and task-end checkpoints
+remain automatic guidance from the SessionStart hook.
+
 ## Prerequisite: a namespaced redis-memory connection
 
 This skill's `mem_save`/`mem_list` calls use whatever scope the installing client's own
@@ -52,7 +58,8 @@ Best-effort: if memory is unavailable, skip silently — never block the task on
 3. **Draft a changeset** — concrete edits to this project's own skills/docs/commands, each tied
    to a specific finding.
 4. **Present the full changeset for approval. Apply nothing first** — even "obvious, reversible"
-   edits go in the changeset, not straight to disk.
+   edits go in the changeset, not straight to disk. With `--dry-run`, stop here without
+   applying, committing or deleting findings.
 5. On approval: apply, commit (standard trailer), then **`mem_delete` every processed finding —
    implemented OR rejected — and save nothing in its place.**
 
