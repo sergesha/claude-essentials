@@ -13,6 +13,11 @@ REPO = PLUGIN.parent
 
 
 class ImportedPluginTests(unittest.TestCase):
+    def assert_manifest_versions_match(self, plugin):
+        claude = json.loads((plugin / ".claude-plugin/plugin.json").read_text())
+        codex = json.loads((plugin / ".codex-plugin/plugin.json").read_text())
+        self.assertEqual(codex["version"], claude["version"])
+
     def test_marketplace_resolves_plugin_and_runtime_files(self):
         marketplace = json.loads((REPO / ".claude-plugin/marketplace.json").read_text())
         entry = next(p for p in marketplace["plugins"] if p["name"] == "tech-radar")
@@ -41,11 +46,9 @@ class ImportedPluginTests(unittest.TestCase):
                 "authentication": "ON_INSTALL",
             },
         })
-        self.assertEqual(marketplace["plugins"][-1], entry)
-
         manifest = json.loads((PLUGIN / ".codex-plugin/plugin.json").read_text())
         self.assertEqual(manifest["name"], "tech-radar")
-        self.assertEqual(manifest["version"], "0.5.0")
+        self.assert_manifest_versions_match(PLUGIN)
         self.assertEqual(manifest["skills"], "./skills/")
         self.assertEqual(manifest["hooks"], "./hooks/session-start.json")
         self.assertEqual(manifest["mcpServers"], "./.codex-plugin/mcp.json")
@@ -64,6 +67,39 @@ class ImportedPluginTests(unittest.TestCase):
             {"type": "json", "path": ".codex-plugin/plugin.json", "jsonpath": "$.version"},
             extra_files,
         )
+
+    def test_codex_manifest_version_tracks_release_bumps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            package = Path(tmp) / "tech-radar"
+            shutil.copytree(PLUGIN, package)
+            for host in (".claude-plugin", ".codex-plugin"):
+                path = package / host / "plugin.json"
+                manifest = json.loads(path.read_text())
+                manifest["version"] = "0.6.0"
+                path.write_text(json.dumps(manifest))
+            self.assert_manifest_versions_match(package)
+
+    def test_missing_report_entrypoints_give_host_neutral_next_step(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            installed = Path(tmp) / "installed plugin"
+            shutil.copytree(PLUGIN, installed)
+            project = Path(tmp) / "consumer project"
+            project.mkdir()
+            scripts = (
+                installed / "skills/show-result/show.py",
+                installed / "skills/render-dashboard/render.py",
+                installed / "skills/collect-news/export_yaml.py",
+            )
+            for script in scripts:
+                with self.subTest(script=script.name):
+                    result = subprocess.run(
+                        [sys.executable, str(script)], cwd=project,
+                        capture_output=True, text=True,
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertEqual(result.stdout, "")
+                    self.assertIn("collect-news skill", result.stderr)
+                    self.assertNotIn("/tech-radar:", result.stderr)
 
     def test_show_result_resolves_sibling_exporters_after_move(self):
         data = {"generated_at": "2026-07-23T12:00:00Z", "topics": [],

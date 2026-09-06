@@ -56,18 +56,27 @@ The hook exports that value as `CLAUDE_PLUGIN_DATA`. It does not migrate data;
 using the shared override avoids treating the other client's mount as drift.
 Do not run two managed copies concurrently.
 
-For a backend managed outside this plugin, disable all stack lifecycle work and
-provide its MCP endpoints before launching the client:
+For a backend managed outside this plugin on the default local endpoints
+(`localhost:8888` and `localhost:6381`), disable all stack lifecycle work in
+either client before launch:
 
 ```bash
 export TECH_RADAR_STACK=external
+```
+
+Codex can additionally forward custom MCP endpoints from its process
+environment:
+
+```bash
 export SEARXNG_URL=http://search.example:8080
 export CACHE_URL=redis://cache.example:6379
 ```
 
-External mode performs no data-directory, tool, or container action. Configure
-the separate redis-memory plugin's `REDIS_URL`, embedding endpoint, and
-`NAMESPACE` according to its own documentation.
+The custom endpoint example is Codex-only; the Claude Code MCP configuration
+continues to use the default local endpoints. External mode itself performs no
+data-directory, tool, or container action. Configure the separate redis-memory
+plugin's `REDIS_URL`, embedding endpoint, and `NAMESPACE` according to its own
+documentation.
 
 ## Upgrade
 

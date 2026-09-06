@@ -71,7 +71,7 @@ def main():
     pos = [a for a in argv if not a.startswith("--")]
     src = Path(pos[0]) if pos else Path("reports/radar-latest.json")
     if not src.exists():
-        sys.exit(f"No data document at {src}. Run /tech-radar:collect-news first.")
+        sys.exit(f"No data document at {src}. Invoke the collect-news skill first.")
     data = json.loads(src.read_text())
     if to_stdout:
         sys.stdout.write(to_yaml(data))
