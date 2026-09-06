@@ -64,6 +64,12 @@ under `parallel_progress.steps`. Overall ownership still controls when work
 may proceed. Shell callers bind a new run with `scenario start --session-id`
 and reuse that identity for mutations; plugin hosts bind through PostToolUse.
 
+For a protected manual step, `scenario done` checks the declared artifact path
+and Markdown headings using the existing project-read validators. A missing file
+or heading rejects the submission and leaves the same step pending for repair;
+this pre-submission rejection does not consume a graph retry attempt. The artifact
+declaration does not add evidence fields, freshness checks, or business validation.
+
 ## Problem
 
 Autonomous coding agents (esp. weaker models) drop multi-step processes: skip

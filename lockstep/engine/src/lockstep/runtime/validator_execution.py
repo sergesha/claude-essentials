@@ -73,7 +73,7 @@ def _execute_configured_checks(
             if check_type == "unchanged":
                 deferred.append(check)
                 continue
-            implementation = CHECKS.get(check_type)
+            implementation = CHECKS.get(check_type) if isinstance(check_type, str) else None
             if implementation is None:
                 reasons.append(f"unknown check type: {check_type!r}")
                 continue
@@ -91,6 +91,10 @@ def validate_manual_checks(
     checks: object, evidence: dict, project: str
 ) -> list[str]:
     """Run eligible project reads without conferring broader authority."""
+    return manual_check_verdict(checks, evidence, project)["verdict_reasons"]
+
+
+def _manual_check_contract_errors(checks: object) -> list[str]:
     if checks is None:
         return []
     if not isinstance(checks, list) or any(
@@ -116,17 +120,49 @@ def validate_manual_checks(
             )
         elif check_type not in _MANUAL_PROJECT_READ_CHECK_TYPES:
             classification_errors.append(f"unknown check type: {check_type!r}")
-    if classification_errors:
-        return classification_errors
+    return classification_errors
 
-    context = {"_project": project}
-    reasons: list[str] = []
-    try:
-        for check in checks:
-            reasons.extend(CHECKS[check["type"]](check, evidence, context))
-    except Exception as exc:  # noqa: BLE001 - manual validation fails closed
-        return [str(exc)]
-    return reasons
+
+def manual_check_verdict(
+    checks: object, evidence: dict, project: str
+) -> dict[str, Any]:
+    """Separate an ordinary read-check failure from inadmissible execution."""
+    errors = _manual_check_contract_errors(checks)
+    if errors:
+        return {"verdict_status": "error", "verdict_reasons": errors}
+    if not checks:
+        return {"verdict_status": "pass", "verdict_reasons": []}
+    assert isinstance(checks, list)
+    return _execute_configured_checks(checks, evidence, {"_project": project})
+
+
+def validate_manual_artifact_contract(contract: object, project: str) -> list[str]:
+    """Check the declared artifact using the existing project-read validators."""
+    if contract in (None, [], {}):
+        return []
+    if not isinstance(contract, dict):
+        return ["artifact contract must be an object"]
+    path = contract.get("path")
+    markdown = contract.get("markdown")
+    if not isinstance(path, str) or not path:
+        return ["artifact contract requires a path"]
+    if not isinstance(markdown, dict):
+        return ["artifact contract requires Markdown sections"]
+    sections = markdown.get("sections")
+    if (
+        not isinstance(sections, list)
+        or not sections
+        or any(not isinstance(section, str) or not section for section in sections)
+    ):
+        return ["artifact Markdown sections must be nonempty strings"]
+    return validate_manual_checks(
+        [
+            {"type": "file_exists", "path": path},
+            {"type": "md_has_sections", "path": path, "sections": sections},
+        ],
+        {},
+        project,
+    )
 
 
 def _apply_effect_contract(

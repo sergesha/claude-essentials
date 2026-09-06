@@ -161,6 +161,15 @@ Manual yamlgraph is subject to the same closed ingress, project-path, runtime,
 evidence, recovery, artifact, and publication contracts as compiled workflows.
 It does not gain authority from fields in the YAML.
 
+Manual recipes may use the exact installed
+`lockstep.runtime.validators.run_checks` verdict relay without an executable
+grant. The engine checks submitted evidence before supplying its verdict;
+the relay itself does not execute recipe commands. Other Python callables and
+shell tools retain their executable-authority requirements. Manual completion
+supports project-read checks; process checks require the pinned execution path.
+Malformed evidence or inadmissible checks leave the current step pending;
+ordinary failed read checks follow the manual recipe's authored retry edges.
+
 ## Running a workflow
 
 Before running either packaged template, complete [owner runtime setup](#owner-runtime-setup).
