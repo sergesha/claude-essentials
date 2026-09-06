@@ -2,9 +2,10 @@
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
-import sys
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -57,30 +58,64 @@ class PackagingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="code-intel package ") as directory:
             installed = Path(directory) / "installed plugin"
             shutil.copytree(PACKAGE, installed)
-            servers = read_json(installed / ".mcp.json")["mcpServers"]
-            for engine, server in servers.items():
-                script, *arguments = server["args"]
-                script = Path(script.replace("${CLAUDE_PLUGIN_ROOT}", str(installed)))
-                spec = importlib.util.spec_from_file_location("installed_code_intel", script)
-                module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
-                expected = ([module.CODEGRAPH, "serve", "--mcp"] if engine == "codegraph"
-                            else [module.CRG, "serve"])
-                with patch.object(sys, "argv", [str(script), *arguments]), patch.object(module.os, "execv") as execute:
-                    module.main()
-                execute.assert_called_once_with(expected[0], expected)
+            shims = Path(directory) / "bin with spaces"
+            shims.mkdir(parents=True)
+            for engine in ("codegraph", "code-review-graph"):
+                shim = shims / engine
+                shim.write_text('#!/bin/sh\nprintf "%s\\n" "$0" "$@" "$PWD"\ncat\n')
+                shim.chmod(0o755)
+            env = dict(os.environ, HOME=str(Path(directory) / "empty home"),
+                       PATH=str(shims) + os.pathsep + os.defpath)
+            env.pop("CLAUDE_PLUGIN_ROOT", None)
+            env.pop("CODEX_PLUGIN_ROOT", None)
+            for servers in (
+                read_json(installed / ".mcp.json")["mcpServers"],
+                read_json(installed / ".claude-plugin/plugin.json")["mcpServers"],
+            ):
+                for engine, server in servers.items():
+                    with self.subTest(engine=engine, server=server):
+                        result = subprocess.run(
+                            [server["command"], *server["args"]],
+                            cwd=directory, env=env, input="stdio payload\n",
+                            text=True, capture_output=True, timeout=10,
+                        )
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        arguments = ["serve", "--mcp"] if engine == "codegraph" else ["serve"]
+                        self.assertEqual(result.stdout.splitlines(),
+                                         [str(shims / engine), *arguments,
+                                          str(Path(directory).resolve()), "stdio payload"])
             self.assertTrue((installed / "skills/code-intel/../../scripts/code_intel.py").is_file())
 
     def test_install_and_upgrade_keep_baseline_tool_commands(self):
+        import io
+
         spec = importlib.util.spec_from_file_location("code_intel", PACKAGE / "scripts/code_intel.py")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        with patch.object(module, "run", return_value=0) as run:
-            self.assertEqual(module.install_tools(), 0)
-        self.assertEqual([call.args[0] for call in run.call_args_list], [
-            ["mise", "use", "-g", "npm:@colbymchenry/codegraph@latest"],
-            ["mise", "use", "-g", "pipx:code-review-graph@latest"],
-        ])
+        for available, python_command in (
+            ({"npm", "uv", "pipx"}, ["/tools/uv", "tool", "install", "--upgrade", "code-review-graph"]),
+            ({"npm", "pipx"}, ["/tools/pipx", "install", "--force", "code-review-graph"]),
+        ):
+            with (
+                self.subTest(available=available),
+                patch.object(module.shutil, "which", side_effect=lambda name: f"/tools/{name}" if name in available else None),
+                patch.object(module, "run", return_value=0) as run,
+            ):
+                self.assertEqual(module.install_tools(), 0)
+                self.assertEqual([call.args[0] for call in run.call_args_list], [
+                    ["/tools/npm", "install", "--global", "@colbymchenry/codegraph"],
+                    python_command,
+                ])
+        for available, missing in (({"uv"}, "npm"), ({"npm"}, "uv or pipx")):
+            with (
+                self.subTest(missing=missing),
+                patch.object(module.shutil, "which", side_effect=lambda name: f"/tools/{name}" if name in available else None),
+                patch.object(module, "run") as run,
+                patch.object(module.sys, "stderr", new_callable=io.StringIO) as error,
+            ):
+                self.assertEqual(module.install_tools(), 127)
+                run.assert_not_called()
+                self.assertIn(missing, error.getvalue())
         with patch.object(module, "install_tools", return_value=0), patch.object(module, "status", return_value=0) as status:
             self.assertEqual(module.upgrade(PACKAGE), 0)
             status.assert_called_once_with(PACKAGE)
