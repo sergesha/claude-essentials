@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.0](https://github.com/sergesha/claude-essentials/compare/tech-radar-v0.5.0...tech-radar-v0.6.0) (2026-09-06)
+
+
+### Features
+
+* **tech-radar:** add native Codex integration ([#71](https://github.com/sergesha/claude-essentials/issues/71)) ([c82073b](https://github.com/sergesha/claude-essentials/commit/c82073b42d4ef328a3e5ed23ad7b3e90eebe29a7))
+* **tech-radar:** restore plugin in shared marketplace ([#65](https://github.com/sergesha/claude-essentials/issues/65)) ([1aac794](https://github.com/sergesha/claude-essentials/commit/1aac7945466696a101815729508782048df53d63))
+
 ## [0.5.0](https://github.com/sergesha/claude-tech-radar/compare/v0.4.0...v0.5.0) (2026-07-23)
 
 
