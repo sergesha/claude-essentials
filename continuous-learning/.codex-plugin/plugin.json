@@ -1,0 +1,11 @@
+{
+  "name": "continuous-learning",
+  "version": "0.1.0",
+  "description": "Capture runtime findings and promote them into versioned project documentation.",
+  "author": { "name": "sergesha" },
+  "homepage": "https://github.com/sergesha/claude-essentials",
+  "repository": "https://github.com/sergesha/claude-essentials",
+  "license": "MIT",
+  "skills": "./skills/",
+  "hooks": "./hooks/session-start.json"
+}
