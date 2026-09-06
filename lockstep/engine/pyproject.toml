@@ -40,6 +40,8 @@ files = [
   "src/lockstep/runtime/_recovery_watch_drive.py",
   "src/lockstep/runtime/_recovery_watch_settlement.py",
   "src/lockstep/runtime/engine_drive_service.py",
+  "src/lockstep/runtime/legacy_manual_evidence.py",
+  "src/lockstep/runtime/validator_execution.py",
   "src/lockstep/runtime/publication.py",
   "src/lockstep/runtime/effects/_coordinator_authority_recovery.py",
   "src/lockstep/runtime/effects/_coordinator_foundation.py",
