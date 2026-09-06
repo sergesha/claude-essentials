@@ -47,8 +47,10 @@ In Claude Code, add this marketplace as above, then run
 In Codex, add this repository with `codex plugin marketplace add <repository-path>`
 and run `codex plugin add code-intel@claude-essentials`.
 
-The plugin requires Python 3.11+ and mise. Ask the bundled `code-intel` skill to
-install the tools, then restart the host. It uses the existing local skill's
+The plugin requires Python 3.11+ and `codegraph` / `code-review-graph` on the
+host's PATH, regardless of their installation manager. Ask the bundled
+`code-intel` skill to install the tools (npm plus uv or pipx), or use your preferred
+manager, then restart the host. It uses the existing local skill's
 project discovery, initialization, updates, and hooks. Plugin declarations supply
 the host integration; there is no global-config migration step.
 

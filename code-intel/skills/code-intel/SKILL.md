@@ -58,9 +58,16 @@ Install `code-intel` from the `claude-essentials` marketplace in Claude Code or
 Codex. The plugin supplies both MCP servers, hooks, and this skill. It does not
 rewrite global instructions, hooks, MCP settings, or skill symlinks.
 
-Python 3.11+ and mise are prerequisites. `install-tools` and `upgrade` use mise to
-install the latest CodeGraph and code-review-graph releases. MCP entrypoints use
-mise shims under `~/.local/share/mise/shims`; restart the host after installation.
+Python 3.11+ is required for the setup script. Both MCP servers and setup commands
+find `codegraph` and `code-review-graph` through `PATH`; there are no
+package-manager-specific paths. Existing installations from any manager work
+when their executables are available in the host's environment.
+
+For automated provisioning, `install-tools` and `upgrade` use npm for CodeGraph
+and an available uv or pipx for code-review-graph. They do not install package
+managers. Alternatively install the tools with the user's preferred manager.
+Ensure both commands are on the PATH inherited by Claude Code/Codex, including
+when launched as desktop applications, then restart the host.
 `status` checks tool versions, the CRG registry, and discovered CodeGraph indexes.
 `project-status` reports index presence.
 

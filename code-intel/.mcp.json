@@ -1,19 +1,16 @@
 {
   "mcpServers": {
     "codegraph": {
-      "command": "python3",
+      "command": "codegraph",
       "args": [
-        "${CLAUDE_PLUGIN_ROOT}/scripts/code_intel.py",
         "serve",
-        "codegraph"
+        "--mcp"
       ]
     },
     "code-review-graph": {
-      "command": "python3",
+      "command": "code-review-graph",
       "args": [
-        "${CLAUDE_PLUGIN_ROOT}/scripts/code_intel.py",
-        "serve",
-        "crg"
+        "serve"
       ]
     }
   }
