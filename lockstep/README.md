@@ -228,9 +228,15 @@ Provisioning selects executable authority; an agent's report or generated
 configuration does not authorize it. Manual workflows without managed or
 pinned effects do not need runtime grants.
 
-You need an installed Codex executable supporting `exec` and
-`sandbox --permission-profile --include-managed-config`, an explicit model,
-and two distinct owner-only Codex home directories. The managed home must
+Configure only the runners used by the selected recipes' runtime inventory.
+For pinned-only verification, omit `codex` from the provisioning config: no
+managed model authorization or authenticated managed home is needed. For
+managed-only recipes, omit `pinned`. Every supplied binding is still validated.
+When both runners are used, their owner-only Codex homes must be distinct.
+
+You need an installed Codex executable supporting the selected runner:
+`exec` for managed work, or `sandbox --permission-profile --include-managed-config`
+for pinned commands. The managed home must
 already contain your authenticated `auth.json`; the pinned home must contain
 no credentials and have the named permissions profile configured for your
 verification command. Use `codex sandbox --help` to check the installed CLI.
@@ -238,7 +244,8 @@ Lockstep does not create credentials or permissions profiles. The pinned
 provider runs the literal command through Codex's sandbox command, without an
 LLM call; managed child reviews invoke the selected model.
 
-The following shell/Python example prompts for those existing settings,
+The following shell/Python example prompts for those existing settings
+(leave an unused runner's home blank),
 discovers the executable and its version locally, and creates private owner
 input files. Keep `LOCKSTEP_STATE_DIR` outside the project and use the same
 value for the plugin host. The input directory also supplies the runner's
@@ -248,13 +255,13 @@ private `TMPDIR`; retain it while this configuration is active.
 export LOCKSTEP_STATE_DIR="$(python3 -c 'import os; from pathlib import Path; print(Path(os.environ.get("LOCKSTEP_STATE_DIR") or "~/.lockstep").expanduser().resolve())')"
 mkdir -p -m 700 "$LOCKSTEP_STATE_DIR"
 export LOCKSTEP_OWNER_INPUTS="$(mktemp -d "$LOCKSTEP_STATE_DIR/provision.XXXXXX")"
-printf 'Managed Codex home (absolute path): '
+printf 'Managed Codex home (absolute path, blank if unused): '
 read -r LOCKSTEP_MANAGED_HOME
-printf 'Credential-free pinned Codex home (absolute path): '
+printf 'Credential-free pinned Codex home (absolute path, blank if unused): '
 read -r LOCKSTEP_PINNED_HOME
-printf 'Model for managed reviews: '
+printf 'Model for managed reviews (pinned-only: owner-selected metadata label): '
 read -r LOCKSTEP_RUNNER_MODEL
-printf 'Permissions profile configured in the pinned home: '
+printf 'Permissions profile configured in the pinned home (blank if unused): '
 read -r LOCKSTEP_PINNED_PROFILE
 export LOCKSTEP_MANAGED_HOME LOCKSTEP_PINNED_HOME
 export LOCKSTEP_RUNNER_MODEL LOCKSTEP_PINNED_PROFILE
@@ -285,13 +292,15 @@ common = {
 }
 config = {
     'schema': 'lockstep.runtime-provision-config/v1',
-    'codex': {**common, 'codex_home': os.environ['LOCKSTEP_MANAGED_HOME']},
-    'pinned': {
+}
+if os.environ['LOCKSTEP_MANAGED_HOME']:
+    config['codex'] = {**common, 'codex_home': os.environ['LOCKSTEP_MANAGED_HOME']}
+if os.environ['LOCKSTEP_PINNED_HOME']:
+    config['pinned'] = {
         **common,
         'codex_home': os.environ['LOCKSTEP_PINNED_HOME'],
         'pinned_permission_profile': os.environ['LOCKSTEP_PINNED_PROFILE'],
-    },
-}
+    }
 with (root / 'config.json').open('x') as output:
     json.dump(config, output, indent=2)
 PY

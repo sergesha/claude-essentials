@@ -344,7 +344,16 @@ def _validate_document_edges(document: dict[str, Any], logical: str) -> None:
     for index, raw_edge in enumerate(edges):
         edge = _require_mapping(raw_edge, f"{logical} edge {index}")
         _closed_fields(edge, {"from", "to", "condition"}, f"{logical} edge {index}")
-        _require_string(edge.get("from"), f"{logical} edge {index} from")
+        sources = edge.get("from")
+        if isinstance(sources, list) and sources:
+            for source in sources:
+                _require_string(source, f"{logical} edge {index} from")
+            if len(set(sources)) != len(sources):
+                raise RecipeAuthorityError(f"{logical} edge {index} join sources must be distinct")
+            if "condition" in edge or not isinstance(edge.get("to"), str):
+                raise RecipeAuthorityError(f"{logical} edge {index} join requires one unconditional target")
+        else:
+            _require_string(sources, f"{logical} edge {index} from")
         targets = edge.get("to")
         if isinstance(targets, str):
             _require_string(targets, f"{logical} edge {index} to")

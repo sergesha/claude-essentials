@@ -31,7 +31,11 @@ from lockstep.runtime.owner_state import (
 )
 
 _SNAPSHOT_SCHEMA = "lockstep.runtime-owner/v1"
-def _binding_document(binding: _RuntimeBindingFacts) -> dict[str, object]:
+
+
+def _binding_document(binding: _RuntimeBindingFacts | None) -> dict[str, object] | None:
+    if binding is None:
+        return None
     return {
         "executable": binding.executable,
         "model": binding.model,
@@ -97,7 +101,9 @@ def _pairs(value: object, *, label: str) -> tuple[tuple[str, str], ...]:
     return tuple(pairs)
 
 
-def _binding_from_document(value: object) -> _RuntimeBindingFacts:
+def _binding_from_document(value: object) -> _RuntimeBindingFacts | None:
+    if value is None:
+        return None
     fields = {
         "executable",
         "model",
@@ -236,6 +242,7 @@ def _assert_snapshot_grants_consistent(snapshot: OwnerRuntimeSnapshot) -> None:
                 config_generation=snapshot.config_generation,
             )
             for binding in (snapshot.codex, snapshot.pinned)
+            if binding is not None
         }
         if grant.requirement_digest not in candidates:
             raise ValueError("owner runtime snapshot grant requirement digest is stale")
@@ -259,6 +266,8 @@ def _assert_predecessor_consistent(
             if requirement.runner_selector == "codex"
             else snapshot.pinned
         )
+        if binding is None:
+            raise ValueError("owner runtime snapshot grant binding is missing")
         expected = requirement_digest(
             grant_selection_key=grant.grant_selection_key,
             runner_binding_digest=binding.binding_digest,
@@ -271,8 +280,8 @@ def _assert_predecessor_consistent(
 def _next_snapshot(
     predecessor: OwnerRuntimeSnapshot | None,
     *,
-    codex: _RuntimeBindingFacts,
-    pinned: _RuntimeBindingFacts,
+    codex: _RuntimeBindingFacts | None,
+    pinned: _RuntimeBindingFacts | None,
     replacement_keys: tuple[str, ...],
     index: RuntimeRequirementIndex | RuntimeProvisioningInventory,
 ) -> OwnerRuntimeSnapshot:
@@ -308,6 +317,8 @@ def _next_snapshot(
     for key in replacement_keys:
         requirement = requirements[key]
         binding = codex if requirement.runner_selector == "codex" else pinned
+        if binding is None:
+            raise ValueError("owner runtime snapshot grant binding is missing")
         digest = requirement_digest(
             grant_selection_key=key,
             runner_binding_digest=binding.binding_digest,
@@ -317,8 +328,7 @@ def _next_snapshot(
         grant_generation = (
             1
             if previous is None
-            else previous.grant_generation
-            + int(previous.requirement_digest != digest)
+            else previous.grant_generation + int(previous.requirement_digest != digest)
         )
         grants.append(
             OwnerRuntimeGrant(
@@ -363,8 +373,8 @@ def _replace_snapshot(path: Path, encoded: bytes) -> None:
 def replace_runtime_snapshot(
     *,
     directory: Path,
-    codex: _RuntimeBindingFacts,
-    pinned: _RuntimeBindingFacts,
+    codex: _RuntimeBindingFacts | None,
+    pinned: _RuntimeBindingFacts | None,
     replacement_keys: tuple[str, ...],
     index: RuntimeRequirementIndex | RuntimeProvisioningInventory,
 ) -> OwnerRuntimeSnapshot:

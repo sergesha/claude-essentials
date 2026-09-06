@@ -128,7 +128,10 @@ class _EffectCoordinatorAdmission:
                     raise ProviderContractViolation(
                         "manual result targets another effect"
                     )
-                if self._snapshot_resolver is not None:
+                if (
+                    self._snapshot_resolver is not None
+                    and result.fixed_error_code != "manifest_invalid"
+                ):
                     self._snapshot_resolver.capture_successor(
                         binding,
                         guarded.interrupt,

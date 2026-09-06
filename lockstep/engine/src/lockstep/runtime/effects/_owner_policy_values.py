@@ -46,9 +46,10 @@ class _RuntimeBindingFacts:
             )
         ):
             raise ValueError("runtime binding identities must be non-empty strings")
-        if not Path(self.executable).is_absolute() or not Path(
-            self.codex_home
-        ).is_absolute():
+        if (
+            not Path(self.executable).is_absolute()
+            or not Path(self.codex_home).is_absolute()
+        ):
             raise ValueError("runtime binding paths must be absolute")
         if self.permission_profile != (
             ("approval", "never"),
@@ -60,14 +61,19 @@ class _RuntimeBindingFacts:
         ):
             raise ValueError("runtime binding environment is not normalized")
         environment = dict(self.environment)
-        if len(self.environment) != 4 or set(environment) != {
-            "PATH",
-            "LANG",
-            "LC_ALL",
-            "TMPDIR",
-        } or any(
-            not isinstance(value, str) or not value or "\x00" in value
-            for value in environment.values()
+        if (
+            len(self.environment) != 4
+            or set(environment)
+            != {
+                "PATH",
+                "LANG",
+                "LC_ALL",
+                "TMPDIR",
+            }
+            or any(
+                not isinstance(value, str) or not value or "\x00" in value
+                for value in environment.values()
+            )
         ):
             raise ValueError("runtime binding environment is invalid")
         if not Path(environment["TMPDIR"]).is_absolute():
@@ -119,8 +125,8 @@ class OwnerRuntimeSnapshot:
     schema: str
     config_generation: int
     policy_generation: int
-    codex: _RuntimeBindingFacts
-    pinned: _RuntimeBindingFacts
+    codex: _RuntimeBindingFacts | None
+    pinned: _RuntimeBindingFacts | None
     grants: tuple[OwnerRuntimeGrant, ...]
 
     def __post_init__(self) -> None:
@@ -128,21 +134,30 @@ class OwnerRuntimeSnapshot:
             raise ValueError("owner runtime snapshot schema is invalid")
         _exact_generation(self.config_generation, label="config generation")
         _exact_generation(self.policy_generation, label="policy generation")
-        if not isinstance(self.codex, _RuntimeBindingFacts) or not isinstance(
-            self.pinned, _RuntimeBindingFacts
+        if any(
+            binding is not None and not isinstance(binding, _RuntimeBindingFacts)
+            for binding in (self.codex, self.pinned)
         ):
             raise TypeError("owner runtime snapshot bindings are invalid")
-        if self.codex.pinned_permission_profile is not None:
+        if self.codex is not None and self.codex.pinned_permission_profile is not None:
             raise ValueError("owner runtime codex binding cannot be pinned")
-        if self.pinned.pinned_permission_profile is None:
-            raise ValueError("owner runtime pinned binding requires a permission profile")
-        if self.codex.credential_identity_digest is None:
+        if self.pinned is not None and self.pinned.pinned_permission_profile is None:
+            raise ValueError(
+                "owner runtime pinned binding requires a permission profile"
+            )
+        if self.codex is not None and self.codex.credential_identity_digest is None:
             raise ValueError("owner runtime codex binding requires credentials")
-        if self.pinned.credential_identity_digest is not None:
+        if (
+            self.pinned is not None
+            and self.pinned.credential_identity_digest is not None
+        ):
             raise ValueError("owner runtime pinned binding must be credential-free")
-        if Path(self.codex.codex_home).resolve() == Path(
-            self.pinned.codex_home
-        ).resolve():
+        if (
+            self.codex is not None
+            and self.pinned is not None
+            and Path(self.codex.codex_home).resolve()
+            == Path(self.pinned.codex_home).resolve()
+        ):
             raise ValueError("owner runtime Codex homes must differ")
         if not isinstance(self.grants, tuple):
             raise TypeError("owner runtime grants must be a tuple")

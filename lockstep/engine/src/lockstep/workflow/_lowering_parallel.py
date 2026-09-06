@@ -6,6 +6,8 @@ import hashlib
 from typing import Mapping  # noqa: UP035 - preserves existing hints
 
 from ._lowering_contracts import _Exit, _Fragment
+from ._semantics_contracts import EffectContract
+from ._semantics_parallel import manual_effects
 from .ir import ParallelIR
 from .semantics import BlockContract
 
@@ -56,8 +58,14 @@ class _LoweringParallel:
         outer_scopes = self.active_scope_state_keys
         outer_aborted_capture = self.capture_aborted_effects
         outer_parallel_branch = self.inside_parallel_branch
+        outer_manual_parallel = self.manual_parallel
+        parallel_writes = list(EffectContract().union(*(
+            manual_effects(branch, include_artifacts=True)
+            for branch in contract.branches.values()
+        )).writes)
         branch_entries: list[str] = []
         branch_result_keys: list[str] = []
+        branch_completions: list[str] = []
         try:
             for branch_name, branch_flow in contract.branches.items():
                 branch_pointer = f"{pointer}/parallel/branches/{branch_name}"
@@ -83,12 +91,17 @@ class _LoweringParallel:
                 }
                 for setter in setters.values():
                     self.edge(setter, completion)
-                self.edge(completion, join)
+                branch_completions.append(completion)
 
                 self.active_scope_state_keys = branch_scopes
                 self.outcome_targets = setters
                 self.capture_aborted_effects = True
                 self.inside_parallel_branch = True
+                self.manual_parallel = {
+                    "id": contract.block.id,
+                    "branch": branch_name,
+                    "writes": parallel_writes,
+                }
                 fragment = self.flow_contract(branch_flow, branch_pointer)
                 branch_entries.append(fragment.entry)
                 self.connect(fragment.exits, setters["PASS"])
@@ -97,6 +110,8 @@ class _LoweringParallel:
             self.outcome_targets = outer_targets
             self.capture_aborted_effects = outer_aborted_capture
             self.inside_parallel_branch = outer_parallel_branch
+            self.manual_parallel = outer_manual_parallel
+        self.edge(branch_completions, join)
         return branch_entries, branch_result_keys
 
     def _route_parallel_outcomes(
