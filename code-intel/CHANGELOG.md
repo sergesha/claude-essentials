@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.3](https://github.com/sergesha/claude-essentials/compare/code-intel-v0.2.2...code-intel-v0.2.3) (2026-09-06)
+
+
+### Bug Fixes
+
+* **code-intel:** offer installation of missing tools at session start ([#57](https://github.com/sergesha/claude-essentials/issues/57)) ([650028c](https://github.com/sergesha/claude-essentials/commit/650028cab1338230e1be1645c393bf03590c4f9c))
+
 ## [0.2.2](https://github.com/sergesha/claude-essentials/compare/code-intel-v0.2.1...code-intel-v0.2.2) (2026-09-06)
 
 

@@ -1,6 +1,6 @@
 {
   "name": "code-intel",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Shared CodeGraph and code-review-graph setup and checkout indexing.",
   "author": {
     "name": "sergesha"
