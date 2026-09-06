@@ -64,6 +64,9 @@ either client before launch:
 export TECH_RADAR_STACK=external
 ```
 
+External SearXNG must allow JSON search responses (`search.formats` includes
+`json`); an HTML-only configuration returns HTTP 403 to the MCP search client.
+
 Codex can additionally forward custom MCP endpoints from its process
 environment:
 
