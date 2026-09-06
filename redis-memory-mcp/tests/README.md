@@ -7,6 +7,16 @@ without connecting to Redis (install the test client with `pip install 'mcp>=2,<
 python tests/smoke_mcp.py IMAGE
 ```
 
+`native_smoke.py` verifies a built wheel's module and console entry point, then
+starts the installed executable directly (no Docker/Podman), checks its MCP
+handshake and nine-tool catalog, and round-trips a unique Redis KV fixture with
+cleanup when `--redis-kv` is passed. The optional fixture requires an accessible
+Redis instance configured through `REDIS_URL`:
+
+```bash
+python tests/native_smoke.py WHEEL /path/to/venv/bin/redis-memory-mcp --redis-kv
+```
+
 `real_codex_host.py` is an opt-in real-host integration check. It requires
 Codex, Docker, Python 3.11+, network access for the launcher download, and an
 existing Redis Stack + TEI backend reachable at `host.docker.internal:6379` and
