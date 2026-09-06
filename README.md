@@ -40,6 +40,17 @@ installing it also pulls in `redis-memory`. The auto-pulled dependency installs 
 a namespaced connection (see its README), also run `redis-memory`'s own install with `--config`
 to configure it, either before or after installing `continuous-learning`.
 
+### Redis memory in Codex
+
+```bash
+codex plugin marketplace add sergesha/claude-essentials
+codex plugin add redis-memory@claude-essentials
+```
+
+For an existing backend, configure the Codex process environment before starting
+a new session. See [redis-memory installation, credentials and upgrades](redis-memory-mcp/README.md#codex).
+Claude Code continues to use its existing installation and `--config` settings.
+
 ### Code intelligence installation
 
 In Claude Code, add this marketplace as above, then run

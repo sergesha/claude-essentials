@@ -72,7 +72,70 @@ claude plugin install redis-memory@claude-essentials \
   --config namespace=my-project   # omit for the fleet-wide/shared default
 ```
 
-## Tools (8 total)
+### Codex
+
+Install the complete plugin from the repository marketplace (not a standalone
+copy of the skill):
+
+```bash
+codex plugin marketplace add sergesha/claude-essentials
+codex plugin add redis-memory@claude-essentials
+```
+
+Codex uses the same `start.sh`, server, memory skill and SessionStart notice as
+Claude Code. Docker, Bash and curl must be available on the host's `PATH`.
+The default is the existing dedicated backend mode. To reuse a running backend,
+set these variables in the environment of the **Codex process**, then start a
+new Codex session:
+
+```bash
+export REDIS_MEMORY_MCP_MODE=shared
+export REDIS_URL=redis://host.docker.internal:6379/0
+export EMBED_URL=http://host.docker.internal:8081
+export NAMESPACE=my-project
+codex
+```
+
+The first start may download and build the bridge image. Codex allows up to five
+minutes for that startup; memory remains optional if the backend is unavailable.
+
+Keep the same namespace (or leave it unset for the existing shared/base area)
+to access existing memories. The URLs must be reachable from the bridge
+container: `localhost` there is not the host. For other layouts use the existing
+network/socket settings documented below.
+
+Codex forwards `REDIS_MEMORY_MCP_MODE`, `REDIS_URL`, `EMBED_URL`, `NAMESPACE`,
+`INDEX_NAME`, `REDIS_MEMORY_MCP_NETWORK`, `EMBED_SOCKET`,
+`REDIS_MEMORY_MCP_SOCKET_DIR` and `REDIS_MEMORY_MCP_REF` to the launcher, together
+with `DOCKER_HOST`/`DOCKER_CONTEXT` when set. It does not use Claude's
+`userConfig` placeholders or `claude plugin install --config` options.
+For the desktop app, make those variables available to the app's process;
+exporting them in an unrelated terminal after the app has started has no effect.
+
+For an authenticated Redis URL, obtain the value from your secret manager into
+the process environment. Do not paste a password into shell history, plugin
+manifests, command arguments, issue reports or logs. Redis ACLs, namespace
+prefixes and embedding configuration are unchanged by this integration.
+
+### Upgrade (both clients)
+
+```bash
+# Codex
+codex plugin marketplace upgrade claude-essentials
+codex plugin add redis-memory@claude-essentials
+
+# Claude Code
+claude plugin marketplace update claude-essentials
+claude plugin update redis-memory@claude-essentials
+```
+
+Restart the client after upgrading. Upgrading the plugin does not migrate,
+clear or rename stored memories. Keep the existing backend credentials,
+namespace, index and embeddings settings. The existing launcher selects the
+latest `redis-memory-mcp-v*` release unless `REDIS_MEMORY_MCP_REF` is pinned;
+a pinned backend remains pinned independently of the plugin version.
+
+## Tools
 
 ### Key-Value Storage — instant lookup
 
@@ -123,7 +186,11 @@ claude plugin install redis-memory@claude-essentials \
 
 - **Redis Stack** — RediSearch module with HNSW vector index (768 dim, cosine)
 - **TEI** — `paraphrase-multilingual-mpnet-base-v2` (multilingual, runs on CPU)
-- **MCP server** — Python FastMCP over stdio
+- **MCP server** — Python MCP SDK 2.x (`MCPServer`) over stdio
+
+The server uses the [current SDK API](https://py.sdk.modelcontextprotocol.io/migration/#fastmcp-renamed-to-mcpserver),
+not the removed `mcp.server.fastmcp` import. Existing tool names, parameters and
+stored memory formats are unchanged.
 
 ## Environment Variables
 
@@ -136,6 +203,9 @@ claude plugin install redis-memory@claude-essentials \
 | `DEFAULT_TTL` | `7776000` (90 days) | Default TTL in seconds |
 | `REDIS_MEMORY_MCP_MODE` | `dedicated` | `start.sh` only — see Shared Deployment below |
 | `REDIS_MEMORY_MCP_REF` | unset (tracks latest release) | `start.sh` only — pin to a specific `redis-memory-mcp-vX.Y.Z` tag, or `main` for dev |
+| `REDIS_MEMORY_MCP_NETWORK` | unset | Join an existing Docker/Podman network to reach the backend by container name; does not create a network |
+| `EMBED_SOCKET` | unset | Unix socket for embedding HTTP requests; `EMBED_URL` remains the nominal HTTP URL |
+| `REDIS_MEMORY_MCP_SOCKET_DIR` | unset | Bind-mount this host socket directory at the same path in the bridge; uses Podman's `--group-add keep-groups` for group-gated sockets |
 
 ### Shared Deployment (one backend, many agents)
 
