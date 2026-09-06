@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.5](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.2.4...speciflow-v0.2.5) (2026-09-06)
+
+
+### Bug Fixes
+
+* **speciflow:** clarify initialization and diagnostic output contracts ([#53](https://github.com/sergesha/claude-essentials/issues/53)) ([ea72564](https://github.com/sergesha/claude-essentials/commit/ea72564c32f9c6a19c22546211a588923b4790f8))
+
 ## [0.2.4](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.2.3...speciflow-v0.2.4) (2026-09-05)
 
 
