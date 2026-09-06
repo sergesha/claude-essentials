@@ -8,7 +8,6 @@
   "license": "MIT",
   "homepage": "https://github.com/sergesha/claude-essentials",
   "repository": "https://github.com/sergesha/claude-essentials",
-  "hooks": "./hooks/hooks.json",
   "mcpServers": {
     "codegraph": {
       "command": "codegraph",
