@@ -1,0 +1,29 @@
+name: redis-memory
+
+on:
+  pull_request:
+    paths:
+      - "redis-memory-mcp/**"
+      - ".agents/plugins/marketplace.json"
+      - ".github/workflows/redis-memory.yml"
+  push:
+    branches: [main]
+    paths:
+      - "redis-memory-mcp/**"
+      - ".agents/plugins/marketplace.json"
+      - ".github/workflows/redis-memory.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  mcp-startup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install 'mcp>=2.0.0,<3'
+      - run: docker build -t redis-memory-smoke redis-memory-mcp/server
+      - run: python redis-memory-mcp/tests/smoke_mcp.py redis-memory-smoke

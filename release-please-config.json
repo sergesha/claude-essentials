@@ -18,6 +18,7 @@
       "initial-version": "0.5.0",
       "extra-files": [
         { "type": "json", "path": ".claude-plugin/plugin.json", "jsonpath": "$.version" },
+        { "type": "json", "path": ".codex-plugin/plugin.json", "jsonpath": "$.version" },
         { "type": "toml", "path": "server/pyproject.toml", "jsonpath": "$.project.version" }
       ]
     },
