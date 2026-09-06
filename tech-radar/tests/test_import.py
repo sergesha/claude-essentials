@@ -1,5 +1,6 @@
 """Exercise plugin discovery and relocated report entry points without live services."""
 import json
+import os
 import shutil
 from pathlib import Path
 import subprocess
@@ -57,8 +58,6 @@ class ImportedPluginTests(unittest.TestCase):
 
         mcp = json.loads((PLUGIN / manifest["mcpServers"]).read_text())["mcpServers"]
         self.assertEqual(set(mcp), {"searxng-mcp"})
-        self.assertEqual(mcp["searxng-mcp"]["command"], "npx")
-        self.assertEqual(mcp["searxng-mcp"]["args"], ["-y", "@tadmstr/searxng-mcp"])
         self.assertEqual(mcp["searxng-mcp"]["startup_timeout_sec"], 300)
 
         release = json.loads((REPO / "release-please-config.json").read_text())
@@ -67,6 +66,50 @@ class ImportedPluginTests(unittest.TestCase):
             {"type": "json", "path": ".codex-plugin/plugin.json", "jsonpath": "$.version"},
             extra_files,
         )
+
+    def run_codex_mcp_probe(self, forwarded):
+        manifest = json.loads((PLUGIN / ".codex-plugin/plugin.json").read_text())
+        server = json.loads((PLUGIN / manifest["mcpServers"]).read_text())[
+            "mcpServers"
+        ]["searxng-mcp"]
+        with tempfile.TemporaryDirectory() as tmp:
+            bindir = Path(tmp) / "bin"
+            bindir.mkdir()
+            npx = bindir / "npx"
+            npx.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' \"${SEARXNG_URL-}\" \"${CACHE_URL-}\" \"$@\"\n"
+            )
+            npx.chmod(0o755)
+            env = {"PATH": str(bindir) + os.pathsep + os.defpath}
+            for name in server.get("env_vars", []):
+                if name in forwarded:
+                    env[name] = forwarded[name]
+            env.update(server.get("env", {}))
+            result = subprocess.run(
+                [server["command"], *server.get("args", [])],
+                env=env, capture_output=True, text=True, timeout=5, check=True,
+            )
+            return result.stdout.splitlines()
+
+    def test_codex_mcp_command_defaults_to_managed_endpoints(self):
+        self.assertEqual(self.run_codex_mcp_probe({}), [
+            "http://localhost:8888",
+            "redis://localhost:6381",
+            "-y",
+            "@tadmstr/searxng-mcp",
+        ])
+
+    def test_codex_mcp_command_preserves_forwarded_external_endpoints(self):
+        self.assertEqual(self.run_codex_mcp_probe({
+            "SEARXNG_URL": "http://127.0.0.1:32768",
+            "CACHE_URL": "redis://127.0.0.1:32769",
+        }), [
+            "http://127.0.0.1:32768",
+            "redis://127.0.0.1:32769",
+            "-y",
+            "@tadmstr/searxng-mcp",
+        ])
 
     def test_codex_manifest_version_tracks_release_bumps(self):
         with tempfile.TemporaryDirectory() as tmp:
