@@ -20,6 +20,17 @@ def load_module():
 
 
 class CodeIntelTests(unittest.TestCase):
+    def setUp(self):
+        tools = tempfile.TemporaryDirectory(prefix="code intel test tools ")
+        self.addCleanup(tools.cleanup)
+        for name in ("codegraph", "code-review-graph"):
+            executable = Path(tools.name) / name
+            executable.write_text("#!/bin/sh\nexit 0\n")
+            executable.chmod(0o755)
+        environment = patch.dict(os.environ, {"PATH": tools.name + os.pathsep + os.environ.get("PATH", "")})
+        environment.start()
+        self.addCleanup(environment.stop)
+
     def test_atomic_write_does_not_touch_identical_file(self):
         module = load_module()
         with tempfile.TemporaryDirectory() as directory:
