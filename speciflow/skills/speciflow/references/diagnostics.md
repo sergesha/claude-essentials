@@ -1,12 +1,32 @@
 # Derived diagnostics
 
-`status` is a live, read-only, owner-separated view with exactly one slot for
-each of Backlog.md, OpenSpec, Beads/Dolt, and Superpowers. Query selected
-owners live; an unselected owner explicitly shows `N/A`. Each slot shows its
-owner name, native root, native revision or version, tool interface, and read
-time. Do not combine these results into a summary status; there is no aggregate phase.
-Diagnostics may not repair, create, synchronize, archive, or close native
-artifacts.
+`status` is a live, read-only, owner-separated view. The actual user reply
+contains this filled table: four owner rows and all seven named columns.
+This is the minimum report even for a brief answer; brevity shortens cell
+text while retaining the rows and columns.
+
+| Owner | Selection reason | Result | Native root | Revision/version | Interface | Read time |
+| --- | --- | --- | --- | --- | --- | --- |
+| Backlog.md | Not selected | N/A | not applicable | not applicable | not applicable | not applicable |
+| OpenSpec | Not selected | N/A | not applicable | not applicable | not applicable | not applicable |
+| Beads/Dolt | Explicit Beads status request | broken | not observed | not observed | Required CLI absent | not observed |
+| Superpowers | Applicable verification trigger | valid | not observed | not observed | Required skill closure readable | not observed |
+
+This example has only a Beads request, an absent Beads CLI, and a readable
+applicable Superpowers closure; roots, versions, and read timestamps were not
+observed. Adapt the cells to the actual evidence. For selected Superpowers,
+the root is its observed installed closure path. Read time is an observed
+timestamp; when unavailable, its cell is `not observed`.
+
+Fill every cell from current observations and the selection rules in
+[ownership.md](ownership.md). The Superpowers selection reason evaluates the
+native trigger for the current activity, including read-only verification,
+independently of assigned project tasks. Query selected owners live; report
+unselected owners as `N/A` with unqueried evidence marked `not applicable`.
+Mark unavailable evidence `not observed`. Missing report metadata does not
+change an evidenced owner result: an absent required CLI is still `broken`.
+There is no aggregate status. Diagnostics may not repair, create, synchronize,
+archive, or close native artifacts.
 
 ## Per-owner result
 
@@ -16,7 +36,7 @@ unselected owner; every other result applies to a selected owner:
 | Result | Meaning |
 | --- | --- |
 | `N/A` | An unselected owner; do not create or repair it. |
-| `broken` | A selected owner has a missing required tool or interface. State what is missing and apply the root skill's missing-tool rule: offer one safe owner-specific loading or installation action, but do not run it without approval. |
+| `broken` | A selected owner has a missing required tool or interface. State what is missing and apply the root skill's conditional missing-tool rule. |
 | `ambiguous` | Multiple roots or conflicting facts prevent one native answer. Preserve the alternatives and ask the user. |
 | `unknown` | Output was lost or a required fact cannot be verified. Stop rather than infer or retry a mutation. |
 | `valid` | The applicable documented checks below passed through the installed native interface. |
@@ -42,8 +62,9 @@ are:
   or options from a related CLI, a different version, or memory. If the
   installed interface provides no required equivalent, report `broken` instead
   of guessing a command.
-- Superpowers: the selected installed skill closure resolves and required
-  applicable skills are readable; Superpowers owns no project status.
+- Superpowers: `valid` means the selected installed skill closure resolves and
+  required applicable skills are readable. This result reports guidance
+  availability, not project-task state; Superpowers owns no project status.
 
 A missing interface is `broken`, conflicting root or facts are `ambiguous`,
 and lost or unverifiable facts are `unknown`.
@@ -66,51 +87,6 @@ state.
 
 Never persist recommendations, phases, cursors, queues, or derived results.
 
-## Bootstrap preview
-
-For an explicit setup or full-stack initialization request, inspect all
-selected owners and show the complete ordered checklist before asking for the
-first approval. Include only applicable steps: owner dependency installation,
-storage initialization (not only read-only resolution), planning Git init when
-required, each applicable native-owner initialization with its commit effect,
-and a final live status
-check. Show the exact source, target, effects, and approval boundary for every
-mutating item.
-
-The checklist is an ephemeral preview, not SpeciFlow state, a queue, or
-authorization for all steps. Reinspect native state after each approved item
-and update the remaining preview. Apply the ownership approval boundary to
-each concrete item, including applicable prior authorization. When approval
-is missing, ask only for the current item; when
-multiple owner installations are equally valid, present them as an
-`ambiguous` choice.
-
-Distinguish the complete ordered setup outline from its current
-approval-ready mutation. Distinguish observed facts from uninspected details
-in the outline; uninspected details of later items do not gate a fully known
-current item. Before requesting current approval, show the observed literal
-source and target, documented operation, exact payload or configuration,
-filesystem and native-state effects, and the applicable commit behavior. For
-storage preparation, copy the literal `metadata_path` and the complete
-three-field `expected_metadata` JSON returned by `storage.py resolve`.
-
-If any required current-item fact is unavailable, the current response must
-request no mutation approval, including conditional invitations or approval
-for future execution. Do not label the current item approval-ready or claim
-exact values were shown. State the missing fact and next in-scope read-only
-inspection; perform it without extra approval when possible. If inspection is
-unavailable or prohibited, report that limitation without asking mutation
-approval.
-
-Determine an initialization review from the installed version's documented effects,
-not the name `init` or an absent root; unknown effects require read-only
-inspection and may not be labeled mechanical or `Review: skipped`.
-
-A same-owner native init and conditional commit of its exact resulting paths
-may be one previewed action and one approval. Inspect the init result before
-committing; if the native tool already committed, do not add another commit.
-Never combine different owners, dependency installation, storage preparation,
-or planning Git init under that native-owner approval.
 
 ## Views and export
 
