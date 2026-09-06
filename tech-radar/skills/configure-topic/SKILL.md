@@ -92,5 +92,4 @@ sources: []
 ```
 
 Report: "Topic `{name}` saved to `topics/{slug}.yaml`.
-Run `/tech-radar:collect-news` to start collecting, or
-`/schedule` to set up automatic collection."
+Invoke the `collect-news` skill to start collecting."

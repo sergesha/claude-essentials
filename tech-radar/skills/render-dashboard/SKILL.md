@@ -26,7 +26,7 @@ Optional argument: a path to a `reports/radar-<stamp>.json`. Default:
 
 - `python3` available (any OS).
 - At least one `reports/radar-*.json` exists. If none:
-  "No radar data found. Run `/tech-radar:collect-news` first."
+  "No radar data found. Invoke the `collect-news` skill first."
 
 ## Flow
 

@@ -27,7 +27,7 @@ document; in interactive use it also prints a short summary to chat.
 - redis-memory-mcp must be available (via plugin)
 
 If no topics exist, tell the user:
-"No topics configured. Run `/tech-radar:configure-topic` to create one."
+"No topics configured. Invoke the `configure-topic` skill to create one."
 
 ## Flow
 
