@@ -22,6 +22,11 @@ def _edge_targets(edge: dict[str, Any]) -> tuple[Any, ...]:
     return tuple(targets) if isinstance(targets, list) else (targets,)
 
 
+def _edge_sources(edge: dict[str, Any]) -> tuple[Any, ...]:
+    sources = edge.get("from")
+    return tuple(sources) if isinstance(sources, list) else (sources,)
+
+
 def _specialized_fragment_digest(
     original: dict[str, Any],
     specialized: dict[str, Any],
@@ -65,7 +70,7 @@ def _specialized_fragment_digest(
                 for edge in original_edges
                 if isinstance(edge, dict)
                 and (
-                    edge.get("from") in node_names
+                    any(source in node_names for source in _edge_sources(edge))
                     or any(target in node_names for target in _edge_targets(edge))
                 )
             ],
@@ -95,7 +100,7 @@ def _specialized_fragment_digest(
                 for edge in specialized_edges
                 if isinstance(edge, dict)
                 and (
-                    edge.get("from") in mapped_nodes
+                    any(source in mapped_nodes for source in _edge_sources(edge))
                     or any(target in mapped_nodes for target in _edge_targets(edge))
                 )
             ],
@@ -199,6 +204,7 @@ def _specialize_descriptor_runner(
 ) -> None:
     if descriptor.get("kind") == "manual" and descriptor.get("runner") is None:
         descriptor["kind"] = "managed"
+        descriptor.pop("parallel", None)
         descriptor["runner"] = {
             "selector": runner,
             "required_capabilities": [
@@ -366,7 +372,10 @@ def _managed_brief_identity(
         + managed_logical_id.encode("utf-8")
     ).hexdigest()
     match = re.fullmatch(r"step-(.+)-effect-[0-9a-f]{12}", original_name)
-    if match is not None:
+    if (
+        match is not None
+        and _stable_id(f"/flow/{match.group(1)}", "step", "effect") == original_name
+    ):
         stable = _stable_id(f"/flow/{match.group(1)}", "step", "managed-brief")
     else:
         digest = hashlib.sha256(
@@ -466,7 +475,9 @@ def _specialize_child_edges(
     for raw_edge in raw_edges:
         edge = plain(raw_edge)
         source = edge.get("from")
-        if source not in {"START", "END"}:
+        if isinstance(source, list):
+            edge["from"] = [node_map[item] for item in source]
+        elif source not in {"START", "END"}:
             edge["from"] = node_map[source]
         targets = edge.get("to")
         if isinstance(targets, list):

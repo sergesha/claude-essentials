@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "distribution": "yamlgraph",
+  "version": "0.5.22",
+  "upstream_repository": "https://github.com/sheikkinen/yamlgraph",
+  "upstream_issue": null,
+  "upstream_patch_comment": null,
+  "upstream_issue_body_sha256": null,
+  "upstream_patch_sha256": null,
+  "patch_sha256": "d44be4b9d1d859ab8e0caaf3c52b066922bbf27e9b75a4aa47ab6b168be20187",
+  "files": [
+    {
+      "path": "yamlgraph/compile/edge_compiler.py",
+      "before_sha256": "23c5e47488a4a0fa1bace9507666d9869b266d0b816078da06b4d10718997330",
+      "after_sha256": "2bbdfb3782de5cc23d48b50bcb6fb9fb74be82f593627a3308ee0434c8fb81e1"
+    },
+    {
+      "path": "yamlgraph/loop_detector.py",
+      "before_sha256": "9bc2bf2ae0b4e1e45ea460fcfea2ecc5c93d929406611c9b8498349bff210283",
+      "after_sha256": "b51ccb0e04341c526527579f93fb857c59a82d99b7649f48bee70cecef8e77ce"
+    },
+    {
+      "path": "yamlgraph/mermaid_export.py",
+      "before_sha256": "36082d64b09a41308fc4967c7f4d605df1dcb63e58eb6db2de1daed84c99ab0d",
+      "after_sha256": "c47319cac4260d67f626748cc458847da61fffdf5d585ce6ec41ca895b6fe250"
+    },
+    {
+      "path": "yamlgraph/models/graph_schema.py",
+      "before_sha256": "22ba7b80f45c33170c31008d62c89d8f25c9f0f64c8a472544c5d7c69aea6e32",
+      "after_sha256": "9502e56eb23d0a297ce6572dd3f75833b123ca9620a7e4fecab60185039c7a7d"
+    }
+  ]
+}

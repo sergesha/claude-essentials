@@ -16,9 +16,15 @@ from lockstep.runtime.effects.descriptors import (
     derive_effect_id,
     parse_effect_descriptor,
     parse_effect_result,
+    parse_manual_parallel,
 )
-from lockstep.runtime.effects.models import EffectDescriptor, EffectResult
+from lockstep.runtime.effects.models import (
+    EffectDescriptor,
+    EffectResult,
+    ManualParallelContract,
+)
 from lockstep.runtime.manifests import (
+    PathContractError,
     ProjectWritePath,
     capture_project,
     compare_effect,
@@ -61,6 +67,7 @@ class ManualHandoff:
     baseline: BlobRef
     write_contract_digest: str
     digest: str
+    parallel: ManualParallelContract | None = None
 
 
 @dataclass(frozen=True)
@@ -152,6 +159,7 @@ class ManualProvider:
             },
             "write_contract_digest": handoff.write_contract_digest,
             "digest": handoff.digest,
+            **({"parallel": handoff.parallel.to_dict()} if handoff.parallel is not None else {}),
         }
 
     def _write_once(self, handoff: ManualHandoff) -> None:
@@ -199,7 +207,7 @@ class ManualProvider:
             }
             if (
                 not isinstance(data, dict)
-                or set(data) != required
+                or set(data) - {"parallel"} != required
                 or data["schema"] != "lockstep.manual-handoff/v1"
                 or data["effect_id"] != effect_id
             ):
@@ -236,6 +244,7 @@ class ManualProvider:
                 ),
                 write_contract_digest=data["write_contract_digest"],
                 digest=data["digest"],
+                parallel=parse_manual_parallel(data["parallel"]) if "parallel" in data else None,
             )
             self._blobs.read(handoff.baseline)
             contract = {
@@ -248,6 +257,7 @@ class ManualProvider:
                 "writes": list(handoff.writes),
                 "baseline_sha256": handoff.baseline.sha256,
                 "baseline_size": handoff.baseline.size,
+                **({"parallel": handoff.parallel.to_dict()} if handoff.parallel is not None else {}),
             }
             contract_digest = hashlib.sha256(
                 _canonical(contract, label="manual write contract")
@@ -307,6 +317,7 @@ class ManualProvider:
                 descriptor.digest,
                 str(project),
                 descriptor.writes,
+                descriptor.parallel,
             )
             observed = (
                 existing.public_run_id,
@@ -314,6 +325,7 @@ class ManualProvider:
                 existing.descriptor_digest,
                 existing.project_identity,
                 existing.writes,
+                existing.parallel,
             )
             if observed != expected:
                 raise ManualProviderError(
@@ -341,6 +353,7 @@ class ManualProvider:
             "writes": list(descriptor.writes),
             "baseline_sha256": baseline.sha256,
             "baseline_size": baseline.size,
+            **({"parallel": descriptor.parallel.to_dict()} if descriptor.parallel is not None else {}),
         }
         contract_bytes = _canonical(contract, label="manual write contract")
         write_contract_digest = hashlib.sha256(contract_bytes).hexdigest()
@@ -363,6 +376,7 @@ class ManualProvider:
             baseline=baseline,
             write_contract_digest=write_contract_digest,
             digest=handoff_digest,
+            parallel=descriptor.parallel,
         )
         self._write_once(handoff)
         return handoff
@@ -373,18 +387,25 @@ class ManualProvider:
         self._write_once(handoff)
         project = Path(handoff.project_identity)
         before = snapshot_from_data(json.loads(self._blobs.read(handoff.baseline)))
-        after = capture_project(project)
-        allowed = tuple(
-            ProjectWritePath.parse(path, project) for path in handoff.writes
-        )
         claimed = {
             "done": "pass",
             "escalate": "fail",
             "abort": "error",
         }[submission.kind]
-        comparison = compare_effect(before, after, allowed, claimed)
+        try:
+            after = capture_project(project)
+            allowed = tuple(
+                ProjectWritePath.parse(path, project)
+                for path in (
+                    handoff.parallel.writes
+                    if handoff.parallel is not None else handoff.writes
+                )
+            )
+            integrity_error = compare_effect(before, after, allowed, claimed).integrity_error
+        except PathContractError:
+            integrity_error = True
         payload = self._blobs.put(submission.payload)
-        if comparison.integrity_error:
+        if integrity_error:
             outcome = "ERROR"
             fixed_error_code = "manifest_invalid"
         elif submission.kind == "done":

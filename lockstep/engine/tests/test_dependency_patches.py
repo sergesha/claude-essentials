@@ -58,6 +58,16 @@ def _copy_official_distribution(tmp_path: Path) -> tuple[Path, importlib.metadat
             capture_output=True,
             text=True,
         )
+    asset_root = _canonical_paths()[0].parent
+    join_manifest = json.loads((asset_root / "native-join-manifest.json").read_text())
+    if all(
+        _sha256(Path(copied.locate_file(item["path"]))) == item["after_sha256"]
+        for item in join_manifest["files"]
+    ):
+        subprocess.run(
+            ["git", "apply", "--reverse", "--no-index", str(asset_root / "0.5.22-native-join.patch")],
+            cwd=site, check=True, capture_output=True, text=True,
+        )
     return site, copied
 
 
@@ -151,6 +161,28 @@ def test_exact_original_application_and_idempotent_rerun(tmp_path, monkeypatch):
     assert before == {item["path"]: item["before_sha256"] for item in _manifest()["files"]}
     assert after == {item["path"]: item["after_sha256"] for item in _manifest()["files"]}
     assert (site / "outside.txt").read_text() == "untouched"
+
+
+def test_default_installer_applies_and_verifies_native_join_patch(tmp_path):
+    """Startup must reject a legacy-only installation missing the native barrier."""
+    site, dist = _copy_official_distribution(tmp_path)
+    manifest = json.loads((_canonical_paths()[0].parent / "native-join-manifest.json").read_text())
+    legacy_manifest = tmp_path / "legacy-manifest.json"
+    shutil.copyfile(_canonical_paths()[0], legacy_manifest)
+    dp.apply_dependency_patch(distribution=dist, manifest_path=legacy_manifest)
+    with pytest.raises(dp.DependencyPatchError, match="original"):
+        dp.verify_dependency_patch(distribution=dist)
+    dp.apply_dependency_patch(distribution=dist)
+    assert all(
+        _sha256(Path(dist.locate_file(item["path"]))) == item["after_sha256"]
+        for item in manifest["files"]
+    )
+    assert dp.verify_dependency_patch(distribution=dist).status == "fully patched"
+    assert dp.apply_dependency_patch(distribution=dist).status == "already patched"
+    target = Path(dist.locate_file(manifest["files"][0]["path"]))
+    target.write_text(target.read_text() + "\n# unreviewed barrier change\n")
+    with pytest.raises(dp.DependencyPatchError):
+        dp.verify_dependency_patch(distribution=dist)
 
 
 def test_patch_digest_mismatch_fails_before_modification(tmp_path):

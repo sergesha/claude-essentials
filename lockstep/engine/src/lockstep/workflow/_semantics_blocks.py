@@ -165,8 +165,8 @@ def block(
     if not isinstance(item, known_blocks):
         code = "LSP101" if parallel else "LSW120"
         fail(state, code, "unsupported Workflow DSL v1 block", pointer, "remove the unsupported block")
-    if parallel and not isinstance(item, (VerifyIR, ChooseIR, CallIR, GraphIR)):
-        fail(state, "LSP101", "block is not permitted in a parallel branch", pointer, "use verify, choose, call, or a read-only graph")
+    if parallel and not isinstance(item, (StepIR, VerifyIR, ChooseIR, CallIR, GraphIR)):
+        fail(state, "LSP101", "block is not permitted in a parallel branch", pointer, "use step, verify, choose, call, or a read-only graph")
     track_id(state, item, pointer)
     if isinstance(item, (StepIR, VerifyIR, DecideIR, ChooseIR, RepeatIR)):
         return control_block(state, item, pointer, symbols, parallel=parallel)

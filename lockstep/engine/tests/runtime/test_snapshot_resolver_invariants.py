@@ -27,7 +27,7 @@ class _LineageStore:
         self._previous = previous
 
     def read(self, ref: ProjectSnapshotRef) -> SimpleNamespace:
-        return SimpleNamespace(previous=self._previous[ref])
+        return SimpleNamespace(previous=self._previous[ref], provenance={})
 
 
 def _binding(project, *, public_run_id: str = "run-1") -> RunBinding:
