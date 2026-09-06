@@ -10,6 +10,7 @@ lists is versioned and released independently (see [Versioning](#versioning)).
 
 | Plugin | What it does |
 |---|---|
+| [`tech-radar`](tech-radar/) | Monitor technology news with SearXNG, Redis memory, and HTML/YAML reports. Claude Code support restored at 0.5.0; Codex support tracked in #63. |
 | [`code-intel`](code-intel/skills/code-intel/SKILL.md) | Package the CodeGraph and code-review-graph setup skill, MCP servers, and indexing hooks for Claude Code and Codex. |
 | [`continuous-learning`](continuous-learning/) | Capture runtime surprises as they happen, periodically promote them into a project's own versioned skills/docs/commands. Requires a namespaced `redis-memory` connection — see its own README. |
 | [`redis-memory`](redis-memory-mcp/) | Persistent cross-session memory for AI agents — semantic search + KV store with auto-expiry. Moved here from the standalone `sergesha/redis-memory-mcp` repo at v0.5.0. |
