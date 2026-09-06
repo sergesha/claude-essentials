@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 
 import httpx
 import redis.asyncio as aio_redis
-from mcp.server.fastmcp import FastMCP
+from mcp.server import MCPServer
 
 REDIS_URL    = os.getenv("REDIS_URL",    "redis://localhost:6379/0")
 EMBED_URL    = os.getenv("EMBED_URL",    "http://localhost:8081")
@@ -75,7 +75,7 @@ _HEX_PREFIX_RE = re.compile(r"^[0-9a-f]{1,8}$")
 _MAX_PREFIX_MATCHES = 10
 _MAX_SCAN_ROUNDS = 3
 
-mcp = FastMCP("Redis Memory")
+mcp = MCPServer("Redis Memory")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
