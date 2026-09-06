@@ -192,6 +192,35 @@ The server uses the [current SDK API](https://py.sdk.modelcontextprotocol.io/mig
 not the removed `mcp.server.fastmcp` import. Existing tool names, parameters and
 stored memory formats are unchanged.
 
+## Native Python
+
+The MCP bridge can run directly with Python 3.11 or newer, without Docker or
+Podman in the server process. Install the tagged server source into a virtual
+environment (replace the tag after later releases):
+
+```bash
+python3.11 -m venv .venv
+.venv/bin/python -m pip install \
+  'https://github.com/sergesha/claude-essentials/archive/refs/tags/redis-memory-mcp-v0.9.1.tar.gz#subdirectory=redis-memory-mcp/server'
+```
+
+Point the executable at backend services that are already reachable, then run
+it as a stdio MCP server:
+
+```bash
+export REDIS_URL=redis://127.0.0.1:6379/0
+export EMBED_URL=http://127.0.0.1:8081
+export NAMESPACE=my-project  # optional
+.venv/bin/redis-memory-mcp
+```
+
+Semantic tools require both Redis Stack and the embeddings service; the KV
+tools require Redis only. Put optional Redis ACL credentials in `REDIS_URL` and
+keep them out of command arguments and committed MCP configuration. Native
+execution preserves the existing namespace and ACL behavior. Launcher-only
+settings such as `REDIS_MEMORY_MCP_MODE`, `REDIS_MEMORY_MCP_NETWORK`, and
+`REDIS_MEMORY_MCP_REF` do not provision anything in the native process.
+
 ## Environment Variables
 
 | Variable | Default | Description |
