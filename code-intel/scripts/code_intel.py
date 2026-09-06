@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -16,9 +17,8 @@ from typing import Callable, Iterable
 
 
 HOME = Path.home()
-MISE_SHIMS = HOME / ".local" / "share" / "mise" / "shims"
-CODEGRAPH = str(MISE_SHIMS / "codegraph")
-CRG = str(MISE_SHIMS / "code-review-graph")
+CODEGRAPH = shutil.which("codegraph") or "codegraph"
+CRG = shutil.which("code-review-graph") or "code-review-graph"
 
 EXCLUDED_DIRS = {"node_modules", ".venv", "vendor", ".cache", "__pycache__"}
 CODE_SUFFIXES = {".py", ".ts", ".js", ".tsx", ".jsx", ".go", ".rs", ".java", ".rb", ".cs"}
@@ -354,9 +354,21 @@ def hook_prompt(codegraph: str = CODEGRAPH) -> int:
 
 
 def install_tools() -> int:
+    npm = shutil.which("npm")
+    uv = shutil.which("uv")
+    pipx = shutil.which("pipx") if not uv else None
+    if not npm or not (uv or pipx):
+        missing = [name for name, present in (("npm", npm), ("uv or pipx", uv or pipx)) if not present]
+        print(
+            f"missing installer: {', '.join(missing)}; install it on PATH or provision "
+            "codegraph and code-review-graph on PATH manually",
+            file=sys.stderr,
+        )
+        return 127
     commands = [
-        ["mise", "use", "-g", "npm:@colbymchenry/codegraph@latest"],
-        ["mise", "use", "-g", "pipx:code-review-graph@latest"],
+        [npm, "install", "--global", "@colbymchenry/codegraph"],
+        [uv, "tool", "install", "--upgrade", "code-review-graph"]
+        if uv else [pipx, "install", "--force", "code-review-graph"],
     ]
     return sum(1 for command in commands if run(command) != 0)
 
@@ -645,7 +657,7 @@ def main() -> int:
         return project_status(arguments.path)
     if arguments.command == "serve":
         command = [CODEGRAPH, "serve", "--mcp"] if arguments.engine == "codegraph" else [CRG, "serve"]
-        os.execv(command[0], command)
+        os.execvp(command[0], command)
     if arguments.command == "hook-update":
         return hook_update()
     if arguments.command == "hook-status":
