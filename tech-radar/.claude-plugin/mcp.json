@@ -1,0 +1,35 @@
+{
+  "servers": {
+    "searxng-mcp": {
+      "description": "SearXNG metasearch engine bridge. Searches news, tech articles, arxiv, github via local SearXNG instance.",
+      "capabilities": [
+        "search \u2014 search SearXNG with query, category, language, time_range",
+        "search_and_fetch \u2014 search + fetch full page content",
+        "search_and_summarize \u2014 search + AI-generated summary"
+      ],
+      "required": true,
+      "env": {
+        "SEARXNG_URL": "SearXNG instance URL (default: http://localhost:8888)",
+        "CACHE_URL": "Redis/Dragonfly cache URL (default: redis://localhost:6381)"
+      },
+      "infrastructure": {
+        "searxng": "SearXNG metasearch engine (Docker, port 8888)",
+        "cache": "Dragonfly/Redis cache for search results (Docker, port 6381)"
+      },
+      "setup": "docker compose up -d (starts SearXNG + Dragonfly)"
+    },
+    "redis-memory-mcp": {
+      "description": "Persistent cross-session memory (semantic + KV). Provided by the SEPARATE `redis-memory` plugin (claude-essentials marketplace), not bundled here.",
+      "capabilities": [
+        "mem_save \u2014 save article summary with vector embedding",
+        "mem_search \u2014 find articles by meaning (cosine similarity)",
+        "mem_list \u2014 browse saved articles",
+        "mem_delete \u2014 remove article",
+        "kv_set \u2014 store operational metadata",
+        "kv_get \u2014 retrieve metadata by key"
+      ],
+      "required": true,
+      "setup": "Install redis-memory@claude-essentials separately (see README Prerequisites)"
+    }
+  }
+}

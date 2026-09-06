@@ -1,0 +1,36 @@
+use_default_settings: true
+
+general:
+  instance_name: "Tech Radar"
+
+search:
+  formats:
+    - json
+  default_lang: "en"
+  autocomplete: ""
+
+server:
+  secret_key: "change-me-on-first-run"
+  limiter: false
+  image_proxy: false
+  bind_address: "0.0.0.0"
+
+engines:
+  - name: google news
+    engine: google_news
+    disabled: false
+  - name: bing news
+    engine: bing_news
+    disabled: false
+  - name: duckduckgo
+    engine: duckduckgo
+    disabled: false
+  - name: arxiv
+    engine: arxiv
+    disabled: false
+  - name: github
+    engine: github
+    disabled: false
+  - name: qwant
+    engine: qwant
+    disabled: false
