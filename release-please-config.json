@@ -4,6 +4,14 @@
   "include-component-in-tag": true,
   "separate-pull-requests": true,
   "packages": {
+    "tech-radar": {
+      "package-name": "tech-radar",
+      "changelog-path": "CHANGELOG.md",
+      "initial-version": "0.5.0",
+      "extra-files": [
+        { "type": "json", "path": ".claude-plugin/plugin.json", "jsonpath": "$.version" }
+      ]
+    },
     "continuous-learning": {
       "package-name": "continuous-learning",
       "changelog-path": "CHANGELOG.md",

@@ -1,0 +1,24 @@
+# Quadlet unit template — hooks/ensure-stack.sh renders the data-dir
+# placeholder to $CLAUDE_PLUGIN_DATA and installs the result into
+# ~/.config/containers/systemd/. Edit this template in the plugin, never
+# the rendered copy.
+[Unit]
+Description=tech-radar SearXNG search backend
+
+[Container]
+Image=docker.io/searxng/searxng:2026.7.3-747cec4c2
+ContainerName=tech-radar-searxng
+PublishPort=127.0.0.1:8888:8080
+# stable path (survives plugin updates), read-only: the container must
+# neither write here nor chown it
+Volume=@DATA_DIR@/searxng:/etc/searxng:ro
+Environment=SEARXNG_BASE_URL=http://localhost:8888/
+# entrypoint default chown -R's the mount
+Environment=FORCE_OWNERSHIP=false
+
+[Service]
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

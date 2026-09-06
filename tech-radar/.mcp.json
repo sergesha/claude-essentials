@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "searxng-mcp": {
+      "command": "npx",
+      "args": [
+        "@tadmstr/searxng-mcp"
+      ],
+      "env": {
+        "SEARXNG_URL": "http://localhost:8888",
+        "CACHE_URL": "redis://localhost:6381"
+      }
+    }
+  }
+}
