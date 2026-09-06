@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+
 from lockstep.recipe.authority import (
     AuthorityDenied,
     OwnerReviewedGrant,
@@ -339,7 +340,7 @@ tools:
   validate:
     type: python
     module: lockstep.runtime.validators
-    function: run_checks
+    function: build_manifest
 nodes:
   validate: {type: python, tool: validate}
 edges: [{from: START, to: validate}, {from: validate, to: END}]
@@ -381,7 +382,7 @@ edges: [{from: START, to: validate}, {from: validate, to: END}]
 
     target = OwnerReviewedPythonTarget(
         module="lockstep.runtime.validators",
-        function="run_checks",
+        function="build_manifest",
     )
     admitted = candidate.authorize(
         RecipeAuthorityPolicy((grant,), python_targets=(target,))
