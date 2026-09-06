@@ -1,0 +1,25 @@
+{
+  "mcpServers": {
+    "redis-memory-mcp": {
+      "command": "bash",
+      "startup_timeout_sec": 300,
+      "args": [
+        "-c",
+        "t=$(mktemp) && curl -fsSL https://raw.githubusercontent.com/sergesha/claude-essentials/main/redis-memory-mcp/start.sh -o \"$t\" && exec bash \"$t\""
+      ],
+      "env_vars": [
+        "REDIS_MEMORY_MCP_MODE",
+        "REDIS_URL",
+        "EMBED_URL",
+        "NAMESPACE",
+        "INDEX_NAME",
+        "REDIS_MEMORY_MCP_NETWORK",
+        "EMBED_SOCKET",
+        "REDIS_MEMORY_MCP_SOCKET_DIR",
+        "REDIS_MEMORY_MCP_REF",
+        "DOCKER_HOST",
+        "DOCKER_CONTEXT"
+      ]
+    }
+  }
+}
