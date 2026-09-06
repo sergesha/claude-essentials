@@ -128,7 +128,11 @@ class _ServiceComposition:
             snapshots=self.snapshots,
         )
         released = composition.runners
-        runners = {"codex": released.codex, "pinned": released.pinned}
+        runners = {
+            selector: runner
+            for selector, runner in (("codex", released.codex), ("pinned", released.pinned))
+            if runner is not None
+        }
         authority, coordinator = self._effect_coordinator_for(
             runners, composition.authority
         )

@@ -23,6 +23,8 @@ from typing import Callable
 _ASSET_ROOT = Path(__file__).parent / "_dependency_patches" / "yamlgraph"
 _MANIFEST_PATH = _ASSET_ROOT / "manifest.json"
 _PATCH_PATH = _ASSET_ROOT / "0.5.22-subgraph-config.patch"
+_JOIN_MANIFEST_PATH = _ASSET_ROOT / "native-join-manifest.json"
+_JOIN_PATCH_PATH = _ASSET_ROOT / "0.5.22-native-join.patch"
 _MANIFEST_FIELDS = {
     "schema",
     "distribution",
@@ -254,6 +256,10 @@ def verify_dependency_patch(
         raise DependencyPatchError(
             f"{manifest['distribution']} {dist.version} dependency patch state is {state}"
         )
+    if Path(manifest_path) == _MANIFEST_PATH and Path(patch_path) == _PATCH_PATH:
+        verify_dependency_patch(
+            distribution=dist, manifest_path=_JOIN_MANIFEST_PATH, patch_path=_JOIN_PATCH_PATH
+        )
     return PatchResult("fully patched", manifest["distribution"], dist.version)
 
 
@@ -351,6 +357,11 @@ def apply_dependency_patch(
     _check_version(dist, manifest, capability_probe)
     state = _state(dist, manifest)
     if state == "fully patched":
+        if Path(manifest_path) == _MANIFEST_PATH and Path(patch_path) == _PATCH_PATH:
+            return apply_dependency_patch(
+                distribution=dist, manifest_path=_JOIN_MANIFEST_PATH,
+                patch_path=_JOIN_PATCH_PATH, capability_probe=capability_probe,
+            )
         return PatchResult("already patched", manifest["distribution"], dist.version)
     if state != "original":
         raise DependencyPatchError(
@@ -376,6 +387,11 @@ def apply_dependency_patch(
             lambda: _state(dist, manifest),
         )
 
+    if Path(manifest_path) == _MANIFEST_PATH and Path(patch_path) == _PATCH_PATH:
+        apply_dependency_patch(
+            distribution=dist, manifest_path=_JOIN_MANIFEST_PATH,
+            patch_path=_JOIN_PATCH_PATH, capability_probe=capability_probe,
+        )
     return PatchResult("patched", manifest["distribution"], dist.version)
 
 

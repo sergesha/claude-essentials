@@ -73,9 +73,7 @@ def _write_recipe(
             {"from": "work", "to": "END"},
         ],
     }
-    (recipes / f"{name}.recipe.yaml").write_text(
-        json.dumps(document), encoding="utf-8"
-    )
+    (recipes / f"{name}.recipe.yaml").write_text(json.dumps(document), encoding="utf-8")
 
 
 def _write_coalesced_recipe(project: Path) -> None:
@@ -253,6 +251,110 @@ def _subprocess_result(
         process.kill()
         process.wait(timeout=10)
         pytest.fail("owner provisioning blocked on a non-regular file")
+
+
+@pytest.mark.parametrize("selector", ["pinned", "codex"])
+def test_public_provisioning_needs_only_inventory_binding(
+    tmp_path: Path,
+    selector: str,
+) -> None:
+    from lockstep.runtime.effects.owner_provisioning import (
+        capture_runtime_execution_bindings,
+    )
+    from lockstep.runtime.effects.owner_snapshot_store import open_runtime_snapshot
+
+    project = tmp_path / "project"
+    _write_recipe(project, "sample", "sample-work", selector=selector)
+    recipe_path = project / ".lockstep" / "recipes" / "sample.recipe.yaml"
+    recipe = json.loads(recipe_path.read_text())
+    manual = _effect_node("approve-work")
+    manual["message"]["lockstep_effect"]["kind"] = "manual"
+    manual["message"]["lockstep_effect"]["runner"] = None
+    recipe["nodes"]["approve"] = manual
+    recipe["edges"] = [
+        {"from": "START", "to": "approve"},
+        {"from": "approve", "to": "work"},
+        {"from": "work", "to": "END"},
+    ]
+    recipe_path.write_text(json.dumps(recipe))
+    config = _config(tmp_path)
+    unused = "codex" if selector == "pinned" else "pinned"
+    unused_home = Path(config.pop(unused)["codex_home"])
+    for child in unused_home.iterdir():
+        child.unlink()
+    unused_home.rmdir()
+    state = tmp_path / "owner-state"
+    keys = _keys(project, "sample")
+
+    assert _provision(tmp_path, project, state, config, keys, "sample") == 0
+    encoded, document = _snapshot(state)
+    assert document[unused] is None
+    assert set(_grants(document)) == set(keys)
+    _, snapshot = open_runtime_snapshot(state)
+    captured = capture_runtime_execution_bindings(snapshot, project=project)
+    assert getattr(captured, f"{unused}_installation") is None
+    assert getattr(captured, f"{selector}_installation") is not None
+    assert not unused_home.exists()
+    assert _provision(tmp_path, project, state, config, keys, "sample") == 0
+    assert _snapshot(state)[0] == encoded
+    from lockstep.runtime.blobs import BlobStore
+    from lockstep.runtime.project_snapshots import ProjectSnapshotStore
+    from lockstep.runtime.recipe_bundles import RecipeBundleStore
+    from lockstep.runtime.runtime_execution import (
+        build_runtime_execution_composition,
+        capture_runtime_execution_admission,
+    )
+
+    index = RuntimeRequirementIndex.for_authorized_closures(
+        (preflight_recipe(project / ".lockstep" / "recipes", "sample"),),
+        project_identity=str(project.resolve()),
+    )
+    admission = capture_runtime_execution_admission(state, index)
+    blobs = BlobStore(state)
+    composition = build_runtime_execution_composition(
+        state_dir=state,
+        context=admission.context,
+        catalog=None,
+        bundles=RecipeBundleStore(state, blobs),
+        blobs=blobs,
+        snapshots=ProjectSnapshotStore(state, blobs),
+    )
+    assert composition.runners.resolve(selector) is not None
+    with pytest.raises(ValueError, match="unavailable"):
+        composition.runners.resolve(unused)
+    _write_recipe(project, "other", "other-work", selector=unused)
+    other_index = RuntimeRequirementIndex.for_authorized_closures(
+        (preflight_recipe(project / ".lockstep" / "recipes", "other"),),
+        project_identity=str(project.resolve()),
+    )
+    with pytest.raises(ValueError, match="binding is unavailable"):
+        capture_runtime_execution_admission(state, other_index)
+    from lockstep.runtime.engine import Engine
+
+    service = Engine.command(state, project / ".lockstep" / "recipes")
+    try:
+        started = service.start("sample", {}, str(project.resolve()))
+        assert started["run_id"]
+        assert started["status"] in {"starting", "awaiting"}
+    finally:
+        service.close()
+
+
+@pytest.mark.parametrize("selector", ["pinned", "codex"])
+def test_public_provisioning_rejects_missing_inventory_binding(
+    tmp_path: Path,
+    selector: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    _write_recipe(project, "sample", "sample-work", selector=selector)
+    config = _config(tmp_path)
+    config.pop(selector)
+    state = tmp_path / "owner-state"
+
+    assert _provision(tmp_path, project, state, config, (), "sample") != 0
+    assert f"requires {selector} binding" in capsys.readouterr().err
+    assert not state.exists()
 
 
 def test_equal_inputs_are_byte_for_byte_idempotent(tmp_path: Path) -> None:

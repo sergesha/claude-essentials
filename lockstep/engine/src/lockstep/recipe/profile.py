@@ -272,7 +272,13 @@ def _build_edges_by_from(raw_edges: list, errors: list[str]) -> dict[str, list[d
                 f"(edge from {e.get('from')!r}) — use {{from, to, condition}} triples"
             )
             continue
-        edges_by_from.setdefault(e.get("from"), []).append(e)
+        raw_sources = e.get("from")
+        sources = raw_sources if isinstance(raw_sources, list) else [raw_sources]
+        for source in sources:
+            if isinstance(source, str):
+                edges_by_from.setdefault(source, []).append(e)
+            else:
+                errors.append("invalid edge source: expected a node name")
     return edges_by_from
 
 

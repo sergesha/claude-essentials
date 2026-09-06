@@ -763,12 +763,11 @@ def test_parallel_contract_preserves_branch_flow_and_qualified_artifact_handle(w
 @pytest.mark.parametrize(
     "forbidden",
     [
-        StepIR(None, "work", "Do work", "Done"),
         ParallelIR("inner", "all", {"one": (), "two": ()}),
     ],
 )
 def test_parallel_direct_ir_rejects_forbidden_branch_blocks(forbidden) -> None:
-    """Schema bypass must not permit agent work or nesting in a parallel branch."""
+    """Schema bypass must not permit nested parallel branches."""
     workflow = WorkflowIR(
         "1", "release", "Release safely", ("**",),
         (ParallelIR("gates", "all", {"one": (forbidden,), "two": ()}),),

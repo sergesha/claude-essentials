@@ -22,7 +22,8 @@ from lockstep.runtime._snapshot_lineage import (
     _chain,
     _read_regular as _read_regular,
     capture_authoritative_snapshot,
-    resolve_lineage_snapshot,
+    merge_lineage_snapshots,
+    resolve_lineage_snapshot as resolve_lineage_snapshot,
     verify_bound_snapshot,
 )
 from lockstep.runtime.blobs import BlobStore
@@ -68,9 +69,10 @@ class RuntimeSnapshotResolver:
             raise RuntimeSnapshotConflict(
                 "runtime snapshot chain does not descend from the exact run start"
             )
-        snapshot = self._snapshots.read(ref)
-        if snapshot.provenance.get("schema") == "lockstep.run-project-snapshot/v1":
-            verify_bound_snapshot(ref, self._snapshots, binding)
+        for ancestor in chain:
+            snapshot = self._snapshots.read(ancestor)
+            if snapshot.provenance.get("schema") == "lockstep.run-project-snapshot/v1":
+                verify_bound_snapshot(ancestor, self._snapshots, binding)
 
     def _current_ref(
         self, binding: RunBinding, interrupt: NativeInterrupt
@@ -89,7 +91,7 @@ class RuntimeSnapshotResolver:
             ref for ref in dict.fromkeys(candidates)
             if not any(ref in ancestors for other, ancestors in chains.items() if other != ref)
         )
-        return resolve_lineage_snapshot(tips, self._snapshots)
+        return merge_lineage_snapshots(tips, self._snapshots, binding)
 
     def inputs_for(
         self,
@@ -164,6 +166,9 @@ class RuntimeSnapshotResolver:
             binding,
             previous=previous,
             purpose=purpose,
+            writes=descriptor.writes if (
+                isinstance(descriptor, EffectDescriptor) and descriptor.parallel is not None
+            ) else None,
         )
         return self._facts.bind_effect(
             effect_id,

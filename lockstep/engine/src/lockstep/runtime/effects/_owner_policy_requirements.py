@@ -182,10 +182,7 @@ def _runtime_descriptors(encoded: bytes) -> tuple[EffectDescriptor, ...]:
             message["lockstep_effect"],
             known_state_keys=known_state_keys,
         )
-        if (
-            isinstance(descriptor, EffectDescriptor)
-            and descriptor.runner is not None
-        ):
+        if isinstance(descriptor, EffectDescriptor) and descriptor.runner is not None:
             descriptors.append(descriptor)
     return tuple(descriptors)
 
@@ -205,7 +202,9 @@ class RuntimeRequirementIndex:
         keys = tuple(item.grant_selection_key for item in self.requirements)
         if keys != tuple(sorted(keys)) or len(set(keys)) != len(keys):
             raise ValueError("runtime requirements must be sorted and unique")
-        if any(item.project_identity != self.project_identity for item in self.requirements):
+        if any(
+            item.project_identity != self.project_identity for item in self.requirements
+        ):
             raise ValueError("runtime requirement project identity mismatch")
 
     @classmethod
@@ -259,9 +258,7 @@ class RuntimeRequirementIndex:
                     raise ValueError(
                         "runtime requirement has an unsupported runner selector"
                     )
-                capabilities = tuple(
-                    sorted(descriptor.runner.required_capabilities)
-                )
+                capabilities = tuple(sorted(descriptor.runner.required_capabilities))
                 authorities = ("os_user_execution",)
                 selection_key = grant_selection_key(
                     project_identity=project_identity,
@@ -296,14 +293,18 @@ class RuntimeRequirementIndex:
         entries: list[tuple[RuntimeRequirement, str]] = []
         for requirement in self.requirements:
             if requirement.runner_selector == "codex":
-                binding_digest = snapshot.codex.binding_digest
+                binding = snapshot.codex
             elif requirement.runner_selector == "pinned":
-                binding_digest = snapshot.pinned.binding_digest
+                binding = snapshot.pinned
             else:  # construction and static derivation already reject this
-                raise ValueError("runtime requirement has an unsupported runner selector")
+                raise ValueError(
+                    "runtime requirement has an unsupported runner selector"
+                )
+            if binding is None:
+                raise ValueError("owner runtime requirement binding is unavailable")
             digest = requirement_digest(
                 grant_selection_key=requirement.grant_selection_key,
-                runner_binding_digest=binding_digest,
+                runner_binding_digest=binding.binding_digest,
                 config_generation=snapshot.config_generation,
             )
             grant = grants.get(requirement.grant_selection_key)
@@ -328,9 +329,7 @@ class RuntimeRequirementIndex:
                         requirement.protected_descriptor_digest
                     ),
                     "runner_selector": requirement.runner_selector,
-                    "required_capabilities": list(
-                        requirement.required_capabilities
-                    ),
+                    "required_capabilities": list(requirement.required_capabilities),
                     "required_authorities": list(requirement.required_authorities),
                     "uses": [
                         {"logical_file": logical_file, "logical_id": logical_id}
@@ -350,14 +349,15 @@ class RuntimeProvisioningInventory:
     requirements: tuple[RuntimeRequirement, ...]
 
     def __post_init__(self) -> None:
-        if (
-            not self.project_identities
-            or self.project_identities != tuple(sorted(set(self.project_identities)))
+        if not self.project_identities or self.project_identities != tuple(
+            sorted(set(self.project_identities))
         ):
             raise ValueError("runtime provisioning projects must be sorted and unique")
         keys = tuple(item.grant_selection_key for item in self.requirements)
         if keys != tuple(sorted(keys)) or len(set(keys)) != len(keys):
-            raise ValueError("runtime provisioning requirements must be sorted and unique")
+            raise ValueError(
+                "runtime provisioning requirements must be sorted and unique"
+            )
         projects = set(self.project_identities)
         if any(item.project_identity not in projects for item in self.requirements):
             raise ValueError("runtime provisioning requirement project is absent")

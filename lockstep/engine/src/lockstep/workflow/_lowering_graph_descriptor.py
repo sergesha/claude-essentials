@@ -49,6 +49,8 @@ def _qualify_protected_descriptor(
     builder._qualify_fragment_descriptor_state(descriptor, names)
     builder._qualify_fragment_descriptor_artifacts(descriptor, names)
     builder._inherit_fragment_scopes(descriptor)
+    if descriptor.get("kind") == "manual" and builder.manual_parallel is not None:
+        descriptor["parallel"] = builder.manual_parallel
 
 
 def _rewrite_fragment_message(
