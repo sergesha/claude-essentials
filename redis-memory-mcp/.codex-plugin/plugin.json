@@ -1,8 +1,10 @@
 {
   "name": "redis-memory",
-  "version": "0.8.1",
+  "version": "0.9.0",
   "description": "Persistent cross-session semantic and key-value memory using Redis.",
-  "author": { "name": "sergesha" },
+  "author": {
+    "name": "sergesha"
+  },
   "homepage": "https://github.com/sergesha/claude-essentials",
   "repository": "https://github.com/sergesha/claude-essentials",
   "license": "MIT",
