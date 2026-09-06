@@ -66,11 +66,10 @@ applying pending content into canonical state is a lifecycle transition
 regardless of a filesystem mechanism or label. Propose exactly one action and
 its exact effects, name the exact documented owner operation or editing
 interface in the preview, and, when the classified effect is a lifecycle
-transition, name the exact native lifecycle operation. Then state `Review:
-required|skipped — reason` before any Backlog, OpenSpec, Beads, or related
-planning or executable coordination mutation. Review is required for a
-semantic mutation; skip it only for demonstrably read-only or mechanical work
-and name the reason. Approval of semantic intent is not approval of an
+transition, name the exact native lifecycle operation. Apply the
+[semantic review decision](#semantic-review) before any Backlog, OpenSpec,
+Beads, or related planning or executable coordination mutation.
+Approval of semantic intent is not approval of an
 unspecified filesystem or lifecycle operation; unrelated or ambiguous text,
 including `lf`, is not approval. Execute only with unambiguous user authorization
 covering the concrete preview, through the documented owner interface or
@@ -84,6 +83,22 @@ broken. Re-inspect native state after execution before reporting any effect,
 then commit only native data in the approved data repository.
 
 ## Semantic review
+
+Use effects observed from the installed operation's documentation and the
+exact proposed payload as the input to this decision. A review reason names
+that observed effect and its evidence; the word `init` or the existence of new
+files alone does not establish a semantic choice.
+
+| Evidence about the installed operation | Next step |
+| --- | --- |
+| Documented semantic effects | State `Review: required — observed effect and evidence`, then perform the required review |
+| Documented read-only or mechanical effects | State `Review: skipped — observed effect and evidence` |
+| Effects not inspected | Inspect the documented effects read-only, then determine review |
+
+The last row is an inspection action, not another review value. Review and
+approval readiness are separate: documented mechanical storage effects can
+justify skipped review while missing literal metadata still blocks mutation
+approval. In-scope read-only inspection needs no extra mutation approval.
 
 For a required review, give a fresh isolated read-only reviewer the approved
 scope, exact proposed artifact or diff, evidence, and applicable native
