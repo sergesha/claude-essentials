@@ -19,10 +19,12 @@ re-collects, never touches the `latest` pointers, and never hand-writes output.
 
 ## Flow
 
-Run from the project root and relay the output:
+Resolve `show.py` relative to the directory containing this loaded `SKILL.md`.
+Keep the project root as the current working directory so `reports/` remains
+project-local, then run and relay the output:
 
 ```
-python3 plugin/skills/show-result/show.py [--date YYYY-MM-DD] [--format json|yaml|html]
+python3 "<resolved show-result skill directory>/show.py" [--date YYYY-MM-DD] [--format json|yaml|html]
 ```
 
 - stdout = the result content in the requested format (the chosen file's name and

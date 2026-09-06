@@ -1,0 +1,21 @@
+{
+  "name": "tech-radar",
+  "version": "0.5.0",
+  "description": "AI-powered technology scout: monitors news via SearXNG, stores summaries with semantic search in Redis, generates HTML dashboards.",
+  "author": {
+    "name": "sergesha"
+  },
+  "homepage": "https://github.com/sergesha/claude-essentials/tree/main/tech-radar",
+  "repository": "https://github.com/sergesha/claude-essentials",
+  "license": "MIT",
+  "keywords": [
+    "news",
+    "tech-radar",
+    "searxng",
+    "monitoring",
+    "dashboard"
+  ],
+  "skills": "./skills/",
+  "hooks": "./hooks/session-start.json",
+  "mcpServers": "./.codex-plugin/mcp.json"
+}

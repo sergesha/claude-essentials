@@ -226,8 +226,11 @@ makes each run unique. Then refresh the pointer `reports/radar-latest.json` as a
 **copy** of the file just written (the only file overwritten).
 
 JSON is the canonical store. To produce views: run the `render-dashboard` skill
-for HTML, or `python3 plugin/skills/collect-news/export_yaml.py reports/radar-latest.json`
-for a human-readable YAML rendering. Do not hand-write either.
+for HTML. For a human-readable YAML rendering, resolve `export_yaml.py` relative
+to the directory containing this loaded `SKILL.md`, keep the project root as the
+current working directory, and run
+`python3 "<resolved collect-news skill directory>/export_yaml.py" reports/radar-latest.json`.
+Do not hand-write either view.
 
 Also record the run metadata:
 
