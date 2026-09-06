@@ -83,6 +83,36 @@ _READ_ONLY_FRAGMENT = """\
 """
 
 
+def test_fragment_native_join_waits_for_unequal_branches(tmp_path: Path) -> None:
+    document = _compile(tmp_path,
+        "  - graph:\n      id: joined\n"
+        "      fragment:\n        entry: begin\n        exits: {pass: finish}\n"
+        "        effects: {mode: read-only, writes: []}\n"
+        "      state: {left: int, right: int, total: int}\n"
+        "      nodes:\n"
+        "        begin: {type: passthrough, output: {total: 0}}\n"
+        "        left: {type: passthrough, output: {left: 1}}\n"
+        "        middle: {type: passthrough}\n"
+        "        right: {type: passthrough, output: {right: 2}}\n"
+        "        finish: {type: passthrough, output: {total: '{state.total + 1}'}}\n"
+        "      edges:\n"
+        "        - {from: begin, to: left}\n"
+        "        - {from: begin, to: middle}\n"
+        "        - {from: middle, to: right}\n"
+        "        - {from: [left, right], to: finish}\n"
+    )
+    recipe = tmp_path / "joined.recipe.yaml"
+    recipe.write_text(yaml.safe_dump(document, sort_keys=False))
+    app = yg._open_native_path(recipe)
+    try:
+        completed = app.invoke({}, thread_id="fragment-join")
+    finally:
+        app.close()
+    assert completed.values[_state("joined", "total")] == 1
+    assert completed.values[_state("joined", "left")] == 1
+    assert completed.values[_state("joined", "right")] == 2
+
+
 def test_inline_graph_fragment_is_namespaced_and_connected_through_declared_entry_exits(
     tmp_path: Path,
 ) -> None:

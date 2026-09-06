@@ -39,7 +39,7 @@ class _LoweringCore:
         return name
 
     def edge(
-        self, source: str, target: str | list[str], condition: str | None = None
+        self, source: str | list[str], target: str | list[str], condition: str | None = None
     ) -> None:
         edge: dict[str, Any] = {"from": source, "to": target}
         if condition is not None:

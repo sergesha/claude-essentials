@@ -79,14 +79,10 @@ class RuntimeExecutionRecovery:
                 raise ValueError("durable run binding changed during recovery")
             bindings[binding.public_run_id] = binding
             observed = tuple(
-                self._effects.list_nonterminal_for_thread(
-                    thread_id, limit=limit + 1
-                )
+                self._effects.list_nonterminal_for_thread(thread_id, limit=limit + 1)
             )
             if len(observed) > limit:
-                raise ValueError(
-                    "run exceeds the bounded nonterminal effect capacity"
-                )
+                raise ValueError("run exceeds the bounded nonterminal effect capacity")
             records[binding.public_run_id] = observed
         return tuple(
             (binding, run_id in watched, records.get(run_id, ()))
@@ -188,16 +184,12 @@ class RuntimeExecutionRecovery:
     def reconstruct(
         self, *, limit: int, after_thread_id: str | None = None
     ) -> RuntimeExecutionContext | None:
-        work = self._protected_work(
-            limit=limit, after_thread_id=after_thread_id
-        )
+        work = self._protected_work(limit=limit, after_thread_id=after_thread_id)
         if not work:
             return None
         digest, snapshot = open_runtime_snapshot(self._state_dir)
         captured = None
-        for project_identity in sorted(
-            {item.index.project_identity for item in work}
-        ):
+        for project_identity in sorted({item.index.project_identity for item in work}):
             observed = capture_runtime_execution_bindings(
                 snapshot, project=Path(project_identity)
             )
@@ -215,11 +207,14 @@ class RuntimeExecutionRecovery:
             authority.preflight(item.index)
             for record, requirement in item.records:
                 expected = (
-                    snapshot.codex.binding_digest
+                    snapshot.codex
                     if requirement.runner_selector == "codex"
-                    else snapshot.pinned.binding_digest
+                    else snapshot.pinned
                 )
-                if record.runner_binding_digest != expected:
+                if (
+                    expected is None
+                    or record.runner_binding_digest != expected.binding_digest
+                ):
                     raise ValueError(
                         "durable protected effect uses a different owner runner binding"
                     )

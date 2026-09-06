@@ -57,6 +57,7 @@ def capture_authoritative_snapshot(
     *,
     previous: ProjectSnapshotRef | None,
     purpose: str,
+    writes: tuple[str, ...] | None = None,
 ) -> ProjectSnapshotRef:
     """Capture one complete, symlink-free project image as a chain successor."""
 
@@ -65,7 +66,11 @@ def capture_authoritative_snapshot(
     root = Path(project)
     if root.resolve() != Path(binding.project_identity).resolve():
         raise RuntimeSnapshotConflict("snapshot project differs from immutable run binding")
-    from lockstep.runtime.manifests import PathContractError, capture_project
+    from lockstep.runtime.manifests import (
+        PathContractError,
+        ProjectWritePath,
+        capture_project,
+    )
 
     try:
         manifest = capture_project(root, limits=snapshots.limits)
@@ -74,18 +79,32 @@ def capture_authoritative_snapshot(
     if any(item.kind == "symlink" for item in manifest.entries):
         raise RuntimeSnapshotConflict("authoritative project snapshots reject symlinks")
     file_entries = tuple(item for item in manifest.entries if item.kind == "file")
+    surfaces = None if writes is None else tuple(
+        ProjectWritePath.parse(path, root) for path in writes
+    )
     stored = {}
+    if surfaces is not None:
+        if previous is None:
+            raise RuntimeSnapshotConflict("branch snapshot requires a previous snapshot")
+        stored = {
+            item.path: item.blob for item in snapshots.read(previous).files
+            if not any(surface.allows(item.path) for surface in surfaces)
+        }
     for item in file_entries:
+        if surfaces is not None and not any(surface.allows(item.path) for surface in surfaces):
+            continue
         assert item.sha256 is not None
         data = _read_regular(root / item.path, item.sha256, snapshots.limits.max_file_bytes)
         stored[item.path] = blobs.put(data, expected_sha256=item.sha256)
-    provenance = {
+    provenance: dict[str, object] = {
         "schema": "lockstep.run-project-snapshot/v1",
         "public_run_id": binding.public_run_id,
         "project_identity": binding.project_identity,
         "definition_digest": binding.recipe_digest,
         "purpose": purpose,
     }
+    if writes is not None:
+        provenance["parallel_manual"] = True
     return snapshots.capture(
         stored,
         declared_paths=tuple(stored),
@@ -117,16 +136,29 @@ def verify_bound_snapshot(
 def _chain(ref: ProjectSnapshotRef, snapshots: ProjectSnapshotStore) -> tuple[ProjectSnapshotRef, ...]:
     result: list[ProjectSnapshotRef] = []
     seen: set[ProjectSnapshotRef] = set()
-    current: ProjectSnapshotRef | None = ref
-    while current is not None:
-        if current in seen:
+    active: set[ProjectSnapshotRef] = set()
+    pending = [(ref, False)]
+    while pending:
+        current, leaving = pending.pop()
+        if leaving:
+            active.remove(current)
+            seen.add(current)
+            result.append(current)
+            continue
+        if current in active:
             raise RuntimeSnapshotConflict("project snapshot lineage contains a cycle")
-        if len(result) >= _MAX_LINEAGE:
+        if current in seen:
+            continue
+        if len(seen) + len(active) >= _MAX_LINEAGE:
             raise RuntimeSnapshotConflict("project snapshot lineage exceeds public bound")
-        seen.add(current)
-        result.append(current)
-        current = snapshots.read(current).previous
-    return tuple(result)
+        active.add(current)
+        snapshot = snapshots.read(current)
+        parents = tuple(ProjectSnapshotRef(digest) for digest in snapshot.provenance.get("merged_from", ()))
+        if snapshot.previous is not None:
+            parents = (*parents, snapshot.previous)
+        pending.append((current, True))
+        pending.extend((parent, False) for parent in parents)
+    return tuple(reversed(result))
 
 
 def resolve_lineage_snapshot(
@@ -145,3 +177,58 @@ def resolve_lineage_snapshot(
         if candidate in common:
             return candidate
     raise RuntimeSnapshotConflict("runtime snapshot lineages have no common ancestor")
+
+
+def merge_lineage_snapshots(
+    refs: Iterable[ProjectSnapshotRef], snapshots: ProjectSnapshotStore, binding: RunBinding
+) -> ProjectSnapshotRef:
+    """Merge accepted disjoint deltas without capturing unaccepted live files."""
+
+    selected = tuple(sorted(set(refs)))
+    ancestors = {ref: set(_chain(ref, snapshots)[1:]) for ref in selected}
+    tips = tuple(ref for ref in selected if not any(
+        ref in chain for other, chain in ancestors.items() if other != ref
+    ))
+    common = resolve_lineage_snapshot(tips, snapshots)
+    if len(tips) == 1:
+        return tips[0]
+    shared = set(_chain(common, snapshots))
+    if not any(
+        snapshots.read(ref).provenance.get("parallel_manual") is True
+        for tip in tips
+        for ref in (ancestors[tip] | {tip}) - shared
+    ):
+        # A manual snapshot already shared by all branches is an earlier
+        # completed parallel block, not a reason to change this fan-in policy.
+        return common
+    baseline = {item.path: item.blob for item in snapshots.read(common).files}
+    changes = {}
+    for ref in tips:
+        snapshot = snapshots.read(ref)
+        if snapshot.provenance.get("schema") == "lockstep.run-project-snapshot/v1":
+            verify_bound_snapshot(ref, snapshots, binding)
+        files = {item.path: item.blob for item in snapshot.files}
+        for path in baseline.keys() | files.keys():
+            value = files.get(path)
+            if value == baseline.get(path):
+                continue
+            if path in changes and changes[path] != value:
+                raise RuntimeSnapshotConflict(f"parallel snapshots contain conflicting changes: {path}")
+            changes[path] = value
+    merged = dict(baseline)
+    for path, value in changes.items():
+        if value is None:
+            merged.pop(path, None)
+        else:
+            merged[path] = value
+    return snapshots.capture(
+        merged, declared_paths=tuple(merged), previous=common,
+        provenance={
+            "schema": "lockstep.run-project-snapshot/v1",
+            "public_run_id": binding.public_run_id,
+            "project_identity": binding.project_identity,
+            "definition_digest": binding.recipe_digest,
+            "purpose": "effect",
+            "merged_from": [ref.digest for ref in tips],
+        },
+    )

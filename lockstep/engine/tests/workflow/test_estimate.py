@@ -217,8 +217,10 @@ def test_repeat_parallel_scope_bound_applies_once_per_iteration(tmp_path: Path) 
     assert "scope 120s × 3" in estimate["controlled_time"]["formula"]
 
 
+@pytest.mark.parametrize("parallel", [False, True])
 def test_manual_estimate_multiplies_bounded_effects(
     tmp_path: Path,
+    parallel: bool,
 ) -> None:
     recipe = tmp_path / "bounded-manual.recipe.yaml"
     recipe.write_text(
@@ -240,6 +242,18 @@ def test_manual_estimate_multiplies_bounded_effects(
         "  - {from: verify, to: gate}\n  - {from: done, to: END}\n"
         "loop_limits: {gate: 3}\nloop_exits: {gate: done}\n"
     )
+    if parallel:
+        import yaml
+
+        document = yaml.safe_load(recipe.read_text())
+        document["nodes"]["other"] = {"type": "passthrough"}
+        document["edges"] = [
+            {"from": "START", "to": "gate"},
+            {"from": "gate", "to": ["verify", "other"]},
+            {"from": ["verify", "other"], "to": "gate"},
+            {"from": "done", "to": "END"},
+        ]
+        recipe.write_text(yaml.safe_dump(document))
 
     data = estimate_manual_recipe(recipe).to_dict()
 

@@ -71,8 +71,8 @@ class OwnerRuntimeAuthority:
 
     snapshot_digest: str
     snapshot: OwnerRuntimeSnapshot
-    codex_binding: _RuntimeBindingFacts
-    pinned_binding: _RuntimeBindingFacts
+    codex_binding: _RuntimeBindingFacts | None
+    pinned_binding: _RuntimeBindingFacts | None
 
     def __post_init__(self) -> None:
         _lower_hex(self.snapshot_digest, label="owner runtime snapshot digest")
@@ -85,9 +85,7 @@ class OwnerRuntimeAuthority:
         """Authorize every bound entry without resolving or starting a runner."""
 
         bound = index.bind(self.snapshot)
-        grants = {
-            grant.grant_selection_key: grant for grant in self.snapshot.grants
-        }
+        grants = {grant.grant_selection_key: grant for grant in self.snapshot.grants}
         admitted = []
         for requirement, digest in bound.entries:
             grant = grants.get(requirement.grant_selection_key)

@@ -1,0 +1,101 @@
+diff --git a/yamlgraph/compile/edge_compiler.py b/yamlgraph/compile/edge_compiler.py
+index 7ae4e6a..4a7ff90 100644
+--- a/yamlgraph/compile/edge_compiler.py
++++ b/yamlgraph/compile/edge_compiler.py
+@@ -281,6 +281,19 @@ def _process_edge(
+     condition = edge.get("condition")
+     edge_type = edge.get("type")
+ 
++    if isinstance(from_node, list):
++        if not from_node or len(set(from_node)) != len(from_node):
++            raise ValueError("all-source edges require non-empty unique sources")
++        if not isinstance(to_node, str) or condition is not None or edge_type is not None:
++            raise ValueError("all-source edges require one target and no condition/type")
++        special_nodes = set(map_nodes) | set(subgraph_interrupt_nodes or ())
++        if any(source in special_nodes or source in {"START", "END"} for source in from_node) or to_node in special_nodes:
++            raise ValueError("all-source edges require ordinary nodes")
++        if interrupt_nodes and to_node in interrupt_nodes:
++            to_node = f"{to_node}_prepare"
++        graph.add_edge(from_node, END if to_node == "END" else to_node)
++        return
++
+     # FR-797: relay-capable subgraph rewrite happens BEFORE all edge-shape
+     # dispatch (J-15); outgoing edges may be fully handled there.
+     if subgraph_interrupt_nodes:
+diff --git a/yamlgraph/loop_detector.py b/yamlgraph/loop_detector.py
+index 8487502..7f80d44 100644
+--- a/yamlgraph/loop_detector.py
++++ b/yamlgraph/loop_detector.py
+@@ -37,10 +37,12 @@ def detect_loop_nodes(edges: list[dict]) -> set[str]:
+         if isinstance(to_nodes, str):
+             to_nodes = [to_nodes]
+ 
+-        all_nodes.add(from_node)
+-        for to_node in to_nodes:
+-            graph[from_node].add(to_node)
+-            all_nodes.add(to_node)
++        sources = from_node if isinstance(from_node, list) else [from_node]
++        for source in sources:
++            all_nodes.add(source)
++            for to_node in to_nodes:
++                graph[source].add(to_node)
++                all_nodes.add(to_node)
+ 
+     # Find nodes in cycles using DFS with path tracking
+     loop_nodes: set[str] = set()
+diff --git a/yamlgraph/mermaid_export.py b/yamlgraph/mermaid_export.py
+index 89ab963..c756162 100644
+--- a/yamlgraph/mermaid_export.py
++++ b/yamlgraph/mermaid_export.py
+@@ -67,6 +67,9 @@ def _authored_edges(config: dict) -> list[_Edge]:
+         targets = edge.get("to")
+         condition = edge.get("condition")
+         targets = targets if isinstance(targets, list) else [targets]
++        if isinstance(source, list):
++            edges.extend(_Edge(item, target, "all") for item in source for target in targets)
++            continue
+         routes = (nodes.get(source) or {}).get("routes") or {}
+         route_labels = {target: key for key, target in routes.items()}
+         for target in targets:
+diff --git a/yamlgraph/models/graph_schema.py b/yamlgraph/models/graph_schema.py
+index 133d359..8f970bd 100644
+--- a/yamlgraph/models/graph_schema.py
++++ b/yamlgraph/models/graph_schema.py
+@@ -27,12 +27,23 @@ __all__ = [
+ class EdgeConfig(BaseModel):
+     """Configuration for a graph edge."""
+ 
+-    from_node: str = Field(..., alias="from", description="Source node")
++    from_node: str | list[str] = Field(..., alias="from", description="Source node(s); a list waits for all")
+     to: str | list[str] = Field(..., description="Target node(s)")
+     condition: str | None = Field(default=None, description="Condition expression")
+ 
+     model_config = {"populate_by_name": True}
+ 
++    @model_validator(mode="after")
++    def validate_all_sources(self) -> "EdgeConfig":
++        if isinstance(self.from_node, list):
++            if not self.from_node or len(set(self.from_node)) != len(self.from_node):
++                raise ValueError("all-source edges require non-empty unique sources")
++            if not isinstance(self.to, str) or self.condition is not None:
++                raise ValueError("all-source edges require one target and no condition")
++            if any(source in {"START", "END"} for source in self.from_node):
++                raise ValueError("all-source edges require ordinary source nodes")
++        return self
++
+ 
+ class ObservabilityConfig(BaseModel):
+     """Graph evidence posture (FR-807/FR-808)."""
+@@ -123,8 +134,10 @@ class GraphConfigSchema(BaseModel):
+         valid_nodes = set(self.nodes.keys()) | {"START", "END"}
+ 
+         for edge in self.edges:
+-            if edge.from_node not in valid_nodes:
+-                raise ValueError(f"Edge 'from' node '{edge.from_node}' not found")
++            sources = edge.from_node if isinstance(edge.from_node, list) else [edge.from_node]
++            for source in sources:
++                if source not in valid_nodes:
++                    raise ValueError(f"Edge 'from' node '{source}' not found")
+ 
+             targets = edge.to if isinstance(edge.to, list) else [edge.to]
+             for target in targets:

@@ -70,6 +70,24 @@ or heading rejects the submission and leaves the same step pending for repair;
 this pre-submission rejection does not consume a graph retry attempt. The artifact
 declaration does not add evidence fields, freshness checks, or business validation.
 
+Unbounded DSL `parallel` branches may contain protected manual `step` blocks,
+including sequential steps and steps inside `choose`. Different branches must
+declare disjoint portable write paths; sequential steps in one branch may reuse
+their paths. Each step keeps its own declared writes and evidence contract. Its
+immutable descriptor and handoff also bind the aggregate write surface of the
+whole parallel block, so a pending step can finish after a sibling has edited or
+completed. An explicit native all-source barrier joins the branch completions;
+the following flow runs once even when branches have different lengths.
+Completion still checks the complete project against that surface,
+rejects symlink outputs, and preserves the Git control-state fence on success,
+failure, and abort. Manual work remains prohibited in bounded parallel scopes.
+
+This is cooperative manual work in one shared project. The aggregate check
+cannot attribute an edit to a particular branch: a person can modify a sibling's
+declared surface without an integrity error. It also cannot prevent a concurrent
+edit while files are being checked. These checks are not a sandbox or isolation
+boundary; undeclared writes outside the aggregate surface remain errors.
+
 ## Problem
 
 Autonomous coding agents (esp. weaker models) drop multi-step processes: skip
