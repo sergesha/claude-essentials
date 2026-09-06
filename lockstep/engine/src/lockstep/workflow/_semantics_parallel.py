@@ -7,7 +7,9 @@ from collections.abc import Callable, Mapping
 from lockstep.runtime.owner_state import StorageLimitExceeded
 from lockstep.runtime.project_paths import (
     PortablePathError,
+    PortableProjectPath,
     ProjectTreeLimits,
+    portable_collision_key,
     validate_portable_project_paths,
 )
 
@@ -24,7 +26,7 @@ from ._semantics_contracts import (
     _escape,
 )
 from ._semantics_validation import _ValidationState, fail
-from .ir import ParallelIR
+from .ir import ParallelIR, StepIR
 
 
 def parallel(
@@ -41,10 +43,75 @@ def parallel(
         state, block, pointer, symbols, base_artifacts, flow=flow
     )
     validate_parallel_destinations(state, branch_destinations, pointer)
+    validate_parallel_writes(state, branch_contracts, pointer)
+    effects = EffectContract().union(*(
+        manual_effects(branch) for branch in branch_contracts.values()
+    ))
     state.artifacts = {**base_artifacts, **published_artifacts}
-    return BlockContract(block, EffectContract(), branches=branch_contracts, reconverges=True), {
+    return BlockContract(block, effects, branches=branch_contracts, reconverges=True), {
         block.id: OutcomeSymbol(block.id, _TERMINAL_VALUES, OutcomeProvenance.PARALLEL)
     }
+
+
+def manual_effects(flow: FlowContract, *, include_artifacts: bool = False) -> EffectContract:
+    """Live manual writes exclude child artifact destinations awaiting acceptance."""
+    effects = EffectContract()
+    for contract in flow.blocks:
+        if isinstance(contract.block, StepIR):
+            effects = effects.union(
+                EffectContract(contract.block.writes) if include_artifacts else contract.effects
+            )
+        for branch in contract.branches.values():
+            effects = effects.union(
+                manual_effects(branch, include_artifacts=include_artifacts)
+            )
+        if contract.default is not None:
+            effects = effects.union(
+                manual_effects(contract.default, include_artifacts=include_artifacts)
+            )
+    return effects
+
+
+def validate_parallel_writes(
+    state: _ValidationState,
+    branches: Mapping[str, FlowContract],
+    pointer: str,
+) -> None:
+    """Sequential writes may overlap; distinct branches must remain disjoint."""
+    seen: list[tuple[str, str]] = []
+    effects = EffectContract()
+    try:
+        for branch, contract in branches.items():
+            branch_effects = contract.effects.union(
+                manual_effects(contract, include_artifacts=True)
+            )
+            effects = effects.union(branch_effects)
+            for write in branch_effects.writes:
+                path = PortableProjectPath.parse(
+                    write, "prefix" if write.endswith("/") else "file"
+                )
+                key = portable_collision_key(path.relative.as_posix())
+                for other_branch, other in seen:
+                    if other_branch != branch and (
+                        key == other
+                        or key.startswith(other + "/")
+                        or other.startswith(key + "/")
+                    ):
+                        raise PortablePathError(
+                            f"{branch!r} and {other_branch!r} overlap at {write!r}"
+                        )
+                seen.append((branch, key))
+        validate_portable_project_paths(
+            ((write, "prefix" if write.endswith("/") else "file")
+             for write in effects.writes),
+            limits=ProjectTreeLimits(), label="parallel writes",
+        )
+    except (PortablePathError, StorageLimitExceeded) as exc:
+        fail(
+            state, "LSP102", f"parallel writes overlap or alias: {exc}",
+            f"{pointer}/parallel/branches",
+            "use disjoint portable write paths across branches",
+        )
 
 
 def parallel_header(state: _ValidationState, block: ParallelIR, pointer: str) -> None:

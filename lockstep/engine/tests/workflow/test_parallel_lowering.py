@@ -115,25 +115,21 @@ def test_parallel_is_one_yamlgraph_fanout_and_native_multi_source_join(
     ]
     assert len(pass_candidates) == 1
     completion_candidates = {
-        edge["from"]
-        for edge in document["edges"]
+        name
+        for name in document["nodes"]
         if sum(
-            candidate.get("to") == edge["from"]
+            candidate.get("to") == name
             for candidate in document["edges"]
         ) == 4
     }
-    join_candidates = [
-        name for name in document["nodes"]
-        if sum(
-            edge.get("to") == name and edge.get("from") in completion_candidates
-            for edge in document["edges"]
-        ) == 2
+    barriers = [
+        edge for edge in document["edges"]
+        if isinstance(edge.get("from"), list)
+        and set(edge["from"]) == completion_candidates
     ]
-    assert len(join_candidates) == 1
-    join = join_candidates[0]
-    incoming = [edge["from"] for edge in document["edges"] if edge.get("to") == join]
-    assert len(incoming) == 2
-    assert len(set(incoming)) == 2
+    assert len(barriers) == 1
+    assert len(barriers[0]["from"]) == 2
+    assert sum(edge.get("to") == barriers[0]["to"] for edge in document["edges"]) == 1
     assert document["state"]["gates_result"] == "dict"
 
 
