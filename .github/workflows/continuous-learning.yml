@@ -1,0 +1,46 @@
+name: continuous-learning
+
+on:
+  pull_request:
+    paths:
+      - "continuous-learning/**"
+      - ".agents/plugins/marketplace.json"
+      - ".claude-plugin/marketplace.json"
+      - ".github/workflows/continuous-learning.yml"
+  push:
+    branches: [main]
+    paths:
+      - "continuous-learning/**"
+      - ".agents/plugins/marketplace.json"
+      - ".claude-plugin/marketplace.json"
+      - ".github/workflows/continuous-learning.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  plugin-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -B -m unittest discover -s continuous-learning/tests -v
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: npm install --global @anthropic-ai/claude-code
+      - run: claude plugin validate continuous-learning
+      - name: Verify installed Claude plugin
+        env:
+          CLAUDE_CONFIG_DIR: ${{ runner.temp }}/learning-claude
+        run: |
+          claude plugin marketplace add "$GITHUB_WORKSPACE"
+          claude plugin install continuous-learning@claude-essentials --scope user
+          claude plugin list --json | python -c '
+          import json, sys
+          plugin = next(p for p in json.load(sys.stdin) if p["id"] == "continuous-learning@claude-essentials")
+          assert plugin["enabled"], plugin
+          assert not plugin.get("errors"), plugin["errors"]
+          '
