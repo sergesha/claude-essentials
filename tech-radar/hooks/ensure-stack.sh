@@ -17,6 +17,50 @@ set -u
 # plugin paths, create logs/config, probe tools, or inspect fixed-name containers.
 [ "${TECH_RADAR_STACK:-auto}" = external ] && exit 0
 
+verify_searxng_json() {
+  runtime=$1
+  attempt=1
+  while [ "$attempt" -le 15 ]; do
+    "$runtime" exec -i tech-radar-searxng python - <<'PY'
+import json
+import sys
+import urllib.error
+import urllib.request
+
+try:
+    urllib.request.urlopen(
+        "http://127.0.0.1:8080/search?format=json", timeout=2
+    ).close()
+except urllib.error.HTTPError as error:
+    if error.code == 403:
+        raise SystemExit(3)
+    if error.code == 400:
+        try:
+            payload = json.load(error)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            raise SystemExit(1)
+        if payload.get("error") == "No query":
+            raise SystemExit(0)
+except OSError:
+    pass
+raise SystemExit(1)
+PY
+    result=$?
+    if [ "$result" -eq 0 ]; then
+      echo "SearXNG JSON API ready"
+      return 0
+    fi
+    if [ "$result" -eq 3 ]; then
+      echo "SearXNG JSON API disabled (HTTP 403)" >&2
+      return 1
+    fi
+    [ "$attempt" -eq 15 ] || sleep 1
+    attempt=$((attempt + 1))
+  done
+  echo "SearXNG JSON API did not become ready after 15 attempts" >&2
+  return 1
+}
+
 # Claude and Codex keep plugin data under different host-owned directories.
 # This explicit cross-host override lets both clients reuse one existing mount.
 if [ -n "${TECH_RADAR_DATA_DIR:-}" ]; then
@@ -31,11 +75,16 @@ mkdir -p "$CLAUDE_PLUGIN_DATA/searxng"
 exec >>"$CLAUDE_PLUGIN_DATA/hook.log" 2>&1
 echo "--- $(date -u +%FT%TZ) session-start, plugin root: $CLAUDE_PLUGIN_ROOT"
 
-# 1. Config cache -> data (the plugin version is the source of truth: always
-#    overwrite; user customization is a future feature, not a silent side effect)
-cp -f "$CLAUDE_PLUGIN_ROOT/searxng/settings.yml" \
-      "$CLAUDE_PLUGIN_ROOT/searxng/limiter.toml" \
-      "$CLAUDE_PLUGIN_DATA/searxng/"
+# 1. Config cache -> data (the plugin version is the source of truth).
+config_changed=no
+for config in settings.yml limiter.toml; do
+  source_config="$CLAUDE_PLUGIN_ROOT/searxng/$config"
+  data_config="$CLAUDE_PLUGIN_DATA/searxng/$config"
+  if ! cmp -s "$source_config" "$data_config" 2>/dev/null; then
+    cp -f "$source_config" "$data_config" || exit 1
+    config_changed=yes
+  fi
+done
 
 # 2. Pick the strategy. systemctl --user needs XDG_RUNTIME_DIR, which
 #    non-login invocations (sudo -u, nohup'd hooks) may lack.
@@ -88,10 +137,15 @@ if [ "$mode" = quadlet ]; then
   systemctl --user daemon-reload
   if [ "$changed" = yes ]; then
     echo "unit files changed, restarting services"
-    systemctl --user restart tech-radar-searxng.service tech-radar-cache.service
+    systemctl --user restart tech-radar-searxng.service tech-radar-cache.service || exit 1
+  elif [ "$config_changed" = yes ]; then
+    echo "SearXNG config changed, restarting SearXNG"
+    systemctl --user restart tech-radar-searxng.service || exit 1
+    systemctl --user start tech-radar-cache.service || exit 1
   else
-    systemctl --user start tech-radar-searxng.service tech-radar-cache.service
+    systemctl --user start tech-radar-searxng.service tech-radar-cache.service || exit 1
   fi
+  runtime=podman
 else
   # 3b. Migration/drift — recreate the stack when the running state does not
   #     match this compose. Drift is ANY of:
@@ -122,5 +176,13 @@ else
   #     starts stopped containers, no-op for running ones (podman-compose 1.3.0's
   #     up -d is unreliable with pre-existing containers)
   docker compose -f "$CLAUDE_PLUGIN_ROOT/docker-compose.yaml" -p tech-radar up -d || true
-  docker start tech-radar-searxng tech-radar-cache
+  docker start tech-radar-searxng tech-radar-cache || exit 1
+  if [ "$config_changed" = yes ]; then
+    echo "SearXNG config changed, restarting SearXNG"
+    docker restart tech-radar-searxng || exit 1
+  fi
+  runtime=docker
 fi
+
+# 5. Verify the configured JSON response without making an engine request.
+verify_searxng_json "$runtime"
