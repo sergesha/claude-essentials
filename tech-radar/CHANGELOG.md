@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/sergesha/claude-essentials/compare/tech-radar-v0.6.0...tech-radar-v0.6.1) (2026-09-07)
+
+
+### Bug Fixes
+
+* **tech-radar:** reload changed SearXNG config ([#76](https://github.com/sergesha/claude-essentials/issues/76)) ([dffc1f7](https://github.com/sergesha/claude-essentials/commit/dffc1f75f4e46194b7cc48fff5fe93c3a2f52d74))
+
 ## [0.6.0](https://github.com/sergesha/claude-essentials/compare/tech-radar-v0.5.0...tech-radar-v0.6.0) (2026-09-06)
 
 
