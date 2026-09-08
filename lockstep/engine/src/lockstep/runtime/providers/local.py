@@ -19,7 +19,6 @@ class RunnerSelector(StrEnum):
 
 
 class PinnedBackend(StrEnum):
-    CODEX_SANDBOX = "codex-sandbox"
     DIRECT_LOCAL = "direct-local"
 
 
@@ -79,7 +78,7 @@ LaunchDetails = tuple[
     tuple[tuple[str, str], ...],
     Path | None,
     str | None,
-    ExecutableIdentity | None,
+    ExecutableIdentity,
 ]
 
 

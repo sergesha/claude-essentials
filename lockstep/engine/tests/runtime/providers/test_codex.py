@@ -241,6 +241,10 @@ def test_prepare_binds_exact_argv_profile_environment_and_no_shell(provider_syst
     launch = adapter.prepare(request)
     record = adapter.launch_record(request.effect_id)
 
+    persisted = json.loads((adapter._directory(request.effect_id) / "launch.json").read_bytes())
+    assert persisted["schema"] == "lockstep.local-launch/v2"
+    assert persisted["provider"] == "codex"
+    assert persisted["executable_identity"]["sha256"] == _current["binding"].executable_sha256
     assert launch == adapter.prepare(request)
     assert record.inner_argv == (
         str(record.executable_path),

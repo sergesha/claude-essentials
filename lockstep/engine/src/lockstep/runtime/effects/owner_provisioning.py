@@ -17,10 +17,9 @@ from lockstep.runtime.effects.owner_policy import (
 from lockstep.runtime.effects.owner_snapshot_store import replace_runtime_snapshot
 from lockstep.runtime.owner_state import ensure_owner_directory, verify_owner_directory
 from lockstep.runtime.providers.codex import CodexInstallationBinding
-from lockstep.runtime.providers.pinned import pinned_runner_binding_digest, validate_pinned_permission_profile
 from lockstep.runtime.providers.local import ClaudeInstallationBinding, DirectInstallationBinding, PinnedBackend
 from lockstep.runtime.effects._owner_policy_values import (
-    _ClaudeBindingFacts, _DirectBindingFacts, PinnedBindingFacts,
+    _ClaudeBindingFacts, _DirectBindingFacts,
 )
 
 
@@ -29,9 +28,9 @@ class CapturedRuntimeBindings:
     """One validation pass over the snapshot-selected installations."""
 
     codex_installation: CodexInstallationBinding | None
-    pinned_installation: CodexInstallationBinding | DirectInstallationBinding | None
+    pinned_installation: DirectInstallationBinding | None
     codex_facts: _RuntimeBindingFacts | None
-    pinned_facts: PinnedBindingFacts | None
+    pinned_facts: _DirectBindingFacts | None
     claude_installation: ClaudeInstallationBinding | None = None
     claude_facts: _ClaudeBindingFacts | None = None
 
@@ -85,12 +84,10 @@ def _capture_provision_binding(member: dict[str, object]) -> CodexInstallationBi
         raise ValueError(str(exc)) from exc
 
 
-def _capture_pinned(member: dict[str, object]) -> CodexInstallationBinding | DirectInstallationBinding:
-    if member.get("backend") == PinnedBackend.DIRECT_LOCAL:
-        if set(member) != {"backend", "environment"}:
-            raise ValueError("direct-local binding schema is invalid")
-        return DirectInstallationBinding.capture(environment=member["environment"])
-    return _capture_provision_binding(member)
+def _capture_pinned(member: dict[str, object]) -> DirectInstallationBinding:
+    if set(member) != {"backend", "environment"} or member["backend"] != PinnedBackend.DIRECT_LOCAL:
+        raise ValueError("direct-local binding schema is invalid")
+    return DirectInstallationBinding.capture(environment=member["environment"])
 
 
 def _capture_claude(member: dict[str, object]) -> ClaudeInstallationBinding:
@@ -126,9 +123,6 @@ def _validate_provision_tmpdir(binding: object, *, projects: tuple[Path, ...]) -
 
 def _runtime_binding_facts(
     binding: CodexInstallationBinding,
-    *,
-    pinned_permission_profile: str | None,
-    binding_digest: str | None = None,
 ) -> _RuntimeBindingFacts:
     return _RuntimeBindingFacts(
         executable=str(binding.executable_path),
@@ -138,12 +132,7 @@ def _runtime_binding_facts(
         codex_home=str(binding.codex_home),
         environment=binding.environment,
         credential_identity_digest=binding.credential_identity_digest,
-        binding_digest=(
-            binding.digest
-            if binding_digest is None
-            else binding_digest
-        ),
-        pinned_permission_profile=pinned_permission_profile,
+        binding_digest=binding.digest,
     )
 
 
@@ -155,7 +144,7 @@ def validate_runtime_provision_inputs(
     index: RuntimeRequirementIndex | RuntimeProvisioningInventory,
     project: Path,
     claude: dict[str, object] | None = None,
-) -> tuple[_RuntimeBindingFacts | None, PinnedBindingFacts | None, _ClaudeBindingFacts | None]:
+) -> tuple[_RuntimeBindingFacts | None, _DirectBindingFacts | None, _ClaudeBindingFacts | None]:
     """Capture supplied bindings and require each inventory-selected runner."""
 
     projects = _provision_projects(index, project)
@@ -166,19 +155,8 @@ def validate_runtime_provision_inputs(
     codex_binding = _capture_provision_binding(codex) if codex is not None else None
     pinned_binding = _capture_pinned(pinned) if pinned is not None else None
     claude_binding = _capture_claude(claude) if claude is not None else None
-    if (
-        codex_binding is not None
-        and isinstance(pinned_binding, CodexInstallationBinding)
-        and codex_binding.codex_home == pinned_binding.codex_home
-    ):
-        raise ValueError("runtime provision Codex homes must differ")
     if codex_binding is not None and codex_binding.credential_identity_digest is None:
         raise ValueError("runtime codex binding requires an owner credential auth.json")
-    if (
-        isinstance(pinned_binding, CodexInstallationBinding)
-        and pinned_binding.credential_identity_digest is not None
-    ):
-        raise ValueError("runtime pinned binding must be credential-free")
     for binding in (codex_binding, pinned_binding, claude_binding):
         if binding is not None:
             _validate_provision_tmpdir(binding, projects=projects)
@@ -190,20 +168,11 @@ def validate_runtime_provision_inputs(
             "runtime replacement grant key is outside the static runtime inventory"
         )
     return (
-        _runtime_binding_facts(codex_binding, pinned_permission_profile=None)
+        _runtime_binding_facts(codex_binding)
         if codex_binding is not None
         else None,
         _DirectBindingFacts(pinned_binding.environment, pinned_binding.digest)
-        if isinstance(pinned_binding, DirectInstallationBinding)
-        else _runtime_binding_facts(
-            pinned_binding,
-            pinned_permission_profile=validate_pinned_permission_profile(pinned["pinned_permission_profile"]),
-            binding_digest=pinned_runner_binding_digest(
-                pinned_binding.digest,
-                validate_pinned_permission_profile(pinned["pinned_permission_profile"]),
-            ),
-        )
-        if pinned_binding is not None and pinned is not None
+        if pinned_binding is not None
         else None,
         _claude_facts(claude_binding),
     )
@@ -213,7 +182,7 @@ def capture_runtime_snapshot_bindings(
     snapshot: OwnerRuntimeSnapshot,
     *,
     project: Path,
-) -> tuple[_RuntimeBindingFacts | None, PinnedBindingFacts | None, _ClaudeBindingFacts | None]:
+) -> tuple[_RuntimeBindingFacts | None, _DirectBindingFacts | None, _ClaudeBindingFacts | None]:
     """Capture each configured installation once and reject binding drift."""
 
     captured = capture_runtime_execution_bindings(snapshot, project=project)
@@ -244,8 +213,6 @@ def capture_runtime_execution_bindings(
     )
     pinned_binding = (
         DirectInstallationBinding.capture(environment=dict(snapshot.pinned.environment))
-        if isinstance(snapshot.pinned, _DirectBindingFacts)
-        else _capture_provision_binding(member(snapshot.pinned))
         if snapshot.pinned is not None
         else None
     )
@@ -260,22 +227,13 @@ def capture_runtime_execution_bindings(
         if binding is not None:
             _validate_provision_tmpdir(binding, projects=projects)
     codex = (
-        _runtime_binding_facts(codex_binding, pinned_permission_profile=None)
+        _runtime_binding_facts(codex_binding)
         if codex_binding is not None
         else None
     )
     pinned = (
         _DirectBindingFacts(pinned_binding.environment, pinned_binding.digest)
-        if isinstance(pinned_binding, DirectInstallationBinding)
-        else _runtime_binding_facts(
-            pinned_binding,
-            pinned_permission_profile=snapshot.pinned.pinned_permission_profile,
-            binding_digest=pinned_runner_binding_digest(
-                pinned_binding.digest,
-                validate_pinned_permission_profile(snapshot.pinned.pinned_permission_profile),
-            ),
-        )
-        if pinned_binding is not None and isinstance(snapshot.pinned, _RuntimeBindingFacts)
+        if pinned_binding is not None
         else None
     )
     claude = _claude_facts(claude_binding)

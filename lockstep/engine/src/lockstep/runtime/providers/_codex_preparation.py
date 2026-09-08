@@ -66,17 +66,19 @@ class CodexLaunchRecord:
     launcher_decision_generation: int
     deadline_at: datetime
     launch_ref: str
+    provider: AttemptProvider
+    executable_identity: ExecutableIdentity
     shell: bool = False
     close_fds: bool = True
     inherited_fds: tuple[int, ...] = ()
     deployment_profile: Literal["local_unsandboxed"] = "local_unsandboxed"
-    provider: AttemptProvider = AttemptProvider.CODEX
-    executable_identity: ExecutableIdentity | None = None
 
 
 def _record_data(record: CodexLaunchRecord) -> dict[str, object]:
     data = {
-        "schema": "lockstep.codex-launch/v1",
+        "schema": "lockstep.local-launch/v2",
+        "provider": record.provider,
+        "executable_identity": record.executable_identity.__dict__,
         "effect_id": record.effect_id,
         "request_digest": record.request_digest,
         "runner_binding_digest": record.runner_binding_digest,
@@ -101,10 +103,6 @@ def _record_data(record: CodexLaunchRecord) -> dict[str, object]:
         "inherited_fds": [],
         "deployment_profile": "local_unsandboxed",
     }
-    if record.provider is not AttemptProvider.CODEX:
-        data["schema"] = "lockstep.local-launch/v2"
-        data["provider"] = record.provider
-        data["executable_identity"] = record.executable_identity.__dict__ if record.executable_identity else None
     return data
 
 
@@ -186,15 +184,15 @@ class _CodexAttemptState:
         path = self._directory(effect_id) / "launch.json"
         try:
             raw = json.loads(path.read_bytes())
-            if raw["schema"] not in {"lockstep.codex-launch/v1", "lockstep.local-launch/v2"}:
+            if raw["schema"] != "lockstep.local-launch/v2":
                 raise ValueError
-            provider = AttemptProvider(raw.get("provider", "codex"))
+            provider = AttemptProvider(raw["provider"])
             if provider is not self.provider:
                 raise ValueError
-            workspace_purpose = raw.get("workspace_purpose", "managed_output")
+            workspace_purpose = raw["workspace_purpose"]
             if workspace_purpose not in {"managed_output", "no_publish_operation"}:
                 raise ValueError
-            execution_class = raw.get("execution_class", "managed-agent")
+            execution_class = raw["execution_class"]
             if execution_class not in {"managed-agent", "pinned-command"}:
                 raise ValueError
             record = CodexLaunchRecord(
@@ -205,7 +203,7 @@ class _CodexAttemptState:
                 workspace_path=Path(raw["workspace_path"]),
                 workspace_purpose=workspace_purpose,
                 execution_class=execution_class,
-                cwd=Path(raw.get("cwd", raw["workspace_path"])),
+                cwd=Path(raw["cwd"]),
                 executable_path=Path(raw["executable_path"]),
                 executable_identity_digest=raw["executable_identity_digest"],
                 inner_argv=tuple(raw["inner_argv"]),
@@ -218,7 +216,7 @@ class _CodexAttemptState:
                 deadline_at=datetime.fromisoformat(raw["deadline_at"]).astimezone(UTC),
                 launch_ref=raw["launch_ref"],
                 provider=provider,
-                executable_identity=ExecutableIdentity(**raw["executable_identity"]) if raw.get("executable_identity") else None,
+                executable_identity=ExecutableIdentity(**raw["executable_identity"]),
             )
             if (
                 record.execution_class != self.execution_class
@@ -440,7 +438,10 @@ class _CodexPreparation:
         environment["HOME"] = str(binding.codex_home)
         return (binding.executable_path, self._inner_argv(binding, workspace, request),
                 tuple(sorted(environment.items())), binding.codex_home,
-                binding.credential_identity_digest, None)
+                binding.credential_identity_digest,
+                ExecutableIdentity(binding.executable_device, binding.executable_inode,
+                                   binding.executable_size, binding.executable_mtime_ns,
+                                   binding.executable_sha256))
 
     def _provisional_launch_record(
         self,
