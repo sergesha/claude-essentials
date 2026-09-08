@@ -167,7 +167,7 @@ def _preflight_runtime_requirements(
 
     try:
         snapshot_digest, snapshot = open_runtime_snapshot(state_dir)
-        codex_binding, pinned_binding = capture_runtime_snapshot_bindings(
+        codex_binding, pinned_binding, claude_binding = capture_runtime_snapshot_bindings(
             snapshot,
             project=Path(index.project_identity),
         )
@@ -176,6 +176,7 @@ def _preflight_runtime_requirements(
             snapshot=snapshot,
             codex_binding=codex_binding,
             pinned_binding=pinned_binding,
+            claude_binding=claude_binding,
         ).preflight(index)
     except FileNotFoundError as exc:
         raise LockstepError("runtime execution policy is unavailable") from exc

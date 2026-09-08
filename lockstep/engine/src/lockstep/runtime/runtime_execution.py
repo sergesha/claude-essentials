@@ -6,7 +6,10 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from lockstep.runtime.catalog import RunBinding
+from lockstep.runtime.catalog import RunBinding, RunCatalog
+from lockstep.runtime.blobs import BlobStore
+from lockstep.runtime.project_snapshots import ProjectSnapshotStore
+from lockstep.runtime.effects._owner_policy_values import _RuntimeBindingFacts
 from lockstep.runtime.effects.authority import EffectGrant
 from lockstep.runtime.effects.owner_policy import (
     OwnerRuntimeAuthority,
@@ -33,11 +36,12 @@ from lockstep.runtime.providers.codex import (
 from lockstep.runtime.providers.composition import ReleasedRunnerComposition
 from lockstep.runtime.providers.pinned import (
     PinnedRunnerAdapter,
-    pinned_runner_binding_digest,
 )
 from lockstep.runtime.providers.workspaces import LocalGitWorkspaceProvider
 from lockstep.runtime.recipe_bundles import RecipeBundleRef, RecipeBundleStore
 from lockstep.recipe.authority import recipe_definition_sha256
+from lockstep.runtime.providers.claude import ClaudeRunnerAdapter
+from lockstep.runtime.providers.local import LocalMechanicsAttestor, PinnedBackend, DirectInstallationBinding
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,7 +115,7 @@ class OwnerRuntimeEffectAuthority:
         *,
         state_dir: Path,
         context: RuntimeExecutionContext,
-        catalog: object,
+        catalog: RunCatalog,
         resolver: RuntimeBundleRequirementResolver,
         workspaces: LocalGitWorkspaceProvider,
     ) -> None:
@@ -140,11 +144,7 @@ class OwnerRuntimeEffectAuthority:
         grant = grants.get(requirement.grant_selection_key)
         if grant is None or grant.requirement_digest != digest:
             raise ValueError("current owner runtime grant is unavailable")
-        expected_binding = (
-            snapshot.codex
-            if requirement.runner_selector == "codex"
-            else snapshot.pinned
-        )
+        expected_binding = snapshot.binding_for(requirement.runner_selector)
         if (
             expected_binding is None
             or intent.runner_binding_digest != expected_binding.binding_digest
@@ -228,6 +228,7 @@ def capture_runtime_execution_admission(
         snapshot=snapshot,
         codex_binding=bindings.codex_facts,
         pinned_binding=bindings.pinned_facts,
+        claude_binding=bindings.claude_facts,
     ).preflight(index)
     return RuntimeExecutionAdmission(
         decision,
@@ -239,10 +240,10 @@ def build_runtime_execution_composition(
     *,
     state_dir: Path,
     context: RuntimeExecutionContext,
-    catalog: object,
+    catalog: RunCatalog,
     bundles: RecipeBundleStore,
-    blobs: object,
-    snapshots: object,
+    blobs: BlobStore,
+    snapshots: ProjectSnapshotStore,
 ) -> RuntimeExecutionComposition:
     captured = context.bindings
     snapshot = context.snapshot
@@ -263,15 +264,30 @@ def build_runtime_execution_composition(
         if captured.codex_installation is not None and snapshot.codex is not None
         else None
     )
+    claude = (
+        ClaudeRunnerAdapter(
+            owner_state_dir=state_dir,
+            installation=lambda: captured.claude_installation,
+            decision_gate=CodexLaunchDecisionGate(snapshot.claude.binding_digest, generation=snapshot.config_generation),
+            workspaces=workspaces, blobs=blobs, sandbox=LocalMechanicsAttestor(),
+        )
+        if captured.claude_installation is not None and snapshot.claude is not None else None
+    )
     pinned = (
+        PinnedRunnerAdapter(
+            backend=PinnedBackend.DIRECT_LOCAL,
+            owner_state_dir=state_dir,
+            installation=lambda: captured.pinned_installation,
+            decision_gate=CodexLaunchDecisionGate(captured.pinned_installation.digest, generation=snapshot.config_generation),
+            workspaces=workspaces, blobs=blobs, sandbox=LocalMechanicsAttestor(),
+        )
+        if isinstance(captured.pinned_installation, DirectInstallationBinding)
+        else
         PinnedRunnerAdapter(
             owner_state_dir=state_dir,
             installation=lambda: captured.pinned_installation,
             decision_gate=CodexLaunchDecisionGate(
-                pinned_runner_binding_digest(
-                    captured.pinned_installation.digest,
-                    snapshot.pinned.pinned_permission_profile,
-                ),
+                snapshot.pinned.binding_digest,
                 generation=snapshot.config_generation,
             ),
             workspaces=workspaces,
@@ -281,7 +297,7 @@ def build_runtime_execution_composition(
             ),
             permission_profile=snapshot.pinned.pinned_permission_profile,
         )
-        if captured.pinned_installation is not None and snapshot.pinned is not None
+        if captured.pinned_installation is not None and isinstance(snapshot.pinned, _RuntimeBindingFacts)
         else None
     )
     authority = OwnerRuntimeEffectAuthority(
@@ -292,5 +308,5 @@ def build_runtime_execution_composition(
         workspaces=workspaces,
     )
     return RuntimeExecutionComposition(
-        ReleasedRunnerComposition(codex=codex, pinned=pinned), authority
+        ReleasedRunnerComposition(codex=codex, pinned=pinned, claude=claude), authority
     )

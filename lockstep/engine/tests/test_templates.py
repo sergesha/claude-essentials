@@ -49,13 +49,27 @@ def _templates():
     return import_module("lockstep.templates")
 
 
-def _install_template(template: str, name: str, project: Path):
+def _install_template(
+    template: str, name: str, project: Path, *, runner: str = "codex"
+):
     return _templates().install_template(
         template,
         name,
         project,
         state_dir=(project.parent / f"{project.name}-owner-state").resolve(),
+        runner=runner,
     )
+
+
+def _compiled_managed_selectors(project: Path) -> list[str]:
+    selectors = []
+    for path in (project / ".lockstep/recipes").rglob("*.recipe.yaml"):
+        document = yaml.safe_load(path.read_text())
+        for node in document.get("nodes", {}).values():
+            descriptor = node.get("message", {}).get("lockstep_effect")
+            if isinstance(descriptor, dict) and descriptor.get("kind") == "managed":
+                selectors.append(descriptor["runner"]["selector"])
+    return selectors
 
 
 def _template_workflow(bundle_name: str, role: str) -> dict:
@@ -462,6 +476,19 @@ def test_atomic_install_publishes_the_complete_self_contained_child_dag(
         "release-architecture-review",
         "release",
     )
+
+
+@pytest.mark.parametrize(
+    ("bundle_name", "managed_call_count"),
+    (("reviewed-change", 1), ("parallel-review", 2)),
+)
+def test_explicit_claude_selects_every_compiled_managed_call(
+    tmp_path: Path, bundle_name: str, managed_call_count: int
+) -> None:
+    _install_template(bundle_name, "release", tmp_path, runner="claude")
+
+    selectors = _compiled_managed_selectors(tmp_path)
+    assert selectors == ["claude"] * managed_call_count
 
 
 @pytest.mark.parametrize("bundle_name", sorted(EXPECTED_BUNDLES))
