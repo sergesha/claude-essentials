@@ -69,7 +69,7 @@ def _read_spec(path: Path, expected_digest: str) -> dict[str, object]:
         "max_stdout_bytes",
         "max_stderr_bytes",
     }
-    if not isinstance(value, dict) or set(value) != required:
+    if not isinstance(value, dict) or set(value) not in (required, required | {"executable_target"}):
         raise ValueError("invalid supervisor launch body")
     if value["schema"] != "lockstep.codex-supervisor/v1":
         raise ValueError("unsupported supervisor launch body")
@@ -120,6 +120,13 @@ def _verify_bound_files(spec: dict[str, object], argv: list[str]) -> None:
     }:
         raise ValueError("invalid executable identity commitment")
     executable = Path(argv[0])
+    if "executable_target" in spec:
+        target = spec["executable_target"]
+        if not isinstance(target, str) or not Path(target).is_absolute():
+            raise ValueError("invalid executable target commitment")
+        if executable.resolve(strict=True) != Path(target):
+            raise ValueError("invoked executable target changed at inner spawn")
+        executable = Path(target)
     info, sha256 = _read_identity(executable)
     observed = {
         "device": info.st_dev,
@@ -131,8 +138,12 @@ def _verify_bound_files(spec: dict[str, object], argv: list[str]) -> None:
     if observed != expected:
         raise ValueError("Codex executable identity changed at inner spawn")
 
-    credential = Path(str(spec["environment"]["CODEX_HOME"])) / "auth.json"
     expected_credential = spec["credential_identity_digest"]
+    if "CODEX_HOME" not in spec["environment"]:
+        if expected_credential is not None:
+            raise ValueError("credential commitment has no Codex home")
+        return
+    credential = Path(str(spec["environment"]["CODEX_HOME"])) / "auth.json"
     if not credential.exists() and not credential.is_symlink():
         observed_credential = None
     else:

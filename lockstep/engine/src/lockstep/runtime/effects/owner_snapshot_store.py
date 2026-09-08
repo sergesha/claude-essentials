@@ -29,13 +29,23 @@ from lockstep.runtime.owner_state import (
     fsync_owner_directory,
     verify_owner_directory,
 )
+from lockstep.runtime.effects._owner_policy_values import (
+    _ClaudeBindingFacts, _DirectBindingFacts, PinnedBindingFacts, RuntimeBindingFacts,
+)
+from lockstep.runtime.providers.local import PinnedBackend
 
 _SNAPSHOT_SCHEMA = "lockstep.runtime-owner/v1"
 
 
-def _binding_document(binding: _RuntimeBindingFacts | None) -> dict[str, object] | None:
+def _binding_document(binding: RuntimeBindingFacts | None) -> dict[str, object] | None:
     if binding is None:
         return None
+    if isinstance(binding, _DirectBindingFacts):
+        return {"backend": binding.backend, "environment": [list(item) for item in binding.environment],
+                "binding_digest": binding.binding_digest}
+    if isinstance(binding, _ClaudeBindingFacts):
+        return {"executable": binding.executable, "model": binding.model, "home": binding.home,
+                "environment": [list(item) for item in binding.environment], "binding_digest": binding.binding_digest}
     return {
         "executable": binding.executable,
         "model": binding.model,
@@ -61,7 +71,7 @@ def _grant_document(grant: OwnerRuntimeGrant) -> dict[str, object]:
 
 
 def _snapshot_document(snapshot: OwnerRuntimeSnapshot) -> dict[str, object]:
-    return {
+    document = {
         "schema": snapshot.schema,
         "config_generation": snapshot.config_generation,
         "policy_generation": snapshot.policy_generation,
@@ -69,6 +79,9 @@ def _snapshot_document(snapshot: OwnerRuntimeSnapshot) -> dict[str, object]:
         "pinned": _binding_document(snapshot.pinned),
         "grants": [_grant_document(grant) for grant in snapshot.grants],
     }
+    if snapshot.claude is not None:
+        document["claude"] = _binding_document(snapshot.claude)
+    return document
 
 
 def _canonical_snapshot_bytes(snapshot: OwnerRuntimeSnapshot) -> bytes:
@@ -101,9 +114,14 @@ def _pairs(value: object, *, label: str) -> tuple[tuple[str, str], ...]:
     return tuple(pairs)
 
 
-def _binding_from_document(value: object) -> _RuntimeBindingFacts | None:
+def _binding_from_document(value: object) -> PinnedBindingFacts | None:
     if value is None:
         return None
+    if isinstance(value, dict) and "backend" in value:
+        if set(value) != {"backend", "environment", "binding_digest"}:
+            raise ValueError("owner runtime direct binding schema is invalid")
+        return _DirectBindingFacts(_pairs(value["environment"], label="environment"),
+                                   value["binding_digest"], PinnedBackend(value["backend"]))
     fields = {
         "executable",
         "model",
@@ -142,7 +160,7 @@ def _snapshot_from_bytes(encoded: bytes) -> OwnerRuntimeSnapshot:
         "pinned",
         "grants",
     }
-    if not isinstance(document, dict) or set(document) != fields:
+    if not isinstance(document, dict) or set(document) not in (fields, fields | {"claude"}):
         raise ValueError("owner runtime snapshot schema is invalid")
     if (
         type(document["config_generation"]) is not int
@@ -167,16 +185,29 @@ def _snapshot_from_bytes(encoded: bytes) -> OwnerRuntimeSnapshot:
         if not isinstance(value, dict) or set(value) != grant_fields:
             raise ValueError("owner runtime snapshot grant schema is invalid")
         grants.append(OwnerRuntimeGrant(**value))
+    codex = _binding_from_document(document["codex"])
+    if codex is not None and not isinstance(codex, _RuntimeBindingFacts):
+        raise ValueError("owner runtime Codex binding schema is invalid")
     snapshot = OwnerRuntimeSnapshot(
         schema=document["schema"],
         config_generation=document["config_generation"],
         policy_generation=document["policy_generation"],
-        codex=_binding_from_document(document["codex"]),
+        codex=codex,
         pinned=_binding_from_document(document["pinned"]),
         grants=tuple(grants),
+        claude=_claude_from_document(document.get("claude")),
     )
     _assert_snapshot_grants_consistent(snapshot)
     return snapshot
+
+
+def _claude_from_document(value: object) -> _ClaudeBindingFacts | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {"executable", "model", "home", "environment", "binding_digest"}:
+        raise ValueError("owner runtime Claude binding schema is invalid")
+    return _ClaudeBindingFacts(value["executable"], value["model"], value["home"],
+                               _pairs(value["environment"], label="environment"), value["binding_digest"])
 
 
 def _read_snapshot(path: Path) -> tuple[bytes, OwnerRuntimeSnapshot] | None:
@@ -241,7 +272,7 @@ def _assert_snapshot_grants_consistent(snapshot: OwnerRuntimeSnapshot) -> None:
                 runner_binding_digest=binding.binding_digest,
                 config_generation=snapshot.config_generation,
             )
-            for binding in (snapshot.codex, snapshot.pinned)
+            for binding in (snapshot.codex, snapshot.pinned, snapshot.claude)
             if binding is not None
         }
         if grant.requirement_digest not in candidates:
@@ -261,11 +292,7 @@ def _assert_predecessor_consistent(
         requirement = requirements.get(grant.grant_selection_key)
         if requirement is None:
             continue
-        binding = (
-            snapshot.codex
-            if requirement.runner_selector == "codex"
-            else snapshot.pinned
-        )
+        binding = snapshot.binding_for(requirement.runner_selector)
         if binding is None:
             raise ValueError("owner runtime snapshot grant binding is missing")
         expected = requirement_digest(
@@ -281,7 +308,8 @@ def _next_snapshot(
     predecessor: OwnerRuntimeSnapshot | None,
     *,
     codex: _RuntimeBindingFacts | None,
-    pinned: _RuntimeBindingFacts | None,
+    pinned: PinnedBindingFacts | None,
+    claude: _ClaudeBindingFacts | None = None,
     replacement_keys: tuple[str, ...],
     index: RuntimeRequirementIndex | RuntimeProvisioningInventory,
 ) -> OwnerRuntimeSnapshot:
@@ -291,7 +319,7 @@ def _next_snapshot(
         else ()
     )
     config_changed = predecessor is None or (
-        predecessor.codex != codex or predecessor.pinned != pinned
+        predecessor.codex != codex or predecessor.pinned != pinned or predecessor.claude != claude
     )
     policy_changed = predecessor is None or previous_keys != replacement_keys
     config_generation = (
@@ -316,7 +344,7 @@ def _next_snapshot(
     grants: list[OwnerRuntimeGrant] = []
     for key in replacement_keys:
         requirement = requirements[key]
-        binding = codex if requirement.runner_selector == "codex" else pinned
+        binding = {"codex": codex, "pinned": pinned, "claude": claude}[requirement.runner_selector]
         if binding is None:
             raise ValueError("owner runtime snapshot grant binding is missing")
         digest = requirement_digest(
@@ -346,6 +374,7 @@ def _next_snapshot(
         policy_generation=policy_generation,
         codex=codex,
         pinned=pinned,
+        claude=claude,
         grants=tuple(grants),
     )
 
@@ -374,7 +403,8 @@ def replace_runtime_snapshot(
     *,
     directory: Path,
     codex: _RuntimeBindingFacts | None,
-    pinned: _RuntimeBindingFacts | None,
+    pinned: PinnedBindingFacts | None,
+    claude: _ClaudeBindingFacts | None = None,
     replacement_keys: tuple[str, ...],
     index: RuntimeRequirementIndex | RuntimeProvisioningInventory,
 ) -> OwnerRuntimeSnapshot:
@@ -390,11 +420,13 @@ def replace_runtime_snapshot(
             predecessor,
             codex=codex,
             pinned=pinned,
+            claude=claude,
             replacement_keys=replacement_keys,
             index=index,
         )
         encoded = _canonical_snapshot_bytes(snapshot)
         if current is not None and current[0] == encoded:
+            assert predecessor is not None
             return predecessor
         _replace_snapshot(snapshot_path, encoded)
         return snapshot

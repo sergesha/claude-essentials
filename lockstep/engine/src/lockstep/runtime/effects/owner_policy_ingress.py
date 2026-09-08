@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
+from dataclasses import dataclass
+from lockstep.runtime.providers.local import PinnedBackend, local_environment
 
 
 class _DuplicateJsonMember(ValueError):
@@ -43,6 +45,12 @@ def _provision_binding(
 ) -> dict[str, object]:
     if not isinstance(value, dict):
         raise ValueError(f"runtime provision {label} must be a JSON object")
+    if pinned and "backend" in value:
+        if (value["backend"] != PinnedBackend.DIRECT_LOCAL
+                or set(value) != {"backend", "environment"}):
+            raise ValueError("runtime provision direct-local binding schema is invalid")
+        local_environment(value["environment"])
+        return value
     fields = {
         "executable",
         "model",
@@ -108,17 +116,37 @@ def _provision_binding(
     return value
 
 
+@dataclass(frozen=True)
+class RuntimeProvisionConfig:
+    codex: dict[str, object] | None
+    pinned: dict[str, object] | None
+    claude: dict[str, object] | None
+    replacement_keys: tuple[str, ...]
+
+
+def _claude_provision_binding(value: object) -> dict[str, object]:
+    if not isinstance(value, dict) or set(value) != {"executable", "model", "home", "environment"}:
+        raise ValueError("runtime provision Claude binding schema is invalid")
+    if any(not isinstance(value[key], str) or not value[key] or "\x00" in value[key]
+           for key in ("executable", "model", "home")):
+        raise ValueError("runtime provision Claude identities must be non-empty strings")
+    if not Path(value["executable"]).is_absolute() or not Path(value["home"]).is_absolute():
+        raise ValueError("runtime provision Claude paths must be absolute")
+    local_environment(value["environment"])
+    return value
+
+
 def parse_runtime_provision_documents(
     config_bytes: bytes,
     replacement_bytes: bytes,
-) -> tuple[dict[str, object] | None, dict[str, object] | None, tuple[str, ...]]:
+) -> RuntimeProvisionConfig:
     """Parse both untrusted provisioning documents into one closed domain."""
 
     config = _json_document(config_bytes, label="provision config")
     if not isinstance(config, dict):
         raise ValueError("runtime provision config must be a JSON object")
     if (
-        not set(config) <= {"schema", "codex", "pinned"}
+        not set(config) <= {"schema", "codex", "pinned", "claude"}
         or config.get("schema") != "lockstep.runtime-provision-config/v1"
     ):
         raise ValueError("runtime provision config must use the exact config schema")
@@ -132,9 +160,11 @@ def parse_runtime_provision_documents(
         if "pinned" in config
         else None
     )
+    claude = _claude_provision_binding(config["claude"]) if "claude" in config else None
     if (
         codex is not None
         and pinned is not None
+        and "codex_home" in pinned
         and codex["codex_home"] == pinned["codex_home"]
     ):
         raise ValueError("runtime provision Codex homes must differ")
@@ -153,4 +183,4 @@ def parse_runtime_provision_documents(
         )
     if len(set(replacement)) != len(replacement):
         raise ValueError("runtime replacement grant keys must be unique")
-    return codex, pinned, tuple(sorted(replacement))
+    return RuntimeProvisionConfig(codex, pinned, claude, tuple(sorted(replacement)))

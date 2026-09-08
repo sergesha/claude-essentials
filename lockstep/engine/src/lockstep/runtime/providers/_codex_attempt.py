@@ -21,7 +21,6 @@ from lockstep.runtime.providers._codex_preparation import (
     _CodexPreparation,
 )
 from lockstep.runtime.providers._codex_support import (
-    CodexInstallationBinding,
     CodexProviderError,
     _attestation_digest,
     _canonical,
@@ -34,9 +33,11 @@ from lockstep.runtime.providers.base import (
 )
 from lockstep.runtime.providers.workspaces import WorkspaceError
 from lockstep.runtime.sandbox import SandboxPolicy, verify_attestation
+from lockstep.runtime.providers.local import AttemptInstallation, AttemptProvider
 
 
 class _CodexAttemptDriver(_CodexAttemptState, _CodexPreparation):
+    provider = AttemptProvider.CODEX
     required_authorities = ("os_user_execution",)
 
     reconciliation_boundary = "local_durable_handle"
@@ -68,7 +69,7 @@ class _CodexAttemptDriver(_CodexAttemptState, _CodexPreparation):
         )
 
     def _launcher_binding_digest(
-        self, binding: CodexInstallationBinding
+        self, binding: AttemptInstallation
     ) -> str:
         return binding.digest
 
@@ -114,7 +115,7 @@ class _CodexAttemptDriver(_CodexAttemptState, _CodexPreparation):
             "argv": list(record.inner_argv),
             "cwd": str(record.cwd),
             "environment": dict(record.environment),
-            "executable_identity": {
+            "executable_identity": record.executable_identity.__dict__ if record.executable_identity else {
                 "device": self._binding.executable_device,
                 "inode": self._binding.executable_inode,
                 "size": self._binding.executable_size,
@@ -135,6 +136,8 @@ class _CodexAttemptDriver(_CodexAttemptState, _CodexPreparation):
             "max_stdout_bytes": self._limits.max_stdout_bytes,
             "max_stderr_bytes": self._limits.max_stderr_bytes,
         }
+        if str(record.executable_path) != record.inner_argv[0]:
+            body["executable_target"] = str(record.executable_path)
         encoded = _canonical(body)
         path = directory / "supervisor.json"
         self._write_once(path, encoded)
@@ -406,10 +409,25 @@ class _CodexAttemptDriver(_CodexAttemptState, _CodexPreparation):
             return self._error_result(record.effect_id, "deadline_timeout")
         if receipt["returncode"] != 0:
             return self._error_result(record.effect_id, "runner_failed")
+        try:
+            final_message = self._final_message(stdout)
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError):
+            return self._error_result(record.effect_id, "result_invalid")
+        if final_message is None or len(final_message.encode()) > self._limits.max_result_bytes:
+            return self._error_result(record.effect_id, "result_invalid")
+        blob = self._blobs.put(final_message.encode())
+        return parse_effect_result({
+            "schema": "lockstep.effect-result/v1", "effect_id": record.effect_id,
+            "outcome": "PASS", "result_ref": f"blob:{blob.sha256}", "artifact_refs": [],
+            "snapshot_ref": snapshot_ref, "diff_ref": None, "fixed_error_code": None,
+            "evidence_refs": [],
+        })
+
+    def _final_message(self, stdout: bytes) -> str | None:
         final_message: str | None = None
         lines = stdout.splitlines()
         if len(lines) > self._limits.max_json_records:
-            return self._error_result(record.effect_id, "result_invalid")
+            raise ValueError("too many JSON records")
         try:
             for encoded in lines:
                 event = bounded_json(json.loads(encoded), label="Codex JSONL event")
@@ -422,26 +440,8 @@ class _CodexAttemptDriver(_CodexAttemptState, _CodexPreparation):
                 ):
                     final_message = event["item"]["text"]
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError, TypeError):
-            return self._error_result(record.effect_id, "result_invalid")
-        if (
-            final_message is None
-            or len(final_message.encode()) > self._limits.max_result_bytes
-        ):
-            return self._error_result(record.effect_id, "result_invalid")
-        blob = self._blobs.put(final_message.encode())
-        return parse_effect_result(
-            {
-                "schema": "lockstep.effect-result/v1",
-                "effect_id": record.effect_id,
-                "outcome": "PASS",
-                "result_ref": f"blob:{blob.sha256}",
-                "artifact_refs": [],
-                "snapshot_ref": snapshot_ref,
-                "diff_ref": None,
-                "fixed_error_code": None,
-                "evidence_refs": [],
-            }
-        )
+            raise ValueError("invalid Codex JSON result") from None
+        return final_message
 
     def _finalize_workspace(self, record: CodexLaunchRecord) -> str | None:
         workspace = self._workspaces.inspect(record.workspace_ref)

@@ -262,6 +262,15 @@ class _EffectCoordinatorRunner:
             return make_reconcile_report(run_id, record, ReconcileAction.BUSY)
         cancelled = context.runner.cancel(record.effect_id)
         self._check_observation(record, cancelled)
+        if cancelled.state == "indeterminate":
+            indeterminate = self._ledger.mark_indeterminate(
+                record.effect_id,
+                expected_revision=record.revision,
+                lease=lease,
+            )
+            return make_reconcile_report(
+                run_id, indeterminate, ReconcileAction.INDETERMINATE
+            )
         safety = context.runner.quiesce(record.effect_id)
         timeout_result = self._timeout_result(record.effect_id)
         if not self._terminal_safety(
@@ -316,6 +325,15 @@ class _EffectCoordinatorRunner:
         assert context.runner is not None
         observation = context.runner.inspect(record.effect_id)
         self._check_observation(record, observation)
+        if observation.state == "indeterminate":
+            indeterminate = self._ledger.mark_indeterminate(
+                record.effect_id,
+                expected_revision=record.revision,
+                lease=lease,
+            )
+            return make_reconcile_report(
+                run_id, indeterminate, ReconcileAction.INDETERMINATE
+            )
         if observation.state == "running":
             return make_reconcile_report(run_id, record, ReconcileAction.RUNNING)
         if observation.state != "terminal":
