@@ -192,6 +192,7 @@ def _cmd_recipe(args: argparse.Namespace) -> int:
 
 def _cmd_template(args: argparse.Namespace) -> int:
     from lockstep.templates import install_template, list_templates, show_template
+    from lockstep.runtime.providers.local import RunnerSelector
 
     if args.action == "list":
         for name in list_templates():
@@ -201,11 +202,21 @@ def _cmd_template(args: argparse.Namespace) -> int:
         sys.stdout.write(json_text(show_template(args.template, args.name).to_dict()))
         return 0
     if args.action == "init":
+        host = os.environ.get("LOCKSTEP_PLUGIN_HOST")
+        if args.runner is not None:
+            runner = RunnerSelector(args.runner)
+        elif host in {RunnerSelector.CLAUDE.value, RunnerSelector.CODEX.value}:
+            runner = RunnerSelector(host)
+        elif os.environ.get("CLAUDECODE"):
+            runner = RunnerSelector.CLAUDE
+        else:
+            runner = RunnerSelector.CODEX
         install_template(
             args.template,
             args.name,
             Path.cwd(),
             state_dir=state_dir().absolute(),
+            runner=runner,
         )
         print(f"initialized {args.name}")
         return 0

@@ -28,9 +28,12 @@ commitment.
 
 For installation, a shell launcher, and the exact owner provisioning example,
 read [the README](../../README.md#owner-runtime-setup). Both packaged templates
-use managed Codex reviews; `reviewed-change` also needs the project's pytest
-command and `src/`/`tests/` layout. Provisioning belongs to the owner; do not
-infer execution grants from a generated workflow or a successful compile.
+use the managed runner selected by `template init ... --runner claude|codex`;
+`reviewed-change` also needs the project's pytest command and `src/`/`tests/`
+layout through the direct-local pinned backend by default. Provisioning belongs
+to the owner; do not infer execution grants from a generated workflow or a
+successful compile. Claude uses normal native CLI login; direct-local
+verification needs neither AI CLI, model, nor AI home.
 
 1. Call `scenario_status(run_id)` before doing work, including immediately after
    `scenario_start`.
@@ -96,7 +99,7 @@ recipe render NAME --view workflow|generated
 recipe estimate NAME [--json]
 template list
 template show TEMPLATE NAME
-template init TEMPLATE NAME
+template init TEMPLATE NAME [--runner claude|codex]
 ```
 
 The exact MCP authoring tools are:

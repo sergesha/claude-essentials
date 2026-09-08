@@ -32,7 +32,13 @@ Prefer a packaged template for common work:
 - `reviewed-change` for an implemented change followed by independent review.
 - `parallel-review` for independent review branches joined by the parent.
 
-Both templates select Codex for managed reviews, even under a Claude host.
+Choose the managed review runner when initializing: use `--runner claude` for a
+Claude-only installation or `--runner codex` for a Codex-only installation.
+Without the flag, the recognized plugin host is the convenience default and a
+standalone shell defaults to Codex for compatibility. The selection becomes a
+compiled runtime requirement, not execution authority. Claude uses normal
+native CLI login; direct-local verification needs neither AI CLI, model, nor AI
+home.
 `reviewed-change` assumes pytest and `src/`/`tests/`; adapt the source contract
 to the target project before compilation. The
 [README owner setup](../../README.md#owner-runtime-setup) contains the exact
@@ -64,7 +70,7 @@ recipe render NAME --view workflow|generated
 recipe estimate NAME [--json]
 template list
 template show TEMPLATE NAME
-template init TEMPLATE NAME
+template init TEMPLATE NAME [--runner claude|codex]
 ```
 
 The complete MCP authoring surface is:
@@ -105,7 +111,7 @@ A concrete reviewed-change sequence is:
 ```bash
 lockstep template list
 lockstep template show reviewed-change demo
-lockstep template init reviewed-change demo
+lockstep template init reviewed-change demo --runner claude
 lockstep recipe compile demo
 lockstep recipe check demo
 lockstep recipe diff demo

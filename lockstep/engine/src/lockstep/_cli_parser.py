@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 
+from lockstep.runtime.providers.local import RunnerSelector
+
 
 def _add_policy_parser(sub: argparse._SubParsersAction) -> None:
     policy = sub.add_parser("policy").add_subparsers(dest="action")
@@ -44,6 +46,10 @@ def _add_template_parser(sub: argparse._SubParsersAction) -> None:
     init = template.add_parser("init")
     init.add_argument("template")
     init.add_argument("name")
+    init.add_argument(
+        "--runner",
+        choices=(RunnerSelector.CLAUDE.value, RunnerSelector.CODEX.value),
+    )
 
 
 def _add_scenario_parser(sub: argparse._SubParsersAction) -> None:

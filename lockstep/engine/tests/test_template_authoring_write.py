@@ -15,9 +15,9 @@ def _state(project: Path) -> Path:
     return (project.parent / f"{project.name}-state").resolve()
 
 
-def _cli(project: Path, monkeypatch, capsys):
+def _cli(project: Path, monkeypatch, capsys, *arguments: str):
     monkeypatch.chdir(project); monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(_state(project)))
-    code = cli.main(["template", "init", "reviewed-change", "change"])
+    code = cli.main(["template", "init", "reviewed-change", "change", *arguments])
     output = capsys.readouterr(); return code, output.out, output.err
 
 
@@ -61,6 +61,92 @@ def test_direct_template_install_requires_explicit_external_state(tmp_path: Path
     project = tmp_path / "project"; project.mkdir(); before = tree_image(project)
     with pytest.raises(TypeError, match="state_dir"):
         install_template("reviewed-change", "change", project)
+    assert tree_image(project) == before
+
+
+@pytest.mark.parametrize(
+    "host_environment",
+    (
+        {"LOCKSTEP_PLUGIN_HOST": "claude"},
+        {"CLAUDECODE": "1"},
+    ),
+)
+def test_template_cli_defaults_to_recognized_claude_host(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    host_environment: dict[str, str],
+) -> None:
+    project = tmp_path / "project"; project.mkdir()
+    monkeypatch.delenv("LOCKSTEP_PLUGIN_HOST", raising=False)
+    monkeypatch.delenv("CLAUDECODE", raising=False)
+    for name, value in host_environment.items():
+        monkeypatch.setenv(name, value)
+
+    code, _stdout, _stderr = _cli(project, monkeypatch, capsys)
+
+    assert code == 0
+    requirements = _compiled_template_inventory(project)[1]
+    assert [item[1] for item in requirements if item[0] == "managed"] == ["claude"]
+
+
+def test_template_cli_explicit_codex_overrides_claude_host(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"; project.mkdir()
+    monkeypatch.setenv("LOCKSTEP_PLUGIN_HOST", "claude")
+    monkeypatch.setenv("CLAUDECODE", "1")
+
+    code, _stdout, _stderr = _cli(
+        project, monkeypatch, capsys, "--runner", "codex"
+    )
+
+    assert code == 0
+    requirements = _compiled_template_inventory(project)[1]
+    assert [item[1] for item in requirements if item[0] == "managed"] == ["codex"]
+
+
+def test_template_cli_standalone_default_remains_codex(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"; project.mkdir()
+    monkeypatch.delenv("LOCKSTEP_PLUGIN_HOST", raising=False)
+    monkeypatch.delenv("CLAUDECODE", raising=False)
+
+    code, _stdout, _stderr = _cli(project, monkeypatch, capsys)
+
+    assert code == 0
+    requirements = _compiled_template_inventory(project)[1]
+    assert [item[1] for item in requirements if item[0] == "managed"] == ["codex"]
+
+
+def test_template_cli_unknown_runner_exits_without_publishing_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"; project.mkdir()
+    monkeypatch.chdir(project)
+    before = tree_image(project)
+
+    with pytest.raises(SystemExit) as exit_status:
+        cli.main(
+            [
+                "template",
+                "init",
+                "reviewed-change",
+                "change",
+                "--runner",
+                "unknown",
+            ]
+        )
+
+    assert exit_status.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
     assert tree_image(project) == before
 
 
