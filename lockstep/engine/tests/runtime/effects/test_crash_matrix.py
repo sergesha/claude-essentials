@@ -23,6 +23,42 @@ def test_launching_recovery_adopts_same_attempt_and_never_spawns_twice(system) -
     assert len(runner.ensure_started_calls) == 1
 
 
+@pytest.mark.parametrize("expired", [False, True])
+def test_running_supervisor_loss_delivers_uncertainty_without_relaunch_or_snapshot(
+    system, expired: bool,
+) -> None:
+    coordinator, runtime, runner, ledger, _store, coordinate = system
+    running, runner = _advance_to_running(system)
+    launch = runner.ensure_started_calls[-1]
+    lost = RunnerObservation(
+        effect_id=running.effect_id,
+        request_digest=launch.request_digest,
+        runner_binding_digest=launch.runner_binding_digest,
+        state="indeterminate",
+    )
+    runner.inspect_observations.append(lost)
+    runner.cancel_observations.append(lost)
+    if expired:
+        coordinator._clock = lambda: NOW + timedelta(minutes=6)
+
+    report = coordinator.reconcile("run-1")
+
+    assert report.action == "indeterminate"
+    uncertain = ledger.get(running.effect_id)
+    assert uncertain.phase == "indeterminate"
+    assert uncertain.result.outcome == "ERROR"
+    assert uncertain.result.fixed_error_code == "launch_indeterminate"
+    assert uncertain.result.snapshot_ref is None
+    assert uncertain.result.artifact_refs == ()
+    coordinator.deliver_ready("run-1")
+    assert ledger.get(running.effect_id).phase == "delivered"
+    assert runtime.resume_calls[0][2][coordinate.interrupt_id] == uncertain.result.to_dict()
+    coordinator.reconcile("run-1")
+    coordinator.deliver_ready("run-1")
+    assert len(runtime.resume_calls) == 1
+    assert runner.spawn_count == 1
+
+
 def test_launching_ambiguity_is_sealed_indeterminate_and_never_retried(system) -> None:
     coordinator, _runtime, runner, ledger, _store, _coordinate = system
     coordinator.reconcile("run-1")
