@@ -41,16 +41,9 @@ def _provision_binding(
     value: object,
     *,
     label: str,
-    pinned: bool,
 ) -> dict[str, object]:
     if not isinstance(value, dict):
         raise ValueError(f"runtime provision {label} must be a JSON object")
-    if pinned and "backend" in value:
-        if (value["backend"] != PinnedBackend.DIRECT_LOCAL
-                or set(value) != {"backend", "environment"}):
-            raise ValueError("runtime provision direct-local binding schema is invalid")
-        local_environment(value["environment"])
-        return value
     fields = {
         "executable",
         "model",
@@ -59,8 +52,6 @@ def _provision_binding(
         "codex_home",
         "environment",
     }
-    if pinned:
-        fields.add("pinned_permission_profile")
     if set(value) != fields:
         raise ValueError(
             f"runtime provision config must use the exact {label} binding schema"
@@ -104,15 +95,14 @@ def _provision_binding(
         raise ValueError("runtime provision environment contains an invalid value")
     if not Path(environment["TMPDIR"]).is_absolute():
         raise ValueError("runtime provision TMPDIR must be absolute")
-    if pinned:
-        pinned_profile = value["pinned_permission_profile"]
-        if (
-            not isinstance(pinned_profile, str)
-            or not pinned_profile
-            or "\x00" in pinned_profile
-            or len(pinned_profile.encode("utf-8")) > 4096
-        ):
-            raise ValueError("pinned permission profile must be owner-selected")
+    return value
+
+
+def _pinned_provision_binding(value: object) -> dict[str, object]:
+    if (not isinstance(value, dict) or set(value) != {"backend", "environment"}
+            or value["backend"] != PinnedBackend.DIRECT_LOCAL):
+        raise ValueError("runtime provision direct-local binding schema is invalid")
+    local_environment(value["environment"])
     return value
 
 
@@ -151,23 +141,16 @@ def parse_runtime_provision_documents(
     ):
         raise ValueError("runtime provision config must use the exact config schema")
     codex = (
-        _provision_binding(config["codex"], label="codex", pinned=False)
+        _provision_binding(config["codex"], label="codex")
         if "codex" in config
         else None
     )
     pinned = (
-        _provision_binding(config["pinned"], label="pinned", pinned=True)
+        _pinned_provision_binding(config["pinned"])
         if "pinned" in config
         else None
     )
     claude = _claude_provision_binding(config["claude"]) if "claude" in config else None
-    if (
-        codex is not None
-        and pinned is not None
-        and "codex_home" in pinned
-        and codex["codex_home"] == pinned["codex_home"]
-    ):
-        raise ValueError("runtime provision Codex homes must differ")
 
     replacement = _json_document(replacement_bytes, label="replacement grants")
     if not isinstance(replacement, list):

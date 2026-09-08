@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-import stat
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -76,15 +76,13 @@ def _pinned_system(
     effect_kind: str = "pinned",
 ):
     from lockstep.runtime.providers.codex import (
-        CodexInstallationBinding,
         CodexLaunchDecisionGate,
-        CodexSandboxAttestor,
     )
     from lockstep.runtime.providers.pinned import (
         PinnedCommandSpec,
         PinnedRunnerAdapter,
-        pinned_runner_binding_digest,
     )
+    from lockstep.runtime.providers.local import DirectInstallationBinding, LocalMechanicsAttestor
 
     owner = tmp_path / "owner"
     blobs = BlobStore(owner)
@@ -94,19 +92,9 @@ def _pinned_system(
         declared_paths=("src/",),
         provenance={"source": "pinned-test"},
     )
-    executable = tmp_path / "fake-codex"
-    executable.write_text("#!/usr/bin/env python3\nraise SystemExit(0)\n")
-    executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
-    codex_home = owner / "codex-home"
-    codex_home.mkdir(mode=0o700)
     private_tmp = owner / "tmp"
     private_tmp.mkdir(mode=0o700)
-    binding = CodexInstallationBinding.capture(
-        executable=executable,
-        model="unused-for-pinned",
-        cli_version="0.147.0-test",
-        permission_profile={"sandbox": "workspace-write", "approval": "never"},
-        codex_home=codex_home,
+    binding = DirectInstallationBinding.capture(
         environment={
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "LANG": "C.UTF-8",
@@ -115,21 +103,19 @@ def _pinned_system(
         },
     )
     workspaces = LocalGitWorkspaceProvider(owner, snapshots, blobs)
-    permission_profile = "lockstep-pinned"
     adapter = PinnedRunnerAdapter(
         owner_state_dir=owner,
         installation=lambda: binding,
         decision_gate=CodexLaunchDecisionGate(
-            pinned_runner_binding_digest(binding.digest, permission_profile),
+            binding.digest,
             generation=1,
         ),
         workspaces=workspaces,
         blobs=blobs,
-        sandbox=CodexSandboxAttestor(cli_version=binding.cli_version),
-        permission_profile=permission_profile,
+        sandbox=LocalMechanicsAttestor(),
     )
     spec = PinnedCommandSpec.build(
-        logical_argv=("python", "-m", "pytest", "-q"),
+        logical_argv=(sys.executable, "-c", "raise SystemExit(0)"),
         logical_cwd=".",
         result_source=result_source,
     )
@@ -196,7 +182,7 @@ def test_pinned_prepare_rejects_managed_effect_kind(tmp_path: Path) -> None:
     assert adapter.spawn_count == 0
 
 
-def test_pinned_prepare_commits_safe_logical_and_exact_codex_sandbox_argv(
+def test_pinned_prepare_commits_exact_direct_command_argv(
     tmp_path: Path,
 ) -> None:
     adapter, request, workspaces = _pinned_system(tmp_path)
@@ -207,18 +193,9 @@ def test_pinned_prepare_commits_safe_logical_and_exact_codex_sandbox_argv(
     assert launch == adapter.prepare(request)
     assert workspaces.inspect(launch.workspace_ref).purpose == "no_publish_operation"
     assert record.inner_argv == (
-        str(record.executable_path),
-        "sandbox",
-        "--permission-profile",
-        "lockstep-pinned",
-        "--cd",
-        str(record.workspace_path),
-        "--include-managed-config",
-        "--",
-        "python",
-        "-m",
-        "pytest",
-        "-q",
+        sys.executable,
+        "-c",
+        "raise SystemExit(0)",
     )
     assert record.shell is False
     assert record.deployment_profile == "local_unsandboxed"

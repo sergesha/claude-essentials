@@ -150,9 +150,9 @@ lockstep recipe estimate demo --json
 
 Use `--runner claude` for native Claude managed reviews or `--runner codex` for
 native Codex managed reviews. Without the flag, a recognized plugin host is the
-default; a standalone shell with no host marker retains the Codex default for
-compatibility. The selected runner is written into every managed child call
-before compilation. It is still only a workflow requirement: owner provisioning
+default; a standalone shell with no host marker defaults to Codex. Use
+`--runner claude` to select Claude explicitly. The selected runner is written into
+every managed child call before compilation. It is still only a workflow requirement: owner provisioning
 must separately grant the exact selected installation. `parallel-review` is
 initialized the same way and brings its declared child workflow sources with
 it. Compilation is child-first and produces the parent recipe plus dependency
@@ -238,8 +238,8 @@ Provisioning selects executable authority; an agent's report or generated
 configuration does not authorize it. Manual workflows without managed or
 pinned effects do not need runtime grants.
 
-Configure only runners listed by the selected recipes. Ordinary checks should
-normally use the `direct-local` pinned backend. It runs literal argv without a
+Configure only runners listed by the selected recipes. Ordinary checks use
+the `direct-local` pinned runner. It runs literal argv without a
 shell, with the configured PATH, cwd, timeout, bounded capture, and cancellation;
 it needs no model, AI CLI, or AI home. It is local OS-user execution, not an OS
 sandbox or confinement boundary.
@@ -298,13 +298,6 @@ version range or release pin.
   "environment": {"PATH": "/actual/path", "LANG": "C", "LC_ALL": "C", "TMPDIR": "/absolute/owner-only/tmp"}
 }
 ```
-
-The legacy Codex-backed pinned backend remains explicitly supported. Use the
-same exact Codex binding fields under `pinned`, add
-`"pinned_permission_profile": "existing-owner-selected-profile"`, and use a
-separate credential-free Codex home. It invokes `codex sandbox` without an LLM
-call, never silently replaces direct-local, and does not change the local
-unsandboxed threat model.
 
 List requirements after creating the complete JSON document:
 

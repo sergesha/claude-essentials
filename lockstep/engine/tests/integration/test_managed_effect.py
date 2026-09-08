@@ -223,10 +223,9 @@ def _public_compiled_managed_closure(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert len(index.requirements) == 1
 
     config = _runtime_config(tmp_path)
-    for selector in ("codex", "pinned"):
-        binding = config[selector]
-        assert isinstance(binding, dict)
-        binding["executable"] = str(CONTROLLED_EFFECT)
+    binding = config["codex"]
+    assert isinstance(binding, dict)
+    binding["executable"] = str(CONTROLLED_EFFECT)
     owner_state = tmp_path / "owner-state"
     monkeypatch.setenv("LOCKSTEP_STATE_DIR", str(owner_state))
     codex = config["codex"]
@@ -283,10 +282,9 @@ def _provision_reviewed_inventory(
 ) -> None:
     runtime_root.mkdir()
     config = _runtime_config(runtime_root)
-    for selector in ("codex", "pinned"):
-        binding = config[selector]
-        assert isinstance(binding, dict)
-        binding["executable"] = str(CONTROLLED_EFFECT)
+    binding = config["codex"]
+    assert isinstance(binding, dict)
+    binding["executable"] = str(CONTROLLED_EFFECT)
     codex = config["codex"]
     pinned = config["pinned"]
     assert isinstance(codex, dict)
