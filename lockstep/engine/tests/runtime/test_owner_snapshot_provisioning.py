@@ -737,6 +737,33 @@ def test_pinned_snapshot_uses_released_runner_binding_digest(tmp_path: Path) -> 
     )
 
 
+def test_legacy_pinned_requires_explicit_direct_reprovisioning(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    _write_recipe(project, "pinned", "pinned-work", selector="pinned")
+    owner = tmp_path / "owner"
+    selected = _keys(project, "pinned")
+    config = _config(tmp_path)
+    config.pop("codex")
+    assert _provision(tmp_path, project, owner, config, selected, "pinned") == 0
+    original_bytes, original = _snapshot(owner)
+    assert _provision(tmp_path, project, owner, config, selected, "pinned") == 0
+    assert _snapshot(owner)[0] == original_bytes
+
+    Path(config["pinned"]["executable"]).unlink()
+    assert _provision(tmp_path, project, owner, config, selected, "pinned") != 0
+    assert _snapshot(owner)[0] == original_bytes
+
+    direct = {"schema": config["schema"], "pinned": {
+        "backend": "direct-local", "environment": config["pinned"]["environment"],
+    }}
+    assert _provision(tmp_path, project, owner, direct, selected, "pinned") == 0
+    _, replacement = _snapshot(owner)
+    assert replacement["pinned"]["backend"] == "direct-local"
+    assert replacement["config_generation"] == original["config_generation"] + 1
+    assert replacement["pinned"]["binding_digest"] != original["pinned"]["binding_digest"]
+    assert _grants(replacement)[selected[0]]["grant_generation"] == 2
+
+
 def test_poisoned_omitted_predecessor_grant_fails_closed(tmp_path: Path) -> None:
     project = tmp_path / "project"
     _write_recipe(project, "first", "first-work")

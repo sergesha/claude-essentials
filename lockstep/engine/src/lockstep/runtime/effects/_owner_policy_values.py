@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 import re
 from typing import Literal
+from lockstep.runtime.providers.local import PinnedBackend, RunnerSelector, local_environment
 
 
 def _lower_hex(value: object, *, label: str) -> str:
@@ -94,6 +95,43 @@ class _RuntimeBindingFacts:
 
 
 @dataclass(frozen=True, slots=True)
+class _DirectBindingFacts:
+    environment: tuple[tuple[str, str], ...]
+    binding_digest: str
+    backend: PinnedBackend = PinnedBackend.DIRECT_LOCAL
+
+    def __post_init__(self) -> None:
+        if self.backend is not PinnedBackend.DIRECT_LOCAL:
+            raise ValueError("direct binding backend is invalid")
+        if self.environment != local_environment(dict(self.environment)):
+            raise ValueError("direct binding environment is not normalized")
+        _lower_hex(self.binding_digest, label="direct binding digest")
+
+
+@dataclass(frozen=True, slots=True)
+class _ClaudeBindingFacts:
+    executable: str
+    model: str
+    home: str
+    environment: tuple[tuple[str, str], ...]
+    binding_digest: str
+
+    def __post_init__(self) -> None:
+        if any(not isinstance(value, str) or not value or "\x00" in value
+               for value in (self.executable, self.model, self.home)):
+            raise ValueError("Claude binding identities must be non-empty strings")
+        if not Path(self.executable).is_absolute() or not Path(self.home).is_absolute():
+            raise ValueError("Claude binding paths must be absolute")
+        if self.environment != local_environment(dict(self.environment)):
+            raise ValueError("Claude binding environment is not normalized")
+        _lower_hex(self.binding_digest, label="Claude binding digest")
+
+
+PinnedBindingFacts = _RuntimeBindingFacts | _DirectBindingFacts
+RuntimeBindingFacts = _RuntimeBindingFacts | _DirectBindingFacts | _ClaudeBindingFacts
+
+
+@dataclass(frozen=True, slots=True)
 class OwnerRuntimeGrant:
     """One owner-selected grant for a current exact requirement."""
 
@@ -126,8 +164,17 @@ class OwnerRuntimeSnapshot:
     config_generation: int
     policy_generation: int
     codex: _RuntimeBindingFacts | None
-    pinned: _RuntimeBindingFacts | None
+    pinned: PinnedBindingFacts | None
     grants: tuple[OwnerRuntimeGrant, ...]
+    claude: _ClaudeBindingFacts | None = None
+
+    def binding_for(self, selector: str) -> RuntimeBindingFacts | None:
+        selected = RunnerSelector(selector)
+        if selected is RunnerSelector.CODEX:
+            return self.codex
+        if selected is RunnerSelector.CLAUDE:
+            return self.claude
+        return self.pinned
 
     def __post_init__(self) -> None:
         if self.schema != "lockstep.runtime-owner/v1":
@@ -136,25 +183,29 @@ class OwnerRuntimeSnapshot:
         _exact_generation(self.policy_generation, label="policy generation")
         if any(
             binding is not None and not isinstance(binding, _RuntimeBindingFacts)
-            for binding in (self.codex, self.pinned)
+            for binding in (self.codex,)
         ):
             raise TypeError("owner runtime snapshot bindings are invalid")
         if self.codex is not None and self.codex.pinned_permission_profile is not None:
             raise ValueError("owner runtime codex binding cannot be pinned")
-        if self.pinned is not None and self.pinned.pinned_permission_profile is None:
+        if self.claude is not None and not isinstance(self.claude, _ClaudeBindingFacts):
+            raise TypeError("owner runtime Claude binding is invalid")
+        if self.pinned is not None and not isinstance(self.pinned, (_RuntimeBindingFacts, _DirectBindingFacts)):
+            raise TypeError("owner runtime pinned binding is invalid")
+        if isinstance(self.pinned, _RuntimeBindingFacts) and self.pinned.pinned_permission_profile is None:
             raise ValueError(
                 "owner runtime pinned binding requires a permission profile"
             )
         if self.codex is not None and self.codex.credential_identity_digest is None:
             raise ValueError("owner runtime codex binding requires credentials")
         if (
-            self.pinned is not None
+            isinstance(self.pinned, _RuntimeBindingFacts)
             and self.pinned.credential_identity_digest is not None
         ):
             raise ValueError("owner runtime pinned binding must be credential-free")
         if (
             self.codex is not None
-            and self.pinned is not None
+            and isinstance(self.pinned, _RuntimeBindingFacts)
             and Path(self.codex.codex_home).resolve()
             == Path(self.pinned.codex_home).resolve()
         ):

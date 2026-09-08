@@ -131,8 +131,12 @@ def _verify_bound_files(spec: dict[str, object], argv: list[str]) -> None:
     if observed != expected:
         raise ValueError("Codex executable identity changed at inner spawn")
 
-    credential = Path(str(spec["environment"]["CODEX_HOME"])) / "auth.json"
     expected_credential = spec["credential_identity_digest"]
+    if "CODEX_HOME" not in spec["environment"]:
+        if expected_credential is not None:
+            raise ValueError("credential commitment has no Codex home")
+        return
+    credential = Path(str(spec["environment"]["CODEX_HOME"])) / "auth.json"
     if not credential.exists() and not credential.is_symlink():
         observed_credential = None
     else:
