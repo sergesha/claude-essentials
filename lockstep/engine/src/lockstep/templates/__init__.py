@@ -152,26 +152,30 @@ def _captured_role_sources(
         content = bundle.joinpath(files[role]).read_text().replace("{name}", name)
         if runner is not None:
             document = yaml.safe_load(content)
-            _select_call_runners(document, runner)
-            content = yaml.safe_dump(document, sort_keys=False, allow_unicode=True)
+            if _select_call_runners(document, runner):
+                content = yaml.safe_dump(document, sort_keys=False, allow_unicode=True)
         captured.append(
             TemplateRoleSource(output.replace("{name}", name), content.encode())
         )
     return tuple(captured)
 
 
-def _select_call_runners(value: object, runner: RunnerSelector) -> None:
+def _select_call_runners(value: object, runner: RunnerSelector) -> bool:
     if isinstance(value, list):
+        changed = False
         for item in value:
-            _select_call_runners(item, runner)
-        return
+            changed = _select_call_runners(item, runner) or changed
+        return changed
     if not isinstance(value, dict):
-        return
+        return False
+    changed = False
     call = value.get("call")
     if isinstance(call, dict):
+        changed = call.get("runner") != runner.value
         call["runner"] = runner.value
     for item in value.values():
-        _select_call_runners(item, runner)
+        changed = _select_call_runners(item, runner) or changed
+    return changed
 
 
 def install_template(
