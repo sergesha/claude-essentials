@@ -40,6 +40,9 @@ from lockstep.runtime.providers.workspaces import (
     WorkspaceError,
 )
 from lockstep.runtime.sandbox import SandboxAttestor, verify_attestation
+from lockstep.runtime.providers.local import (
+    AttemptInstallation, AttemptProvider, DirectInstallationBinding, ExecutableIdentity, LaunchDetails,
+)
 
 
 @dataclass(frozen=True)
@@ -56,7 +59,7 @@ class CodexLaunchRecord:
     executable_identity_digest: str
     inner_argv: tuple[str, ...]
     environment: tuple[tuple[str, str], ...]
-    codex_home: Path
+    codex_home: Path | None
     credential_identity_digest: str | None
     sandbox_policy_digest: str
     sandbox_attestation_digest: str
@@ -67,10 +70,12 @@ class CodexLaunchRecord:
     close_fds: bool = True
     inherited_fds: tuple[int, ...] = ()
     deployment_profile: Literal["local_unsandboxed"] = "local_unsandboxed"
+    provider: AttemptProvider = AttemptProvider.CODEX
+    executable_identity: ExecutableIdentity | None = None
 
 
 def _record_data(record: CodexLaunchRecord) -> dict[str, object]:
-    return {
+    data = {
         "schema": "lockstep.codex-launch/v1",
         "effect_id": record.effect_id,
         "request_digest": record.request_digest,
@@ -84,7 +89,7 @@ def _record_data(record: CodexLaunchRecord) -> dict[str, object]:
         "executable_identity_digest": record.executable_identity_digest,
         "inner_argv": list(record.inner_argv),
         "environment": [list(item) for item in record.environment],
-        "codex_home": str(record.codex_home),
+        "codex_home": str(record.codex_home) if record.codex_home is not None else None,
         "credential_identity_digest": record.credential_identity_digest,
         "sandbox_policy_digest": record.sandbox_policy_digest,
         "sandbox_attestation_digest": record.sandbox_attestation_digest,
@@ -96,6 +101,11 @@ def _record_data(record: CodexLaunchRecord) -> dict[str, object]:
         "inherited_fds": [],
         "deployment_profile": "local_unsandboxed",
     }
+    if record.provider is not AttemptProvider.CODEX:
+        data["schema"] = "lockstep.local-launch/v2"
+        data["provider"] = record.provider
+        data["executable_identity"] = record.executable_identity.__dict__ if record.executable_identity else None
+    return data
 
 
 class _CodexAttemptState:
@@ -110,7 +120,7 @@ class _CodexAttemptState:
         self,
         *,
         owner_state_dir: str | Path,
-        installation: Callable[[], CodexInstallationBinding],
+        installation: Callable[[], AttemptInstallation],
         decision_gate: CodexLaunchDecisionGate,
         workspaces: LocalGitWorkspaceProvider,
         blobs: BlobStore,
@@ -176,7 +186,10 @@ class _CodexAttemptState:
         path = self._directory(effect_id) / "launch.json"
         try:
             raw = json.loads(path.read_bytes())
-            if raw["schema"] != "lockstep.codex-launch/v1":
+            if raw["schema"] not in {"lockstep.codex-launch/v1", "lockstep.local-launch/v2"}:
+                raise ValueError
+            provider = AttemptProvider(raw.get("provider", "codex"))
+            if provider is not self.provider:
                 raise ValueError
             workspace_purpose = raw.get("workspace_purpose", "managed_output")
             if workspace_purpose not in {"managed_output", "no_publish_operation"}:
@@ -197,13 +210,15 @@ class _CodexAttemptState:
                 executable_identity_digest=raw["executable_identity_digest"],
                 inner_argv=tuple(raw["inner_argv"]),
                 environment=tuple(tuple(item) for item in raw["environment"]),
-                codex_home=Path(raw["codex_home"]),
+                codex_home=Path(raw["codex_home"]) if raw["codex_home"] is not None else None,
                 credential_identity_digest=raw["credential_identity_digest"],
                 sandbox_policy_digest=raw["sandbox_policy_digest"],
                 sandbox_attestation_digest=raw["sandbox_attestation_digest"],
                 launcher_decision_generation=int(raw["launcher_decision_generation"]),
                 deadline_at=datetime.fromisoformat(raw["deadline_at"]).astimezone(UTC),
                 launch_ref=raw["launch_ref"],
+                provider=provider,
+                executable_identity=ExecutableIdentity(**raw["executable_identity"]) if raw.get("executable_identity") else None,
             )
             if (
                 record.execution_class != self.execution_class
@@ -407,23 +422,35 @@ class _CodexPreparation:
             )
         binding.revalidate()
         if (
-            binding.executable_path == workspace_path
-            or workspace_path in binding.executable_path.parents
+            not isinstance(binding, DirectInstallationBinding)
+            and (binding.executable_path == workspace_path
+            or workspace_path in binding.executable_path.parents)
         ):
             raise CodexProviderError(
                 "Codex executable may not reside in its workspace"
             )
         return binding
 
+    def _launch_details(self, binding: AttemptInstallation, workspace: Path,
+                        request: EffectRequest) -> LaunchDetails:
+        if not isinstance(binding, CodexInstallationBinding):
+            raise CodexProviderError("Codex runner requires a Codex installation")
+        environment = dict(binding.environment)
+        environment["CODEX_HOME"] = str(binding.codex_home)
+        environment["HOME"] = str(binding.codex_home)
+        return (binding.executable_path, self._inner_argv(binding, workspace, request),
+                tuple(sorted(environment.items())), binding.codex_home,
+                binding.credential_identity_digest, None)
+
     def _provisional_launch_record(
         self,
         request: EffectRequest,
         workspace,
-        binding: CodexInstallationBinding,
+        binding: AttemptInstallation,
     ) -> CodexLaunchRecord:
-        environment = dict(binding.environment)
-        environment["CODEX_HOME"] = str(binding.codex_home)
-        environment["HOME"] = str(binding.codex_home)
+        executable, argv, environment, codex_home, credential, identity = self._launch_details(
+            binding, workspace.workspace_path, request
+        )
         return CodexLaunchRecord(
             effect_id=request.effect_id,
             request_digest=request.request_digest,
@@ -433,14 +460,14 @@ class _CodexPreparation:
             workspace_purpose=self.workspace_purpose,
             execution_class=self.execution_class,
             cwd=self._execution_cwd(workspace.workspace_path, request),
-            executable_path=binding.executable_path,
+            executable_path=executable,
             executable_identity_digest=binding.digest,
-            inner_argv=self._inner_argv(
-                binding, workspace.workspace_path, request
-            ),
-            environment=tuple(sorted(environment.items())),
-            codex_home=binding.codex_home,
-            credential_identity_digest=binding.credential_identity_digest,
+            inner_argv=argv,
+            environment=environment,
+            codex_home=codex_home,
+            credential_identity_digest=credential,
+            provider=self.provider,
+            executable_identity=identity,
             sandbox_policy_digest="",
             sandbox_attestation_digest="",
             launcher_decision_generation=self._decision_gate.generation,
@@ -463,7 +490,7 @@ class _CodexPreparation:
             "sandbox_attestation_digest": attestation_digest,
         }
         commitment.pop("launch_ref")
-        launch_ref = "codex:" + hashlib.sha256(_canonical(commitment)).hexdigest()
+        launch_ref = self.provider + ":" + hashlib.sha256(_canonical(commitment)).hexdigest()
         return CodexLaunchRecord(
             **{
                 **provisional.__dict__,

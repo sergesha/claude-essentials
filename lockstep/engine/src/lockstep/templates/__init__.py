@@ -15,6 +15,7 @@ from lockstep.authoring import (
 from lockstep.authoring_compilation import workflow_call_names
 from lockstep.authoring_installation import installation_collision
 from lockstep.authoring_publisher import AuthoringPublisher
+from lockstep.runtime.providers.local import RunnerSelector
 from lockstep.template_installation import (
     TemplateRoleSource,
     plan_template_installation,
@@ -135,34 +136,67 @@ def show_template(template: str, name: str) -> TemplateView:
 
 
 def _captured_role_sources(
-    template: str, name: str, manifest: dict[str, object]
+    template: str,
+    name: str,
+    manifest: dict[str, object],
+    *,
+    runner: RunnerSelector | None = None,
 ) -> tuple[TemplateRoleSource, ...]:
     bundle = _bundle(template)
     outputs = manifest["outputs"]
     files = manifest["files"]
     if not isinstance(outputs, dict) or not isinstance(files, dict):
         raise ValueError("template manifest is invalid")
-    return tuple(
-        TemplateRoleSource(
-            output.replace("{name}", name),
-            bundle.joinpath(files[role])
-            .read_text()
-            .replace("{name}", name)
-            .encode(),
+    captured = []
+    for role, output in outputs.items():
+        content = bundle.joinpath(files[role]).read_text().replace("{name}", name)
+        if runner is not None:
+            document = yaml.safe_load(content)
+            if _select_call_runners(document, runner):
+                content = yaml.safe_dump(document, sort_keys=False, allow_unicode=True)
+        captured.append(
+            TemplateRoleSource(output.replace("{name}", name), content.encode())
         )
-        for role, output in outputs.items()
-    )
+    return tuple(captured)
+
+
+def _select_call_runners(value: object, runner: RunnerSelector) -> bool:
+    if isinstance(value, list):
+        changed = False
+        for item in value:
+            changed = _select_call_runners(item, runner) or changed
+        return changed
+    if not isinstance(value, dict):
+        return False
+    changed = False
+    call = value.get("call")
+    if isinstance(call, dict):
+        changed = call.get("runner") != runner.value
+        call["runner"] = runner.value
+    for item in value.values():
+        changed = _select_call_runners(item, runner) or changed
+    return changed
 
 
 def install_template(
-    template: str, name: str, project: Path, *, state_dir: Path
+    template: str,
+    name: str,
+    project: Path,
+    *,
+    state_dir: Path,
+    runner: RunnerSelector | str = RunnerSelector.CODEX,
 ) -> InstalledTemplate:
+    selected_runner = RunnerSelector(runner)
+    if selected_runner not in {RunnerSelector.CLAUDE, RunnerSelector.CODEX}:
+        raise ValueError("template runner must be claude or codex")
     validate_logical_name(name)
     manifest = _manifest(template)
     root = Path(project).resolve()
     publisher = AuthoringPublisher(state_dir)
     publisher.require_ready(root)
-    role_sources = _captured_role_sources(template, name, manifest)
+    role_sources = _captured_role_sources(
+        template, name, manifest, runner=selected_runner
+    )
     outputs = manifest["outputs"]
     if not isinstance(outputs, dict) or not isinstance(outputs.get("parent"), str):
         raise ValueError("template manifest has no parent role")

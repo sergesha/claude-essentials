@@ -192,6 +192,7 @@ def _cmd_recipe(args: argparse.Namespace) -> int:
 
 def _cmd_template(args: argparse.Namespace) -> int:
     from lockstep.templates import install_template, list_templates, show_template
+    from lockstep.runtime.providers.local import RunnerSelector
 
     if args.action == "list":
         for name in list_templates():
@@ -201,11 +202,21 @@ def _cmd_template(args: argparse.Namespace) -> int:
         sys.stdout.write(json_text(show_template(args.template, args.name).to_dict()))
         return 0
     if args.action == "init":
+        host = os.environ.get("LOCKSTEP_PLUGIN_HOST")
+        if args.runner is not None:
+            runner = RunnerSelector(args.runner)
+        elif host in {RunnerSelector.CLAUDE.value, RunnerSelector.CODEX.value}:
+            runner = RunnerSelector(host)
+        elif os.environ.get("CLAUDECODE"):
+            runner = RunnerSelector.CLAUDE
+        else:
+            runner = RunnerSelector.CODEX
         install_template(
             args.template,
             args.name,
             Path.cwd(),
             state_dir=state_dir().absolute(),
+            runner=runner,
         )
         print(f"initialized {args.name}")
         return 0
@@ -240,7 +251,7 @@ def _cmd_owner(args: argparse.Namespace) -> int:
             label="runtime replacement grants",
             max_bytes=512 * 1024,
         )
-        codex, pinned, replacement_keys = parse_runtime_provision_documents(
+        config = parse_runtime_provision_documents(
             config_bytes,
             replacement_bytes,
         )
@@ -263,9 +274,10 @@ def _cmd_owner(args: argparse.Namespace) -> int:
         )
         provision_runtime_snapshot(
             state_dir=state_dir(),
-            codex=codex,
-            pinned=pinned,
-            replacement_keys=replacement_keys,
+            codex=config.codex,
+            pinned=config.pinned,
+            claude=config.claude,
+            replacement_keys=config.replacement_keys,
             index=index,
             project=project,
         )

@@ -53,11 +53,11 @@ def test_runtime_provision_documents_normalize_replacement_keys() -> None:
 
     high = "f" * 64
     low = "0" * 64
-    _codex, _pinned, keys = parse_runtime_provision_documents(
+    parsed = parse_runtime_provision_documents(
         *_documents(grants=[high, low])
     )
 
-    assert keys == (low, high)
+    assert parsed.replacement_keys == (low, high)
 
 
 @pytest.mark.parametrize("member", ["schema", "model"])
