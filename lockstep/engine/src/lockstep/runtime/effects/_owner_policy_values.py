@@ -34,7 +34,6 @@ class _RuntimeBindingFacts:
     environment: tuple[tuple[str, str], ...]
     credential_identity_digest: str | None
     binding_digest: str
-    pinned_permission_profile: str | None
 
     def __post_init__(self) -> None:
         if any(
@@ -85,13 +84,6 @@ class _RuntimeBindingFacts:
                 label="runtime binding credential identity digest",
             )
         _lower_hex(self.binding_digest, label="runtime binding digest")
-        if self.pinned_permission_profile is not None and (
-            not isinstance(self.pinned_permission_profile, str)
-            or not self.pinned_permission_profile
-            or "\x00" in self.pinned_permission_profile
-            or len(self.pinned_permission_profile.encode("utf-8")) > 4096
-        ):
-            raise ValueError("pinned permission profile must be owner-selected")
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,7 +119,6 @@ class _ClaudeBindingFacts:
         _lower_hex(self.binding_digest, label="Claude binding digest")
 
 
-PinnedBindingFacts = _RuntimeBindingFacts | _DirectBindingFacts
 RuntimeBindingFacts = _RuntimeBindingFacts | _DirectBindingFacts | _ClaudeBindingFacts
 
 
@@ -164,7 +155,7 @@ class OwnerRuntimeSnapshot:
     config_generation: int
     policy_generation: int
     codex: _RuntimeBindingFacts | None
-    pinned: PinnedBindingFacts | None
+    pinned: _DirectBindingFacts | None
     grants: tuple[OwnerRuntimeGrant, ...]
     claude: _ClaudeBindingFacts | None = None
 
@@ -186,30 +177,12 @@ class OwnerRuntimeSnapshot:
             for binding in (self.codex,)
         ):
             raise TypeError("owner runtime snapshot bindings are invalid")
-        if self.codex is not None and self.codex.pinned_permission_profile is not None:
-            raise ValueError("owner runtime codex binding cannot be pinned")
         if self.claude is not None and not isinstance(self.claude, _ClaudeBindingFacts):
             raise TypeError("owner runtime Claude binding is invalid")
-        if self.pinned is not None and not isinstance(self.pinned, (_RuntimeBindingFacts, _DirectBindingFacts)):
+        if self.pinned is not None and not isinstance(self.pinned, _DirectBindingFacts):
             raise TypeError("owner runtime pinned binding is invalid")
-        if isinstance(self.pinned, _RuntimeBindingFacts) and self.pinned.pinned_permission_profile is None:
-            raise ValueError(
-                "owner runtime pinned binding requires a permission profile"
-            )
         if self.codex is not None and self.codex.credential_identity_digest is None:
             raise ValueError("owner runtime codex binding requires credentials")
-        if (
-            isinstance(self.pinned, _RuntimeBindingFacts)
-            and self.pinned.credential_identity_digest is not None
-        ):
-            raise ValueError("owner runtime pinned binding must be credential-free")
-        if (
-            self.codex is not None
-            and isinstance(self.pinned, _RuntimeBindingFacts)
-            and Path(self.codex.codex_home).resolve()
-            == Path(self.pinned.codex_home).resolve()
-        ):
-            raise ValueError("owner runtime Codex homes must differ")
         if not isinstance(self.grants, tuple):
             raise TypeError("owner runtime grants must be a tuple")
         keys = tuple(grant.grant_selection_key for grant in self.grants)

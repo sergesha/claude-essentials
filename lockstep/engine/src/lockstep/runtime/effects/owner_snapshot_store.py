@@ -30,7 +30,7 @@ from lockstep.runtime.owner_state import (
     verify_owner_directory,
 )
 from lockstep.runtime.effects._owner_policy_values import (
-    _ClaudeBindingFacts, _DirectBindingFacts, PinnedBindingFacts, RuntimeBindingFacts,
+    _ClaudeBindingFacts, _DirectBindingFacts, RuntimeBindingFacts,
 )
 from lockstep.runtime.providers.local import PinnedBackend
 
@@ -55,7 +55,6 @@ def _binding_document(binding: RuntimeBindingFacts | None) -> dict[str, object] 
         "environment": [list(item) for item in binding.environment],
         "credential_identity_digest": binding.credential_identity_digest,
         "binding_digest": binding.binding_digest,
-        "pinned_permission_profile": binding.pinned_permission_profile,
     }
 
 
@@ -77,10 +76,9 @@ def _snapshot_document(snapshot: OwnerRuntimeSnapshot) -> dict[str, object]:
         "policy_generation": snapshot.policy_generation,
         "codex": _binding_document(snapshot.codex),
         "pinned": _binding_document(snapshot.pinned),
+        "claude": _binding_document(snapshot.claude),
         "grants": [_grant_document(grant) for grant in snapshot.grants],
     }
-    if snapshot.claude is not None:
-        document["claude"] = _binding_document(snapshot.claude)
     return document
 
 
@@ -114,14 +112,18 @@ def _pairs(value: object, *, label: str) -> tuple[tuple[str, str], ...]:
     return tuple(pairs)
 
 
-def _binding_from_document(value: object) -> PinnedBindingFacts | None:
+def _direct_from_document(value: object) -> _DirectBindingFacts | None:
     if value is None:
         return None
-    if isinstance(value, dict) and "backend" in value:
-        if set(value) != {"backend", "environment", "binding_digest"}:
-            raise ValueError("owner runtime direct binding schema is invalid")
-        return _DirectBindingFacts(_pairs(value["environment"], label="environment"),
-                                   value["binding_digest"], PinnedBackend(value["backend"]))
+    if not isinstance(value, dict) or set(value) != {"backend", "environment", "binding_digest"}:
+        raise ValueError("owner runtime direct binding schema is invalid")
+    return _DirectBindingFacts(_pairs(value["environment"], label="environment"),
+                               value["binding_digest"], PinnedBackend(value["backend"]))
+
+
+def _binding_from_document(value: object) -> _RuntimeBindingFacts | None:
+    if value is None:
+        return None
     fields = {
         "executable",
         "model",
@@ -131,7 +133,6 @@ def _binding_from_document(value: object) -> PinnedBindingFacts | None:
         "environment",
         "credential_identity_digest",
         "binding_digest",
-        "pinned_permission_profile",
     }
     if not isinstance(value, dict) or set(value) != fields:
         raise ValueError("owner runtime snapshot binding schema is invalid")
@@ -146,7 +147,6 @@ def _binding_from_document(value: object) -> PinnedBindingFacts | None:
         environment=_pairs(value["environment"], label="environment"),
         credential_identity_digest=value["credential_identity_digest"],
         binding_digest=value["binding_digest"],
-        pinned_permission_profile=value["pinned_permission_profile"],
     )
 
 
@@ -158,9 +158,10 @@ def _snapshot_from_bytes(encoded: bytes) -> OwnerRuntimeSnapshot:
         "policy_generation",
         "codex",
         "pinned",
+        "claude",
         "grants",
     }
-    if not isinstance(document, dict) or set(document) not in (fields, fields | {"claude"}):
+    if not isinstance(document, dict) or set(document) != fields:
         raise ValueError("owner runtime snapshot schema is invalid")
     if (
         type(document["config_generation"]) is not int
@@ -186,16 +187,14 @@ def _snapshot_from_bytes(encoded: bytes) -> OwnerRuntimeSnapshot:
             raise ValueError("owner runtime snapshot grant schema is invalid")
         grants.append(OwnerRuntimeGrant(**value))
     codex = _binding_from_document(document["codex"])
-    if codex is not None and not isinstance(codex, _RuntimeBindingFacts):
-        raise ValueError("owner runtime Codex binding schema is invalid")
     snapshot = OwnerRuntimeSnapshot(
         schema=document["schema"],
         config_generation=document["config_generation"],
         policy_generation=document["policy_generation"],
         codex=codex,
-        pinned=_binding_from_document(document["pinned"]),
+        pinned=_direct_from_document(document["pinned"]),
         grants=tuple(grants),
-        claude=_claude_from_document(document.get("claude")),
+        claude=_claude_from_document(document["claude"]),
     )
     _assert_snapshot_grants_consistent(snapshot)
     return snapshot
@@ -308,7 +307,7 @@ def _next_snapshot(
     predecessor: OwnerRuntimeSnapshot | None,
     *,
     codex: _RuntimeBindingFacts | None,
-    pinned: PinnedBindingFacts | None,
+    pinned: _DirectBindingFacts | None,
     claude: _ClaudeBindingFacts | None = None,
     replacement_keys: tuple[str, ...],
     index: RuntimeRequirementIndex | RuntimeProvisioningInventory,
@@ -403,7 +402,7 @@ def replace_runtime_snapshot(
     *,
     directory: Path,
     codex: _RuntimeBindingFacts | None,
-    pinned: PinnedBindingFacts | None,
+    pinned: _DirectBindingFacts | None,
     claude: _ClaudeBindingFacts | None = None,
     replacement_keys: tuple[str, ...],
     index: RuntimeRequirementIndex | RuntimeProvisioningInventory,

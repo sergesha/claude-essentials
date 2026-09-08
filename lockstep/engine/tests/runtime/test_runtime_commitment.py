@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 import time
 from contextlib import suppress
+from pathlib import Path
 
 import pytest
 import yaml
@@ -364,14 +366,13 @@ def test_public_managed_codex_runs_the_production_lifecycle_to_delivery(
         command.close()
 
 
-def test_public_verify_uses_pinned_profile_and_credential_free_lifecycle(
+def test_public_verify_uses_direct_local_lifecycle_and_binding(
     tmp_path,
     monkeypatch,
 ) -> None:
     """A7 GREEN: public verify uses the exact pinned lifecycle and binding."""
 
     provisioned = provision_pinned_verify_closure(tmp_path, monkeypatch)
-    assert tuple(provisioned.pinned_home.iterdir()) == ()
     command = Engine.command(
         provisioned.owner_state,
         provisioned.project / ".lockstep" / "recipes",
@@ -384,39 +385,20 @@ def test_public_verify_uses_pinned_profile_and_credential_free_lifecycle(
         )
         run_id = started["run_id"]
 
-        actual_argv, actual_environment = _await_provider_markers(
-            provisioned, command
-        )
-        assert actual_environment == (
-            str(provisioned.pinned_home),
-            str(provisioned.pinned_home),
-        )
-        assert str(provisioned.codex_home) not in "\n".join(
-            (*actual_argv, *actual_environment)
-        )
-        assert not (provisioned.pinned_home / "auth.json").exists()
-
         record = _assert_completed_delivery(command, provisioned, run_id)
         launch = command._runtime_execution_composition.runners.pinned.launch_record(
             record.effect_id
         )
-        assert actual_argv == (
-            "sandbox",
-            "--permission-profile",
-            "task12-pinned-profile",
-            "--cd",
-            str(launch.workspace_path),
-            "--include-managed-config",
-            "--",
-            "python",
-            "-m",
-            "pytest",
-            "-q",
+        assert launch.inner_argv == (
+            sys.executable,
+            "-c",
+            "raise SystemExit(0)",
         )
-        assert launch.inner_argv == (str(tmp_path / "codex"), *actual_argv)
+        assert launch.executable_path == Path(sys.executable).resolve()
+        assert launch.provider == "direct-local"
+        assert launch.codex_home is None
+        assert launch.credential_identity_digest is None
         assert dict(launch.environment) == {
-            "CODEX_HOME": str(provisioned.pinned_home),
-            "HOME": str(provisioned.pinned_home),
             "LANG": "C.UTF-8",
             "LC_ALL": "C.UTF-8",
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
