@@ -482,7 +482,7 @@ class EffectLedger(_EffectLedgerQueries):
             effect_id,
             expected_revision=expected_revision,
             target=EffectPhase.INDETERMINATE,
-            allowed_sources={EffectPhase.LAUNCHING},
+            allowed_sources={EffectPhase.LAUNCHING, EffectPhase.RUNNING},
             lease=lease,
             result=result,
         )
