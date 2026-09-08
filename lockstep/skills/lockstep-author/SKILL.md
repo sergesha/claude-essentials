@@ -35,8 +35,9 @@ Prefer a packaged template for common work:
 Choose the managed review runner when initializing: use `--runner claude` for a
 Claude-only installation or `--runner codex` for a Codex-only installation.
 Without the flag, the recognized plugin host is the convenience default and a
-standalone shell defaults to Codex for compatibility. The selection becomes a
-compiled runtime requirement, not execution authority. Claude uses normal
+standalone shell defaults to Codex; use `--runner claude` to select Claude
+explicitly. The selection becomes a compiled runtime requirement, not execution
+authority. Claude uses normal
 native CLI login; direct-local verification needs neither AI CLI, model, nor AI
 home.
 `reviewed-change` assumes pytest and `src/`/`tests/`; adapt the source contract

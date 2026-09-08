@@ -6,6 +6,7 @@ import json
 import os
 import shlex
 import stat
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,7 +25,6 @@ class ProvisionedRuntimeClosure:
     recipe: str
     requirement_index: RuntimeRequirementIndex
     codex_home: Path
-    pinned_home: Path
     provider_argv_marker: Path
     provider_environment_marker: Path
 
@@ -173,7 +173,11 @@ def write_pinned_verify_recipe(
                 "output": {
                     "command": {
                         "schema": "lockstep.pinned-command/v1",
-                        "logical_argv": ["python", "-m", "pytest", "-q"],
+                        "logical_argv": [
+                            sys.executable,
+                            "-c",
+                            "raise SystemExit(0)",
+                        ],
                         "logical_cwd": ".",
                         "result_source": "exit",
                     }
@@ -263,8 +267,6 @@ def _runtime_config(root: Path) -> dict[str, object]:
     auth = codex_home / "auth.json"
     auth.write_text("{}", encoding="utf-8")
     auth.chmod(0o600)
-    pinned_home = root / "pinned-home"
-    pinned_home.mkdir(mode=0o700)
     private_tmp = root / "private-tmp"
     private_tmp.mkdir(mode=0o700)
     environment = {
@@ -284,9 +286,8 @@ def _runtime_config(root: Path) -> dict[str, object]:
         "schema": "lockstep.runtime-provision-config/v1",
         "codex": {**common, "codex_home": str(codex_home)},
         "pinned": {
-            **common,
-            "codex_home": str(pinned_home),
-            "pinned_permission_profile": "task12-pinned-profile",
+            "backend": "direct-local",
+            "environment": environment,
         },
     }
 
@@ -348,7 +349,6 @@ def _provision_written_closure(
         recipe,
         index,
         root / "codex-home",
-        root / "pinned-home",
         root / "provider-argv.txt",
         root / "provider-environment.txt",
     )
@@ -417,7 +417,6 @@ def provision_compiled_managed_closure(
         recipe,
         index,
         root / "codex-home",
-        root / "pinned-home",
         root / "provider-argv.txt",
         root / "provider-environment.txt",
     )

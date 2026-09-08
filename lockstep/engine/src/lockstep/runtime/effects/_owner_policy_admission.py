@@ -17,7 +17,7 @@ from lockstep.runtime.effects._owner_policy_values import (
     _RuntimeBindingFacts,
     _lower_hex,
     _ClaudeBindingFacts,
-    PinnedBindingFacts,
+    _DirectBindingFacts,
 )
 
 
@@ -74,7 +74,7 @@ class OwnerRuntimeAuthority:
     snapshot_digest: str
     snapshot: OwnerRuntimeSnapshot
     codex_binding: _RuntimeBindingFacts | None
-    pinned_binding: PinnedBindingFacts | None
+    pinned_binding: _DirectBindingFacts | None
     claude_binding: _ClaudeBindingFacts | None = None
 
     def __post_init__(self) -> None:

@@ -273,10 +273,9 @@ def _prepare_parallel_review(
     assert {item.runner_selector for item in requirements.requirements} == {"codex"}
 
     config = _runtime_config(tmp_path)
-    for selector in ("codex", "pinned"):
-        binding = config[selector]
-        assert isinstance(binding, dict)
-        binding["executable"] = str(CONTROLLED_EFFECT)
+    binding = config["codex"]
+    assert isinstance(binding, dict)
+    binding["executable"] = str(CONTROLLED_EFFECT)
     codex = config["codex"]
     pinned = config["pinned"]
     assert isinstance(codex, dict)

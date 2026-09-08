@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import signal
@@ -22,7 +21,6 @@ from lockstep.runtime.effects.owner_policy import (
 )
 from lockstep.runtime.effects.owner_provisioning import provision_runtime_snapshot
 from lockstep.runtime.owner_state import ensure_owner_directory
-from lockstep.runtime.providers.codex import CodexInstallationBinding
 from lockstep.runtime.service import preflight_recipe
 
 
@@ -126,8 +124,6 @@ def _config(tmp_path: Path, *, model: str = "model") -> dict[str, object]:
     (codex_home / "config.toml").write_text(
         'model = "owner-selected"\n', encoding="utf-8"
     )
-    pinned_home = tmp_path / "pinned-home"
-    pinned_home.mkdir(mode=0o700, exist_ok=True)
     private_tmp = tmp_path / "private-tmp"
     private_tmp.mkdir(mode=0o700, exist_ok=True)
     environment = {
@@ -150,9 +146,8 @@ def _config(tmp_path: Path, *, model: str = "model") -> dict[str, object]:
         "schema": "lockstep.runtime-provision-config/v1",
         "codex": {**common, "codex_home": str(codex_home)},
         "pinned": {
-            **common,
-            "codex_home": str(pinned_home),
-            "pinned_permission_profile": "owner-profile",
+            "backend": "direct-local",
+            "environment": environment,
         },
     }
 
@@ -215,24 +210,6 @@ def _grants(snapshot: dict[str, object]) -> dict[str, dict[str, object]]:
     return {item["grant_selection_key"]: item for item in values}
 
 
-def _pinned_binding_digest(
-    installation_digest: str,
-    permission_profile: str,
-) -> str:
-    encoded = json.dumps(
-        {
-            "schema": "lockstep.pinned-runner-binding/v1",
-            "installation_digest": installation_digest,
-            "permission_profile": permission_profile,
-            "execution_authority": "os_user_execution",
-            "deployment_profile": "local_unsandboxed",
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode()
-    return hashlib.sha256(encoded).hexdigest()
-
-
 def _subprocess_result(
     argv: list[str],
     *,
@@ -279,10 +256,13 @@ def test_public_provisioning_needs_only_inventory_binding(
     recipe_path.write_text(json.dumps(recipe))
     config = _config(tmp_path)
     unused = "codex" if selector == "pinned" else "pinned"
-    unused_home = Path(config.pop(unused)["codex_home"])
-    for child in unused_home.iterdir():
-        child.unlink()
-    unused_home.rmdir()
+    unused_config = config.pop(unused)
+    if unused == "codex":
+        unused_home = Path(unused_config["codex_home"])
+        for child in unused_home.iterdir():
+            child.unlink()
+        unused_home.rmdir()
+        assert not unused_home.exists()
     state = tmp_path / "owner-state"
     keys = _keys(project, "sample")
 
@@ -294,7 +274,6 @@ def test_public_provisioning_needs_only_inventory_binding(
     captured = capture_runtime_execution_bindings(snapshot, project=project)
     assert getattr(captured, f"{unused}_installation") is None
     assert getattr(captured, f"{selector}_installation") is not None
-    assert not unused_home.exists()
     assert _provision(tmp_path, project, state, config, keys, "sample") == 0
     assert _snapshot(state)[0] == encoded
     from lockstep.runtime.blobs import BlobStore
@@ -555,13 +534,15 @@ def test_first_snapshot_uses_real_coalesced_inventory(tmp_path: Path) -> None:
         "config_generation",
         "policy_generation",
         "codex",
+        "claude",
         "pinned",
         "grants",
     }
+    assert snapshot["claude"] is None
     assert snapshot["schema"] == "lockstep.runtime-owner/v1"
     assert snapshot["config_generation"] == 1
     assert snapshot["policy_generation"] == 1
-    for selector in ("codex", "pinned"):
+    for selector in ("codex",):
         binding = snapshot[selector]
         assert set(binding) == {
             "executable",
@@ -572,15 +553,13 @@ def test_first_snapshot_uses_real_coalesced_inventory(tmp_path: Path) -> None:
             "environment",
             "credential_identity_digest",
             "binding_digest",
-            "pinned_permission_profile",
         }
         assert Path(binding["executable"]).is_absolute()
         assert Path(binding["codex_home"]).is_absolute()
         assert len(binding["binding_digest"]) == 64
     assert snapshot["codex"]["credential_identity_digest"] is not None
-    assert snapshot["codex"]["pinned_permission_profile"] is None
-    assert snapshot["pinned"]["credential_identity_digest"] is None
-    assert snapshot["pinned"]["pinned_permission_profile"] == "owner-profile"
+    assert set(snapshot["pinned"]) == {"backend", "environment", "binding_digest"}
+    assert snapshot["pinned"]["backend"] == "direct-local"
     assert grant == {
         "grant_selection_key": selected[0],
         "requirement_digest": requirement_digest(
@@ -707,12 +686,8 @@ def test_pinned_snapshot_uses_released_runner_binding_digest(tmp_path: Path) -> 
     config = _config(tmp_path)
     pinned_config = config["pinned"]
     assert isinstance(pinned_config, dict)
-    installation = CodexInstallationBinding.capture(
-        executable=pinned_config["executable"],
-        model=pinned_config["model"],
-        cli_version=pinned_config["cli_version"],
-        permission_profile=pinned_config["permission_profile"],
-        codex_home=pinned_config["codex_home"],
+    from lockstep.runtime.providers.local import DirectInstallationBinding
+    installation = DirectInstallationBinding.capture(
         environment=pinned_config["environment"],
     )
 
@@ -726,42 +701,12 @@ def test_pinned_snapshot_uses_released_runner_binding_digest(tmp_path: Path) -> 
     ) == 0
     _, snapshot = _snapshot(owner_state)
     pinned = snapshot["pinned"]
-    assert pinned["binding_digest"] == _pinned_binding_digest(
-        installation.digest,
-        pinned["pinned_permission_profile"],
-    )
+    assert pinned["binding_digest"] == installation.digest
     assert _grants(snapshot)[selected[0]]["requirement_digest"] == requirement_digest(
         grant_selection_key=selected[0],
         runner_binding_digest=pinned["binding_digest"],
         config_generation=1,
     )
-
-
-def test_legacy_pinned_requires_explicit_direct_reprovisioning(tmp_path: Path) -> None:
-    project = tmp_path / "project"
-    _write_recipe(project, "pinned", "pinned-work", selector="pinned")
-    owner = tmp_path / "owner"
-    selected = _keys(project, "pinned")
-    config = _config(tmp_path)
-    config.pop("codex")
-    assert _provision(tmp_path, project, owner, config, selected, "pinned") == 0
-    original_bytes, original = _snapshot(owner)
-    assert _provision(tmp_path, project, owner, config, selected, "pinned") == 0
-    assert _snapshot(owner)[0] == original_bytes
-
-    Path(config["pinned"]["executable"]).unlink()
-    assert _provision(tmp_path, project, owner, config, selected, "pinned") != 0
-    assert _snapshot(owner)[0] == original_bytes
-
-    direct = {"schema": config["schema"], "pinned": {
-        "backend": "direct-local", "environment": config["pinned"]["environment"],
-    }}
-    assert _provision(tmp_path, project, owner, direct, selected, "pinned") == 0
-    _, replacement = _snapshot(owner)
-    assert replacement["pinned"]["backend"] == "direct-local"
-    assert replacement["config_generation"] == original["config_generation"] + 1
-    assert replacement["pinned"]["binding_digest"] != original["pinned"]["binding_digest"]
-    assert _grants(replacement)[selected[0]]["grant_generation"] == 2
 
 
 def test_poisoned_omitted_predecessor_grant_fails_closed(tmp_path: Path) -> None:
