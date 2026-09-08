@@ -55,12 +55,12 @@ codex plugin marketplace add /absolute/path/to/claude-essentials --json
 codex plugin add lockstep@claude-essentials --json
 ```
 
-For a custom state location, export an absolute path in the same shell
-used for Lockstep provisioning and for starting Codex from the target project:
+For a custom state location, export an absolute path in the same shell used for
+Lockstep provisioning and for starting the plugin host from the target project:
 
 ```bash
 export LOCKSTEP_STATE_DIR=/absolute/path/to/owner-state
-codex
+# Start Claude Code or Codex here.
 ```
 
 Restart Codex after changing this value. The host forwards `LOCKSTEP_STATE_DIR`
@@ -71,9 +71,11 @@ project's `.lockstep/recipes` for the CLI/provisioning/plugin workflow.
 Start Codex interactively once and approve the installed hooks when prompted.
 Do not use hook-trust or approval bypass flags for normal operation.
 
-Codex receives a non-authoritative `LOCKSTEP_PLUGIN_HOST=codex` launcher marker.
-The launcher uses it only to recover `CODEX_HOME` from the installed plugin path.
-The runtime never reads that marker.
+Codex receives a non-authoritative `LOCKSTEP_PLUGIN_HOST=codex` launcher marker;
+Claude Code supplies its native `CLAUDECODE` marker. Template initialization may
+use those markers as a convenience default. The launcher uses the Codex marker
+only to recover `CODEX_HOME` from the installed plugin path, and the runtime
+never treats either marker as execution authority.
 
 ## Authority and threat model
 
@@ -111,7 +113,7 @@ recipe render NAME --view workflow|generated
 recipe estimate NAME [--json]
 template list
 template show TEMPLATE NAME
-template init TEMPLATE NAME
+template init TEMPLATE NAME [--runner claude|codex]
 ```
 
 Prefix these forms with `lockstep` in a shell. Names are logical names, not YAML
@@ -137,7 +139,7 @@ A normal template flow is:
 ```bash
 lockstep template list
 lockstep template show reviewed-change demo
-lockstep template init reviewed-change demo
+lockstep template init reviewed-change demo --runner claude
 lockstep recipe compile demo
 lockstep recipe check demo
 lockstep recipe render demo --view workflow
@@ -145,9 +147,15 @@ lockstep recipe render demo --view generated
 lockstep recipe estimate demo --json
 ```
 
-`parallel-review` is initialized the same way and brings its declared child
-workflow sources with it. Compilation is child-first and produces the parent
-recipe plus dependency and source-map artifacts.
+Use `--runner claude` for native Claude managed reviews or `--runner codex` for
+native Codex managed reviews. Without the flag, a recognized plugin host is the
+default; a standalone shell with no host marker retains the Codex default for
+compatibility. The selected runner is written into every managed child call
+before compilation. It is still only a workflow requirement: owner provisioning
+must separately grant the exact selected installation. `parallel-review` is
+initialized the same way and brings its declared child workflow sources with
+it. Compilation is child-first and produces the parent recipe plus dependency
+and source-map artifacts.
 
 ## Manual yamlgraph
 
@@ -173,11 +181,12 @@ ordinary failed read checks follow the manual recipe's authored retry edges.
 ## Running a workflow
 
 Before running either packaged template, complete [owner runtime setup](#owner-runtime-setup).
-Both templates use Codex for managed child reviews, including when the parent
-host is Claude. `reviewed-change` assumes a Python project with `src/`, `tests/`,
-and `pytest` available on the configured runner PATH. Its verification checks
-the pinned command's exit status; it does not impose a separate skipped-test
-limit or prove that the tests cover the requested change.
+Both templates use the managed runner selected at initialization. A Claude-only
+installation can initialize with `--runner claude`; a Codex-only installation
+can use `--runner codex`. `reviewed-change` assumes a Python project with `src/`,
+`tests/`, and `pytest` available on the configured direct-local command PATH.
+Its verification checks the pinned command's exit status; it does not impose a
+separate skipped-test limit or prove that the tests cover the requested change.
 
 Start a recipe with `scenario_start`, then repeat:
 
@@ -228,83 +237,77 @@ Provisioning selects executable authority; an agent's report or generated
 configuration does not authorize it. Manual workflows without managed or
 pinned effects do not need runtime grants.
 
-Configure only the runners used by the selected recipes' runtime inventory.
-For pinned-only verification, omit `codex` from the provisioning config: no
-managed model authorization or authenticated managed home is needed. For
-managed-only recipes, omit `pinned`. Every supplied binding is still validated.
-When both runners are used, their owner-only Codex homes must be distinct.
+Configure only runners listed by the selected recipes. Ordinary checks should
+normally use the `direct-local` pinned backend. It runs literal argv without a
+shell, with the configured PATH, cwd, timeout, bounded capture, and cancellation;
+it needs no model, AI CLI, or AI home. It is local OS-user execution, not an OS
+sandbox or confinement boundary.
 
-You need an installed Codex executable supporting the selected runner:
-`exec` for managed work, or `sandbox --permission-profile --include-managed-config`
-for pinned commands. The managed home must
-already contain your authenticated `auth.json`; the pinned home must contain
-no credentials and have the named permissions profile configured for your
-verification command. Use `codex sandbox --help` to check the installed CLI.
-Lockstep does not create credentials or permissions profiles. The pinned
-provider runs the literal command through Codex's sandbox command, without an
-LLM call; managed child reviews invoke the selected model.
-
-The following shell/Python example prompts for those existing settings
-(leave an unused runner's home blank),
-discovers the executable and its version locally, and creates private owner
-input files. Keep `LOCKSTEP_STATE_DIR` outside the project and use the same
-value for the plugin host. The input directory also supplies the runner's
-private `TMPDIR`; retain it while this configuration is active.
+Keep `LOCKSTEP_STATE_DIR` outside the project. Create an owner-only input/TMPDIR
+and save the configuration as `$LOCKSTEP_OWNER_INPUTS/config.json`:
 
 ```bash
 export LOCKSTEP_STATE_DIR="$(python3 -c 'import os; from pathlib import Path; print(Path(os.environ.get("LOCKSTEP_STATE_DIR") or "~/.lockstep").expanduser().resolve())')"
 mkdir -p -m 700 "$LOCKSTEP_STATE_DIR"
 export LOCKSTEP_OWNER_INPUTS="$(mktemp -d "$LOCKSTEP_STATE_DIR/provision.XXXXXX")"
-printf 'Managed Codex home (absolute path, blank if unused): '
-read -r LOCKSTEP_MANAGED_HOME
-printf 'Credential-free pinned Codex home (absolute path, blank if unused): '
-read -r LOCKSTEP_PINNED_HOME
-printf 'Model for managed reviews (pinned-only: owner-selected metadata label): '
-read -r LOCKSTEP_RUNNER_MODEL
-printf 'Permissions profile configured in the pinned home (blank if unused): '
-read -r LOCKSTEP_PINNED_PROFILE
-export LOCKSTEP_MANAGED_HOME LOCKSTEP_PINNED_HOME
-export LOCKSTEP_RUNNER_MODEL LOCKSTEP_PINNED_PROFILE
+```
 
-python3 - <<'PY'
-import json
-import os
-from pathlib import Path
-import shutil
-import subprocess
+This is the complete direct-only configuration; use the real command search
+PATH needed by the recipe:
 
-root = Path(os.environ['LOCKSTEP_OWNER_INPUTS']).resolve(strict=True)
-executable = shutil.which('codex')
-if executable is None:
-    raise SystemExit('Install Codex and put it on PATH first')
-executable = str(Path(executable).resolve(strict=True))
-common = {
-    'executable': executable,
-    'model': os.environ['LOCKSTEP_RUNNER_MODEL'],
-    'cli_version': subprocess.check_output([executable, '--version'], text=True).strip(),
-    'permission_profile': {'sandbox': 'workspace-write', 'approval': 'never'},
-    'environment': {
-        'PATH': os.environ['PATH'],
-        'LANG': 'C',
-        'LC_ALL': 'C',
-        'TMPDIR': str(root),
-    },
-}
-config = {
-    'schema': 'lockstep.runtime-provision-config/v1',
-}
-if os.environ['LOCKSTEP_MANAGED_HOME']:
-    config['codex'] = {**common, 'codex_home': os.environ['LOCKSTEP_MANAGED_HOME']}
-if os.environ['LOCKSTEP_PINNED_HOME']:
-    config['pinned'] = {
-        **common,
-        'codex_home': os.environ['LOCKSTEP_PINNED_HOME'],
-        'pinned_permission_profile': os.environ['LOCKSTEP_PINNED_PROFILE'],
+```json
+{
+  "schema": "lockstep.runtime-provision-config/v1",
+  "pinned": {
+    "backend": "direct-local",
+    "environment": {
+      "PATH": "/usr/bin:/bin",
+      "LANG": "C",
+      "LC_ALL": "C",
+      "TMPDIR": "/absolute/owner-only/tmp"
     }
-with (root / 'config.json').open('x') as output:
-    json.dump(config, output, indent=2)
-PY
+  }
+}
+```
 
+For a managed template, add exactly one member matching its `--runner` value.
+Native Claude uses normal CLI login from the native user home; Lockstep does not
+copy or log credentials:
+
+```json
+"claude": {
+  "executable": "/absolute/path/to/claude",
+  "model": "owner-selected-model",
+  "home": "/absolute/native/user/home",
+  "environment": {"PATH": "/actual/path", "LANG": "C", "LC_ALL": "C", "TMPDIR": "/absolute/owner-only/tmp"}
+}
+```
+
+Native Codex uses its existing authenticated home. `cli_version` records the
+exact output of the selected executable's `--version`; it is not a required
+version range or release pin.
+
+```json
+"codex": {
+  "executable": "/absolute/path/to/codex",
+  "model": "owner-selected-model",
+  "cli_version": "exact installed CLI version output",
+  "permission_profile": {"sandbox": "workspace-write", "approval": "never"},
+  "codex_home": "/absolute/authenticated/codex-home",
+  "environment": {"PATH": "/actual/path", "LANG": "C", "LC_ALL": "C", "TMPDIR": "/absolute/owner-only/tmp"}
+}
+```
+
+The legacy Codex-backed pinned backend remains explicitly supported. Use the
+same exact Codex binding fields under `pinned`, add
+`"pinned_permission_profile": "existing-owner-selected-profile"`, and use a
+separate credential-free Codex home. It invokes `codex sandbox` without an LLM
+call, never silently replaces direct-local, and does not change the local
+unsandboxed threat model.
+
+List requirements after creating the complete JSON document:
+
+```bash
 lockstep owner list-runtime-requirements --project "$PWD" --recipe demo \
   > "$LOCKSTEP_OWNER_INPUTS/requirements.json"
 python3 -m json.tool "$LOCKSTEP_OWNER_INPUTS/requirements.json"
@@ -337,10 +340,9 @@ lockstep owner provision-runtime --project "$PWD" --recipe demo \
   --replace-grants "$LOCKSTEP_OWNER_INPUTS/grants.json"
 ```
 
-Provisioning validates and captures the binding; it does not run a review or
-prove that the selected model, credentials, permissions profile, and project
-dependencies will succeed together. Publication consent remains a separate
-interactive action described below.
+Provisioning validates and captures supplied bindings; it does not run a review
+or prove that the selected model, native login, or project dependencies will
+succeed together. Publication consent remains a separate interactive action.
 
 ## Artifact publication and consent
 
