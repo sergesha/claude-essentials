@@ -33,6 +33,18 @@ dev = [
 
 [tool.mypy]
 files = [
+  "src/lockstep/runtime/providers/local.py",
+  "src/lockstep/runtime/providers/claude.py",
+  "src/lockstep/runtime/providers/pinned.py",
+  "src/lockstep/runtime/providers/composition.py",
+  "src/lockstep/runtime/effects/_owner_policy_values.py",
+  "src/lockstep/runtime/effects/_owner_policy_requirements.py",
+  "src/lockstep/runtime/effects/_owner_policy_admission.py",
+  "src/lockstep/runtime/effects/owner_policy_ingress.py",
+  "src/lockstep/runtime/effects/owner_provisioning.py",
+  "src/lockstep/runtime/effects/owner_snapshot_store.py",
+  "src/lockstep/runtime/runtime_execution.py",
+  "src/lockstep/runtime/runtime_execution_recovery.py",
   "src/lockstep/recipe/layout.py",
   "src/lockstep/recipe/loader.py",
   "src/lockstep/runtime/_publication_queries.py",

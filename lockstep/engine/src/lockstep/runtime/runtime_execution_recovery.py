@@ -50,7 +50,7 @@ class RuntimeExecutionRecovery:
 
     @staticmethod
     def _accepted_kinds(requirement: RuntimeRequirement) -> frozenset[str]:
-        if requirement.runner_selector == "codex":
+        if requirement.runner_selector in {"codex", "claude"}:
             return CodexRunnerAdapter.accepted_effect_kinds
         if requirement.runner_selector == "pinned":
             return PinnedRunnerAdapter.accepted_effect_kinds
@@ -100,7 +100,7 @@ class RuntimeExecutionRecovery:
             return ()
         page_size = 128 if watch_filter is not None else limit
         cursor = 0
-        bindings = []
+        bindings: list[RunBinding] = []
         while len(bindings) < limit:
             page = self._effects.list_run_drive_watches(
                 after_admission_seq=cursor,
@@ -202,15 +202,12 @@ class RuntimeExecutionRecovery:
             snapshot=snapshot,
             codex_binding=captured.codex_facts,
             pinned_binding=captured.pinned_facts,
+            claude_binding=captured.claude_facts,
         )
         for item in work:
             authority.preflight(item.index)
             for record, requirement in item.records:
-                expected = (
-                    snapshot.codex
-                    if requirement.runner_selector == "codex"
-                    else snapshot.pinned
-                )
+                expected = snapshot.binding_for(requirement.runner_selector)
                 if (
                     expected is None
                     or record.runner_binding_digest != expected.binding_digest

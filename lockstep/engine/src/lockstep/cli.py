@@ -240,7 +240,7 @@ def _cmd_owner(args: argparse.Namespace) -> int:
             label="runtime replacement grants",
             max_bytes=512 * 1024,
         )
-        codex, pinned, replacement_keys = parse_runtime_provision_documents(
+        config = parse_runtime_provision_documents(
             config_bytes,
             replacement_bytes,
         )
@@ -263,9 +263,10 @@ def _cmd_owner(args: argparse.Namespace) -> int:
         )
         provision_runtime_snapshot(
             state_dir=state_dir(),
-            codex=codex,
-            pinned=pinned,
-            replacement_keys=replacement_keys,
+            codex=config.codex,
+            pinned=config.pinned,
+            claude=config.claude,
+            replacement_keys=config.replacement_keys,
             index=index,
             project=project,
         )

@@ -16,6 +16,7 @@ from lockstep.runtime.effects._owner_policy_values import (
 )
 from lockstep.runtime.effects.descriptors import parse_effect_descriptor
 from lockstep.runtime.effects.models import EffectDescriptor
+from lockstep.runtime.providers.local import RunnerSelector
 
 if TYPE_CHECKING:
     from lockstep.recipe.authority import AuthorizedRecipe
@@ -119,12 +120,13 @@ class RuntimeRequirement:
     project_identity: str
     definition_digest: str
     protected_descriptor_digest: str
-    runner_selector: str
+    runner_selector: RunnerSelector
     required_capabilities: tuple[str, ...]
     required_authorities: tuple[str, ...]
     uses: tuple[tuple[str, str], ...]
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "runner_selector", RunnerSelector(self.runner_selector))
         _canonical_uses(self.uses)
         expected = grant_selection_key(
             project_identity=self.project_identity,
@@ -254,7 +256,7 @@ class RuntimeRequirementIndex:
         for logical_path, encoded in documents:
             for descriptor in _runtime_descriptors(encoded):
                 assert descriptor.runner is not None
-                if descriptor.runner.selector not in {"codex", "pinned"}:
+                if descriptor.runner.selector not in {"codex", "claude", "pinned"}:
                     raise ValueError(
                         "runtime requirement has an unsupported runner selector"
                     )
@@ -264,7 +266,7 @@ class RuntimeRequirementIndex:
                     project_identity=project_identity,
                     definition_digest=definition_digest,
                     protected_descriptor_digest=descriptor.digest,
-                    runner_selector=descriptor.runner.selector,
+                    runner_selector=RunnerSelector(descriptor.runner.selector),
                     required_capabilities=capabilities,
                     required_authorities=authorities,
                 )
@@ -273,7 +275,7 @@ class RuntimeRequirementIndex:
                     project_identity=project_identity,
                     definition_digest=definition_digest,
                     protected_descriptor_digest=descriptor.digest,
-                    runner_selector=descriptor.runner.selector,
+                    runner_selector=RunnerSelector(descriptor.runner.selector),
                     required_capabilities=capabilities,
                     required_authorities=authorities,
                     uses=((logical_path, descriptor.logical_id),),
@@ -292,14 +294,7 @@ class RuntimeRequirementIndex:
         grants = {grant.grant_selection_key: grant for grant in snapshot.grants}
         entries: list[tuple[RuntimeRequirement, str]] = []
         for requirement in self.requirements:
-            if requirement.runner_selector == "codex":
-                binding = snapshot.codex
-            elif requirement.runner_selector == "pinned":
-                binding = snapshot.pinned
-            else:  # construction and static derivation already reject this
-                raise ValueError(
-                    "runtime requirement has an unsupported runner selector"
-                )
+            binding = snapshot.binding_for(requirement.runner_selector)
             if binding is None:
                 raise ValueError("owner runtime requirement binding is unavailable")
             digest = requirement_digest(

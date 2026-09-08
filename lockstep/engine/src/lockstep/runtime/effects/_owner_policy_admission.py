@@ -16,6 +16,8 @@ from lockstep.runtime.effects._owner_policy_values import (
     OwnerRuntimeSnapshot,
     _RuntimeBindingFacts,
     _lower_hex,
+    _ClaudeBindingFacts,
+    PinnedBindingFacts,
 )
 
 
@@ -72,7 +74,8 @@ class OwnerRuntimeAuthority:
     snapshot_digest: str
     snapshot: OwnerRuntimeSnapshot
     codex_binding: _RuntimeBindingFacts | None
-    pinned_binding: _RuntimeBindingFacts | None
+    pinned_binding: PinnedBindingFacts | None
+    claude_binding: _ClaudeBindingFacts | None = None
 
     def __post_init__(self) -> None:
         _lower_hex(self.snapshot_digest, label="owner runtime snapshot digest")
@@ -80,6 +83,8 @@ class OwnerRuntimeAuthority:
             raise ValueError("owner runtime Codex binding changed after provisioning")
         if self.pinned_binding != self.snapshot.pinned:
             raise ValueError("owner runtime pinned binding changed after provisioning")
+        if self.claude_binding != self.snapshot.claude:
+            raise ValueError("owner runtime Claude binding changed after provisioning")
 
     def preflight(self, index: RuntimeRequirementIndex) -> RuntimeAdmissionDecision:
         """Authorize every bound entry without resolving or starting a runner."""

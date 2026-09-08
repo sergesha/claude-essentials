@@ -5,11 +5,16 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 import re
+import shutil
 from typing import Literal
 
 from lockstep.runtime.effects.descriptors import parse_effect_result
 from lockstep.runtime.effects.models import PinnedCommandSpec
 from lockstep.runtime.providers.base import EffectRequest
+from lockstep.runtime.providers.local import (
+    AttemptInstallation, AttemptProvider, DirectInstallationBinding, ExecutableIdentity,
+    PinnedBackend, LaunchDetails,
+)
 from lockstep.runtime.providers.codex import (
     CodexInstallationBinding,
     CodexLaunchRecord,
@@ -70,6 +75,8 @@ class _PinnedCodexStrategy(_CodexAttemptDriver):
             permission_profile
         )
         super().__init__(**kwargs)
+        if not isinstance(self._binding, CodexInstallationBinding):
+            raise CodexProviderError("Codex pinned runner requires a Codex installation")
         if self._binding.credential_identity_digest is not None:
             raise CodexProviderError("pinned Codex home must be credential-free")
         self.binding_digest = pinned_runner_binding_digest(
@@ -78,7 +85,7 @@ class _PinnedCodexStrategy(_CodexAttemptDriver):
         )
 
     def _launcher_binding_digest(
-        self, _binding: CodexInstallationBinding
+        self, _binding: AttemptInstallation
     ) -> str:
         return self.binding_digest
 
@@ -167,8 +174,10 @@ class PinnedRunnerAdapter:
     reconciliation_boundary = _CodexAttemptDriver.reconciliation_boundary
     accepted_effect_kinds = _PinnedCodexStrategy.accepted_effect_kinds
 
-    def __init__(self, **kwargs) -> None:
-        self._driver = _PinnedCodexStrategy(**kwargs)
+    def __init__(self, *, backend: PinnedBackend = PinnedBackend.CODEX_SANDBOX, **kwargs) -> None:
+        selected = PinnedBackend(backend)
+        self._driver = (_PinnedDirectStrategy(**kwargs)
+                        if selected is PinnedBackend.DIRECT_LOCAL else _PinnedCodexStrategy(**kwargs))
 
     @property
     def binding_digest(self) -> str:
@@ -198,6 +207,9 @@ class PinnedRunnerAdapter:
     def wait_terminal(self, effect_id: str, *, timeout: float):
         return self._driver.wait_terminal(effect_id, timeout=timeout)
 
+    def launch_record(self, effect_id: str):
+        return self._driver.launch_record(effect_id)
+
     def __getattr__(self, name: str):
         return getattr(self._driver, name)
 
@@ -208,3 +220,39 @@ class PinnedRunnerAdapter:
             setattr(self._driver, name, value)
         else:
             object.__setattr__(self, name, value)
+
+
+class _PinnedDirectStrategy(_PinnedCodexStrategy):
+    provider = AttemptProvider.DIRECT_LOCAL
+
+    def __init__(self, **kwargs) -> None:
+        _CodexAttemptDriver.__init__(self, **kwargs)
+        if not isinstance(self._binding, DirectInstallationBinding):
+            raise ValueError("direct-local runner requires a direct-local binding")
+
+    def _launcher_binding_digest(self, binding: AttemptInstallation) -> str:
+        return binding.digest
+
+    @staticmethod
+    def _assert_no_project_control_surfaces(workspace: Path) -> None:
+        del workspace
+
+    def _launch_details(self, binding: AttemptInstallation, workspace: Path,
+                        request: EffectRequest) -> LaunchDetails:
+        if not isinstance(binding, DirectInstallationBinding):
+            raise CodexProviderError("direct-local runner requires a direct installation")
+        spec = self._spec(request)
+        cwd = self._execution_cwd(workspace, request)
+        if cwd != workspace and workspace not in cwd.parents:
+            raise CodexProviderError("pinned cwd escaped its workspace")
+        requested = spec.logical_argv[0]
+        if "/" in requested:
+            executable = (cwd / requested).resolve(strict=True)
+        else:
+            found = shutil.which(requested, path=dict(binding.environment)["PATH"])
+            if found is None:
+                raise CodexProviderError("pinned command executable is unavailable")
+            executable = Path(found).resolve(strict=True)
+        identity = ExecutableIdentity.capture(executable)
+        return (executable, (str(executable), *spec.logical_argv[1:]),
+                binding.environment, None, None, identity)
