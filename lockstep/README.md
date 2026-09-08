@@ -63,13 +63,14 @@ export LOCKSTEP_STATE_DIR=/absolute/path/to/owner-state
 # Start Claude Code or Codex here.
 ```
 
-Restart Codex after changing this value. The host forwards `LOCKSTEP_STATE_DIR`
-to the bundled MCP server; the plugin does not store or choose its value.
+Restart the active plugin host after changing this value. The host forwards
+`LOCKSTEP_STATE_DIR` to the bundled MCP server; the plugin does not store or
+choose its value.
 When unset, state defaults to `~/.lockstep`. Keep recipes in the active
 project's `.lockstep/recipes` for the CLI/provisioning/plugin workflow.
 
-Start Codex interactively once and approve the installed hooks when prompted.
-Do not use hook-trust or approval bypass flags for normal operation.
+For Codex, start it interactively once and approve the installed hooks when
+prompted. Do not use hook-trust or approval bypass flags for normal operation.
 
 Codex receives a non-authoritative `LOCKSTEP_PLUGIN_HOST=codex` launcher marker;
 Claude Code supplies its native `CLAUDECODE` marker. Template initialization may
