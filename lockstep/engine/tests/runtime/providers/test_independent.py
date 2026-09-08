@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 import time
+import venv
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -35,13 +36,19 @@ from lockstep.runtime.runtime_execution import (
 )
 
 
-def _system(tmp_path: Path, selector: str, *, claude_body: str | None = None):
+def _system(
+    tmp_path: Path,
+    selector: str,
+    *,
+    claude_body: str | None = None,
+    path: str = "/usr/bin:/bin",
+):
     project = tmp_path / "project"
     project.mkdir()
     private_tmp = tmp_path / "tmp"
     private_tmp.mkdir(mode=0o700)
     env = {
-        "PATH": "/usr/bin:/bin",
+        "PATH": path,
         "LANG": "C",
         "LC_ALL": "C",
         "TMPDIR": str(private_tmp),
@@ -350,3 +357,78 @@ def test_missing_selected_provider_rejects_provision_before_state_creation(
             replacement_keys=(),
         )
     assert not owner.exists()
+
+
+def test_direct_preserves_selected_virtualenv_interpreter_and_dependencies(
+    tmp_path: Path,
+):
+    factory, _blobs, seed, _owner = _system(tmp_path, "pinned")
+    selected_venv = tmp_path / "selected-venv"
+    venv.EnvBuilder(with_pip=False, symlinks=True).create(selected_venv)
+    site_packages = (
+        selected_venv
+        / "lib"
+        / f"python{sys.version_info.major}.{sys.version_info.minor}"
+        / "site-packages"
+    )
+    (site_packages / "selected_dependency.py").write_text("VALUE = 'selected-venv'\n")
+    executable = selected_venv / "bin/python"
+    assert executable.is_symlink()
+    adapter = factory()
+    code = f"import sys,selected_dependency; assert sys.prefix == {str(selected_venv)!r}; assert selected_dependency.VALUE == 'selected-venv'"
+    request = _request(adapter, seed, "pinned", argv=(str(executable), "-c", code))
+    adapter.ensure_started(adapter.prepare(request))
+    result = adapter.wait_terminal(request.effect_id, timeout=10)
+    assert result.result.outcome == "PASS"
+
+
+def test_direct_resolves_relative_path_from_selected_command_cwd(tmp_path: Path):
+    from lockstep.runtime.providers.workspaces import LocalGitWorkspaceProvider
+
+    factory, blobs, seed, owner = _system(
+        tmp_path, "pinned", path="../../selected-venv/bin"
+    )
+    adapter = factory()
+    code = "import pathlib,sys; assert pathlib.Path(sys.prefix) == pathlib.Path.cwd().parent.parent / 'selected-venv'"
+    request = _request(adapter, seed, "pinned", argv=("python", "-c", code))
+    workspaces = LocalGitWorkspaceProvider(
+        owner, ProjectSnapshotStore(owner, blobs), blobs
+    )
+    lease = workspaces.materialize(
+        effect_id=request.effect_id,
+        request_digest=request.request_digest,
+        workspace_ref=request.workspace_ref,
+        input_snapshot_ref=f"snapshot:{seed.digest}",
+        declared_writes=(),
+        purpose="no_publish_operation",
+    )
+    venv.EnvBuilder(with_pip=False, symlinks=True).create(
+        lease.workspace_path.parent / "selected-venv"
+    )
+    adapter.ensure_started(adapter.prepare(request))
+    result = adapter.wait_terminal(request.effect_id, timeout=10)
+    assert result.result.outcome == "PASS"
+
+
+def test_direct_refuses_retargeted_invocation_symlink_after_prepare(tmp_path: Path):
+    factory, _blobs, seed, _owner = _system(tmp_path, "pinned")
+    original = tmp_path / "original-command"
+    original.write_text(f"#!{sys.executable}\nraise SystemExit(0)\n")
+    original.chmod(0o700)
+    invocation = tmp_path / "selected-command"
+    invocation.symlink_to(original)
+    adapter = factory()
+    request = _request(adapter, seed, "pinned", argv=(str(invocation),))
+    launch = adapter.prepare(request)
+    marker = tmp_path / "replacement-executed"
+    replacement = tmp_path / "replacement-command"
+    replacement.write_text(
+        f"#!{sys.executable}\nimport pathlib; pathlib.Path({str(marker)!r}).touch()\n"
+    )
+    replacement.chmod(0o700)
+    invocation.unlink()
+    invocation.symlink_to(replacement)
+    adapter.ensure_started(launch)
+    result = adapter.wait_terminal(request.effect_id, timeout=10)
+    assert result.result.outcome == "ERROR"
+    assert not marker.exists()

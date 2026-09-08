@@ -136,6 +136,8 @@ class _CodexAttemptDriver(_CodexAttemptState, _CodexPreparation):
             "max_stdout_bytes": self._limits.max_stdout_bytes,
             "max_stderr_bytes": self._limits.max_stderr_bytes,
         }
+        if str(record.executable_path) != record.inner_argv[0]:
+            body["executable_target"] = str(record.executable_path)
         encoded = _canonical(body)
         path = directory / "supervisor.json"
         self._write_once(path, encoded)
