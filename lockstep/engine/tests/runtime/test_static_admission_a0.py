@@ -175,8 +175,6 @@ def _config(tmp_path: Path, *, provider_marker: Path | None = None) -> dict[str,
     auth = codex_home / "auth.json"
     auth.write_text("{}", encoding="utf-8")
     auth.chmod(0o600)
-    pinned_home = tmp_path / "pinned-home"
-    pinned_home.mkdir(mode=0o700)
     private_tmp = tmp_path / "private-tmp"
     private_tmp.mkdir(mode=0o700)
     environment = {
@@ -196,9 +194,8 @@ def _config(tmp_path: Path, *, provider_marker: Path | None = None) -> dict[str,
         "schema": "lockstep.runtime-provision-config/v1",
         "codex": {**common, "codex_home": str(codex_home)},
         "pinned": {
-            **common,
-            "codex_home": str(pinned_home),
-            "pinned_permission_profile": "owner-profile",
+            "backend": "direct-local",
+            "environment": environment,
         },
     }
 

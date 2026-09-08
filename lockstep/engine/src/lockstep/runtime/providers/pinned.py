@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import hashlib
 import os
 from pathlib import Path
-import re
 import shutil
 from typing import Literal
 
@@ -14,76 +12,29 @@ from lockstep.runtime.effects.models import PinnedCommandSpec
 from lockstep.runtime.providers.base import EffectRequest
 from lockstep.runtime.providers.local import (
     AttemptInstallation, AttemptProvider, DirectInstallationBinding, ExecutableIdentity,
-    PinnedBackend, LaunchDetails,
+    LaunchDetails,
 )
 from lockstep.runtime.providers.codex import (
-    CodexInstallationBinding,
     CodexLaunchRecord,
     CodexProviderError,
-    _canonical,
     _CodexAttemptDriver,
 )
 
 
-def validate_pinned_permission_profile(value: object) -> str:
-    if (
-        not isinstance(value, str)
-        or not value
-        or "\x00" in value
-        or len(value.encode()) > 4096
-    ):
-        raise CodexProviderError("pinned permission profile must be owner-selected")
-    return value
-
-
-def pinned_runner_binding_digest(
-    installation_digest: str,
-    permission_profile: str,
-) -> str:
-    """Bind one pinned runner to its installation and owner-selected profile."""
-
-    if re.fullmatch(r"[0-9a-f]{64}", installation_digest) is None:
-        raise CodexProviderError("pinned installation digest is invalid")
-    profile = validate_pinned_permission_profile(permission_profile)
-    return hashlib.sha256(
-        _canonical(
-            {
-                "schema": "lockstep.pinned-runner-binding/v1",
-                "installation_digest": installation_digest,
-                "permission_profile": profile,
-                "execution_authority": "os_user_execution",
-                "deployment_profile": "local_unsandboxed",
-            }
-        )
-    ).hexdigest()
-
-
-class _PinnedCodexStrategy(_CodexAttemptDriver):
-    """Pinned hooks for Task 6's one durable Codex attempt driver."""
+class _PinnedStrategy(_CodexAttemptDriver):
+    """Direct command hooks for the shared durable attempt driver."""
 
     accepted_effect_kinds = frozenset({"pinned", "verify"})
     required_capabilities = frozenset({"workspace", "bounded_result", "sandbox"})
     workspace_purpose: Literal["no_publish_operation"] = "no_publish_operation"
     execution_class: Literal["pinned-command"] = "pinned-command"
 
-    def __init__(
-        self,
-        *,
-        permission_profile: str,
-        **kwargs,
-    ) -> None:
-        self._pinned_permission_profile = validate_pinned_permission_profile(
-            permission_profile
-        )
+    provider = AttemptProvider.DIRECT_LOCAL
+
+    def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
-        if not isinstance(self._binding, CodexInstallationBinding):
-            raise CodexProviderError("Codex pinned runner requires a Codex installation")
-        if self._binding.credential_identity_digest is not None:
-            raise CodexProviderError("pinned Codex home must be credential-free")
-        self.binding_digest = pinned_runner_binding_digest(
-            self._binding.digest,
-            permission_profile,
-        )
+        if not isinstance(self._binding, DirectInstallationBinding):
+            raise ValueError("direct-local runner requires a direct-local binding")
 
     def _launcher_binding_digest(
         self, _binding: AttemptInstallation
@@ -111,30 +62,39 @@ class _PinnedCodexStrategy(_CodexAttemptDriver):
             raise CodexProviderError("pinned snapshot input must be a string")
         return b"", snapshot_ref
 
-    def _inner_argv(
-        self,
-        binding: CodexInstallationBinding,
-        workspace: Path,
-        request: EffectRequest,
-    ) -> tuple[str, ...]:
-        spec = self._spec(request)
-        cwd = (workspace / spec.logical_cwd).resolve(strict=False)
-        if cwd != workspace and workspace not in cwd.parents:
-            raise CodexProviderError("pinned cwd escaped its workspace")
-        return (
-            str(binding.executable_path),
-            "sandbox",
-            "--permission-profile",
-            self._pinned_permission_profile,
-            "--cd",
-            str(cwd),
-            "--include-managed-config",
-            "--",
-            *spec.logical_argv,
-        )
-
     def _execution_cwd(self, workspace: Path, request: EffectRequest) -> Path:
         return (workspace / self._spec(request).logical_cwd).resolve(strict=False)
+
+    @staticmethod
+    def _assert_no_project_control_surfaces(workspace: Path) -> None:
+        del workspace
+
+    def _launch_details(self, binding: AttemptInstallation, workspace: Path,
+                        request: EffectRequest) -> LaunchDetails:
+        if not isinstance(binding, DirectInstallationBinding):
+            raise CodexProviderError("direct-local runner requires a direct installation")
+        spec = self._spec(request)
+        cwd = self._execution_cwd(workspace, request)
+        if cwd != workspace and workspace not in cwd.parents:
+            raise CodexProviderError("pinned cwd escaped its workspace")
+        requested = spec.logical_argv[0]
+        if "/" in requested:
+            invocation = cwd / requested
+        else:
+            search_path = os.pathsep.join(
+                str(cwd / entry)
+                for entry in dict(binding.environment)["PATH"].split(os.pathsep)
+            )
+            found = shutil.which(requested, path=search_path)
+            if found is None:
+                raise CodexProviderError("pinned command executable is unavailable")
+            invocation = Path(found)
+        # Invocation paths carry interpreter semantics (notably pyvenv.cfg).
+        # Bind the resolved bytes without rewriting the selected invocation.
+        executable = invocation.resolve(strict=True)
+        identity = ExecutableIdentity.capture(executable)
+        return (executable, (str(invocation), *spec.logical_argv[1:]),
+                binding.environment, None, None, identity)
 
     def _parse_result(
         self,
@@ -173,12 +133,10 @@ class PinnedRunnerAdapter:
 
     required_authorities = _CodexAttemptDriver.required_authorities
     reconciliation_boundary = _CodexAttemptDriver.reconciliation_boundary
-    accepted_effect_kinds = _PinnedCodexStrategy.accepted_effect_kinds
+    accepted_effect_kinds = _PinnedStrategy.accepted_effect_kinds
 
-    def __init__(self, *, backend: PinnedBackend = PinnedBackend.CODEX_SANDBOX, **kwargs) -> None:
-        selected = PinnedBackend(backend)
-        self._driver = (_PinnedDirectStrategy(**kwargs)
-                        if selected is PinnedBackend.DIRECT_LOCAL else _PinnedCodexStrategy(**kwargs))
+    def __init__(self, **kwargs) -> None:
+        self._driver = _PinnedStrategy(**kwargs)
 
     @property
     def binding_digest(self) -> str:
@@ -221,46 +179,3 @@ class PinnedRunnerAdapter:
             setattr(self._driver, name, value)
         else:
             object.__setattr__(self, name, value)
-
-
-class _PinnedDirectStrategy(_PinnedCodexStrategy):
-    provider = AttemptProvider.DIRECT_LOCAL
-
-    def __init__(self, **kwargs) -> None:
-        _CodexAttemptDriver.__init__(self, **kwargs)
-        if not isinstance(self._binding, DirectInstallationBinding):
-            raise ValueError("direct-local runner requires a direct-local binding")
-
-    def _launcher_binding_digest(self, binding: AttemptInstallation) -> str:
-        return binding.digest
-
-    @staticmethod
-    def _assert_no_project_control_surfaces(workspace: Path) -> None:
-        del workspace
-
-    def _launch_details(self, binding: AttemptInstallation, workspace: Path,
-                        request: EffectRequest) -> LaunchDetails:
-        if not isinstance(binding, DirectInstallationBinding):
-            raise CodexProviderError("direct-local runner requires a direct installation")
-        spec = self._spec(request)
-        cwd = self._execution_cwd(workspace, request)
-        if cwd != workspace and workspace not in cwd.parents:
-            raise CodexProviderError("pinned cwd escaped its workspace")
-        requested = spec.logical_argv[0]
-        if "/" in requested:
-            invocation = cwd / requested
-        else:
-            search_path = os.pathsep.join(
-                str(cwd / entry)
-                for entry in dict(binding.environment)["PATH"].split(os.pathsep)
-            )
-            found = shutil.which(requested, path=search_path)
-            if found is None:
-                raise CodexProviderError("pinned command executable is unavailable")
-            invocation = Path(found)
-        # Invocation paths carry interpreter semantics (notably pyvenv.cfg).
-        # Bind the resolved bytes without rewriting the selected invocation.
-        executable = invocation.resolve(strict=True)
-        identity = ExecutableIdentity.capture(executable)
-        return (executable, (str(invocation), *spec.logical_argv[1:]),
-                binding.environment, None, None, identity)

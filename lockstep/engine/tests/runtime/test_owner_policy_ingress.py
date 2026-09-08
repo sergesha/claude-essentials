@@ -28,9 +28,8 @@ def _config() -> dict[str, object]:
         "schema": "lockstep.runtime-provision-config/v1",
         "codex": dict(common),
         "pinned": {
-            **common,
-            "codex_home": "/owner/pinned",
-            "pinned_permission_profile": "owner-profile",
+            "backend": "direct-local",
+            "environment": common["environment"],
         },
     }
 
@@ -95,13 +94,11 @@ def test_runtime_provision_config_rejects_duplicate_object_members(
         ("config-object", "config must be a JSON object"),
         ("config-schema", "exact config schema"),
         ("binding-object", "codex must be a JSON object"),
-        ("binding-schema", "exact pinned binding schema"),
+        ("binding-schema", "direct-local binding schema"),
         ("permission-profile-type", "permission profile"),
         ("permission-profile-value", "permission profile"),
         ("environment-type", "environment"),
         ("string-field-type", "non-empty strings"),
-        ("same-homes", "homes must differ"),
-        ("pinned-profile-empty", "pinned permission profile"),
         ("grants-utf8", "replacement grants must be UTF-8"),
         ("grants-json", "replacement grants must be valid JSON"),
         ("grants-object", "replacement grants must be a JSON array"),
@@ -155,14 +152,6 @@ def test_runtime_provision_documents_reject_invalid_domain(
         codex = config["codex"]
         assert isinstance(codex, dict)
         codex["model"] = 1
-    elif mutation == "same-homes":
-        pinned = config["pinned"]
-        assert isinstance(pinned, dict)
-        pinned["codex_home"] = "/owner/codex"
-    elif mutation == "pinned-profile-empty":
-        pinned = config["pinned"]
-        assert isinstance(pinned, dict)
-        pinned["pinned_permission_profile"] = ""
     elif mutation == "grants-utf8":
         grants_bytes = b"\xff"
     elif mutation == "grants-json":

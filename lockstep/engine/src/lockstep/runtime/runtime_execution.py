@@ -9,7 +9,6 @@ from pathlib import Path
 from lockstep.runtime.catalog import RunBinding, RunCatalog
 from lockstep.runtime.blobs import BlobStore
 from lockstep.runtime.project_snapshots import ProjectSnapshotStore
-from lockstep.runtime.effects._owner_policy_values import _RuntimeBindingFacts
 from lockstep.runtime.effects.authority import EffectGrant
 from lockstep.runtime.effects.owner_policy import (
     OwnerRuntimeAuthority,
@@ -41,7 +40,7 @@ from lockstep.runtime.providers.workspaces import LocalGitWorkspaceProvider
 from lockstep.runtime.recipe_bundles import RecipeBundleRef, RecipeBundleStore
 from lockstep.recipe.authority import recipe_definition_sha256
 from lockstep.runtime.providers.claude import ClaudeRunnerAdapter
-from lockstep.runtime.providers.local import LocalMechanicsAttestor, PinnedBackend, DirectInstallationBinding
+from lockstep.runtime.providers.local import LocalMechanicsAttestor
 
 
 @dataclass(frozen=True, slots=True)
@@ -275,29 +274,12 @@ def build_runtime_execution_composition(
     )
     pinned = (
         PinnedRunnerAdapter(
-            backend=PinnedBackend.DIRECT_LOCAL,
             owner_state_dir=state_dir,
             installation=lambda: captured.pinned_installation,
             decision_gate=CodexLaunchDecisionGate(captured.pinned_installation.digest, generation=snapshot.config_generation),
             workspaces=workspaces, blobs=blobs, sandbox=LocalMechanicsAttestor(),
         )
-        if isinstance(captured.pinned_installation, DirectInstallationBinding)
-        else
-        PinnedRunnerAdapter(
-            owner_state_dir=state_dir,
-            installation=lambda: captured.pinned_installation,
-            decision_gate=CodexLaunchDecisionGate(
-                snapshot.pinned.binding_digest,
-                generation=snapshot.config_generation,
-            ),
-            workspaces=workspaces,
-            blobs=blobs,
-            sandbox=CodexSandboxAttestor(
-                cli_version=captured.pinned_installation.cli_version
-            ),
-            permission_profile=snapshot.pinned.pinned_permission_profile,
-        )
-        if captured.pinned_installation is not None and isinstance(snapshot.pinned, _RuntimeBindingFacts)
+        if captured.pinned_installation is not None
         else None
     )
     authority = OwnerRuntimeEffectAuthority(

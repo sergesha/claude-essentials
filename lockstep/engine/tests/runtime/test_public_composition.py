@@ -104,7 +104,7 @@ def _provision_config_shape() -> dict[str, object]:
     return {
         "schema": "lockstep.runtime-provision-config/v1",
         "codex": dict(common),
-        "pinned": {**common, "pinned_permission_profile": "owner-profile"},
+        "pinned": {"backend": "direct-local", "environment": common["environment"]},
     }
 
 
@@ -116,8 +116,6 @@ def _valid_provision_config(tmp_path: Path) -> dict[str, object]:
     codex_home.mkdir(mode=0o700)
     (codex_home / "auth.json").write_text("{}", encoding="utf-8")
     (codex_home / "auth.json").chmod(0o600)
-    pinned_home = tmp_path / "pinned-home"
-    pinned_home.mkdir(mode=0o700)
     private_tmp = tmp_path / "private-tmp"
     private_tmp.mkdir(mode=0o700)
     config = _provision_config_shape()
@@ -135,11 +133,7 @@ def _valid_provision_config(tmp_path: Path) -> dict[str, object]:
         codex_home=str(codex_home),
         environment=environment,
     )
-    pinned.update(
-        executable=str(executable),
-        codex_home=str(pinned_home),
-        environment=environment,
-    )
+    pinned["environment"] = environment
     return config
 
 
@@ -423,9 +417,7 @@ def test_owner_provision_runtime_rejects_oversize_config_before_decoding(
     assert not (owner_state / "runtime-owner" / "snapshot.json").exists()
 
 
-@pytest.mark.parametrize("member", ["codex", "pinned"])
 def test_owner_provision_runtime_rejects_binding_home_symlink(
-    member: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -433,10 +425,10 @@ def test_owner_provision_runtime_rejects_binding_home_symlink(
     project = tmp_path / "project"
     _write_empty_runtime_recipe(project)
     config_value = _valid_provision_config(tmp_path)
-    binding = config_value[member]
+    binding = config_value["codex"]
     assert isinstance(binding, dict)
     target = Path(str(binding["codex_home"]))
-    linked_home = tmp_path / f"{member}-linked-home"
+    linked_home = tmp_path / "codex-linked-home"
     linked_home.symlink_to(target, target_is_directory=True)
     binding["codex_home"] = str(linked_home)
     config = tmp_path / "config.json"
@@ -467,9 +459,7 @@ def test_owner_provision_runtime_rejects_binding_home_symlink(
     assert not (owner_state / "runtime-owner" / "snapshot.json").exists()
 
 
-@pytest.mark.parametrize("member", ["codex", "pinned"])
 def test_owner_provision_runtime_rejects_shared_home_mode(
-    member: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -477,7 +467,7 @@ def test_owner_provision_runtime_rejects_shared_home_mode(
     project = tmp_path / "project"
     _write_empty_runtime_recipe(project)
     config_value = _valid_provision_config(tmp_path)
-    binding = config_value[member]
+    binding = config_value["codex"]
     assert isinstance(binding, dict)
     Path(str(binding["codex_home"])).chmod(0o704)
     config = tmp_path / "config.json"
@@ -495,9 +485,7 @@ def test_owner_provision_runtime_rejects_shared_home_mode(
     assert not (owner_state / "runtime-owner" / "snapshot.json").exists()
 
 
-@pytest.mark.parametrize("member", ["codex", "pinned"])
-def test_owner_provision_runtime_enforces_distinct_credential_roles(
-    member: str,
+def test_owner_provision_runtime_requires_codex_credentials(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -505,14 +493,10 @@ def test_owner_provision_runtime_enforces_distinct_credential_roles(
     project = tmp_path / "project"
     _write_empty_runtime_recipe(project)
     config_value = _valid_provision_config(tmp_path)
-    binding = config_value[member]
+    binding = config_value["codex"]
     assert isinstance(binding, dict)
     auth = Path(str(binding["codex_home"])) / "auth.json"
-    if member == "codex":
-        auth.unlink()
-    else:
-        auth.write_text("{}", encoding="utf-8")
-        auth.chmod(0o600)
+    auth.unlink()
     config = tmp_path / "config.json"
     config.write_text(json.dumps(config_value), encoding="utf-8")
     grants = tmp_path / "grants.json"
