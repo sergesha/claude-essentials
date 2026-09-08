@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 import re
 import shutil
@@ -247,12 +248,19 @@ class _PinnedDirectStrategy(_PinnedCodexStrategy):
             raise CodexProviderError("pinned cwd escaped its workspace")
         requested = spec.logical_argv[0]
         if "/" in requested:
-            executable = (cwd / requested).resolve(strict=True)
+            invocation = cwd / requested
         else:
-            found = shutil.which(requested, path=dict(binding.environment)["PATH"])
+            search_path = os.pathsep.join(
+                str(cwd / entry)
+                for entry in dict(binding.environment)["PATH"].split(os.pathsep)
+            )
+            found = shutil.which(requested, path=search_path)
             if found is None:
                 raise CodexProviderError("pinned command executable is unavailable")
-            executable = Path(found).resolve(strict=True)
+            invocation = Path(found)
+        # Invocation paths carry interpreter semantics (notably pyvenv.cfg).
+        # Bind the resolved bytes without rewriting the selected invocation.
+        executable = invocation.resolve(strict=True)
         identity = ExecutableIdentity.capture(executable)
-        return (executable, (str(executable), *spec.logical_argv[1:]),
+        return (executable, (str(invocation), *spec.logical_argv[1:]),
                 binding.environment, None, None, identity)
