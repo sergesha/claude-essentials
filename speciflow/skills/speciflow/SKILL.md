@@ -89,11 +89,13 @@ activation disabled; never offer unqualified installation.
 ## Superpowers boundary
 
 SpeciFlow selects the cross-tool action. Apply every applicable Superpowers
-skill by its native trigger before the selected activity; architectural or
-creative planning uses `superpowers:brainstorming`, approved designs use
-`superpowers:writing-plans`, and any SpeciFlow edit uses
-`superpowers:writing-skills`. Superpowers may apply its discipline only to the
-bounded selected activity, then must return control to SpeciFlow.
+skill by its native trigger before the selected activity. Architectural or
+creative planning uses `superpowers:brainstorming`; follow the path selected
+by that installed skill, including whether it calls for
+`superpowers:writing-plans`. Preserve that path's required approval and
+verification. Any SpeciFlow edit uses `superpowers:writing-skills`.
+Superpowers may apply its discipline only to the bounded selected activity,
+then must return control to SpeciFlow.
 
 Do not define SpeciFlow phases, statuses, tasks, readiness, assignments, a second graph, queues, or cursors. Do not let Superpowers select cross-tool actions or the next Bead.
 
