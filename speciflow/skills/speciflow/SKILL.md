@@ -34,6 +34,7 @@ report also needs the reporting route.
 | Clarification, design interview, ambiguity, domain terms, research, or prototype selection | [references/grilling-integration.md](references/grilling-integration.md) |
 | Human-invoked original Wayfinder chart, resolve, or fresh resume | [references/grilling-integration.md](references/grilling-integration.md), [references/wayfinding.md](references/wayfinding.md), [references/operations.md](references/operations.md), [references/transitions.md](references/transitions.md) |
 | User-requested host installation | [references/installation.md](references/installation.md) |
+| Original grilling-family installation, availability, or update compatibility | [references/installation.md](references/installation.md), [references/grilling-integration.md](references/grilling-integration.md) |
 
 Creating Beads issues from OpenSpec remains a cross-owner projection when
 its exact preview is already approved; that continuation still reads

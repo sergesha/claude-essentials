@@ -13,6 +13,16 @@ Git initialization, each selected native-owner initialization with its commit
 effect, and a final live status check. Keep different owners as separate
 actions.
 
+When setup includes an activity that selected an original grilling-family
+capability, include a concrete host installation item only when current
+evidence says the dependency is missing or the user explicitly selected a
+refresh. Do not reinstall an already available compatible closure. Include any
+necessary project configuration as a separate item and show only effects
+required by that activity. Use [installation.md](installation.md) for the host
+action. Installation is not project setup and does not authorize either item.
+If neither item applies, omit it; an unavailable supporting dependency does not
+block unrelated storage, planning Git, or native-owner setup.
+
 Storage `resolve` is a read-only path/metadata query; `init` creates the
 directory and metadata. Do not substitute resolution for initialization.
 Use the project-specific `data_root` and native-root locations from
