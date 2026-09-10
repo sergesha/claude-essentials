@@ -8,9 +8,14 @@ disable-model-invocation: true
 
 ## Absolute boundary
 
-**SpeciFlow is only a skill around Backlog.md, OpenSpec, Beads/Dolt, and Superpowers.**
+**SpeciFlow coordinates Backlog.md, OpenSpec, Beads/Dolt, and Product Git/CI
+through their native interfaces. Superpowers and the original
+`mattpocock/skills` family are supporting disciplines for selected work.**
 
-**SpeciFlow owns no process or state.** Use the four tools through their native interfaces; do not create or assume a `speciflow` command. Native tool edits remain authoritative. Never copy their content into a SpeciFlow schema.
+**SpeciFlow owns no process or state.** Use native owners through their native
+interfaces; do not create or assume a `speciflow` command. Native owner edits
+remain authoritative. Supporting disciplines never acquire owner authority.
+Never copy owner content into a SpeciFlow schema.
 
 ## Required reading
 
@@ -26,6 +31,7 @@ report also needs the reporting route.
 | Native operations or any proposed mutation | [references/operations.md](references/operations.md) |
 | Status, next, views, or export | [references/operations.md](references/operations.md), [references/diagnostics.md](references/diagnostics.md), [references/transitions.md](references/transitions.md) |
 | Cross-owner refinement, projection, application, promotion, archive, closure, or any state report | [references/transitions.md](references/transitions.md) |
+| Clarification, design interview, ambiguity, domain terms, research, or prototype selection | [references/grilling-integration.md](references/grilling-integration.md) |
 | User-requested host installation | [references/installation.md](references/installation.md) |
 
 Creating Beads issues from OpenSpec remains a cross-owner projection when
@@ -88,3 +94,9 @@ creative planning uses `superpowers:brainstorming`, approved designs use
 bounded selected activity, then must return control to SpeciFlow.
 
 Do not define SpeciFlow phases, statuses, tasks, readiness, assignments, a second graph, queues, or cursors. Do not let Superpowers select cross-tool actions or the next Bead.
+
+When an original grilling-family method applies, use
+[references/grilling-integration.md](references/grilling-integration.md) to
+resolve and invoke its actual external source, pass owner-aware context, and
+return its result. The original method supplies its discipline only; SpeciFlow
+retains cross-owner selection.
