@@ -31,6 +31,11 @@ may invoke them. Never call one from SpeciFlow or reproduce a hidden invocation
 by reading and executing its instructions. A prior direct invocation continues
 within the same unchanged authorized activity.
 
+After an explicit human Wayfinder invocation, apply
+[wayfinding.md](wayfinding.md) to supply its documented `Other` tracker and
+domain context through native owners. This binding does not turn Wayfinder into
+a reusable method or authorize SpeciFlow to invoke it.
+
 ## Actual source and closure resolution
 
 Resolve the applicable installed skill to the original
@@ -111,6 +116,13 @@ identify their project-defined role; do not make a copy canonical merely by
 writing it. A product-scope proposal returns to Backlog for approval. Research
 findings and prototype links go only into authorized native artifacts as
 evidence or inputs to the owner decision.
+
+For an explicitly invoked multi-session Wayfinder activity, preserve the full
+original chart, one-selected-ticket resolution, research and prototype
+capabilities, and fresh resume through the native binding in
+[wayfinding.md](wayfinding.md). Apply its intentional owner departures rather
+than storing the semantic answer in a ticket or letting Wayfinder select the
+next cross-owner action.
 
 Agreement on meaning, semantic review, and authorization for the exact
 mutation are separate. Research delegation or artifact capture, prototype

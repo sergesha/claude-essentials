@@ -32,6 +32,7 @@ report also needs the reporting route.
 | Status, next, views, or export | [references/operations.md](references/operations.md), [references/diagnostics.md](references/diagnostics.md), [references/transitions.md](references/transitions.md) |
 | Cross-owner refinement, projection, application, promotion, archive, closure, or any state report | [references/transitions.md](references/transitions.md) |
 | Clarification, design interview, ambiguity, domain terms, research, or prototype selection | [references/grilling-integration.md](references/grilling-integration.md) |
+| Human-invoked original Wayfinder chart, resolve, or fresh resume | [references/grilling-integration.md](references/grilling-integration.md), [references/wayfinding.md](references/wayfinding.md), [references/operations.md](references/operations.md), [references/transitions.md](references/transitions.md) |
 | User-requested host installation | [references/installation.md](references/installation.md) |
 
 Creating Beads issues from OpenSpec remains a cross-owner projection when
@@ -100,3 +101,7 @@ When an original grilling-family method applies, use
 resolve and invoke its actual external source, pass owner-aware context, and
 return its result. The original method supplies its discipline only; SpeciFlow
 retains cross-owner selection.
+
+Wayfinder remains a human-invoked original entrypoint. After that explicit
+invocation, apply [references/wayfinding.md](references/wayfinding.md) as its
+native owner binding; never call Wayfinder from SpeciFlow.

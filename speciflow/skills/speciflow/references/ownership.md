@@ -39,6 +39,7 @@ Use selected tools to the extent the work needs:
 | Committed product initiative | A Backlog task expressing the outcome, scope, product acceptance criteria, and priority. Link an existing brief for detail. |
 | Specification and technical refinement | An OpenSpec change with requirements, scenarios, design, and, when authorized, its native design-time task checklist. |
 | Concrete implementation | Beads issues with bounded work, verification, executable dependencies, and references to the approved OpenSpec source. |
+| Multi-session Wayfinder work | A Beads parent/index and bounded child work linked to Backlog scope and current OpenSpec questions; semantic questions, answers, and rationale remain in OpenSpec. |
 
 When Backlog is selected for a committed initiative, search for and reuse its
 framing task; if missing, create it through the native CLI under the applicable
@@ -89,6 +90,12 @@ and code are project sources whose documented role must be read and respected;
 copying or updating one does not automatically make it canonical. Agreement on
 meaning, semantic review, and authorization for an exact mutation remain
 separate decisions.
+
+In Wayfinder, Beads owns the map relationship, dependency, readiness, claim,
+and completion of bounded decision work. Its native assignee identifies the
+claimant, not the semantic owner. A map and its resolution comments are indexes
+to owner results; neither may become a second product scope or design-answer
+store. Apply [wayfinding.md](wayfinding.md) after explicit human invocation.
 
 ## Review authority
 
