@@ -8,9 +8,14 @@ disable-model-invocation: true
 
 ## Absolute boundary
 
-**SpeciFlow is only a skill around Backlog.md, OpenSpec, Beads/Dolt, and Superpowers.**
+**SpeciFlow coordinates Backlog.md, OpenSpec, Beads/Dolt, and Product Git/CI
+through their native interfaces. Superpowers and the original
+`mattpocock/skills` family are supporting disciplines for selected work.**
 
-**SpeciFlow owns no process or state.** Use the four tools through their native interfaces; do not create or assume a `speciflow` command. Native tool edits remain authoritative. Never copy their content into a SpeciFlow schema.
+**SpeciFlow owns no process or state.** Use native owners through their native
+interfaces; do not create or assume a `speciflow` command. Native owner edits
+remain authoritative. Supporting disciplines never acquire owner authority.
+Never copy owner content into a SpeciFlow schema.
 
 ## Required reading
 
@@ -26,7 +31,10 @@ report also needs the reporting route.
 | Native operations or any proposed mutation | [references/operations.md](references/operations.md) |
 | Status, next, views, or export | [references/operations.md](references/operations.md), [references/diagnostics.md](references/diagnostics.md), [references/transitions.md](references/transitions.md) |
 | Cross-owner refinement, projection, application, promotion, archive, closure, or any state report | [references/transitions.md](references/transitions.md) |
+| Clarification, design interview, ambiguity, domain terms, research, or prototype selection | [references/grilling-integration.md](references/grilling-integration.md) |
+| Human-invoked original Wayfinder chart, resolve, or fresh resume | [references/grilling-integration.md](references/grilling-integration.md), [references/wayfinding.md](references/wayfinding.md), [references/operations.md](references/operations.md), [references/transitions.md](references/transitions.md) |
 | User-requested host installation | [references/installation.md](references/installation.md) |
+| Original grilling-family installation, availability, or update compatibility | [references/installation.md](references/installation.md), [references/grilling-integration.md](references/grilling-integration.md) |
 
 Creating Beads issues from OpenSpec remains a cross-owner projection when
 its exact preview is already approved; that continuation still reads
@@ -81,10 +89,22 @@ activation disabled; never offer unqualified installation.
 ## Superpowers boundary
 
 SpeciFlow selects the cross-tool action. Apply every applicable Superpowers
-skill by its native trigger before the selected activity; architectural or
-creative planning uses `superpowers:brainstorming`, approved designs use
-`superpowers:writing-plans`, and any SpeciFlow edit uses
-`superpowers:writing-skills`. Superpowers may apply its discipline only to the
-bounded selected activity, then must return control to SpeciFlow.
+skill by its native trigger before the selected activity. Architectural or
+creative planning uses `superpowers:brainstorming`; follow the path selected
+by that installed skill, including whether it calls for
+`superpowers:writing-plans`. Preserve that path's required approval and
+verification. Any SpeciFlow edit uses `superpowers:writing-skills`.
+Superpowers may apply its discipline only to the bounded selected activity,
+then must return control to SpeciFlow.
 
 Do not define SpeciFlow phases, statuses, tasks, readiness, assignments, a second graph, queues, or cursors. Do not let Superpowers select cross-tool actions or the next Bead.
+
+When an original grilling-family method applies, use
+[references/grilling-integration.md](references/grilling-integration.md) to
+resolve and invoke its actual external source, pass owner-aware context, and
+return its result. The original method supplies its discipline only; SpeciFlow
+retains cross-owner selection.
+
+Wayfinder remains a human-invoked original entrypoint. After that explicit
+invocation, apply [references/wayfinding.md](references/wayfinding.md) as its
+native owner binding; never call Wayfinder from SpeciFlow.
