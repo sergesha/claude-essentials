@@ -67,3 +67,13 @@ Backlog; keep execution state in Beads and source evidence in Product Git/CI.
 Persist only authorized owner-native artifacts and links. The result of an
 original method is not approval for transfer into production, external
 publication, a new owner write, or any lifecycle transition.
+
+For human-invoked Wayfinder, apply [wayfinding.md](wayfinding.md). A child
+scoped only to bounded research or prerequisite work may complete in Beads when
+its own acceptance is met, while its proposed semantic answer remains pending.
+Any child that promises to resolve a semantic decision, regardless of label,
+does not resolve until the user-provided answer and rationale have been recorded
+and verified in the current OpenSpec context under the applicable authorization.
+The Beads comment and map entry link that owner result; they do not copy it or
+approve it. Beads close, OpenSpec acceptance, map update, Backlog scope change,
+prototype promotion, and Product Git evidence remain separate effects.

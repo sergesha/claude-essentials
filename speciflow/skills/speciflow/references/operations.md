@@ -16,6 +16,10 @@ is selected, apply [grilling-integration.md](grilling-integration.md). Resolve
 and invoke the actual applicable original method with its bounded owner-aware
 context, then return its result to SpeciFlow before selecting an owner action.
 
+When the human explicitly invokes original Wayfinder, also apply
+[wayfinding.md](wayfinding.md). Supply its owner-aware `Other` tracker context;
+do not invoke Wayfinder from SpeciFlow or replace it with local operations.
+
 Product Git and CI own source changes, review history, dirty state, and
 implementation evidence. They do not own OpenSpec approval or Beads status.
 
@@ -144,6 +148,14 @@ assignment. A guessed ID, local lock, note, Git commit, OpenSpec validation,
 or review verdict is not claim, create, or other owner-transition evidence.
 Never hide an owner result with planning Git or duplicate the same owner's
 native commit.
+
+For Wayfinder child creation, inspect the installed native parent-label
+behavior and use its documented no-inheritance facility (`--no-inherit-labels`
+in qualified Beads 1.2.2) so only the parent is `wayfinder:map`. Verify every
+returned child before creating further edges. Treat documented or observed
+native audit records, including `.beads/interactions.jsonl`, as operation
+effects alongside Dolt commits; preserve and report them rather than silently
+resetting them.
 
 On failure, lost or ambiguous output, or an uncertain create result, stop and report native evidence and uncommitted changes.
 
