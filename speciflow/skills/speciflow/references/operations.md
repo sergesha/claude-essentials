@@ -49,6 +49,11 @@ directory. Stop if the root or binding is uncertain.
 
 ## Approved mutations
 
+Retrieve the concrete target and payload from available source and evidence
+before selecting an operation. A summary of prior approval or completed review
+does not supply details it omits; inspect those details without repeating the
+review or asking for unchanged authorization again.
+
 Before invoking an original method, inspect its actual closure for delegation,
 artifact, branch, commit, publication, and source-write effects. Include every
 proposed effect in the applicable exact preview below. The read-only interview
@@ -99,6 +104,13 @@ then commit only native data in the approved data repository.
 
 ## Semantic review
 
+This gate covers Backlog, OpenSpec, Beads, and related planning or executable
+coordination mutations. Product code and test edits within approved scope
+follow the applicable Superpowers implementation and review discipline;
+they do not acquire an extra pre-edit coordination review merely because
+product behavior changes. Changes to owner requirements or coordination
+state still use this gate.
+
 Use effects observed from the installed operation's documentation and the
 exact proposed payload as the input to this decision. A review reason names
 that observed effect and its evidence; the word `init` or the existence of new
@@ -109,6 +121,20 @@ files alone does not establish a semantic choice.
 | Documented semantic effects | State `Review: required — observed effect and evidence`, then perform the required review |
 | Documented read-only or mechanical effects | State `Review: skipped — observed effect and evidence` |
 | Effects not inspected | Inspect the documented effects read-only, then determine review |
+
+Recording existing verified evidence is mechanical only when the exact text
+and documented native effects change no owner semantics, including approved
+scope, security or contract boundaries, requirements, acceptance criteria,
+dependencies, readiness, assignment, status, or meaning of completion. For
+example, appending an artifact revision, test command, observed exit code,
+and result needs no separate semantic review merely because it adds text.
+Retain its native-root check and applicable authorization; post-check the
+record and all documented effects, including native audit or commit effects
+when present. Expected effects are not evidence that they occurred.
+A comment declaring work ready or complete, or an operation changing a
+dependency, claim, or closure, changes an owner assertion or state; evaluate
+that semantic effect rather than treating the record's field name as evidence
+of mechanical work.
 
 The last row is an inspection action, not another review value. Review and
 approval readiness are separate: documented mechanical storage effects can
@@ -126,6 +152,24 @@ report `Review: required — completed, no blockers`; proceed under its applicab
 authorization without repeating that review. Completed review is not skipped
 review.
 
+A completed review may cover both the result and its exact owner-scoped
+completion operation when it covers all relevant owner inputs and effects,
+including the exact target and payload, approved scope and constraints,
+acceptance coverage, evidence and its limits, dependencies, and readiness or
+claim state. Retrieve the exact reviewed payload from that existing evidence:
+trusting the review's verdict does not fill in text omitted from its summary,
+and reading that text does not reopen the review. Reuse the review while its
+relevant inputs and effects remain unchanged. This does not waive verification
+freshness required by the applicable native methodology.
+A material difference found by the native precheck requires review of the
+uncovered change, not the unchanged package again. A progress review alone
+does not cover completion. This is reuse of existing
+evidence, not a new SpeciFlow artifact or approval record.
+Review and mutation authorization remain separate: design approval or a
+review verdict alone does not authorize an additional native claim or close.
+Recheck the native target before execution and verify its actual result
+afterward; different owners retain their own transitions and authorization.
+
 A single owner-scoped action may preview native init followed by a conditional
 commit of exactly the paths that init changed. One approval covers that pair
 only when both effects were shown together. Inspect the actual Git state after
@@ -142,9 +186,11 @@ never hide Git initialization in storage preparation or document mutation.
 
 For Beads, observe the native Dolt commit policy and use only documented native
 Beads commit behavior. Required but unperformed automatic commits are
-`incomplete`; lost or ambiguous output is `unknown`. Use a documented atomic claim
-when available; otherwise prohibit automatic claim and require manual native
-assignment. A guessed ID, local lock, note, Git commit, OpenSpec validation,
+`incomplete`; lost or ambiguous output is `unknown`. For a concretely authorized
+claim, use a documented atomic claim when available; otherwise prohibit
+automatic claim and require authorized manual native assignment. Readiness or
+approval to implement alone does not select or authorize a claim operation.
+A guessed ID, local lock, note, Git commit, OpenSpec validation,
 or review verdict is not claim, create, or other owner-transition evidence.
 Never hide an owner result with planning Git or duplicate the same owner's
 native commit.
