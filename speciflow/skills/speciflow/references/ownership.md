@@ -13,6 +13,10 @@ Each concern has one authoritative owner:
 Product Git and CI own implementation evidence; code evidence is never Beads
 status or OpenSpec design approval.
 
+Superpowers and the original `mattpocock/skills` methods are supporting
+disciplines. They shape how a selected activity is explored, implemented, or
+verified but own none of the product, design, execution, or source state above.
+
 ## Native artifacts and granularity
 
 Select owners before checking their availability:
@@ -78,6 +82,13 @@ substitution. Validation, review, downstream acceptance, and implementation
 evidence do not supply that approval. Use the ephemeral comparison in
 [transitions.md](transitions.md); never persist a coverage table or SpeciFlow
 traceability record.
+
+Definitions, design answers, and rationale produced during an interview belong
+to the current OpenSpec context. Existing glossaries, context documents, ADRs,
+and code are project sources whose documented role must be read and respected;
+copying or updating one does not automatically make it canonical. Agreement on
+meaning, semantic review, and authorization for an exact mutation remain
+separate decisions.
 
 ## Review authority
 

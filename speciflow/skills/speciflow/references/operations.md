@@ -11,6 +11,11 @@ Beads/Dolt is the sole owner of executable decomposition, dependencies, readines
 For a selected activity, invoke every applicable Superpowers skill by its
 native trigger before that bounded activity, then return control to SpeciFlow.
 
+When clarification, a design interview, domain work, research, or a prototype
+is selected, apply [grilling-integration.md](grilling-integration.md). Resolve
+and invoke the actual applicable original method with its bounded owner-aware
+context, then return its result to SpeciFlow before selecting an owner action.
+
 Product Git and CI own source changes, review history, dirty state, and
 implementation evidence. They do not own OpenSpec approval or Beads status.
 
@@ -39,6 +44,12 @@ bind the native command through an explicit root argument or that exact working
 directory. Stop if the root or binding is uncertain.
 
 ## Approved mutations
+
+Before invoking an original method, inspect its actual closure for delegation,
+artifact, branch, commit, publication, and source-write effects. Include every
+proposed effect in the applicable exact preview below. The read-only interview
+needs no mutation approval; any covered prior authorization remains effective
+while its scope, target, payload, and effects are unchanged.
 
 For product framing, search native Backlog tasks as well as briefs before
 creation. Inspect configured fields, create or update the framing task through

@@ -25,6 +25,7 @@ EXPECTED_DISTRIBUTABLE_FILES = frozenset(
         ".codex-plugin/plugin.json",
         "skills/speciflow/SKILL.md",
         "skills/speciflow/agents/openai.yaml",
+        "skills/speciflow/references/grilling-integration.md",
         "skills/speciflow/references/operations.md",
         "skills/speciflow/references/ownership.md",
         "skills/speciflow/references/transitions.md",

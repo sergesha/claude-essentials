@@ -59,3 +59,11 @@ non-authoritative regardless of copy approval and cannot be named final,
 canonical, or approved for a concern owned elsewhere. Only that owner can
 incorporate and approve it through its documented interface and lifecycle. One
 tool's verdict never supplies another owner's transition.
+
+Treat interview decisions, research findings, prototype artifacts, branches,
+and commits as supporting results. Return definitions, design answers, and
+rationale to the current OpenSpec context; return product-scope proposals to
+Backlog; keep execution state in Beads and source evidence in Product Git/CI.
+Persist only authorized owner-native artifacts and links. The result of an
+original method is not approval for transfer into production, external
+publication, a new owner write, or any lifecycle transition.
