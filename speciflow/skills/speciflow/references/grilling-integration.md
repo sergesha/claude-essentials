@@ -48,6 +48,13 @@ especially for `research`. Inspect the resolved entrypoint and every linked
 file or invoked reusable skill in its current closure before use. Hold that
 actual loaded closure stable for the bounded activity.
 
+Treat an installed update as unqualified until those closure, invocation, and
+effect reads complete for the new source. Record the installed source and
+actual revision when observable, the closure files checked, and any changed
+effects in review evidence. A higher version or newer revision alone does not
+establish compatibility or authorize a new effect. Do not switch closures in
+the middle of an interview or supporting activity.
+
 Invoke the resolved original method through the host's native skill interface;
 calling an ordinary question “grilling” is not loading the method. In Codex,
 successful local discovery followed by a complete read of the resolved
@@ -148,3 +155,8 @@ scope. Do not substitute a same-named skill, vendor upstream source, invent an
 invocation, install or configure a host, or create runtime or state.
 Installation remains a separate explicit user-requested activity through
 [installation.md](installation.md).
+
+After an incompatible update, continue independent owner-native work in the
+approved scope. Restoring an earlier revision is a separate host action only
+when the host documents it and the applicable authorization covers its exact
+effects; SpeciFlow does not maintain a dependency lock or vendored copy.

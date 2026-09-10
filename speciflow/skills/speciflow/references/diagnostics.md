@@ -1,9 +1,15 @@
 # Derived diagnostics
 
-`status` is a live, read-only, owner-separated view. The actual user reply
-contains this filled table: four owner rows and all seven named columns.
-This is the minimum report even for a brief answer; brevity shortens cell
-text while retaining the rows and columns.
+`status` is a live, read-only, owner-separated view. Unless the user explicitly
+requests another serialization or layout, construct the actual reply with
+this exact shape: the seven-column header below, followed in this order by one
+row each for Backlog.md, OpenSpec, Beads/Dolt, and Superpowers. Fill every cell.
+This is the minimum report even for a brief answer. A scope phrase such as
+“only Beads” shortens owner detail and leaves Backlog.md and OpenSpec unqueried
+as `N/A`; it does not remove rows or columns. Evaluate the Superpowers native
+trigger independently and fill that row from current target evidence, querying
+it only when selected. An explicit user request for another serialization,
+layout, or field subset takes precedence over this table shape.
 
 | Owner | Selection reason | Result | Native root | Revision/version | Interface | Read time |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -35,6 +41,27 @@ Mark unavailable evidence `not observed`. Missing report metadata does not
 change an evidenced owner result: an absent required CLI is still `broken`.
 There is no aggregate status. Diagnostics may not repair, create, synchronize,
 archive, or close native artifacts.
+
+## Selected supporting dependency
+
+When the current selected activity uses an original grilling-family method,
+append a separate read-only dependency block after the four owner rows with
+exactly these fields:
+
+```text
+Supporting dependency
+Capability: <selected original method>
+Selection reason: <why this activity requires it>
+Installed source/revision: <observed original source and revision, or not observed>
+Closure availability: <entrypoint and linked/invoked files completely readable, or exact gap>
+Compatibility limitation: <none observed, or exact affected capability/effect>
+```
+
+This block is not a fifth owner, aggregate result, or persisted status. Derive
+it only from current target evidence. A snapshot-only request leaves
+unsupplied target metadata `not observed`; ambient host metadata cannot fill
+it. When no grilling-family method is selected, omit the block and do not query
+that dependency. In particular, a Beads-only status request does not select it.
 
 ## Per-owner result
 
