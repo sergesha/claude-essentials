@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.3.0](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.2.6...speciflow-v0.3.0) (2026-09-10)
+
+
+### Features
+
+* **speciflow:** bind wayfinding to native planning owners ([5632d80](https://github.com/sergesha/claude-essentials/commit/5632d804f474037eb4408231d8a9dda19ba054cd))
+* **speciflow:** compose upstream grilling with native owners ([e2d7c43](https://github.com/sergesha/claude-essentials/commit/e2d7c4375755e4c5761e436deb8e4646abeeb754))
+* **speciflow:** integrate original grilling methods with native owners ([f10fa90](https://github.com/sergesha/claude-essentials/commit/f10fa903c6df216e776d864db3b94922113590cf))
+
+
+### Bug Fixes
+
+* **speciflow:** bound administrative review and authorization ([12bf2f9](https://github.com/sergesha/claude-essentials/commit/12bf2f9bb2c2db23fad6ed12a8a6f456464c226e))
+
 ## [0.2.6](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.2.5...speciflow-v0.2.6) (2026-09-06)
 
 
