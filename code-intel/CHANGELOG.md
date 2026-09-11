@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.4](https://github.com/sergesha/claude-essentials/compare/code-intel-v0.2.3...code-intel-v0.2.4) (2026-09-11)
+
+
+### Bug Fixes
+
+* align Claude Code and Codex plugin declarations for full symmetry ([4cfb43a](https://github.com/sergesha/claude-essentials/commit/4cfb43aa2d03cf058e2eb5df4e14784a52723a24))
+
 ## [0.2.3](https://github.com/sergesha/claude-essentials/compare/code-intel-v0.2.2...code-intel-v0.2.3) (2026-09-06)
 
 
