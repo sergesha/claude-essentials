@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.7.0](https://github.com/sergesha/claude-essentials/compare/tech-radar-v0.6.2...tech-radar-v0.7.0) (2026-09-11)
+
+
+### Features
+
+* **tech-radar:** add native Codex integration ([#71](https://github.com/sergesha/claude-essentials/issues/71)) ([dc65b8f](https://github.com/sergesha/claude-essentials/commit/dc65b8faef214484c3d018aa67ef707d5fe7034b))
+* **tech-radar:** restore plugin in shared marketplace ([#65](https://github.com/sergesha/claude-essentials/issues/65)) ([f907dab](https://github.com/sergesha/claude-essentials/commit/f907dab10b5aba035ff8d915574bb47f091bffdd))
+
+
+### Bug Fixes
+
+* align Claude Code and Codex plugin declarations for full symmetry ([378a46f](https://github.com/sergesha/claude-essentials/commit/378a46fa14610886703c994d10b311bcdea93e9c))
+* **tech-radar:** reload changed SearXNG config ([#76](https://github.com/sergesha/claude-essentials/issues/76)) ([c4981e9](https://github.com/sergesha/claude-essentials/commit/c4981e93e301d45537217d81b417032638f29919))
+
 ## [0.6.2](https://github.com/sergesha/claude-essentials/compare/tech-radar-v0.6.1...tech-radar-v0.6.2) (2026-09-11)
 
 
