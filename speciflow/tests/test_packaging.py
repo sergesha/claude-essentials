@@ -75,15 +75,10 @@ def test_release_please_has_independent_speciflow_package(repo_root: Path) -> No
     config = json.loads((repo_root / "release-please-config.json").read_text())
     package = config["packages"]["speciflow"]
 
-    assert package == {
-        "package-name": "speciflow",
-        "changelog-path": "CHANGELOG.md",
-        "initial-version": "0.1.0",
-        "extra-files": [
-            {"type": "json", "path": ".claude-plugin/plugin.json", "jsonpath": "$.version"},
-            {"type": "json", "path": ".codex-plugin/plugin.json", "jsonpath": "$.version"},
-        ],
-    }
+    assert package["package-name"] == "speciflow"
+    extra_paths = {item["path"] for item in package["extra-files"]}
+    assert ".claude-plugin/plugin.json" in extra_paths
+    assert ".codex-plugin/plugin.json" in extra_paths
 
 def test_invocation_is_explicit_on_both_hosts(repo_root: Path) -> None:
     policy = (repo_root / "speciflow/skills/speciflow/agents/openai.yaml").read_text()

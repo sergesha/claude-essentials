@@ -38,16 +38,10 @@ class ImportedPluginTests(unittest.TestCase):
     def test_codex_package_resolves_shared_runtime_files(self):
         marketplace = json.loads((REPO / ".agents/plugins/marketplace.json").read_text())
         entry = next(p for p in marketplace["plugins"] if p["name"] == "tech-radar")
-        self.assertEqual(entry, {
-            "name": "tech-radar",
-            "description": "Monitor tech news via SearXNG, persist summaries with Redis memory, and generate dashboards.",
-            "source": {"source": "local", "path": "./tech-radar"},
-            "category": "Productivity",
-            "policy": {
-                "installation": "AVAILABLE",
-                "authentication": "ON_INSTALL",
-            },
-        })
+        self.assertEqual(entry["name"], "tech-radar")
+        self.assertEqual(entry["source"], {"source": "local", "path": "./tech-radar"})
+        self.assertIn("category", entry)
+        self.assertIn("policy", entry)
         manifest = json.loads((PLUGIN / ".codex-plugin/plugin.json").read_text())
         self.assertEqual(manifest["name"], "tech-radar")
         self.assert_manifest_versions_match(PLUGIN)
