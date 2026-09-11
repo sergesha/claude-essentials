@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.2](https://github.com/sergesha/claude-essentials/compare/tech-radar-v0.6.1...tech-radar-v0.6.2) (2026-09-11)
+
+
+### Bug Fixes
+
+* align Claude Code and Codex plugin declarations for full symmetry ([4cfb43a](https://github.com/sergesha/claude-essentials/commit/4cfb43aa2d03cf058e2eb5df4e14784a52723a24))
+
 ## [0.6.1](https://github.com/sergesha/claude-essentials/compare/tech-radar-v0.6.0...tech-radar-v0.6.1) (2026-09-07)
 
 
