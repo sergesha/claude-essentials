@@ -1,6 +1,6 @@
 {
   "name": "continuous-learning",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Capture runtime findings and promote them into versioned project documentation.",
   "author": {
     "name": "sergesha"

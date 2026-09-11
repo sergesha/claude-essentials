@@ -5,6 +5,14 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0](https://github.com/sergesha/claude-essentials/compare/continuous-learning-v0.2.0...continuous-learning-v0.3.0) (2026-09-11)
+
+
+### Features
+
+* add continuous-learning plugin ([7dde0f4](https://github.com/sergesha/claude-essentials/commit/7dde0f4cc2d3c8b3d42f2682f083af3549c737f2))
+* **continuous-learning:** add native Codex integration ([#67](https://github.com/sergesha/claude-essentials/issues/67)) ([86cd948](https://github.com/sergesha/claude-essentials/commit/86cd94845150e6c5ec1cac750d945aa7ee7b3986))
+
 ## [0.2.0](https://github.com/sergesha/claude-essentials/compare/continuous-learning-v0.1.0...continuous-learning-v0.2.0) (2026-09-06)
 
 
