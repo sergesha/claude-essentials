@@ -3,7 +3,7 @@
   "name": "tech-radar",
   "displayName": "Tech Radar",
   "description": "AI-powered technology scout: monitors news via SearXNG, stores summaries with semantic search in Redis, generates HTML dashboards.",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "author": {
     "name": "sergesha"
   },
