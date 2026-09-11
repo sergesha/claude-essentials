@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.5](https://github.com/sergesha/claude-essentials/compare/code-intel-v0.2.4...code-intel-v0.2.5) (2026-09-11)
+
+
+### Bug Fixes
+
+* **code-intel,lockstep:** remove duplicate hooks declaration from Claude plugin.json ([6175376](https://github.com/sergesha/claude-essentials/commit/6175376b85bfaf715588edf63ba5f26339cefb9a))
+
 ## [0.2.4](https://github.com/sergesha/claude-essentials/compare/code-intel-v0.2.3...code-intel-v0.2.4) (2026-09-11)
 
 
