@@ -9,6 +9,6 @@
   "homepage": "https://github.com/sergesha/claude-essentials",
   "repository": "https://github.com/sergesha/claude-essentials",
   "skills": "./skills/",
-  "hooks": "./hooks/hooks.json",
+  "hooks": "./hooks/indexing.json",
   "mcpServers": "./.mcp.json"
 }

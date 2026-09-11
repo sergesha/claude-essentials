@@ -10,7 +10,7 @@
   "license": "MIT",
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",
-  "hooks": "./hooks/hooks.json",
+  "hooks": "./hooks/enforcement.json",
   "interface": {
     "displayName": "Lockstep",
     "shortDescription": "Native durable workflows for coding agents",

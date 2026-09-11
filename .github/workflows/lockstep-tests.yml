@@ -6,7 +6,7 @@ on:
       - main
     paths:
       # every path the suite asserts on, not just the engine: tests pin the
-      # shipped hooks.json matcher and compile the example recipes, so a PR
+      # shipped enforcement.json matcher and compile the example recipes, so a PR
       # touching only those would go green without ever running the test
       # that guards them.
       - "lockstep/engine/**"
@@ -17,7 +17,7 @@ on:
   pull_request:
     paths:
       # every path the suite asserts on, not just the engine: tests pin the
-      # shipped hooks.json matcher and compile the example recipes, so a PR
+      # shipped enforcement.json matcher and compile the example recipes, so a PR
       # touching only those would go green without ever running the test
       # that guards them.
       - "lockstep/engine/**"

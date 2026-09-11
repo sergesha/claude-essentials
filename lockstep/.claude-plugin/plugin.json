@@ -9,6 +9,7 @@
   "homepage": "https://github.com/sergesha/claude-essentials",
   "repository": "https://github.com/sergesha/claude-essentials",
   "license": "MIT",
+  "hooks": "./hooks/enforcement.json",
   "mcpServers": {
     "lockstep": {
       "command": "${CLAUDE_PLUGIN_ROOT}/scripts/lockstep-plugin",

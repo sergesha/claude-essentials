@@ -214,7 +214,7 @@ def hook_pretool(stdin_json: dict, state_dir: Path) -> tuple[int, str]:
 
 # ---------------------------------------------------------------------------
 # PostToolUse hook — the binding writer. Fires on lockstep MCP tools only
-# (hooks.json matcher; re-checked here — by name for the known shapes via
+# (enforcement.json matcher; re-checked here — by name for the known shapes via
 # LOCKSTEP_TOOL_MATCHER, by the server-stamped response marker for any
 # other mcp__ name a user-extended matcher lets through). This is where a
 # run gets BOUND to the session driving it only at scenario_start (run_id read
@@ -232,7 +232,7 @@ def hook_pretool(stdin_json: dict, state_dir: Path) -> tuple[int, str]:
 # segment is pinned to "lockstep" by the shipped plugin manifest's
 # mcpServers key, so `mcp__plugin_.+_lockstep__` covers every plugin
 # install regardless of what the user named the plugin. ONE home for the
-# pattern, mirrored byte-for-byte into hooks/hooks.json's PostToolUse
+# pattern, mirrored byte-for-byte into hooks/enforcement.json's PostToolUse
 # matcher (pinned by test_shipped_hook_matcher_covers_install_shapes).
 # A tool name OUTSIDE these shapes (e.g. a hand-written .mcp.json server
 # under another key) is still accepted by hook_posttool — but only via
@@ -507,7 +507,7 @@ def doctor(state_dir: Path, recipes_dir: Path) -> tuple[bool, str]:
                 f"names (shipped matcher: {LOCKSTEP_TOOL_MATCHER}). Find the real "
                 "name in the session's tool list (it ends in __scenario_start) and "
                 "add its prefix followed by .* to the PostToolUse matcher in the "
-                "plugin's hooks/hooks.json or your settings hooks — responses are "
+                "plugin's hooks/enforcement.json or your settings hooks — responses are "
                 "marker-verified, no code change needed. Then start a fresh run",
             )
         else:

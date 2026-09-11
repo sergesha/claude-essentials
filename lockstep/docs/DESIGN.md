@@ -134,7 +134,7 @@ lockstep/
 ├── .codex-plugin/plugin.json
 ├── .mcp.json
 ├── scripts/lockstep-plugin
-├── hooks/hooks.json
+├── hooks/enforcement.json
 ├── skills/
 ├── engine/
 └── recipes/examples/

@@ -25,7 +25,7 @@ def test_host_manifests_share_identity_version_and_components():
         assert claude[key] == codex[key]
     assert codex["skills"] == "./skills/"
     assert codex["mcpServers"] == "./.mcp.json"
-    assert claude["hooks"] == "./hooks/hooks.json"
+    assert claude["hooks"] == "./hooks/enforcement.json"
     assert codex["interface"] == {
         "displayName": "Lockstep",
         "shortDescription": "Native durable workflows for coding agents",

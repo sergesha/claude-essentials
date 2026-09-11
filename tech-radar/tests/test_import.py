@@ -40,6 +40,7 @@ class ImportedPluginTests(unittest.TestCase):
         entry = next(p for p in marketplace["plugins"] if p["name"] == "tech-radar")
         self.assertEqual(entry, {
             "name": "tech-radar",
+            "description": "Monitor tech news via SearXNG, persist summaries with Redis memory, and generate dashboards.",
             "source": {"source": "local", "path": "./tech-radar"},
             "category": "Productivity",
             "policy": {

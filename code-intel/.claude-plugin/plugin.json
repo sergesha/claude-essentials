@@ -22,5 +22,6 @@
         "serve"
       ]
     }
-  }
+  },
+  "hooks": "./hooks/indexing.json"
 }

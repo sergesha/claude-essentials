@@ -26,7 +26,7 @@ class PackagingTests(unittest.TestCase):
             self.assertEqual(claude[field], codex[field])
         self.assertEqual(codex["name"], "code-intel")
         self.assertEqual(codex["skills"], "./skills/")
-        self.assertEqual(codex["hooks"], "./hooks/hooks.json")
+        self.assertEqual(codex["hooks"], "./hooks/indexing.json")
         self.assertEqual(codex["mcpServers"], "./.mcp.json")
         self.assertEqual(claude["mcpServers"], read_json(PACKAGE / ".mcp.json")["mcpServers"])
         self.assertEqual(claude["version"], read_json(REPO / ".release-please-manifest.json")["code-intel"])
@@ -43,7 +43,7 @@ class PackagingTests(unittest.TestCase):
             self.assertEqual(next(item for item in entries if item["name"] == "code-intel")["source"], source)
 
     def test_hooks_share_baseline_entrypoints_and_build_timeout(self):
-        hooks = read_json(PACKAGE / "hooks/hooks.json")["hooks"]
+        hooks = read_json(PACKAGE / "hooks/indexing.json")["hooks"]
         for event, command in (
             ("SessionStart", "hook-status"),
             ("UserPromptSubmit", "hook-prompt"),
