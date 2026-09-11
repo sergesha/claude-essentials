@@ -41,7 +41,9 @@
     },
     {
       "name": "code-intel",
-      "source": "./code-intel"
+      "description": "Shared CodeGraph and code-review-graph setup and checkout indexing.",
+      "source": "./code-intel",
+      "category": "developer-tools"
     }
   ]
 }

@@ -6,11 +6,12 @@
   "plugins": [
     {
       "name": "speciflow",
+      "description": "Coordinated specification-driven workflow guidance for coding agents.",
       "source": {
         "source": "local",
         "path": "./speciflow"
       },
-      "category": "Productivity",
+      "category": "Developer Tools",
       "policy": {
         "installation": "AVAILABLE",
         "authentication": "ON_INSTALL"
@@ -18,11 +19,12 @@
     },
     {
       "name": "code-intel",
+      "description": "Shared CodeGraph and code-review-graph setup and checkout indexing.",
       "source": {
         "source": "local",
         "path": "./code-intel"
       },
-      "category": "Productivity",
+      "category": "Developer Tools",
       "policy": {
         "installation": "AVAILABLE",
         "authentication": "ON_INSTALL"
@@ -30,6 +32,7 @@
     },
     {
       "name": "redis-memory",
+      "description": "Persistent cross-session memory for AI agents. Two storage modes: semantic vector search (mem_*) for knowledge found by meaning, and key-value store (kv_*) for instant lookup. Auto-expiry via TTL + volatile-lru eviction.",
       "source": {
         "source": "local",
         "path": "./redis-memory-mcp"
@@ -42,9 +45,23 @@
     },
     {
       "name": "continuous-learning",
+      "description": "Capture runtime surprises as they happen, periodically promote them into a project's own versioned skills/docs/commands.",
       "source": {
         "source": "local",
         "path": "./continuous-learning"
+      },
+      "category": "Developer Tools",
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      }
+    },
+    {
+      "name": "tech-radar",
+      "description": "Monitor tech news via SearXNG, persist summaries with Redis memory, and generate dashboards.",
+      "source": {
+        "source": "local",
+        "path": "./tech-radar"
       },
       "category": "Productivity",
       "policy": {
@@ -53,12 +70,13 @@
       }
     },
     {
-      "name": "tech-radar",
+      "name": "lockstep",
+      "description": "Flow-enforcement engine for coding agents: declarative yamlgraph recipes, durable runs, deterministic evidence gates.",
       "source": {
         "source": "local",
-        "path": "./tech-radar"
+        "path": "./lockstep"
       },
-      "category": "Productivity",
+      "category": "Developer Tools",
       "policy": {
         "installation": "AVAILABLE",
         "authentication": "ON_INSTALL"
