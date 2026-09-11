@@ -176,3 +176,59 @@ work, queues the scope proposal for human review at next checkpoint.
 **Contrast — if the proposal were "add admin dashboard":** No intersection
 with OAuth2 work. Subagent returns "non-intersecting, continue." Current
 work proceeds, proposal logged for Backlog.
+
+## Example 8 — Iterative planning from a rough idea
+
+**User:** "I want to add a recommendation engine to our e-commerce platform.
+Not sure exactly what that means yet — let's figure it out."
+
+**SpeciFlow detects:** Rough idea, needs refinement → iterative planning.
+
+**Iteration 1 (Backlog — broad strokes):**
+
+Agent captures: "Add product recommendations to improve conversion."
+
+Grill interview (adversary mode):
+- "What kind of recommendations? Similar products? Frequently bought
+  together? Personalized?"
+- "Where do they appear? Product page? Cart? Email?"
+- "What data do you have? Purchase history? Browse behavior? Ratings?"
+
+User answers: "Personalized, on the product page, we have purchase history."
+
+Agent switches to facilitator: refines Backlog task with these specifics.
+Commit: `plan(backlog): iteration 1 — personalized product-page recs from purchase history`
+
+Sufficiency check: Outcome ✓, Scope boundaries ✗ (no exclusions yet),
+Acceptance ✗, Unknowns ✗ → next iteration.
+
+**Iteration 2 (Backlog — filling gaps):**
+
+Grill interview:
+- "What's NOT included? Email recs? Cart cross-sell? Homepage?"
+- "How do you measure success? CTR? Conversion lift? Revenue per session?"
+- "What about cold-start users with no purchase history?"
+
+User answers: "Only product page for now. Measure by CTR. Cold-start shows
+trending items."
+
+Agent refines with exclusions and acceptance criteria.
+Commit: `plan(backlog): iteration 2 — scope boundaries and success metrics`
+
+Sufficiency check: All four criteria met → transition to OpenSpec.
+
+**Phase 2 (OpenSpec — specification):**
+
+Grill interview stress-tests requirements:
+- "You said personalized from purchase history — collaborative filtering or
+  content-based? Each has different data requirements."
+- "What's the latency budget? Recommendations computed on request or
+  precomputed?"
+- "How many recommendations per page? What if the model has low confidence?"
+
+Agent helps formalize into testable requirements. Commit each iteration.
+When spec is complete → approve → project to Beads.
+
+**Key principle:** The user started with "I want recommendations" and through
+2 Backlog iterations + OpenSpec iterations arrived at a specific, testable
+spec. Each version is committed. Grill drove the exploration at every stage.

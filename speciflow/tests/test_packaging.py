@@ -35,6 +35,7 @@ EXPECTED_DISTRIBUTABLE_FILES = frozenset(
         "skills/speciflow/references/initialization.md",
         "skills/speciflow/references/installation.md",
         "skills/speciflow/references/examples.md",
+        "skills/speciflow/references/iterative-planning.md",
         "skills/speciflow/scripts/storage.py",
     }
 )

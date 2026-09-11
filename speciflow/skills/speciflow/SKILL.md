@@ -45,6 +45,7 @@ report also needs the reporting route.
 
 | Request or activity | Required references |
 | --- | --- |
+| New idea, feature request, or rough plan that needs refinement | [references/iterative-planning.md](references/iterative-planning.md), [references/grilling-integration.md](references/grilling-integration.md), [references/operations.md](references/operations.md) |
 | Setup or initialization | [references/storage.md](references/storage.md), [references/operations.md](references/operations.md), [references/initialization.md](references/initialization.md) |
 | Storage selection | [references/storage.md](references/storage.md) |
 | Native operations or any proposed mutation | [references/operations.md](references/operations.md) |
