@@ -113,16 +113,24 @@ verification activity before carrying it out.
 The interview itself authorizes no mutation. Resolve the actual closure before
 invocation because `domain-modeling`, `research`, and `prototype` may entail
 delegation, an artifact write, a branch, a commit, or product-source edits.
-Put each proposed effect into the exact preview required by
-[operations.md](operations.md), then apply its existing review and approval
-rules. Existing authorization remains valid for an unchanged covered effect.
+Preview each proposed effect with its exact target, payload, and documented
+operation before execution. Apply semantic review and existing authorization.
+Existing authorization remains valid for an unchanged covered effect.
 
-Definitions, design answers, and their rationale return to the current
-OpenSpec context. Read existing glossary, context, ADR, and code sources and
-identify their project-defined role; do not make a copy canonical merely by
-writing it. A product-scope proposal returns to Backlog for approval. Research
-findings and prototype links go only into authorized native artifacts as
-evidence or inputs to the owner decision.
+### Returning results to owners
+
+When the interview reaches shared understanding, route results by type:
+
+| Result type | Goes to | How |
+| --- | --- | --- |
+| Design decisions and rationale | OpenSpec | Preview spec update → semantic review → approve → write |
+| Product-scope proposals | Backlog | Return as scope proposal for prioritization |
+| Research findings and evidence | Authorized native artifacts | As evidence or inputs, not standalone state |
+| Prototype artifacts | Product Git | Only with explicit approval for the artifact write |
+
+For OpenSpec updates specifically: present the exact spec change (decision +
+rationale), apply the cross-owner mutation recipe from operations.md (preview
+→ review → authorize → execute), then continue to the next SpeciFlow action.
 
 For an explicitly invoked multi-session Wayfinder activity, preserve the full
 original chart, one-selected-ticket resolution, research and prototype

@@ -53,8 +53,8 @@ missing unselected owner tool is `N/A`.
 For an npm-based installation preview, Backlog.md is package `backlog.md` with
 the `backlog` CLI, and OpenSpec is package `@fission-ai/openspec` with the
 `openspec` CLI. The unscoped npm package `openspec` is not the OpenSpec owner
-CLI. Do not pin a version in this skill: inspect current package metadata and
-the installed interface before proposing the exact channel or version.
+CLI. Inspect current package metadata and the installed interface before
+proposing the exact channel or version.
 
 ## Original grilling-family dependency
 
@@ -67,22 +67,19 @@ or install the same bundle through two host mechanisms.
 ### Codex project closure
 
 Use the official `skills` CLI from the selected project root with an explicit
-Codex target. First inspect the current package metadata and interface. Show the
-resolved CLI version in the preview; that qualification applies to this one
-operation and is not a permanent SpeciFlow pin. The audited `skills@1.5.25`
-interface has this exact install or constrained refresh shape:
+Codex target. Inspect the current `skills` CLI version and interface before use.
+Show the resolved CLI version in the preview; that qualification applies to this
+one operation and is not a permanent SpeciFlow pin.
 
 ```sh
-DISABLE_TELEMETRY=1 DO_NOT_TRACK=1 NODE_DISABLE_COMPILE_CACHE=1 npx --yes skills@1.5.25 add mattpocock/skills --agent codex --skill grill-me grilling grill-with-docs domain-modeling wayfinder research prototype setup-matt-pocock-skills --copy --yes
+DISABLE_TELEMETRY=1 DO_NOT_TRACK=1 NODE_DISABLE_COMPILE_CACHE=1 npx --yes skills add mattpocock/skills --agent codex --skill grill-me grilling grill-with-docs domain-modeling wayfinder research prototype setup-matt-pocock-skills --copy --yes
 ```
 
-At original revision `3cca18b368ae95cdbdebbff572ccafa662551015`, preview
-all eight targets as
-`<project>/.agents/skills/{grill-me,grilling,grill-with-docs,domain-modeling,wayfinder,research,prototype,setup-matt-pocock-skills}`;
-that inspected closure contains 25 files. Before a later install or refresh,
-resolve the then-current requested original closure and adapt the selected
-names and targets if upstream added dependencies. Include these effects in the
-preview:
+Preview all eight targets as
+`<project>/.agents/skills/{grill-me,grilling,grill-with-docs,domain-modeling,wayfinder,research,prototype,setup-matt-pocock-skills}`.
+Before install or refresh, resolve the then-current requested original closure
+and adapt the selected names and targets if upstream added dependencies.
+Include these effects in the preview:
 
 - npm package/dependency resolution and cache writes, plus GitHub clone/API
   checks in a temporary directory;

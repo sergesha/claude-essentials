@@ -1,6 +1,6 @@
 ---
 name: speciflow
-description: Use when a user explicitly asks to coordinate work across Backlog.md, OpenSpec, Beads/Dolt, and Superpowers.
+description: Use when a user needs to coordinate across Backlog.md, OpenSpec, Beads/Dolt, Superpowers, and Grill — turning ideas into tracked specs, projecting specs into tasks, checking status, or resolving design decisions.
 disable-model-invocation: true
 ---
 
@@ -9,13 +9,32 @@ disable-model-invocation: true
 ## Absolute boundary
 
 **SpeciFlow coordinates Backlog.md, OpenSpec, Beads/Dolt, and Product Git/CI
-through their native interfaces. Superpowers and the original
-`mattpocock/skills` family are supporting disciplines for selected work.**
+through their native interfaces. Superpowers and Grill (the original
+`mattpocock/skills` family) are supporting disciplines for selected work.**
 
 **SpeciFlow owns no process or state.** Use native owners through their native
 interfaces; do not create or assume a `speciflow` command. Native owner edits
 remain authoritative. Supporting disciplines never acquire owner authority.
 Never copy owner content into a SpeciFlow schema.
+
+## Quick start
+
+SpeciFlow coordinates your installed planning and execution tools through
+their native interfaces. Start with what you have:
+
+| What you have | What SpeciFlow can do |
+| --- | --- |
+| Nothing installed yet | Show a setup outline, help install tools one at a time |
+| Backlog.md | Track product intent, capture requirements, manage priority |
+| Backlog.md + OpenSpec | Add spec authoring, requirement refinement, design review |
+| All three + Beads/Dolt | Full cross-owner flow: spec → decomposition → executable graph |
+| + Superpowers | TDD, code review, verification, implementation discipline |
+| + Grill | Design interviews, domain modeling, research, prototyping |
+
+Invoke SpeciFlow when you need to coordinate across these tools — for
+example, turning a product idea into a tracked spec, or projecting an
+approved design into implementation tasks. Ask for `status` to see what
+is available and what is missing.
 
 ## Required reading
 
@@ -35,6 +54,9 @@ report also needs the reporting route.
 | Human-invoked original Wayfinder chart, resolve, or fresh resume | [references/grilling-integration.md](references/grilling-integration.md), [references/wayfinding.md](references/wayfinding.md), [references/operations.md](references/operations.md), [references/transitions.md](references/transitions.md) |
 | User-requested host installation | [references/installation.md](references/installation.md) |
 | Original grilling-family installation, availability, or update compatibility | [references/installation.md](references/installation.md), [references/grilling-integration.md](references/grilling-integration.md) |
+
+For worked examples of these routes in natural SDLC scenarios, see
+[references/examples.md](references/examples.md).
 
 Creating Beads issues from OpenSpec remains a cross-owner projection when
 its exact preview is already approved; that continuation still reads
@@ -86,25 +108,28 @@ triggers must be invocation-scoped and explicit-only. For `openspec-to-beads`,
 offer only an invocation-scoped explicit-only load with automatic and proactive
 activation disabled; never offer unqualified installation.
 
-## Superpowers boundary
+## Supporting disciplines
 
-SpeciFlow selects the cross-tool action. Apply every applicable Superpowers
-skill by its native trigger before the selected activity. Architectural or
-creative planning uses `superpowers:brainstorming`; follow the path selected
-by that installed skill, including whether it calls for
-`superpowers:writing-plans`. Preserve that path's required approval and
-verification. Any SpeciFlow edit uses `superpowers:writing-skills`.
-Superpowers may apply its discipline only to the bounded selected activity,
-then must return control to SpeciFlow.
+SpeciFlow coordinates five components. Three are product owners (Backlog,
+OpenSpec, Beads) and two are supporting disciplines:
 
-Do not define SpeciFlow phases, statuses, tasks, readiness, assignments, a second graph, queues, or cursors. Do not let Superpowers select cross-tool actions or the next Bead.
+- **Superpowers**: TDD, debugging, verification, implementation review.
+  Apply by native trigger before the bounded selected activity.
+- **Grill** (mattpocock/skills family): interviews, domain modeling,
+  research, prototyping. Apply when the activity involves clarification
+  or design exploration.
 
-When an original grilling-family method applies, use
-[references/grilling-integration.md](references/grilling-integration.md) to
-resolve and invoke its actual external source, pass owner-aware context, and
-return its result. The original method supplies its discipline only; SpeciFlow
-retains cross-owner selection.
+Both install and invoke through the host's native skill interface — same
+pattern. Each shapes the bounded activity, then returns control to SpeciFlow.
+SpeciFlow retains cross-owner selection.
 
-Wayfinder remains a human-invoked original entrypoint. After that explicit
-invocation, apply [references/wayfinding.md](references/wayfinding.md) as its
-native owner binding; never call Wayfinder from SpeciFlow.
+Architectural or creative planning uses `superpowers:brainstorming`; follow
+its selected path including `superpowers:writing-plans`. Any SpeciFlow edit
+uses `superpowers:writing-skills`.
+
+When clarification, domain work, research, or prototyping applies, use
+[references/grilling-integration.md](references/grilling-integration.md).
+
+Wayfinder is a human-invoked entrypoint. After explicit invocation, apply
+[references/wayfinding.md](references/wayfinding.md) for its native owner
+binding.

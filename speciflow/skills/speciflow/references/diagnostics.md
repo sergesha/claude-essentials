@@ -1,67 +1,43 @@
 # Derived diagnostics
 
-`status` is a live, read-only, owner-separated view. Unless the user explicitly
-requests another serialization or layout, construct the actual reply with
-this exact shape: the seven-column header below, followed in this order by one
-row each for Backlog.md, OpenSpec, Beads/Dolt, and Superpowers. Fill every cell.
-This is the minimum report even for a brief answer. A scope phrase such as
-“only Beads” shortens owner detail and leaves Backlog.md and OpenSpec unqueried
-as `N/A`; it does not remove rows or columns. Evaluate the Superpowers native
-trigger independently and fill that row from current target evidence, querying
-it only when selected. An explicit user request for another serialization,
-layout, or field subset takes precedence over this table shape.
+`status` is a live, read-only, owner-separated view. Report one entry per
+owner (Backlog.md, OpenSpec, Beads/Dolt, Superpowers, Grill) with these
+required fields:
 
-| Owner | Selection reason | Result | Native root | Revision/version | Interface | Read time |
-| --- | --- | --- | --- | --- | --- | --- |
-| Backlog.md | Not selected | N/A | not applicable | not applicable | not applicable | not applicable |
-| OpenSpec | Not selected | N/A | not applicable | not applicable | not applicable | not applicable |
-| Beads/Dolt | Explicit Beads status request | broken | not observed | not observed | Required CLI absent | not observed |
-| Superpowers | Applicable verification trigger | valid | not observed | not observed | Required skill closure readable | not observed |
-
-This example has only a Beads request, an absent Beads CLI, and a readable
-applicable Superpowers closure; roots, versions, and read timestamps were not
-observed. Adapt the cells to the actual evidence. For selected Superpowers,
-the root is its observed installed closure path. Read time is an observed
-timestamp; when unavailable, its cell is `not observed`.
-
-Bind report evidence to the requested target. Instructions read to guide the
-acting agent are not evidence of another target's installed paths, versions,
-or read times. When the request limits the report to supplied snapshot or
-simulated observations, fill target facts only from that evidence and identify the
-report as snapshot-based, not a new live check. Unavailable target metadata
-stays `not observed`; do not substitute ambient host observations. For a live
-local target, its actually observed local paths remain valid evidence.
-
-Fill every cell from current observations and the selection rules in
-[ownership.md](ownership.md). The Superpowers selection reason evaluates the
-native trigger for the current activity, including read-only verification,
-independently of assigned project tasks. Query selected owners live; report
-unselected owners as `N/A` with unqueried evidence marked `not applicable`.
-Mark unavailable evidence `not observed`. Missing report metadata does not
-change an evidenced owner result: an absent required CLI is still `broken`.
-There is no aggregate status. Diagnostics may not repair, create, synchronize,
-archive, or close native artifacts.
-
-## Selected supporting dependency
-
-When the current selected activity uses an original grilling-family method,
-append a separate read-only dependency block after the four owner rows with
-exactly these fields:
-
-```text
-Supporting dependency
-Capability: <selected original method>
-Selection reason: <why this activity requires it>
-Installed source/revision: <observed original source and revision, or not observed>
-Closure availability: <entrypoint and linked/invoked files completely readable, or exact gap>
-Compatibility limitation: <none observed, or exact affected capability/effect>
+```json
+{
+  “owner”: “Backlog.md | OpenSpec | Beads/Dolt | Superpowers | Grill”,
+  “selection”: “why this owner is or is not queried”,
+  “result”: “valid | broken | ambiguous | unknown | N/A”,
+  “root”: “observed native root path, or not observed”,
+  “evidence”: “interface status, revision, and read timestamp”
+}
 ```
 
-This block is not a fifth owner, aggregate result, or persisted status. Derive
-it only from current target evidence. A snapshot-only request leaves
-unsupplied target metadata `not observed`; ambient host metadata cannot fill
-it. When no grilling-family method is selected, omit the block and do not query
-that dependency. In particular, a Beads-only status request does not select it.
+**Selection rules:** Select owners by the concern in the request, not by
+default. A scope phrase like “only Beads” queries Beads and leaves others
+as `N/A`. Evaluate Superpowers and Grill triggers independently from the
+current activity context.
+
+**Evidence rules:**
+- Query selected owners live through their native interface.
+- Unselected owners: `N/A` with evidence `not applicable`.
+- Unavailable metadata: `not observed` — never substitute ambient host data.
+- A missing required CLI is `broken` regardless of other metadata.
+- There is no aggregate status.
+
+**Rendering:** Use a table, structured list, or JSON — adapt to the context.
+An explicit user request for a specific format takes precedence.
+
+Diagnostics is read-only: it never repairs, creates, synchronizes, archives,
+or closes native artifacts.
+
+## Supporting disciplines (Superpowers, Grill)
+
+Superpowers and Grill are supporting disciplines, not product owners. Their
+`result` reflects whether the installed skill closure is available and
+readable, not project-task state. When the current activity has no applicable
+trigger for either, report them as `N/A`.
 
 ## Per-owner result
 

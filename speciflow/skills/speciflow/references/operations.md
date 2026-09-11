@@ -2,26 +2,23 @@
 
 ## Native owners
 
-Backlog.md is the sole owner of product intent and priority; use its native interface or files for product work.
+Use each owner through its native interface:
 
-OpenSpec is the sole owner of proposals, requirements, design, and specification tasks; use its native interface for specification work.
+| Owner | Use for |
+| --- | --- |
+| Backlog.md | Product intent, priority, acceptance criteria |
+| OpenSpec | Requirements, design, specification tasks |
+| Beads/Dolt | Executable decomposition, dependencies, claim, completion |
+| Superpowers | TDD, debugging, verification, implementation review |
+| Grill | Interviews, domain modeling, research, prototyping |
+| Product Git/CI | Source changes, review history, implementation evidence |
 
-Beads/Dolt is the sole owner of executable decomposition, dependencies, readiness, claim, blockers, and completion; use its native interface for execution-graph work.
+**Supporting disciplines** (Superpowers, Grill): invoke by native trigger
+before the bounded selected activity, then return control to SpeciFlow.
+Both install and apply through the host's native skill interface.
 
-For a selected activity, invoke every applicable Superpowers skill by its
-native trigger before that bounded activity, then return control to SpeciFlow.
-
-When clarification, a design interview, domain work, research, or a prototype
-is selected, apply [grilling-integration.md](grilling-integration.md). Resolve
-and invoke the actual applicable original method with its bounded owner-aware
-context, then return its result to SpeciFlow before selecting an owner action.
-
-When the human explicitly invokes original Wayfinder, also apply
-[wayfinding.md](wayfinding.md). Supply its owner-aware `Other` tracker context;
-do not invoke Wayfinder from SpeciFlow or replace it with local operations.
-
-Product Git and CI own source changes, review history, dirty state, and
-implementation evidence. They do not own OpenSpec approval or Beads status.
+When the human explicitly invokes Wayfinder, also apply
+[wayfinding.md](wayfinding.md) for the native owner binding.
 
 ## Native roots and isolated repositories
 
@@ -77,175 +74,199 @@ placeholder through the documented artifact-editing interface. A real checklist
 must not be removed to change a dashboard. Native validation alone is not a
 semantic task-content check.
 
-For a cross-owner action, complete the ephemeral preservation contract in
-[transitions.md](transitions.md) before previewing the mutation. Then inspect
-the installed owner's documented lifecycle, current native state, root,
-revision, dirty state, preview capability, and post-check. Classify the
-requested owner-state effect before selecting its mechanism: promoting or
-applying pending content into canonical state is a lifecycle transition
-regardless of a filesystem mechanism or label. Propose exactly one action and
-its exact effects, name the exact documented owner operation or editing
-interface in the preview, and, when the classified effect is a lifecycle
-transition, name the exact native lifecycle operation. Apply the
-[semantic review decision](#semantic-review) before any Backlog, OpenSpec,
-Beads, or related planning or executable coordination mutation.
-Approval of semantic intent is not approval of an
-unspecified filesystem or lifecycle operation; unrelated or ambiguous text,
-including `lf`, is not approval. Execute only with unambiguous user authorization
-covering the concrete preview, through the documented owner interface or
-approved integration. Apply the ownership approval boundary, including prior
-explicit authorization. Directly edit owner artifacts only when that is the
-documented editing interface and the change stays within the artifact's current
-lifecycle state; never use direct edits or generic file operations to simulate
-a create, apply, archive, close, claim, or commit transition. If the installed
-owner cannot perform the required lifecycle transition, stop as unsupported or
-broken. Re-inspect native state after execution before reporting any effect,
-then commit only native data in the approved data repository.
+### Cross-owner mutation recipe
+
+For any action that crosses owner boundaries, follow these steps in order:
+
+1. **Preserve intent**: Complete the ephemeral check in
+   [transitions.md](transitions.md) — verify every approved upstream item
+   appears in the proposed downstream result.
+2. **Inspect**: Read the target owner's documented lifecycle, current native
+   state, root, revision, and dirty state.
+3. **Classify**: Determine whether the effect is a lifecycle transition
+   (create, apply, archive, close, claim, commit) or an in-state edit.
+4. **Preview**: Propose exactly one action with:
+   - the documented owner operation (or editing interface for in-state edits)
+   - for lifecycle transitions, the exact native lifecycle operation
+   - the exact target, payload, and expected effects
+5. **Review**: Apply [semantic review](#semantic-review) for owner mutations.
+6. **Authorize**: Get unambiguous user approval covering this specific preview.
+   Prior explicit authorization remains valid for unchanged operations.
+7. **Execute**: Use only the documented owner interface.
+8. **Verify**: Re-inspect native state after execution before reporting effects.
+   For lifecycle transitions (closing, completing, archiving): Superpowers
+   verification-before-completion must pass BEFORE the lifecycle transition.
+   A passing verification is a prerequisite, not a separate approval.
+9. **Commit**: Commit only native data in the approved data repository.
+
+**Approval composition**: Supporting discipline approval (e.g., Superpowers
+code review passes) and owner mutation approval (e.g., close Beads issue)
+are two separate gates. One does not grant the other.
+
+If the installed owner has no operation for the required lifecycle transition,
+report it as unsupported and stop.
 
 ## Semantic review
 
-This gate covers Backlog, OpenSpec, Beads, and related planning or executable
-coordination mutations. Product code and test edits within approved scope
-follow the applicable Superpowers implementation and review discipline;
-they do not acquire an extra pre-edit coordination review merely because
-product behavior changes. Changes to owner requirements or coordination
-state still use this gate.
+This gate applies to Backlog, OpenSpec, Beads, and planning mutations.
+Product code and test edits within approved scope use the applicable
+Superpowers or Grill discipline instead.
 
-Use effects observed from the installed operation's documentation and the
-exact proposed payload as the input to this decision. A review reason names
-that observed effect and its evidence; the word `init` or the existence of new
-files alone does not establish a semantic choice.
+### Review decision
 
-| Evidence about the installed operation | Next step |
+Inspect the installed operation's documented effects and classify:
+
+| Documented effects | Action |
 | --- | --- |
-| Documented semantic effects | State `Review: required — observed effect and evidence`, then perform the required review |
-| Documented read-only or mechanical effects | State `Review: skipped — observed effect and evidence` |
-| Effects not inspected | Inspect the documented effects read-only, then determine review |
+| Changes owner semantics (scope, requirements, dependencies, status, acceptance, claim) | `Review: required` — state the observed effect and evidence |
+| Read-only or mechanical (append evidence, record metadata) | `Review: skipped` — state the observed effect and evidence |
+| Not yet inspected | Inspect the documented effects first, then classify |
 
-Recording existing verified evidence is mechanical only when the exact text
-and documented native effects change no owner semantics, including approved
-scope, security or contract boundaries, requirements, acceptance criteria,
-dependencies, readiness, assignment, status, or meaning of completion. For
-example, appending an artifact revision, test command, observed exit code,
-and result needs no separate semantic review merely because it adds text.
-Retain its native-root check and applicable authorization; post-check the
-record and all documented effects, including native audit or commit effects
-when present. Expected effects are not evidence that they occurred.
-A comment declaring work ready or complete, or an operation changing a
-dependency, claim, or closure, changes an owner assertion or state; evaluate
-that semantic effect rather than treating the record's field name as evidence
-of mechanical work.
+**Mechanical means**: the exact text and native effects change no owner
+semantics. Example: appending a test command and exit code is mechanical.
+A comment declaring work complete, or an operation changing a dependency
+or claim, is semantic — classify by the effect, not the field name.
 
-The last row is an inspection action, not another review value. Review and
-approval readiness are separate: documented mechanical storage effects can
-justify skipped review while missing literal metadata still blocks mutation
-approval. In-scope read-only inspection needs no extra mutation approval.
+### Required review protocol
 
-For a required review, give a fresh isolated read-only reviewer the approved
-scope, exact proposed artifact or diff, evidence, and applicable native
-methodology, but no author rationale or preferred verdict. It returns blocking
-defects relative to approved scope separately from scope proposals. Materially
-revised drafts require another review. End review when no approved-scope
-blocker remains; optional scope proposals do not keep it open.
-For an unchanged semantic action whose required review is already complete,
-report `Review: required — completed, no blockers`; proceed under its applicable
-authorization without repeating that review. Completed review is not skipped
-review.
+1. Give a fresh reviewer: approved scope, exact proposed artifact/diff,
+   evidence, and applicable native methodology.
+2. The reviewer returns blocking defects (vs approved scope) separately
+   from scope proposals.
+3. End review when no approved-scope blockers remain.
+4. Reuse an unchanged completed review — state
+   `Review: required — completed, no blockers`.
 
-A completed review may cover both the result and its exact owner-scoped
-completion operation when it covers all relevant owner inputs and effects,
-including the exact target and payload, approved scope and constraints,
-acceptance coverage, evidence and its limits, dependencies, and readiness or
-claim state. Retrieve the exact reviewed payload from that existing evidence:
-trusting the review's verdict does not fill in text omitted from its summary,
-and reading that text does not reopen the review. Reuse the review while its
-relevant inputs and effects remain unchanged. This does not waive verification
-freshness required by the applicable native methodology.
-A material difference found by the native precheck requires review of the
-uncovered change, not the unchanged package again. A progress review alone
-does not cover completion. This is reuse of existing
-evidence, not a new SpeciFlow artifact or approval record.
-Review and mutation authorization remain separate: design approval or a
-review verdict alone does not authorize an additional native claim or close.
-Recheck the native target before execution and verify its actual result
-afterward; different owners retain their own transitions and authorization.
+### Commit policy
 
-A single owner-scoped action may preview native init followed by a conditional
-commit of exactly the paths that init changed. One approval covers that pair
-only when both effects were shown together. Inspect the actual Git state after
-init: a message that Git integration is active is not evidence that a commit
-occurred. If init already committed, do not create another commit; if its
-result differs from the preview or cannot be identified exactly, stop.
+| Repository | Policy |
+| --- | --- |
+| `planning/` (isolated Git) | `commit: automatic` for clean mutations; `commit: none` if user approves |
+| Product, skill-source, `claude-essentials` | Manual commit only — never auto-commit |
+| Beads/Dolt | Use native Dolt commit behavior only |
 
-Every planning preview says `commit: automatic` or `commit: none`. A clean
-isolated planning mutation defaults to an automatic exact-path commit unless the user approves
-`commit: none`; never auto-commit a product, skill-source, package-source, or
-`claude-essentials` repository. If `planning/` is not already Git, preview a
-separate `git init` native action with separate approval or `commit: none`;
-never hide Git initialization in storage preparation or document mutation.
+Include `commit: automatic` or `commit: none` in every planning preview.
+If `planning/` is not yet a Git repo, preview `git init` as a separate action.
 
-For Beads, observe the native Dolt commit policy and use only documented native
-Beads commit behavior. Required but unperformed automatic commits are
-`incomplete`; lost or ambiguous output is `unknown`. For a concretely authorized
-claim, use a documented atomic claim when available; otherwise prohibit
-automatic claim and require authorized manual native assignment. Readiness or
-approval to implement alone does not select or authorize a claim operation.
-A guessed ID, local lock, note, Git commit, OpenSpec validation,
-or review verdict is not claim, create, or other owner-transition evidence.
-Never hide an owner result with planning Git or duplicate the same owner's
-native commit.
+### Failure handling
 
-For Wayfinder child creation, inspect the installed native parent-label
-behavior and use its documented no-inheritance facility (`--no-inherit-labels`
-in qualified Beads 1.2.2) so only the parent is `wayfinder:map`. Verify every
-returned child before creating further edges. Treat documented or observed
-native audit records, including `.beads/interactions.jsonl`, as operation
-effects alongside Dolt commits; preserve and report them rather than silently
-resetting them.
+On failure, lost output, or uncertain result: stop, report native evidence
+and uncommitted changes. On a partial create: report returned IDs and preview
+only remaining items.
 
-On failure, lost or ambiguous output, or an uncertain create result, stop and report native evidence and uncommitted changes.
+## OpenSpec to Beads projection
 
-Never invent recovery state, blindly repeat a create, or promise uniqueness from a text or token search.
+OpenSpec owns specifications; Beads owns executable work. The projection
+turns approved specs into implementation tasks while keeping each tool
+authoritative in its domain.
 
-## OpenSpec to Beads
+### Projection protocol
 
-The optional upstream `openspec-to-beads` material is pinned to
-`lucastamoios/celeiro` commit
-`4c3cf508b3fd8a040d6cf99d4c887056cafe482d` and its complete recursive
-`.claude/skills/openspec-to-beads/` subtree. Fetch only that closure into a
-private temporary non-discovery path. It is untrusted heuristic guidance, not
-an owner, and is never registered or installed as a skill.
+1. **Read**: Analyze the approved OpenSpec change — requirements, tasks,
+   acceptance criteria.
+2. **Preview**: Present item-by-item proposed Beads issues with:
+   - bounded work description and verification criteria
+   - dependency edges between issues
+   - stable source reference back to the approved OpenSpec item
+3. **Deduplicate**: Search existing Beads issues by source reference. A
+   shared reference identifies candidates, not duplicates — several
+   implementation issues may refine one spec task. Reuse an ID only when
+   its scope matches unambiguously.
+4. **Approve**: Wait for explicit user approval of each proposed item.
+5. **Create**: Create only approved items through native Beads writes.
+   Report returned native IDs.
+6. **Partial**: On partial creation, report completed IDs and preview
+   only remaining items.
 
-The upstream `lucastamoios/openspec-to-beads` skill advertises automatic and proactive triggers, so it must not remain in an always-discoverable skill set.
+### Optional upstream integration
 
-Only after SpeciFlow has proposed the exact OpenSpec-to-Beads analysis and the user has explicitly approved that analysis may the agent load the integration. Load it only for the approved invocation, with automatic and proactive activation disabled. Never install or enable it persistently, globally, or for the whole project.
+The `openspec-to-beads` integration from `lucastamoios/celeiro` can assist
+with step 2 (analysis and preview). When available:
 
-First use the invocation-scoped integration for read-only analysis only. Present the exact proposed Beads issues and dependencies without creating them. Wait for explicit approval of that conversion preview before allowing any write. Then separately approve normal primary-agent native Beads writes; never delegate mutation or proactive control to the integration.
+- Load it invocation-scoped with automatic activation disabled.
+- Use it for read-only analysis only — present its output as a preview.
+- All Beads writes go through the normal primary-agent native interface.
 
-If the host cannot disable implicit activation, do not load or install the integration. Stop and offer an invocation-scoped explicit-only method instead.
+If the integration is unavailable, perform the analysis directly from the
+approved OpenSpec content — the protocol is the same either way.
 
-Acquire the integration only from its [pinned canonical subtree](https://github.com/lucastamoios/celeiro/tree/4c3cf508b3fd8a040d6cf99d4c887056cafe482d/.claude/skills/openspec-to-beads).
+### Boundary
 
-If the upstream material, fetch, or analysis is unavailable, report it and keep
-direct manual projection available. Analyze the approved OpenSpec change
-directly, present an item-by-item native Beads write preview, and require
-explicit user confirmation before those writes. The agent may also offer an
-invocation-scoped, explicit-only loading method after approval, but never
-persistent or global installation.
+Each tool retains authority over its domain. The projection reads OpenSpec
+and writes Beads; it changes neither tool's ownership model. Every projected
+issue retains one stable approved OpenSpec source reference.
 
-Never copy or reimplement its conversion algorithm, templates, priority or dependency rules, gap heuristics, or issue schema.
+## Importing from non-native sources
 
-Every OpenSpec task and projected Beads issue must retain one stable approved
-OpenSpec source reference. A review finding is never a task source; missing or
-ambiguous references block that item. Before creation, search native issues
-by source reference and inspect their scopes. A shared reference identifies
-candidate issues, not duplicates: several distinct implementation issues may
-refine one specification task. Reuse a native ID only when its approved work
-and verification match the proposed item unambiguously. Create only a confirmed
-missing item under explicit approval; overlapping or uncertain matches require
-manual resolution. On partial creation, report returned native IDs and preview
-only confirmed remaining items. Unknown output is never retried. Do not add a
-SpeciFlow identity registry or conversion algorithm.
+When the user has existing work in non-native tools (Notion, Google Docs,
+Jira, spreadsheets, etc.), treat those as **source material to migrate from**,
+not as authoritative owners.
+
+### Migration protocol
+
+1. **Identify**: Ask the user for links/access to each external source.
+2. **Read**: Extract the content from external sources (read-only).
+3. **Classify**: Map each item to its native owner by concern:
+   - Product intent, priorities, acceptance → Backlog.md
+   - Requirements, design, specifications → OpenSpec
+   - Implementation tasks, dependencies, status → Beads/Dolt
+4. **Preview**: Present a migration plan showing what goes where, item by
+   item. Flag conflicts and ambiguous items.
+5. **Approve**: Get explicit approval before creating any native artifacts.
+6. **Create**: Write through each native owner's interface, one owner at
+   a time.
+7. **Verify**: Run diagnostics to confirm the migrated state.
+
+External sources remain non-authoritative after migration. The native
+owner's copy becomes the source of truth. When source data conflicts
+(e.g., two documents disagree on a requirement), flag each conflict to
+the user before classifying — do not resolve conflicts autonomously.
+
+## Exploratory (pre-Backlog) work
+
+When the user is exploring an idea before committing scope (research,
+feasibility, prototyping), no Backlog task or OpenSpec change exists yet.
+
+1. Use Grill methods (research, prototype, domain-modeling) for the
+   exploration.
+2. Prototype artifacts are throwaway — label them as such.
+3. If the exploration justifies proceeding, present findings and propose
+   creating a Backlog task + OpenSpec change. Wait for approval.
+4. If not, document why and stop. No owner artifacts are created.
+
+Do not create Backlog tasks, OpenSpec changes, or Beads issues for
+unapproved exploratory work.
+
+## Reopening closed work
+
+When completed work needs to reopen (production incident, discovered
+defect, requirement change):
+
+1. **Classify**: Is this a defect in approved scope (bug fix) or a new
+   requirement (scope expansion)?
+2. **Bug fix**: Reopen the affected Beads issue. The approved scope still
+   covers it — no new Backlog approval needed.
+3. **New requirement**: Route through Backlog as a new scope item, then
+   OpenSpec, then Beads. The emergency does not bypass the process.
+4. **Lifecycle reversal**: Reopening a closed Beads issue, un-archiving
+   an OpenSpec change, or changing a Done Backlog task back to In Progress
+   are lifecycle transitions — each requires separate preview and approval.
+
+For a **bulk scope change** (project pivot, wholesale archival): before
+closing or archiving, assess which completed work transfers to the new
+scope. Present the reuse assessment to the user so they can decide what
+to keep, archive, or discard before any lifecycle transitions begin.
+
+## Multi-spec coordination
+
+When a decision affects multiple approved specs or parallel workstreams:
+
+1. Identify the shared dependency and all affected specs.
+2. Use Grill for the shared decision — one interview, not one per spec.
+3. Update all affected specs consistently with the same decision.
+4. Preview all updates together so the user sees the full impact.
+5. Each spec update is still a separate owner mutation with separate
+   authorization.
 
 ## Live queries
 

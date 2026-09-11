@@ -8,10 +8,18 @@ missing inspection understandable; no fixed layout is required.
 
 For explicit setup or full-stack initialization, inspect the selected owners
 and show the complete ordered outline before asking for the first approval.
-Include applicable dependency installation, storage initialization, planning
-Git initialization, each selected native-owner initialization with its commit
-effect, and a final live status check. Keep different owners as separate
-actions.
+Steps in order:
+
+1. **Dependencies** — install missing owner CLIs (one at a time, with approval)
+2. **Storage** — `storage.py resolve`, then `storage.py init` (with approval)
+3. **Planning Git** — `git init` in `<data-root>/planning/` if not already
+   a Git repo (separate preview and approval — this is a prerequisite for
+   automatic commits in later steps)
+4. **Native owners** — initialize each selected owner in its native root
+   (separate action per owner, with commit effect)
+5. **Live status** — run diagnostics to verify the result
+
+Keep different owners as separate actions.
 
 When setup includes an activity that selected an original grilling-family
 capability, include a concrete host installation item only when current

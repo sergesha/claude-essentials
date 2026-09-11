@@ -3,8 +3,9 @@
 Apply this reference only after the human explicitly invokes the original
 `mattpocock/skills` `wayfinder` entrypoint. Wayfinder is user-only: SpeciFlow
 must not invoke it, simulate it, or copy its charting, interview, selection, or
-resolution method. Resolve and completely read that original entrypoint and its
-actual closure through [grilling-integration.md](grilling-integration.md), then
+resolution method. Resolve the original entrypoint to the installed
+`mattpocock/skills` source, completely read it and every linked file in its
+closure, and hold that closure stable for the activity. Then
 pass the native context below through Wayfinder's documented `Other` tracker
 extension. The original method remains in control of wayfinding; this reference
 only binds owners and operations.
@@ -60,10 +61,9 @@ stay in Backlog and OpenSpec rather than becoming canonical issue descriptions.
 
 ## Qualified native operations
 
-Follow [operations.md](operations.md) before every write. Verify the canonical
-root, installed help and current state; preview the exact payload and effects;
-apply semantic review and existing authorization; then inspect the native
-result. Include documented or observed Dolt commits and CLI audit writes such
+Before every write: verify the canonical root, installed help, and current
+state; preview the exact payload and effects; apply semantic review and
+existing authorization; then inspect the native result. Include documented or observed Dolt commits and CLI audit writes such
 as `.beads/interactions.jsonl` in the effect preview and post-check. Preserve
 native audit effects even when Git reports them dirty.
 

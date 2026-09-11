@@ -8,14 +8,16 @@ Each concern has one authoritative owner:
 | OpenSpec | Proposals, requirements, design, and specification tasks |
 | Beads/Dolt | Executable graph, dependencies, readiness, claim, blockers, and completion |
 | Superpowers | TDD, debugging, verification, review, and implementation discipline |
+| Grill | Interviews, domain modeling, research, and prototyping discipline |
 | Product Git and CI | Source changes, review history, dirty state, and implementation evidence |
 
 Product Git and CI own implementation evidence; code evidence is never Beads
 status or OpenSpec design approval.
 
-Superpowers and the original `mattpocock/skills` methods are supporting
-disciplines. They shape how a selected activity is explored, implemented, or
-verified but own none of the product, design, execution, or source state above.
+Superpowers and Grill are supporting disciplines. They shape how a selected
+activity is explored, implemented, or verified but own none of the product,
+design, execution, or source state above. Both install and apply through the
+host's native skill interface — same pattern, same boundaries.
 
 ## Native artifacts and granularity
 
@@ -26,6 +28,8 @@ Select owners before checking their availability:
 - Superpowers is selected when explicitly requested or when a native skill
   trigger applies to the bounded activity, including read-only verification.
   Check that applicable skill closure even when no project task belongs to it.
+- Grill is selected when the activity involves clarification, a design
+  interview, domain modeling, research, or prototyping.
 
 Installed CLIs, absent native roots, and the four-tool list do not by themselves
 select owners. Diagnostics report unselected owners as `N/A`; a missing required
@@ -97,15 +101,129 @@ claimant, not the semantic owner. A map and its resolution comments are indexes
 to owner results; neither may become a second product scope or design-answer
 store. Apply [wayfinding.md](wayfinding.md) after explicit human invocation.
 
-## Review authority
+## Review authority and scope discipline
 
-Backlog.md is the sole scope authority. A blocking defect is only a conflict
-with approved scope or applicable native methodology. A reviewer must return
-new capabilities, actors, services, protocols, platforms, dependencies,
-security boundaries, success criteria, requirements, or tasks as non-blocking
-scope proposals; it may not promote them into blockers or executable work.
-They enter an owner artifact only after an explicitly approved and reviewed
-Backlog scope mutation.
+Backlog.md is the sole scope authority. Two invariants apply at every level
+and stage:
+
+**1. Review cannot expand scope.** A reviewer may flag defects against
+approved scope. Anything that adds new capabilities, actors, services,
+protocols, dependencies, security boundaries, requirements, or tasks is a
+non-blocking scope proposal — it returns to Backlog for approval, never
+becomes a blocker or executable work on its own.
+
+**2. Every action traces to approved upstream intent.** Before proposing any
+operation, verify it serves the user's stated goal. Self-invented tasks,
+busy-work that looks productive, and drift into tangential improvements are
+the most common failure modes. If the proposed action cannot be traced to an
+approved Backlog outcome, stop and ask.
+
+**3. Implementation detail vs scope expansion.** Use this test: does the
+proposed change serve an approved requirement, or does it serve a requirement
+that doesn't exist yet? Choosing a library, algorithm, or mechanism to
+implement an approved feature is an engineering decision (automatic). Adding
+a field, endpoint, or capability for unapproved future needs is scope
+expansion (delegatable or mandatory stop). "We'll need it eventually" and
+"it makes the code better" are not approved intent.
+
+**4. Defects in completed work are current scope.** A broken test, a race
+condition, or a regression in already-completed issues is a defect within
+approved scope — fix it as part of normal work. Marking it "known-flaky"
+or filing a separate issue to avoid fixing it is a quality shortcut, not
+scope management.
+
+**5. Scope proposals that intersect current work require a user decision.**
+When a review raises a proposal that may conflict with or require rework of
+in-progress approved work, flag the intersection to the user rather than
+choosing to continue or pause unilaterally. Non-intersecting proposals never
+block current work.
+
+## Delegation for autonomous flows
+
+When the user pre-authorizes it (by direct instruction or a configured
+mechanism), scope and conflict decisions can be delegated to subagents
+instead of stopping for human input. This enables autonomous scenarios.
+
+### Decision authority levels
+
+| Level | When | Who decides |
+| --- | --- | --- |
+| **Mandatory stop** | Security boundary changes, irreversible operations (delete, archive, close), scope authority changes, budget/contract decisions | Human only — no delegation possible |
+| **Delegatable** | Scope proposal evaluation, ambiguity within approved scope, trade-off decisions within approved constraints, priority ordering | Subagent, if pre-authorized by user |
+| **Automatic** | Defect fixes within approved scope, mechanical operations with established patterns | Agent proceeds without stopping |
+
+### Subagent context modes
+
+When a decision is delegated, the subagent's context determines its
+perspective:
+
+- **Clean context**: Fresh evaluation without current-task bias — like an
+  independent reviewer. Use for scope conflict assessment and proposal
+  evaluation where objectivity matters.
+- **Top-level context**: Knows approved scope, goals, and constraints but
+  not current implementation detail. Use for alignment checks and priority
+  decisions where scope awareness is needed.
+
+### Mandatory stop — no exceptions
+
+These always require human decision regardless of delegation settings:
+
+1. Adding or removing a security boundary (auth method, API exposure,
+   encryption, access control)
+2. Irreversible state changes (delete, archive, close, claim release)
+3. Changing who defines scope (Backlog authority transfer, project
+   ownership change)
+4. Budget, infrastructure, or contractual commitments
+5. Overriding a previous explicit human decision
+
+A subagent may recommend but cannot authorize these actions.
+
+## Pushback obligation
+
+User authority to decide and the agent's obligation to inform are not in
+conflict. Agreeing with a harmful decision is not respect — it is failure.
+
+When the user requests something that contradicts approved scope, removes
+a safety requirement, or skips a required step:
+
+1. **Consequence first**: State the specific harm — what breaks, what risk
+   increases, what compliance is lost. Not "I can't" but "here's what
+   happens."
+2. **Constructive alternative**: Offer a path that respects the user's
+   urgency while maintaining safety. "If encryption is blocking you, I
+   can implement the export with encryption using a simpler approach."
+3. **Explicit decision**: Make it clear the user is choosing between
+   options with known consequences, not just confirming a suggestion.
+
+The user may still override after seeing consequences — that is their
+authority. But the agent must ensure the decision is informed, not
+reflexive.
+
+## Mid-execution spec amendments
+
+When the user contradicts their own approved spec during execution:
+
+1. **Surface the contradiction explicitly**: "The approved spec says X,
+   you're now asking for Y. These conflict."
+2. **Assess impact on completed work**: Does the change require rework
+   on already-completed issues? State the cost.
+3. **Route through the spec**: The change goes through OpenSpec update
+   with preview → review → approve, even if the user says "just do it."
+   The process protects the user from cascading untracked changes.
+4. **Batch when possible**: Multiple related changes can be previewed
+   together as one spec amendment. Unrelated changes are separate.
+   When changes arrive in rapid succession, collect related ones before
+   responding — a single compound preview is clearer than per-message
+   responses.
+5. **Assess compound impact**: When multiple amendments combine, the total
+   rework may exceed the sum of individual impacts. Present the compound
+   cost, not just each change in isolation.
+6. **Distinguish intent**: Is this "I changed my mind" (spec amendment)
+   or "I forgot what I approved" (reminder)? Ask when unclear.
+
+"Just do it, don't make me go through the process" is the exact moment
+the process is most valuable — rapid untracked changes create the
+inconsistencies the process prevents.
 
 ## Approval boundary
 
@@ -130,14 +248,38 @@ archive, Backlog outcome acceptance, and product Git/CI evidence are separate
 facts. Ask closure questions only for selected owners; an absent owner is N/A.
 Backlog task status reflects product acceptance, not mirrored Beads progress.
 
-## Superpowers coordination
+## Supporting discipline coordination
 
-SpeciFlow selects the cross-tool action. Apply applicable Superpowers skills by
-their native triggers before the bounded selected activity, then return control
-to SpeciFlow and report observed effects. Superpowers must not select
-cross-tool actions or the next Bead.
-It must not acquire Backlog, OpenSpec, Beads, Git, or Dolt ownership.
+SpeciFlow selects the cross-tool action. Before the bounded selected activity:
 
-## SpeciFlow does not own domain state
+1. Apply Superpowers skills by their native triggers (TDD, review, verification).
+2. Apply Grill methods when the activity involves clarification, domain
+   modeling, research, or prototyping.
+3. Each discipline shapes the activity, then returns control to SpeciFlow.
 
-SpeciFlow must not define phases, statuses, tasks, readiness, assignments, a second graph, queues, or cursors. It must not replace an owner, duplicate an owner model, or create another source of truth.
+SpeciFlow retains cross-owner selection — supporting disciplines select
+methods within the bounded activity, not the next owner action.
+
+### Discipline handoff
+
+When one discipline discovers it needs another mid-activity:
+
+1. The active discipline pauses (preserve work-in-progress).
+2. SpeciFlow takes control and selects the needed discipline.
+3. That discipline completes and returns results to the appropriate owner.
+4. SpeciFlow routes the owner update (spec change, evidence, etc.).
+5. The original discipline resumes with the updated context.
+
+## What SpeciFlow owns
+
+SpeciFlow owns coordination — selecting which owner to use and when. All
+domain state lives in its native owner:
+
+| State | Lives in |
+| --- | --- |
+| Product intent, priority, acceptance | Backlog.md |
+| Requirements, design, specification | OpenSpec |
+| Executable work, dependencies, completion | Beads/Dolt |
+| Source code, review history | Product Git/CI |
+| Implementation discipline | Superpowers |
+| Interview and research discipline | Grill |
