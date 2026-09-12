@@ -101,14 +101,25 @@ owner; continue through the selected owners' setup outline.
 
 ## Missing tools
 
-If a required native tool or integration is missing, report it. When the user
-forbids installation or repair, finish with the findings and confirmation that
-nothing was changed; installation is at most a future option, not a current
-approval question. Otherwise offer one safe loading or installation action and
-wait for explicit approval before performing it. A component with implicit
-triggers must be invocation-scoped and explicit-only. For `openspec-to-beads`,
-offer only an invocation-scoped explicit-only load with automatic and proactive
-activation disabled; never offer unqualified installation.
+On first invocation, check availability of all five components and report
+missing ones:
+
+| Component | Claude Code | Codex |
+| --- | --- | --- |
+| Backlog.md | `backlog --help` | `backlog --help` |
+| OpenSpec | `openspec --help` | `openspec --help` |
+| Beads/Dolt | `bd --help` | `bd --help` |
+| Superpowers | Check installed plugin/skill closure | Check `.agents/skills/` |
+| Grill | Check `mattpocock-skills` plugin or skill closure | Check `.agents/skills/{grilling,domain-modeling,research,prototype}` |
+
+For missing components, offer installation through
+[references/installation.md](references/installation.md) — one component at a
+time, with preview and approval. Work continues with available components;
+missing ones are reported as `N/A` in diagnostics.
+
+Grill is strongly recommended but not a hard blocker — interviews work
+without the formal methodology (see
+[references/grilling-integration.md](references/grilling-integration.md)).
 
 ## Supporting disciplines
 
