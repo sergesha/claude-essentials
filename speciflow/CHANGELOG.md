@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.4.0...speciflow-v0.5.0) (2026-09-12)
+
+
+### Features
+
+* **speciflow:** add doctor — cross-level consistency checker ([63f91c5](https://github.com/sergesha/claude-essentials/commit/63f91c50811b44cdd5ce46e2ef39f0ef36de16e9))
+
 ## [0.4.0](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.3.0...speciflow-v0.4.0) (2026-09-11)
 
 
