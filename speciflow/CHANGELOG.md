@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.3](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.5.2...speciflow-v0.5.3) (2026-09-12)
+
+
+### Bug Fixes
+
+* **speciflow:** add component availability check table and Grill detection ([c26b84f](https://github.com/sergesha/claude-essentials/commit/c26b84f8162133de0a7950e6f4c262cb0c0b3989))
+* **speciflow:** enable model invocation, fix skill namespaces, add dependencies ([06c46b6](https://github.com/sergesha/claude-essentials/commit/06c46b6d42b92d1a9787069d9da053f37e8bc49b))
+
 ## [0.5.2](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.5.1...speciflow-v0.5.2) (2026-09-12)
 
 
