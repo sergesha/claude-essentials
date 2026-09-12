@@ -39,6 +39,9 @@ Backlog task with clear scope.
 
 ### Sufficiency criteria (Backlog → OpenSpec)
 
+Before checking sufficiency, run [doctor](doctor.md) to verify coverage
+and detect orphans or drift introduced during this iteration.
+
 All four must be met to transition:
 
 - [ ] **Outcome**: What should exist when this is done? Stated as a
@@ -89,6 +92,9 @@ a complete specification.
    If complete → spec is ready for approval and Beads projection.
 
 ### Completeness criteria (OpenSpec → Beads)
+
+Before checking completeness, run [doctor](doctor.md) to verify that
+all Backlog criteria are covered and no orphan requirements appeared.
 
 All four must be met to approve:
 

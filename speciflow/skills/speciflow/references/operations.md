@@ -80,7 +80,9 @@ For any action that crosses owner boundaries, follow these steps in order:
 
 1. **Preserve intent**: Complete the ephemeral check in
    [transitions.md](transitions.md) — verify every approved upstream item
-   appears in the proposed downstream result.
+   appears in the proposed downstream result. For lifecycle closures
+   (close, archive, complete), run [doctor](doctor.md) first to verify
+   cross-level consistency before the transition.
 2. **Inspect**: Read the target owner's documented lifecycle, current native
    state, root, revision, and dirty state.
 3. **Classify**: Determine whether the effect is a lifecycle transition

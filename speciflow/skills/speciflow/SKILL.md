@@ -49,8 +49,9 @@ report also needs the reporting route.
 | Setup or initialization | [references/storage.md](references/storage.md), [references/operations.md](references/operations.md), [references/initialization.md](references/initialization.md) |
 | Storage selection | [references/storage.md](references/storage.md) |
 | Native operations or any proposed mutation | [references/operations.md](references/operations.md) |
+| Consistency check, alignment, "is everything on track?" | [references/doctor.md](references/doctor.md), [references/diagnostics.md](references/diagnostics.md) |
 | Status, next, views, or export | [references/operations.md](references/operations.md), [references/diagnostics.md](references/diagnostics.md), [references/transitions.md](references/transitions.md) |
-| Cross-owner refinement, projection, application, promotion, archive, closure, or any state report | [references/transitions.md](references/transitions.md) |
+| Cross-owner refinement, projection, application, promotion, archive, closure, or any state report | [references/transitions.md](references/transitions.md), [references/doctor.md](references/doctor.md) |
 | Clarification, design interview, ambiguity, domain terms, research, or prototype selection | [references/grilling-integration.md](references/grilling-integration.md) |
 | Human-invoked original Wayfinder chart, resolve, or fresh resume | [references/grilling-integration.md](references/grilling-integration.md), [references/wayfinding.md](references/wayfinding.md), [references/operations.md](references/operations.md), [references/transitions.md](references/transitions.md) |
 | User-requested host installation | [references/installation.md](references/installation.md) |

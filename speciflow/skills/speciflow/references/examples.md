@@ -232,3 +232,31 @@ When spec is complete → approve → project to Beads.
 **Key principle:** The user started with "I want recommendations" and through
 2 Backlog iterations + OpenSpec iterations arrived at a specific, testable
 spec. Each version is committed. Grill drove the exploration at every stage.
+
+## Example 9 — Doctor catches drift before projection
+
+**Situation:** OpenSpec spec is approved. User says "project into Beads."
+Before projection, SpeciFlow runs doctor automatically.
+
+**Doctor report:**
+
+```
+Coverage: 3/3 Backlog criteria → OpenSpec requirements ✓
+Orphans:  1 OpenSpec requirement has no Backlog trace:
+          "Add admin analytics dashboard" — not in approved scope
+Drift:    3 Backlog criteria → 4 OpenSpec requirements (1 extra)
+```
+
+**SpeciFlow response:**
+
+"Doctor found an orphan requirement — 'admin analytics dashboard' doesn't
+trace to any Backlog acceptance criterion. This looks like scope drift.
+
+Options:
+1. Remove it from the spec before projection
+2. Add a corresponding Backlog criterion (scope expansion → needs approval)
+3. Confirm it's intentional and provide the Backlog trace I missed"
+
+**Key principle:** Doctor caught scope drift automatically, before it
+propagated into Beads issues. Without doctor, the orphan requirement would
+have become implementation work without approved intent.

@@ -32,6 +32,10 @@ An explicit user request for a specific format takes precedence.
 Diagnostics is read-only: it never repairs, creates, synchronizes, archives,
 or closes native artifacts.
 
+When the user requests a full status report (not a scoped single-owner
+check), include the cross-level consistency view from
+[doctor.md](doctor.md) alongside the per-owner results.
+
 ## Supporting disciplines (Superpowers, Grill)
 
 Superpowers and Grill are supporting disciplines, not product owners. Their
