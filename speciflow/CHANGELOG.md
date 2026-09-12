@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.5.0...speciflow-v0.5.1) (2026-09-12)
+
+
+### Bug Fixes
+
+* **speciflow:** rewrite grilling-integration and wayfinding as positive recipes ([e32b28a](https://github.com/sergesha/claude-essentials/commit/e32b28ac4fe4c2ff6bcb27a1bc68c055ec0114f4))
+
 ## [0.5.0](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.4.0...speciflow-v0.5.0) (2026-09-12)
 
 
