@@ -1,139 +1,107 @@
-# Native Wayfinder binding
+# Wayfinder binding
 
-Apply this reference only after the human explicitly invokes the original
-`mattpocock/skills` `wayfinder` entrypoint. Wayfinder is user-only: SpeciFlow
-must not invoke it, simulate it, or copy its charting, interview, selection, or
-resolution method. Resolve the original entrypoint to the installed
-`mattpocock/skills` source, completely read it and every linked file in its
-closure, and hold that closure stable for the activity. Then
-pass the native context below through Wayfinder's documented `Other` tracker
-extension. The original method remains in control of wayfinding; this reference
-only binds owners and operations.
+Apply this reference only after the human explicitly invokes the
+`wayfinder` entrypoint from `mattpocock/skills`. SpeciFlow binds
+Wayfinder to native owners — it does not invoke, simulate, or replace
+Wayfinder itself.
 
-## Invocation context
+## Setup
 
-Fill and pass these values in memory, not in a SpeciFlow file or schema:
+1. Resolve the original `wayfinder` source and read its full closure
+   (same process as [grilling-integration.md](grilling-integration.md)
+   step 1).
+2. Pass the context below through Wayfinder's `Other` tracker extension.
+3. The original method controls wayfinding; this reference only binds
+   owners and operations.
+
+### Context to pass
 
 ```text
-Wayfinding tracker: verified native Beads/Dolt root and qualified installed
-map, child, dependency, readiness, claim, comment, close, and history operations.
-Planning owners: verified Backlog and OpenSpec roots, authoritative source
-revisions or user-approved dirty snapshots, and their linked artifacts.
-Product authority: approved Backlog outcome, scope, priority, exclusions, and
-unresolved prerequisites.
-Semantic authority: current OpenSpec change and stable question references.
-Permitted effects: exact existing authorization for owner writes, native
-commits/audits, research or prototype artifacts, delegation, branches, and
-product-source changes.
-Return condition: finish the selected bounded activity and return cross-owner
-selection to SpeciFlow.
+Wayfinding tracker: verified Beads/Dolt root + installed map/child/
+  dependency/readiness/claim/comment/close/history operations
+Planning owners: verified Backlog and OpenSpec roots, source revisions
+Product authority: approved Backlog outcome, scope, priority, exclusions
+Semantic authority: current OpenSpec change and question references
+Permitted effects: existing authorization for owner writes and commits
+Return condition: finish bounded activity, return control to SpeciFlow
 ```
 
-Project domain documents remain sources in their documented role. The original
-`domain-modeling` method may actively challenge them, but definitions, design
-answers, and rationale return to the current OpenSpec context through its
-authorized editing interface.
+## Owner mapping
 
-## Native owner mapping
+Use one Beads graph:
 
-Use one Beads graph. The map is a native parent/index carrying only the
-`wayfinder:map` label and the original low-resolution map sections. Destination,
-Notes, and Out of scope summarize and link approved Backlog intent; they are not
-scope authority. Fog points to unresolved OpenSpec questions or areas.
-Decisions-so-far links named child issues and their OpenSpec results without
-copying answers or live status.
+| Wayfinder concept | Native owner |
+| --- | --- |
+| Map (parent/index) | Beads issue with `wayfinder:map` label |
+| Destination, Notes, Out of scope | Summarize and link Backlog intent (not scope authority) |
+| Fog | Unresolved OpenSpec questions |
+| Sharp questions / prerequisites | Beads child issues with `wayfinder:<type>` labels |
+| Decisions-so-far | Links to child issues and their OpenSpec results |
+| Execution state (readiness, claim, completion) | Beads native fields |
+| Semantic answers and rationale | OpenSpec context |
 
-Each sharp question or prerequisite is a native child whose returned Beads ID
-is its identity. Bound its research, interview, prototype, or prerequisite work
-and link the stable OpenSpec question and source revision. Use the original
-`wayfinder:<type>` label. A standard native task is sufficient; an optional
-native decision type does not transfer semantic ownership from OpenSpec.
+## Operations
 
-Use native parent relationships, blockers, readiness, assignment/claim,
-comments, close, and history. Do not mirror that state in OpenSpec checklists,
-Markdown fields, map prose, or SpeciFlow metadata. Beads owns execution state;
-its assignee is the claimant, not the semantic owner.
+### Creating the map and children
 
-Preserve original chart breadth, fog, ticket types, create-then-wire order,
-named links, linked assets, one-selected-ticket rule, research exception, and
-fresh-session behavior. Human answers stay HITL. Product facts and requirements
-stay in Backlog and OpenSpec rather than becoming canonical issue descriptions.
+1. Create the map issue first.
+2. Create all children, then wire blockers.
+3. Suppress parent label inheritance (`--no-inherit-labels`).
+4. Verify each child's parent, type label, source reference, and
+   absence of `wayfinder:map` before continuing.
+5. Use returned native IDs only.
 
-## Qualified native operations
+### Before every write
 
-Before every write: verify the canonical root, installed help, and current
-state; preview the exact payload and effects; apply semantic review and
-existing authorization; then inspect the native result. Include documented or observed Dolt commits and CLI audit writes such
-as `.beads/interactions.jsonl` in the effect preview and post-check. Preserve
-native audit effects even when Git reports them dirty.
+1. Verify the canonical Beads root.
+2. Preview the exact payload and effects.
+3. Apply semantic review and existing authorization.
+4. Inspect the native result after execution.
+5. Include Dolt commits and audit records (`.beads/interactions.jsonl`)
+   in the preview and post-check.
 
-Use returned native IDs only. Create the map before its children, create all
-children before wiring blockers, and verify every response. Suppress parent
-label inheritance through the installed native facility: for qualified Beads
-1.2.2 child creation this is `--no-inherit-labels`. Verify each child's parent,
-intended type label, source reference, and absence of `wayfinder:map` before the
-next create or edge. Never identify a map by label alone. A mismatch, partial
-result, or unknown output stops the operation without silent correction, blind
-retry, or guessed IDs.
+### Selecting next work
 
-SpeciFlow selects the next cross-owner action from current native state. Honor
-a child the human names; when only a map is named, query the current child
-records, blockers, readiness, and claims, including each ready child's current
-native title and OpenSpec question reference. Complete this available read-only
-lookup within the current `next` report; do not return it as future work or ask
-the human to supply facts available from the owner. When candidates are equally
-supported, present every candidate before asking the human to choose in the
-shape `[<native title>](<documented native link or path>) — <OpenSpec question
-reference>`, substituting only values obtained from the current owners.
-Wayfinder may propose a solution inside the selected activity but must not
-assign itself the next Bead.
+SpeciFlow selects the next cross-owner action from current native state:
 
-The primary agent performs every owner write. It atomically claims selected
-work as the first Beads write; a losing or unknown claim stops that work. A
-research agent applies the original `research` method and returns cited evidence
-only: it does not claim, comment, close, update the map, write OpenSpec, or
-select a neighbor. Preserve parallel research when all affected tickets are
-ready and the exact delegation, artifact, branch, and commit effects are
-authorized. Otherwise perform only the authorized chart or resolution effects.
+1. Honor a child the human names.
+2. If only a map is named, query child records, blockers, readiness,
+   and claims.
+3. Present ready candidates as:
+   `[<title>](<link>) — <OpenSpec question reference>`
+4. Equal candidates → present all and let the human choose.
 
-Research capture, prototype capture, product promotion, owner recording,
-comment, close, and map update are distinct effects. Map Notes cannot grant
-implementation permission. New tickets remain a separately previewed native
-create-then-wire action. A scope exclusion, narrowing, issue deletion, or
-scope-based close first returns to Backlog for approval.
+### Agent roles
 
-## Owner result and completion
+- **Primary agent**: performs all owner writes, claims work atomically.
+- **Research agent**: applies `research` method, returns cited evidence
+  only — no claims, comments, closes, or map updates.
 
-Resolve according to the child's bounded acceptance, not its label:
+## Completion
 
-- Work scoped only to research or a prerequisite may close when its accepted
-  evidence or performed-work result is linked. Any proposed semantic answer
-  remains pending; that close is not OpenSpec acceptance or a map decision.
-- Work that promises a semantic decision, including research-labelled work,
-  resolves only after the human supplies the answer and rationale and they are
-  reviewed, authorized, recorded, and verified in the current OpenSpec context.
-  The Beads resolution comment links that result and may add a clearly
-  non-authoritative gist before native close.
+Resolve by the child's bounded acceptance:
 
-Agreement in conversation is neither an OpenSpec write nor Beads completion.
-The map update links the child and owner result without copying either. After
-the original single selected non-research activity, or its permitted research
-set, return control to SpeciFlow.
+| Child type | Completes when |
+| --- | --- |
+| Research or prerequisite only | Accepted evidence linked; semantic answer stays pending |
+| Promises a semantic decision | Human supplies answer + rationale, recorded and verified in OpenSpec |
 
-## Fresh resume and restrictions
+After the selected activity, return control to SpeciFlow.
 
-A later session requires a fresh explicit human Wayfinder invocation.
-Re-resolve the original source and closure, record its current revision when
-available, and verify the Backlog, OpenSpec, Beads, and relevant Product Git
-roots and revisions. Query the native map, children, dependencies, readiness,
-claims, comments, close state, history, commits, and audits; then follow owner
-references and verify their current revisions. A handover, transcript, cached
-source, map gist, or untracked report is only a pointer to inspect. Never restore
-a local cursor or copied status.
+## Fresh session resume
 
-If the user forbids Beads writes, do not chart, claim, comment, close, or update
-a map, and do not fall back to `.scratch`, local Markdown tickets, OpenSpec task
-status, or another registry. Continue only allowed reads, original-method
-discussion, or independently authorized OpenSpec edits, and name the unavailable
-Wayfinder capability precisely. This restricted path is not a completed native
-multi-session route.
+A new session requires a fresh human Wayfinder invocation:
+
+1. Re-resolve source and closure.
+2. Verify all owner roots and revisions.
+3. Query native map, children, dependencies, readiness, claims,
+   comments, close state, history, commits, and audits.
+4. Follow owner references and verify current revisions.
+5. Handovers and transcripts are pointers to inspect, not state to
+   restore.
+
+## Restrictions
+
+If the user forbids Beads writes: continue only reads, original-method
+discussion, or independently authorized OpenSpec edits. Name the
+unavailable capability precisely.
