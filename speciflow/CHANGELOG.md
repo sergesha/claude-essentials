@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.3.0...speciflow-v0.4.0) (2026-09-11)
+
+
+### Features
+
+* **speciflow:** add iterative planning with grilling-driven refinement ([84c52a1](https://github.com/sergesha/claude-essentials/commit/84c52a11b426d2242472cdb4bbb8ee99e88b6cba))
+
 ## [0.3.0](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.2.6...speciflow-v0.3.0) (2026-09-10)
 
 
