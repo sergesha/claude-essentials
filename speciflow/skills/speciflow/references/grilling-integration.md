@@ -86,12 +86,22 @@ These are human-invoked only — SpeciFlow never calls them:
 A prior direct invocation by the user continues within the same activity.
 Reading an entrypoint's instructions is not the same as invoking it.
 
-## When the method is unavailable
+## When the formal method is not installed
 
-If the Grill skills are not installed, or the loaded closure is
-incomplete or incompatible:
+The `mattpocock/skills` package provides structured interview
+methodology. When it is not installed:
 
-1. Report what's missing or incompatible.
-2. Continue any unaffected owner-native work.
-3. Offer installation through [installation.md](installation.md)
-   as a separate action.
+1. **Interviews still work.** Conduct clarification, domain modeling,
+   and stress-testing using the same principles: challenge assumptions,
+   surface gaps, explore domain boundaries. The formal skill adds
+   structure and question discipline; it is not required for the
+   interview itself.
+2. **Report availability.** Note that the formal Grill method is not
+   installed — the interview uses general principles instead.
+3. **Offer installation** through [installation.md](installation.md)
+   if the user wants the full structured methodology.
+
+The absence of the formal Grill skill never blocks clarification,
+domain work, or research activities. It only means the structured
+question algorithm and templates from `mattpocock/skills` are not
+available.

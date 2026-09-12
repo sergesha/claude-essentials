@@ -22,8 +22,8 @@ Backlog task with clear scope.
 
 1. **Capture**: Write the current understanding as a Backlog task draft
    (or update from previous iteration).
-2. **Interview**: Invoke Grill (grilling or domain-modeling) to challenge
-   the current draft:
+2. **Interview**: Challenge the current draft (using Grill methods when
+   installed, or general interview principles when not):
    - What assumptions are untested?
    - What's missing from scope boundaries?
    - What does "done" look like — can you test it?
@@ -77,8 +77,8 @@ a complete specification.
 
 1. **Draft**: Write the current understanding as an OpenSpec change
    (or update from previous iteration).
-2. **Interview**: Invoke Grill (grilling or domain-modeling) to
-   stress-test the specification:
+2. **Interview**: Stress-test the specification (using Grill methods
+   when installed, or general interview principles when not):
    - Do requirements cover all acceptance criteria from Backlog?
    - What edge cases are unaddressed?
    - Are requirements specific enough to implement and test?
