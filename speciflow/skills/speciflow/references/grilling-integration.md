@@ -7,12 +7,15 @@ return to the appropriate owner.
 
 ## Method selection
 
-| Activity needs | Use this method |
+| Activity needs | Skill to invoke |
 | --- | --- |
-| Stress-test a plan, decision, or idea | `grilling` |
-| Challenge domain terms and scenarios against project language | `domain-modeling` (+ `grilling` for interview) |
-| Resolve a blocking factual question from primary sources | `research` |
-| Give the user a concrete artifact to judge | `prototype` |
+| Stress-test a plan, decision, or idea | `mattpocock-skills:grilling` |
+| Challenge domain terms and scenarios against project language | `mattpocock-skills:domain-modeling` (+ `grilling` for interview) |
+| Resolve a blocking factual question from primary sources | `mattpocock-skills:research` |
+| Give the user a concrete artifact to judge | `mattpocock-skills:prototype` |
+
+On Codex, these are under `.agents/skills/` and invoked by local name
+(`grilling`, `domain-modeling`, etc.).
 
 Start by narrowing the question. Deepen when the user asks, when an
 answer exposes dependent decisions, or when a missing fact prevents a

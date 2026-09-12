@@ -1,7 +1,6 @@
 ---
 name: speciflow
 description: Use when a user needs to coordinate across Backlog.md, OpenSpec, Beads/Dolt, Superpowers, and Grill — turning ideas into tracked specs, projecting specs into tasks, checking status, or resolving design decisions.
-disable-model-invocation: true
 ---
 
 # SpeciFlow
@@ -104,13 +103,13 @@ owner; continue through the selected owners' setup outline.
 On first invocation, check availability of all five components and report
 missing ones:
 
-| Component | Claude Code | Codex |
+| Component | Claude Code — how to check | Codex — how to check |
 | --- | --- | --- |
 | Backlog.md | `backlog --help` | `backlog --help` |
 | OpenSpec | `openspec --help` | `openspec --help` |
 | Beads/Dolt | `bd --help` | `bd --help` |
-| Superpowers | Check installed plugin/skill closure | Check `.agents/skills/` |
-| Grill | Check `mattpocock-skills` plugin or skill closure | Check `.agents/skills/{grilling,domain-modeling,research,prototype}` |
+| Superpowers | `Skill("superpowers:brainstorming")` loads | Check `.agents/skills/` |
+| Grill | `Skill("mattpocock-skills:grilling")` loads | Check `.agents/skills/{grilling,domain-modeling,research,prototype}` |
 
 For missing components, offer installation through
 [references/installation.md](references/installation.md) — one component at a

@@ -37,7 +37,8 @@
       "name": "speciflow",
       "description": "Coordinated specification-driven workflow guidance for coding agents.",
       "source": "./speciflow",
-      "category": "developer-tools"
+      "category": "developer-tools",
+      "dependencies": ["superpowers@claude-plugins-official", "mattpocock-skills@claude-plugins-official"]
     },
     {
       "name": "code-intel",
