@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.2](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.5.1...speciflow-v0.5.2) (2026-09-12)
+
+
+### Bug Fixes
+
+* **speciflow:** graceful degradation when grilling skills not installed ([079b3e8](https://github.com/sergesha/claude-essentials/commit/079b3e8d4d2b4e2e8b76215b9abbe83aa4aa7fdf))
+
 ## [0.5.1](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.5.0...speciflow-v0.5.1) (2026-09-12)
 
 
