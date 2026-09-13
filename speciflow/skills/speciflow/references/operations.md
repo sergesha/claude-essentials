@@ -17,6 +17,10 @@ Use each owner through its native interface:
 before the bounded selected activity, then return control to SpeciFlow.
 Both install and apply through the host's native skill interface.
 
+**CLI knowledge caching:** Check each owner CLI's help (`--help`) once
+per session, not per operation. After the first check, you know the
+interface — reuse that knowledge for subsequent commands.
+
 When the human explicitly invokes Wayfinder, also apply
 [wayfinding.md](wayfinding.md) for the native owner binding.
 
