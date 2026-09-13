@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.7.1](https://github.com/sergesha/claude-essentials/compare/tech-radar-v0.7.0...tech-radar-v0.7.1) (2026-09-13)
+
+
+### Bug Fixes
+
+* **code-intel:** handle removed hook installations with reload guidance ([6dcbb2a](https://github.com/sergesha/claude-essentials/commit/6dcbb2a06cedfa06865e9de03b593eb96360cfca))
+* **code-intel:** handle removed hook installations with reload guidance ([ea1a62d](https://github.com/sergesha/claude-essentials/commit/ea1a62dc3516106268b61e26112ba96bf488d349))
+
 ## [0.7.0](https://github.com/sergesha/claude-essentials/compare/tech-radar-v0.6.2...tech-radar-v0.7.0) (2026-09-11)
 
 
