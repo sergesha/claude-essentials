@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.1](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.6.0...speciflow-v0.6.1) (2026-09-13)
+
+
+### Bug Fixes
+
+* **speciflow:** cache CLI help per session, not per operation ([ed039d7](https://github.com/sergesha/claude-essentials/commit/ed039d7bc10015c668b0df5dcd3c0e532a2fd86e))
+* **speciflow:** override grilling to one-question-at-a-time format ([23d6cb7](https://github.com/sergesha/claude-essentials/commit/23d6cb7ac769177d3b48de56f81b310139bb3ad8))
+
 ## [0.6.0](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.5.3...speciflow-v0.6.0) (2026-09-13)
 
 
