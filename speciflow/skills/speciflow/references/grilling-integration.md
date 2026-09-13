@@ -52,9 +52,19 @@ For planning-phase interviews (iterative refinement): use the simplified
 
 ### Step 3: Run the interview
 
-Invoke through the host's native skill interface. The method leads the
-interview using its own question discipline. SpeciFlow provides the
+Invoke through the host's native skill interface. SpeciFlow provides the
 bounded context; the method provides the practice.
+
+**Interview format override:** When invoked through SpeciFlow, use
+one-question-at-a-time format regardless of the method's default:
+
+1. Ask **one** question with your recommended answer.
+2. Wait for the user's response or counter-question.
+3. Only then move to the next question.
+
+This overrides grilling's "ask the whole frontier in one round" default.
+The user's response may change the next question — sequential questions
+produce better refinement than batch rounds.
 
 ### Step 4: Return results
 
