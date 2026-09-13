@@ -66,6 +66,12 @@ manager, then restart the host. It uses the existing local skill's
 project discovery, initialization, updates, and hooks. Plugin declarations supply
 the host integration; there is no global-config migration step.
 
+## Updating plugins
+
+Follow the shared [plugin update procedure](docs/plugin-updates.md) for Claude
+Code and Codex. It covers installed-plugin selection, applying updates to open
+sessions, stale hook paths, and separate installation/activation checks.
+
 ## Versioning
 
 Each plugin is its own [release-please](https://github.com/googleapis/release-please) package,

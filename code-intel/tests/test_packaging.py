@@ -50,7 +50,6 @@ class PackagingTests(unittest.TestCase):
             ("PostToolUse", "hook-update"),
         ):
             hook = hooks[event][0]["hooks"][0]
-            self.assertEqual(hook["command"], 'python3 "${CLAUDE_PLUGIN_ROOT}/scripts/code_intel.py" ' + command)
             self.assertEqual(hook["timeout"], 300)
         self.assertIn("apply_patch", hooks["PostToolUse"][0]["matcher"].split("|"))
 

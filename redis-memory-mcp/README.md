@@ -119,17 +119,10 @@ prefixes and embedding configuration are unchanged by this integration.
 
 ### Upgrade (both clients)
 
-```bash
-# Codex
-codex plugin marketplace upgrade claude-essentials
-codex plugin add redis-memory@claude-essentials
+Follow the shared [plugin update procedure](../docs/plugin-updates.md) for
+installation, session activation, and verification in both clients.
 
-# Claude Code
-claude plugin marketplace update claude-essentials
-claude plugin update redis-memory@claude-essentials
-```
-
-Restart the client after upgrading. Upgrading the plugin does not migrate,
+Upgrading the plugin does not migrate,
 clear or rename stored memories. Keep the existing backend credentials,
 namespace, index and embeddings settings. The existing launcher selects the
 latest `redis-memory-mcp-v*` release unless `REDIS_MEMORY_MCP_REF` is pinned;

@@ -83,17 +83,10 @@ documentation.
 
 ## Upgrade
 
-```bash
-# Codex
-codex plugin marketplace upgrade claude-essentials
-codex plugin add tech-radar@claude-essentials
+Follow the shared [plugin update procedure](../docs/plugin-updates.md) for
+installation, session activation, and verification in both clients.
 
-# Claude Code
-claude plugin marketplace update claude-essentials
-claude plugin update tech-radar@claude-essentials
-```
-
-Restart the client, retain the existing `TECH_RADAR_DATA_DIR` when applicable,
+Retain the existing `TECH_RADAR_DATA_DIR` when applicable,
 and upgrade redis-memory separately if needed.
 
 ## Verification
