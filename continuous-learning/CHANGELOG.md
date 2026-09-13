@@ -5,6 +5,14 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1](https://github.com/sergesha/claude-essentials/compare/continuous-learning-v0.3.0...continuous-learning-v0.3.1) (2026-09-13)
+
+
+### Bug Fixes
+
+* **code-intel:** handle removed hook installations with reload guidance ([6dcbb2a](https://github.com/sergesha/claude-essentials/commit/6dcbb2a06cedfa06865e9de03b593eb96360cfca))
+* **code-intel:** handle removed hook installations with reload guidance ([ea1a62d](https://github.com/sergesha/claude-essentials/commit/ea1a62dc3516106268b61e26112ba96bf488d349))
+
 ## [0.3.0](https://github.com/sergesha/claude-essentials/compare/continuous-learning-v0.2.0...continuous-learning-v0.3.0) (2026-09-11)
 
 
