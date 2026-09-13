@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.2](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.6.1...speciflow-v0.6.2) (2026-09-13)
+
+
+### Bug Fixes
+
+* **speciflow:** separate operational from semantic review, scope doctor triggers ([62f0fc9](https://github.com/sergesha/claude-essentials/commit/62f0fc982ae78f6572a255e695520765a7ca5cc8))
+
 ## [0.6.1](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.6.0...speciflow-v0.6.1) (2026-09-13)
 
 
