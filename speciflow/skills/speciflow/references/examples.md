@@ -260,3 +260,32 @@ Options:
 **Key principle:** Doctor caught scope drift automatically, before it
 propagated into Beads issues. Without doctor, the orphan requirement would
 have become implementation work without approved intent.
+
+## Example 10 — Inbox: capture and continue
+
+**Situation:** You're implementing the Stripe webhook handler (Beads issue #2).
+
+**User says:** "Oh, we should add Apple Pay support eventually."
+
+**Wrong:** Stop webhook work, start researching Apple Pay, create Backlog
+task with full preview/approval cycle.
+
+**Correct — triage and capture:**
+
+1. Triage: Blocks current work? No. Mandatory stop? No. Invalidates
+   assumption? No. → **Capture to inbox.**
+2. `backlog draft create "Explore Apple Pay support"` (2 seconds)
+3. Continue webhook handler implementation.
+
+**Later, user says:** "Wait — the webhook endpoint has no rate limiting!"
+
+1. Triage: Blocks current work? No, but... Mandatory stop? **Yes** —
+   security boundary (access control / DoS protection). → **Interrupt.**
+2. Pause webhook work. Apply scope discipline: is rate limiting in the
+   approved spec? If yes → defect, fix now. If no → scope amendment
+   protocol.
+
+**Key principle:** Most incoming items are not urgent. Capture takes
+seconds. The current work gets finished. Inbox is reviewed after the
+work unit completes — each item then goes through normal speciflow
+routing with proper attention.

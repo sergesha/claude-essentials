@@ -270,6 +270,53 @@ When a decision affects multiple approved specs or parallel workstreams:
 5. Each spec update is still a separate owner mutation with separate
    authorization.
 
+## Incoming items during execution
+
+When ideas, questions, or corrections arrive while work is in progress,
+triage before acting. The default is **capture and continue** — not
+interrupt.
+
+### Triage (3 questions, instant)
+
+1. Does this **block** the current work? (dependency, wrong assumption)
+2. Is this a **mandatory stop** item? (security, irreversibility)
+3. Does this **invalidate** a fundamental assumption of the current task?
+
+**Any YES → interrupt.** Apply the appropriate protocol (scope amendment,
+mandatory stop, cross-phase invalidation). Current work pauses.
+
+**All NO → capture to inbox, continue current work.**
+
+### Inbox
+
+The inbox is a lightweight capture — not a Backlog task. Use one of:
+
+- `backlog draft create "<one-line summary>"` — Backlog draft (no full
+  task creation, no preview/approval cycle)
+- A `## Inbox` section in the current planning document
+- A timestamped note in `<data-root>/planning/inbox.md`
+
+Each item gets: one-line summary, source (who said it, when), and
+category tag (`idea`, `question`, `correction`, `future-scope`).
+
+Capture takes seconds, not minutes. No approval needed. Continue
+current work immediately after capture.
+
+### Processing inbox
+
+After the current work unit completes (Beads issue closed, iteration
+finished, or natural pause):
+
+1. Review inbox items.
+2. Each item goes through normal speciflow routing — iterative planning
+   for new ideas, scope amendment for corrections, doctor for alignment
+   checks.
+3. Empty items that were addressed during work or became irrelevant.
+
+The inbox is ephemeral — not a second backlog or queue. If an item
+survives two reviews without action, promote it to a real Backlog task
+or discard it.
+
 ## Live queries
 
 Use [diagnostics.md](diagnostics.md) for live `status` and `next`, including

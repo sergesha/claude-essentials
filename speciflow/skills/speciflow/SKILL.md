@@ -47,6 +47,7 @@ report also needs the reporting route.
 | New idea, feature request, or rough plan that needs refinement | [references/iterative-planning.md](references/iterative-planning.md), [references/grilling-integration.md](references/grilling-integration.md), [references/operations.md](references/operations.md) |
 | Setup or initialization | [references/storage.md](references/storage.md), [references/operations.md](references/operations.md), [references/initialization.md](references/initialization.md) |
 | Storage selection | [references/storage.md](references/storage.md) |
+| Idea, question, or correction arriving mid-work | [references/operations.md](references/operations.md) (Incoming items during execution) |
 | Native operations or any proposed mutation | [references/operations.md](references/operations.md) |
 | Consistency check, alignment, "is everything on track?" | [references/doctor.md](references/doctor.md), [references/diagnostics.md](references/diagnostics.md) |
 | Status, next, views, or export | [references/operations.md](references/operations.md), [references/diagnostics.md](references/diagnostics.md), [references/transitions.md](references/transitions.md) |
