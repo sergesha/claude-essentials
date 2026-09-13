@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/code_intel.py\" hook-status",
+            "command": "python3 -c 'import json, os, sys\npath = sys.argv[1]\nsys.argv = sys.argv[1:]\ntry:\n    with open(path, \"rb\") as stream:\n        source = stream.read()\nexcept FileNotFoundError:\n    print(json.dumps({\"systemMessage\": \"Code Intel: this installation is missing, possibly after a plugin update. Claude Code: run /reload-plugins in this session. Codex: reload through the owning App Server if available; otherwise restart the client and resume this conversation. This indexing hook was skipped; activation of the updated plugin is not verified.\"}))\n    sys.exit(0)\nsys.path[0] = os.path.dirname(path)\nexec(compile(source, path, \"exec\"), {\"__name__\": \"__main__\", \"__file__\": path})' \"${CLAUDE_PLUGIN_ROOT}/scripts/code_intel.py\" hook-status",
             "timeout": 300
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/code_intel.py\" hook-prompt",
+            "command": "python3 -c 'import json, os, sys\npath = sys.argv[1]\nsys.argv = sys.argv[1:]\ntry:\n    with open(path, \"rb\") as stream:\n        source = stream.read()\nexcept FileNotFoundError:\n    print(json.dumps({\"systemMessage\": \"Code Intel: this installation is missing, possibly after a plugin update. Claude Code: run /reload-plugins in this session. Codex: reload through the owning App Server if available; otherwise restart the client and resume this conversation. This indexing hook was skipped; activation of the updated plugin is not verified.\"}))\n    sys.exit(0)\nsys.path[0] = os.path.dirname(path)\nexec(compile(source, path, \"exec\"), {\"__name__\": \"__main__\", \"__file__\": path})' \"${CLAUDE_PLUGIN_ROOT}/scripts/code_intel.py\" hook-prompt",
             "timeout": 300
           }
         ]
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/code_intel.py\" hook-update",
+            "command": "python3 -c 'import json, os, sys\npath = sys.argv[1]\nsys.argv = sys.argv[1:]\ntry:\n    with open(path, \"rb\") as stream:\n        source = stream.read()\nexcept FileNotFoundError:\n    print(json.dumps({\"systemMessage\": \"Code Intel: this installation is missing, possibly after a plugin update. Claude Code: run /reload-plugins in this session. Codex: reload through the owning App Server if available; otherwise restart the client and resume this conversation. This indexing hook was skipped; activation of the updated plugin is not verified.\"}))\n    sys.exit(0)\nsys.path[0] = os.path.dirname(path)\nexec(compile(source, path, \"exec\"), {\"__name__\": \"__main__\", \"__file__\": path})' \"${CLAUDE_PLUGIN_ROOT}/scripts/code_intel.py\" hook-update",
             "timeout": 300
           }
         ]

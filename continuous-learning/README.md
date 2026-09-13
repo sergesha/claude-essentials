@@ -82,15 +82,8 @@ namespace and retain their existing TTL. No new storage format or policy is adde
 
 ## Upgrade
 
-```bash
-# Codex
-codex plugin marketplace upgrade claude-essentials
-codex plugin add continuous-learning@claude-essentials
+Follow the shared [plugin update procedure](../docs/plugin-updates.md) for
+installation, session activation, and verification in both clients.
 
-# Claude Code
-claude plugin marketplace update claude-essentials
-claude plugin update continuous-learning@claude-essentials
-```
-
-Restart the client and retain the existing Redis connection and namespace. Upgrade
+Retain the existing Redis connection and namespace. Upgrade
 redis-memory separately if needed using its documented upgrade commands.
