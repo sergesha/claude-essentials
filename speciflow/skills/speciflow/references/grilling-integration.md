@@ -13,9 +13,12 @@ return to the appropriate owner.
 | Challenge domain terms and scenarios against project language | `mattpocock-skills:domain-modeling` (+ `grilling` for interview) |
 | Resolve a blocking factual question from primary sources | `mattpocock-skills:research` |
 | Give the user a concrete artifact to judge | `mattpocock-skills:prototype` |
+| Design module interfaces, seams, deep modules | `mattpocock-skills:codebase-design` |
+| Guide human through manual steps (infra, credentials, UI) | `mattpocock-skills:wizard` |
+| Edit skill files or agent-facing documents | `mattpocock-skills:writing-for-agents` |
 
 On Codex, these are under `.agents/skills/` and invoked by local name
-(`grilling`, `domain-modeling`, etc.).
+(`grilling`, `domain-modeling`, `codebase-design`, etc.).
 
 Start by narrowing the question. Deepen when the user asks, when an
 answer exposes dependent decisions, or when a missing fact prevents a

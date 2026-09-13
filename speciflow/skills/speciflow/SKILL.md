@@ -128,18 +128,23 @@ OpenSpec, Beads) and two are supporting disciplines:
 - **Superpowers**: TDD, debugging, verification, implementation review.
   Apply by native trigger before the bounded selected activity.
 - **Grill** (mattpocock/skills family): interviews, domain modeling,
-  research, prototyping. Apply when the activity involves clarification
-  or design exploration.
+  research, prototyping, module design, guided wizards, agent-doc writing.
+  Apply when the activity involves clarification, design exploration, manual
+  human steps, or skill editing.
 
 Both install and invoke through the host's native skill interface — same
 pattern. Each shapes the bounded activity, then returns control to SpeciFlow.
 SpeciFlow retains cross-owner selection.
 
-Architectural or creative planning uses `superpowers:brainstorming`; follow
-its selected path including `superpowers:writing-plans`. Any SpeciFlow edit
-uses `superpowers:writing-skills`.
+Architectural or creative planning uses `superpowers:brainstorming`; for
+module interface design, compose with `mattpocock-skills:codebase-design`.
+Follow brainstorming's selected path including `superpowers:writing-plans`.
+Any SpeciFlow edit uses `superpowers:writing-skills` +
+`mattpocock-skills:writing-for-agents`. Manual human setup steps use
+`mattpocock-skills:wizard`.
 
-When clarification, domain work, research, or prototyping applies, use
+When clarification, domain work, research, prototyping, module design,
+manual steps, or skill editing applies, use
 [references/grilling-integration.md](references/grilling-integration.md).
 
 Wayfinder is a human-invoked entrypoint. After explicit invocation, apply
