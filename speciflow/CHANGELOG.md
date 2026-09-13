@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.5.3...speciflow-v0.6.0) (2026-09-13)
+
+
+### Features
+
+* **speciflow:** integrate codebase-design, wizard, and writing-for-agents ([df15302](https://github.com/sergesha/claude-essentials/commit/df15302b8498cd48c402e79192d31957b7ad018f))
+
 ## [0.5.3](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.5.2...speciflow-v0.5.3) (2026-09-12)
 
 
