@@ -12,8 +12,13 @@ read-only — it reports findings but never mutates owner state.
 **Automatic (at milestone points):**
 - Before sufficiency/completeness checks in iterative planning
 - Before cross-owner transitions (OpenSpec → Beads projection)
-- Before lifecycle closures (close Beads issue, archive OpenSpec)
-- As part of a status report (diagnostics + doctor together)
+- Before **epic-level** closures (archive full OpenSpec spec, mark
+  Backlog task Done) — NOT for individual Beads issue close
+- As part of a full status report (diagnostics + doctor together)
+
+**NOT triggered by:** closing a single Beads issue with passing code
+review and evidence. Individual task closure uses evidence verification
+only — full cross-level doctor runs at epic/milestone boundaries.
 
 ## Checks
 

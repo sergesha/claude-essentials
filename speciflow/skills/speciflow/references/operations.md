@@ -84,9 +84,10 @@ For any action that crosses owner boundaries, follow these steps in order:
 
 1. **Preserve intent**: Complete the ephemeral check in
    [transitions.md](transitions.md) — verify every approved upstream item
-   appears in the proposed downstream result. For lifecycle closures
-   (close, archive, complete), run [doctor](doctor.md) first to verify
-   cross-level consistency before the transition.
+   appears in the proposed downstream result. For epic-level closures
+   (archive OpenSpec spec, mark Backlog task Done), run
+   [doctor](doctor.md) first. Individual Beads issue close with passing
+   code review and evidence does not need full doctor.
 2. **Inspect**: Read the target owner's documented lifecycle, current native
    state, root, revision, and dirty state.
 3. **Classify**: Determine whether the effect is a lifecycle transition
@@ -124,14 +125,16 @@ Inspect the installed operation's documented effects and classify:
 
 | Documented effects | Action |
 | --- | --- |
-| Changes owner semantics (scope, requirements, dependencies, status, acceptance, claim) | `Review: required` — state the observed effect and evidence |
-| Read-only or mechanical (append evidence, record metadata) | `Review: skipped` — state the observed effect and evidence |
+| Changes scope, requirements, dependencies, acceptance criteria, or exclusions | `Review: required` — separate semantic review |
+| Claim of an approved ready task, or close with passing code review + evidence | `Review: skipped` — verify evidence exists, no separate reviewer needed |
+| Read-only or mechanical (append evidence, record metadata) | `Review: skipped` — state the observed effect |
 | Not yet inspected | Inspect the documented effects first, then classify |
 
-**Mechanical means**: the exact text and native effects change no owner
-semantics. Example: appending a test command and exit code is mechanical.
-A comment declaring work complete, or an operation changing a dependency
-or claim, is semantic — classify by the effect, not the field name.
+**Key distinction:** Claiming an already-approved task and closing it
+with evidence from a completed code review are operational, not
+semantic — they don't change the meaning of the work. A separate
+semantic review is for changes that alter what the work IS (scope,
+requirements, dependencies, acceptance criteria).
 
 ### Required review protocol
 
