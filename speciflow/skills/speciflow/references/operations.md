@@ -140,15 +140,42 @@ requirements, dependencies, acceptance criteria).
 
 **Critical: use a separate clean-context subagent as reviewer.** The
 agent that did the work cannot review it — self-review is fundamentally
-unreliable. The reviewer sees: approved scope, exact proposed
-artifact/diff, evidence, and applicable methodology. It does NOT see
-the author's rationale or preferred verdict.
+unreliable.
 
-1. Spawn a clean-context subagent with the review inputs.
-2. The reviewer returns blocking defects (vs approved scope) separately
+**Two review modes:**
+
+**Direct review** — "does this match the spec?"
+- Reviewer receives: approved scope + diff/artifact + evidence
+- Use for: code review, spec completeness, intent preservation,
+  user-initiated changes
+
+**Adversarial review** — "is the agent's own judgment trustworthy?"
+- Reviewer receives: **original user intent** + current state (no
+  intermediate rationalizations or agent's preferred verdict)
+- Compares with the *original* user formulation, not the latest
+  approved version (which the agent may have shaped)
+
+Adversarial triggers only when ALL THREE conditions are met:
+1. The **agent** is the origin of the proposal (not the user)
+2. The proposal alters **semantic content** (not mechanical/typo)
+3. The context is a **lifecycle gate** (not informational)
+
+| Situation | Mode |
+| --- | --- |
+| Code review, user-initiated spec change | Direct |
+| Agent proposes spec change at a lifecycle gate | **Adversarial** |
+| Doctor at epic closure | **Adversarial** |
+| Typo fix, formatting, mechanical correction | No review |
+| Status report, informational query | No review |
+
+**Protocol:**
+
+1. Select mode from the table above.
+2. Spawn a clean-context subagent with the appropriate inputs.
+3. The reviewer returns blocking defects (vs approved scope) separately
    from scope proposals.
-3. End review when no approved-scope blockers remain.
-4. Reuse an unchanged completed review — state
+4. End review when no approved-scope blockers remain.
+5. Reuse an unchanged completed review — state
    `Review: required — completed, no blockers`.
 
 ### Commit policy
