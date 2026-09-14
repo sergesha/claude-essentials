@@ -51,15 +51,18 @@ scope drift detector. Report: which item has no upstream trace.
 
 ### 3. Scope alignment
 
-Compare the total scope at each level:
+Check for semantic drift, not just counts:
 
-- Count Backlog acceptance criteria
-- Count OpenSpec requirements
-- Count Beads issues
+- Do any Beads issues introduce **new user-facing capabilities** not
+  in OpenSpec?
+- Do any OpenSpec requirements add **new user obligations** (runtime
+  dependencies, manual steps, services) not in Backlog?
+- Are there **new exclusions** that appeared without explicit approval?
 
-A significant expansion (more issues than requirements, or more
-requirements than criteria) may indicate scope drift. Report the
-ratio and flag if issues exceed requirements by more than 2x.
+Report ratios as context (e.g., "7 issues for 3 requirements") but do
+not flag ratio alone as drift. Good decomposition naturally fans out.
+Flag only when orphan checks (section 2) find untraceable items or
+when new capabilities/obligations appear without upstream approval.
 
 ### 4. Stale items
 
@@ -108,7 +111,9 @@ Report: which item, what evidence is missing.
     "backlog_criteria": 4,
     "openspec_requirements": 5,
     "beads_issues": 7,
-    "drift_signal": "beads issues exceed requirements — verify 2 extra are within scope"
+    "new_capabilities": [],
+    "new_user_obligations": [],
+    "note": "7:5 ratio is context only — no untraceable items found"
   },
   "stale": [],
   "consistency": [],

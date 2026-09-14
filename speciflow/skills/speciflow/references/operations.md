@@ -138,8 +138,13 @@ requirements, dependencies, acceptance criteria).
 
 ### Required review protocol
 
-1. Give a fresh reviewer: approved scope, exact proposed artifact/diff,
-   evidence, and applicable native methodology.
+**Critical: use a separate clean-context subagent as reviewer.** The
+agent that did the work cannot review it — self-review is fundamentally
+unreliable. The reviewer sees: approved scope, exact proposed
+artifact/diff, evidence, and applicable methodology. It does NOT see
+the author's rationale or preferred verdict.
+
+1. Spawn a clean-context subagent with the review inputs.
 2. The reviewer returns blocking defects (vs approved scope) separately
    from scope proposals.
 3. End review when no approved-scope blockers remain.

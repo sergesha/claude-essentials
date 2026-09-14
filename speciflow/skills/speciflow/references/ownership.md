@@ -118,13 +118,18 @@ busy-work that looks productive, and drift into tangential improvements are
 the most common failure modes. If the proposed action cannot be traced to an
 approved Backlog outcome, stop and ask.
 
-**3. Implementation detail vs scope expansion.** Use this test: does the
-proposed change serve an approved requirement, or does it serve a requirement
-that doesn't exist yet? Choosing a library, algorithm, or mechanism to
-implement an approved feature is an engineering decision (automatic). Adding
-a field, endpoint, or capability for unapproved future needs is scope
-expansion (delegatable or mandatory stop). "We'll need it eventually" and
-"it makes the code better" are not approved intent.
+**3. Implementation detail vs scope expansion.** Two tests, both must pass
+for a choice to be automatic:
+- Does it serve an approved requirement? (not a future one)
+- Does it preserve approved installation, operation, and compatibility
+  requirements? A library that adds a new runtime (e.g., Python in a
+  Node.js project), a required service, or a manual setup step changes
+  user-facing requirements — surface this to the user before implementing,
+  even if it serves an approved feature.
+
+Adding a field, endpoint, or capability for unapproved future needs is
+scope expansion. "We'll need it eventually" and "it makes the code better"
+are not approved intent.
 
 **4. Defects in completed work are current scope.** A broken test, a race
 condition, or a regression in already-completed issues is a defect within
@@ -218,8 +223,14 @@ When the user contradicts their own approved spec during execution:
 5. **Assess compound impact**: When multiple amendments combine, the total
    rework may exceed the sum of individual impacts. Present the compound
    cost, not just each change in isolation.
-6. **Distinguish intent**: Is this "I changed my mind" (spec amendment)
-   or "I forgot what I approved" (reminder)? Ask when unclear.
+6. **Distinguish origin**: Three cases, not two:
+   - "I changed my mind" → spec amendment (route through OpenSpec update)
+   - "I forgot what I approved" → reminder (continue as approved)
+   - Agent implemented something different from approved spec → **agent
+     error** — fix the code to match the spec, not the spec to match the
+     code. Do not present an agent's unauthorized deviation as a spec
+     amendment. If the deviation was motivated by a real concern, raise
+     it through pushback obligation as a forward-looking proposal.
 
 "Just do it, don't make me go through the process" is the exact moment
 the process is most valuable — rapid untracked changes create the

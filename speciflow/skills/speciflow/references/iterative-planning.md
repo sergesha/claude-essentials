@@ -103,8 +103,10 @@ All four must be met to approve:
 - [ ] **Specificity**: Each requirement is concrete enough to write a
   test for. No "should handle edge cases appropriately."
 - [ ] **Consistency**: No requirements contradict each other.
-- [ ] **Unknowns resolved**: No open questions remain — every deferred
-  unknown from Backlog is answered.
+- [ ] **Unknowns sufficient**: Every unknown deferred from Backlog
+  refinement is answered. Remaining unknowns that cannot change the
+  contract or cause significant rework are noted with their impact
+  boundary and decision deadline — they do not block this stage.
 
 ## Cross-phase assumption invalidation
 
