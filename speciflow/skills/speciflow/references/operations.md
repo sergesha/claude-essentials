@@ -150,24 +150,25 @@ unreliable.
   user-initiated changes
 
 **Adversarial review** — "is the agent's own judgment trustworthy?"
-- Reviewer receives: **original user intent** + current state (no
-  intermediate rationalizations or agent's preferred verdict)
-- Compares with the *original* user formulation, not the latest
-  approved version (which the agent may have shaped)
+- Reviewer receives: **original user intent** + **subsequent explicit
+  user decisions** (scope amendments, agreed exclusions, architecture
+  pivots) + current state. Agent's intermediate rationalizations are
+  excluded — they are the thing being checked, not a trusted source.
+- Original intent detects gradual drift. Subsequent user decisions
+  have equal authority — a later explicit decision is not a deviation
+  from the original.
 
-Adversarial triggers only when ALL THREE conditions are met:
-1. The **agent** is the origin of the proposal (not the user)
-2. The proposal alters **semantic content** (not mechanical/typo)
-3. The context is a **lifecycle gate** (not informational)
+Adversarial review applies in the situations listed below. The table
+is the single definitive trigger — no separate rule overrides it.
 
-| Situation | Mode |
-| --- | --- |
-| Code review, user-initiated spec change | Direct |
-| Agent proposes spec change at a lifecycle gate | **Adversarial** |
-| Agent removes or weakens a requirement ("cleanup", "simplification") | **Adversarial** (even between gates) |
-| Doctor at epic closure | **Adversarial** |
-| Typo fix, formatting, mechanical correction | No review |
-| Status report, informational query | No review |
+| Situation | Mode | Rationale |
+| --- | --- | --- |
+| Code review, user-initiated spec change | Direct | User is the origin |
+| Agent proposes spec change at a lifecycle gate | **Adversarial** | Agent origin + semantic + gate |
+| Agent removes or weakens a requirement ("cleanup", "simplification") | **Adversarial** | Removal risk justifies check regardless of lifecycle position |
+| Doctor at epic closure | **Adversarial** | Milestone boundary — verifies cumulative drift |
+| Typo fix, formatting, mechanical correction | No review | No semantic change |
+| Status report, informational query | No review | Read-only |
 
 **Protocol:**
 

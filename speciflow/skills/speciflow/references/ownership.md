@@ -108,15 +108,20 @@ and stage:
 
 **1. Review findings have three categories:**
 - **Implementation defect** (code doesn't match spec) → fix immediately
-- **Spec gap** (something the spec should have included to meet its own
-  stated goals, e.g., missing token revocation for an auth feature) →
-  mandatory spec amendment, may block if it creates a safety/security risk
+- **Spec gap** (a concrete approved outcome is impossible to deliver
+  without an addition the spec omitted) → mandatory spec amendment, may
+  block if it creates a safety/security risk
 - **Enhancement** (new capability beyond what approved goals require) →
   non-blocking scope proposal, returns to Backlog for approval
 
-A reviewer cannot promote enhancements into blockers. But a spec gap
-that creates a safety or security risk CAN block — shipping without it
-violates the spirit of the approved scope.
+A reviewer cannot promote enhancements into blockers. A spec gap claim
+requires concrete justification: which approved outcome is impossible,
+under what scenario, and why existing constraints don't cover it. The
+reviewer may stop affected work and escalate the risk to the user, but
+cannot auto-assign a new requirement or override an agreed exclusion.
+A spec gap that creates a safety or security risk CAN block — but
+only when the risk is specific and demonstrable, not inferred from the
+feature's category.
 
 **2. Every action traces to approved upstream intent.** Before proposing any
 operation, verify it serves the user's stated goal. Self-invented tasks,
@@ -238,12 +243,13 @@ When the user contradicts their own approved spec during execution:
      code. If the deviation was motivated by a real concern, raise it
      through pushback obligation as a forward-looking proposal.
    - Agent interpreted ambiguous spec differently from user's intent →
-     **spec clarification** — the spec was underspecified, not the agent
-     wrong. A clarification resolves ambiguity within what the spec
-     states; it cannot contradict or replace what the spec states.
-     Update the spec to resolve the ambiguity (via OpenSpec amendment),
-     then align implementation. This is a spec quality signal, not an
-     error by either party.
+     **spec clarification** — the spec was underspecified. Whether
+     the agent should have flagged the ambiguity before implementing
+     depends on how material and detectable it was: a subtle edge
+     case is a spec quality signal; an obvious fork in meaning that
+     the agent silently resolved is an agent error in judgment.
+     Either way: update the spec to resolve the ambiguity (via
+     OpenSpec amendment), then align implementation.
 
 "Just do it, don't make me go through the process" is the exact moment
 the process is most valuable — rapid untracked changes create the
