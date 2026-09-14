@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.1](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.7.0...speciflow-v0.7.1) (2026-09-14)
+
+
+### Bug Fixes
+
+* **speciflow:** resolve 3 ambiguities and 2 partial fixes from Codex feedback ([95b98cb](https://github.com/sergesha/claude-essentials/commit/95b98cbc672eabcefe7841f1a70ce1d695e45eb9))
+
 ## [0.7.0](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.6.2...speciflow-v0.7.0) (2026-09-14)
 
 
