@@ -21,8 +21,11 @@ class MissingToolsTests(unittest.TestCase):
             project = root / "project"
             project.mkdir()
             if indexed:
-                for name in (".git", ".codegraph", ".code-review-graph"):
-                    (project / name).mkdir()
+                (project / ".git").mkdir()
+                for name in (".codegraph", ".code-review-graph"):
+                    idx = project / name
+                    idx.mkdir()
+                    (idx / ".marker").touch()
             registry = root / ".code-review-graph"
             registry.mkdir()
             (registry / "registry.json").write_text('{"repos": []}')

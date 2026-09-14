@@ -459,36 +459,50 @@ def hook_update() -> int:
         if project_index_gaps(repo, umbrella=False):
             ensure_repo_indexes(repo)
             continue
-        if not (repo / ".code-review-graph").is_dir():
-            continue
-        try:
-            subprocess.run(
-                [CRG, "update", "--skip-flows", "--repo", str(repo)],
-                check=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except OSError:
-            return 0
+        if _index_ready(repo / ".codegraph"):
+            try:
+                subprocess.run(
+                    [CODEGRAPH, "sync", str(repo)],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except OSError:
+                pass
+        if _index_ready(repo / ".code-review-graph"):
+            try:
+                subprocess.run(
+                    [CRG, "update", "--skip-flows", "--repo", str(repo)],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except OSError:
+                pass
     return 0
 
 
+def _index_ready(path: Path) -> bool:
+    """True when the index directory exists and contains at least one file."""
+    return path.is_dir() and any(path.iterdir())
+
+
 def project_index_gaps(project: Path, *, umbrella: bool) -> tuple[str, ...]:
-    """Describe missing indexes without invoking either indexing tool."""
+    """Describe missing or empty indexes without invoking either indexing tool."""
 
     gaps: list[str] = []
     if umbrella:
-        if not (project / ".codegraph").is_dir():
+        if not _index_ready(project / ".codegraph"):
             gaps.append("CodeGraph umbrella")
         for repo in discover_repos(project):
-            if not (repo / ".codegraph").is_dir():
+            if not _index_ready(repo / ".codegraph"):
                 gaps.append(f"{repo}: CodeGraph")
-            if not (repo / ".code-review-graph").is_dir():
+            if not _index_ready(repo / ".code-review-graph"):
                 gaps.append(f"{repo}: CRG")
     else:
-        if not (project / ".codegraph").is_dir():
+        if not _index_ready(project / ".codegraph"):
             gaps.append("CodeGraph")
-        if not (project / ".code-review-graph").is_dir():
+        if not _index_ready(project / ".code-review-graph"):
             gaps.append("CRG")
     return tuple(gaps)
 

@@ -12,6 +12,12 @@ from unittest.mock import ANY, patch
 MODULE_PATH = Path(__file__).parents[1] / "scripts" / "code_intel.py"
 
 
+def _make_index(path: Path) -> None:
+    """Create an index directory with a marker so _index_ready() returns True."""
+    path.mkdir(parents=True, exist_ok=True)
+    (path / ".marker").touch()
+
+
 def load_module():
     spec = importlib.util.spec_from_file_location("code_intel", MODULE_PATH)
     module = importlib.util.module_from_spec(spec)
@@ -86,8 +92,8 @@ class CodeIntelTests(unittest.TestCase):
             self.assertEqual(module.update_repo(repo, lambda command: calls.append(command) or 0, "CG", "CRG"), 1)
             self.assertEqual(calls, [])
 
-            (repo / ".codegraph").mkdir()
-            (repo / ".code-review-graph").mkdir()
+            _make_index(repo / ".codegraph")
+            _make_index(repo / ".code-review-graph")
             self.assertEqual(module.update_repo(repo, lambda command: calls.append(command) or 0, "CG", "CRG"), 0)
             resolved = str(repo.resolve())
             self.assertEqual(calls, [["CG", "sync", resolved], ["CRG", "update", "--skip-flows", "--repo", resolved]])
@@ -97,7 +103,7 @@ class CodeIntelTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
             (repo / ".git" / "info").mkdir(parents=True)
-            (repo / ".codegraph").mkdir()
+            _make_index(repo / ".codegraph")
             (repo / ".git" / "info" / "exclude").write_bytes(b"\xff")
             calls = []
             self.assertEqual(module.update_repo(repo, lambda command: calls.append(command) or 0, "CG", "CRG"), 1)
@@ -118,25 +124,28 @@ class CodeIntelTests(unittest.TestCase):
                 setup.assert_called_once_with(repo.resolve(), runner=ANY)
                 run.assert_not_called()
 
-    def test_hook_update_only_updates_an_existing_crg_index(self):
+    def test_hook_update_syncs_both_indexes(self):
         module = load_module()
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
             (repo / ".git").mkdir()
-            (repo / ".codegraph").mkdir()
-            (repo / ".code-review-graph").mkdir()
+            _make_index(repo / ".codegraph")
+            _make_index(repo / ".code-review-graph")
             with patch.object(module, "hook_repos", return_value={repo}), patch.object(module.subprocess, "run") as run:
                 with patch("sys.stdin", io.StringIO(json.dumps({"cwd": str(repo)}))):
                     module.hook_update()
-                run.assert_called_once()
+                self.assertEqual(run.call_count, 2)
+                commands = [call.args[0] for call in run.call_args_list]
+                self.assertTrue(any("sync" in cmd for cmd in commands))
+                self.assertTrue(any("update" in cmd for cmd in commands))
 
     def test_hook_update_fails_open_when_crg_executable_is_missing(self):
         module = load_module()
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
             module.subprocess.run(["git", "init", "-q", str(repo)], check=True)
-            (repo / ".codegraph").mkdir()
-            (repo / ".code-review-graph").mkdir()
+            _make_index(repo / ".codegraph")
+            _make_index(repo / ".code-review-graph")
             source = repo / "example.py"
             source.write_text("value = 1\n")
             payload = {"cwd": str(repo), "tool_name": "Write", "tool_input": {"file_path": str(source)}}
@@ -169,8 +178,8 @@ class CodeIntelTests(unittest.TestCase):
 
             def initialize(path, **_kwargs):
                 self.assertEqual(path, repo.resolve())
-                (repo / ".codegraph").mkdir()
-                (repo / ".code-review-graph").mkdir()
+                _make_index(repo / ".codegraph")
+                _make_index(repo / ".code-review-graph")
                 return 0
 
             stdout = io.StringIO()
@@ -210,8 +219,8 @@ class CodeIntelTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
             (repo / ".git").mkdir()
-            (repo / ".codegraph").mkdir()
-            (repo / ".code-review-graph").mkdir()
+            _make_index(repo / ".codegraph")
+            _make_index(repo / ".code-review-graph")
             with patch.object(module, "git_root", return_value=repo), patch.object(module, "setup_project") as setup:
                 with patch("sys.stdin", io.StringIO(json.dumps({"cwd": str(repo)}))):
                     self.assertEqual(module.hook_status(), 0)
@@ -222,7 +231,7 @@ class CodeIntelTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
             (repo / ".git").mkdir()
-            (repo / ".code-review-graph").mkdir()
+            _make_index(repo / ".code-review-graph")
             stdout = io.StringIO()
             with (
                 patch.object(module, "git_root", return_value=repo.resolve()),
@@ -242,8 +251,8 @@ class CodeIntelTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
             (repo / ".git").mkdir()
-            (repo / ".codegraph").mkdir()
-            (repo / ".code-review-graph").mkdir()
+            _make_index(repo / ".codegraph")
+            _make_index(repo / ".code-review-graph")
             stdout = io.StringIO()
             with (
                 patch.object(module, "git_root", return_value=repo.resolve()),
@@ -261,13 +270,13 @@ class CodeIntelTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             umbrella = Path(directory)
             (umbrella / "AGENTS.md").write_text("umbrella\n")
-            (umbrella / ".codegraph").mkdir()
+            _make_index(umbrella / ".codegraph")
             complete = umbrella / "complete"
             incomplete = umbrella / "incomplete"
             for repo in (complete, incomplete):
                 (repo / ".git").mkdir(parents=True)
-                (repo / ".codegraph").mkdir()
-            (complete / ".code-review-graph").mkdir()
+                _make_index(repo / ".codegraph")
+            _make_index(complete / ".code-review-graph")
             stdout = io.StringIO()
             with (
                 patch("sys.stdin", io.StringIO(json.dumps({"cwd": str(umbrella)}))),
@@ -286,18 +295,18 @@ class CodeIntelTests(unittest.TestCase):
             base = Path(directory)
             repo = base / "repo"
             (repo / ".git").mkdir(parents=True)
-            (repo / ".codegraph").mkdir()
-            (repo / ".code-review-graph").mkdir()
+            _make_index(repo / ".codegraph")
+            _make_index(repo / ".code-review-graph")
             with patch.object(module.subprocess, "run") as run, redirect_stdout(io.StringIO()):
                 self.assertEqual(module.project_status(repo), 0)
                 run.assert_not_called()
 
             umbrella = base / "umbrella"
-            (umbrella / ".codegraph").mkdir(parents=True)
+            _make_index(umbrella / ".codegraph")
             nested = umbrella / "nested"
             (nested / ".git").mkdir(parents=True)
-            (nested / ".codegraph").mkdir()
-            (nested / ".code-review-graph").mkdir()
+            _make_index(nested / ".codegraph")
+            _make_index(nested / ".code-review-graph")
             with patch.object(module.subprocess, "run") as run, redirect_stdout(io.StringIO()):
                 self.assertEqual(module.project_status(umbrella), 0)
                 run.assert_not_called()
