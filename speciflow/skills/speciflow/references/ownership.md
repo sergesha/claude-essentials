@@ -239,9 +239,11 @@ When the user contradicts their own approved spec during execution:
      through pushback obligation as a forward-looking proposal.
    - Agent interpreted ambiguous spec differently from user's intent →
      **spec clarification** — the spec was underspecified, not the agent
-     wrong. Update the spec to resolve the ambiguity (via OpenSpec
-     amendment), then align implementation. This is a spec quality
-     signal, not an error by either party.
+     wrong. A clarification resolves ambiguity within what the spec
+     states; it cannot contradict or replace what the spec states.
+     Update the spec to resolve the ambiguity (via OpenSpec amendment),
+     then align implementation. This is a spec quality signal, not an
+     error by either party.
 
 "Just do it, don't make me go through the process" is the exact moment
 the process is most valuable — rapid untracked changes create the

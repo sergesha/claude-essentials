@@ -27,8 +27,8 @@ When the human explicitly invokes Wayfinder, also apply
 ## Native roots and isolated repositories
 
 Keep native-root selection at skill level, outside the storage helper. Accept
-only the unique, canonical absolute roots `planning`, `backlog`, `openspec`,
-and `beads`. An invocation-explicit root wins. Otherwise compare the already
+only the unique, canonical root names `planning`, `backlog`, `openspec`,
+and `beads` (relative to the selected data root). An invocation-explicit root wins. Otherwise compare the already
 initialized deterministic root below the selected data root with the
 documented native root query or marker: one valid candidate is selected, two
 different candidates are `ambiguous`, and a similar directory name is not
@@ -164,6 +164,7 @@ Adversarial triggers only when ALL THREE conditions are met:
 | --- | --- |
 | Code review, user-initiated spec change | Direct |
 | Agent proposes spec change at a lifecycle gate | **Adversarial** |
+| Agent removes or weakens a requirement ("cleanup", "simplification") | **Adversarial** (even between gates) |
 | Doctor at epic closure | **Adversarial** |
 | Typo fix, formatting, mechanical correction | No review |
 | Status report, informational query | No review |
