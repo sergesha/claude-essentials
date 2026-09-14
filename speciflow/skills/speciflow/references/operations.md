@@ -315,11 +315,14 @@ When ideas, questions, or corrections arrive while work is in progress,
 triage before acting. The default is **capture and continue** — not
 interrupt.
 
-### Triage (3 questions, instant)
+### Triage (4 questions, instant)
 
 1. Does this **block** the current work? (dependency, wrong assumption)
 2. Is this a **mandatory stop** item? (security, irreversibility)
-3. Does this **invalidate** a fundamental assumption of the current task?
+3. Does this **invalidate** a fundamental assumption of the current task
+   **or the approved project architecture**?
+4. Does this **compound in cost** with each task completed? (e.g., wrong
+   database choice, wrong runtime — every finished task increases rework)
 
 **Any YES → interrupt.** Apply the appropriate protocol (scope amendment,
 mandatory stop, cross-phase invalidation). Current work pauses.

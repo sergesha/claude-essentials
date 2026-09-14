@@ -106,11 +106,17 @@ store. Apply [wayfinding.md](wayfinding.md) after explicit human invocation.
 Backlog.md is the sole scope authority. Two invariants apply at every level
 and stage:
 
-**1. Review cannot expand scope.** A reviewer may flag defects against
-approved scope. Anything that adds new capabilities, actors, services,
-protocols, dependencies, security boundaries, requirements, or tasks is a
-non-blocking scope proposal — it returns to Backlog for approval, never
-becomes a blocker or executable work on its own.
+**1. Review findings have three categories:**
+- **Implementation defect** (code doesn't match spec) → fix immediately
+- **Spec gap** (something the spec should have included to meet its own
+  stated goals, e.g., missing token revocation for an auth feature) →
+  mandatory spec amendment, may block if it creates a safety/security risk
+- **Enhancement** (new capability beyond what approved goals require) →
+  non-blocking scope proposal, returns to Backlog for approval
+
+A reviewer cannot promote enhancements into blockers. But a spec gap
+that creates a safety or security risk CAN block — shipping without it
+violates the spirit of the approved scope.
 
 **2. Every action traces to approved upstream intent.** Before proposing any
 operation, verify it serves the user's stated goal. Self-invented tasks,
@@ -173,8 +179,9 @@ perspective:
 
 These always require human decision regardless of delegation settings:
 
-1. Adding or removing a security boundary (auth method, API exposure,
-   encryption, access control)
+1. Adding, removing, or materially changing the behavior of a security
+   boundary (auth method, API exposure, encryption, access control —
+   including changes that could break existing clients or workflows)
 2. Irreversible state changes (delete, archive, close, claim release)
 3. Changing who defines scope (Backlog authority transfer, project
    ownership change)
@@ -223,14 +230,18 @@ When the user contradicts their own approved spec during execution:
 5. **Assess compound impact**: When multiple amendments combine, the total
    rework may exceed the sum of individual impacts. Present the compound
    cost, not just each change in isolation.
-6. **Distinguish origin**: Three cases, not two:
+6. **Distinguish origin**: Four cases:
    - "I changed my mind" → spec amendment (route through OpenSpec update)
    - "I forgot what I approved" → reminder (continue as approved)
    - Agent implemented something different from approved spec → **agent
      error** — fix the code to match the spec, not the spec to match the
-     code. Do not present an agent's unauthorized deviation as a spec
-     amendment. If the deviation was motivated by a real concern, raise
-     it through pushback obligation as a forward-looking proposal.
+     code. If the deviation was motivated by a real concern, raise it
+     through pushback obligation as a forward-looking proposal.
+   - Agent interpreted ambiguous spec differently from user's intent →
+     **spec clarification** — the spec was underspecified, not the agent
+     wrong. Update the spec to resolve the ambiguity (via OpenSpec
+     amendment), then align implementation. This is a spec quality
+     signal, not an error by either party.
 
 "Just do it, don't make me go through the process" is the exact moment
 the process is most valuable — rapid untracked changes create the
