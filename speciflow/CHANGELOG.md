@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.7.0](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.6.2...speciflow-v0.7.0) (2026-09-14)
+
+
+### Features
+
+* **speciflow:** add direct vs adversarial review modes ([0cc4fb9](https://github.com/sergesha/claude-essentials/commit/0cc4fb9b89153fe0456916e3782265c20877c7ea))
+
+
+### Bug Fixes
+
+* **speciflow:** address 4 high-severity findings from false-positive audit ([bd9a73f](https://github.com/sergesha/claude-essentials/commit/bd9a73f44b984f7ced572efbc943cc4d719223d2))
+* **speciflow:** address 5 gaps from process analysis ([138b746](https://github.com/sergesha/claude-essentials/commit/138b7469426a4fc5d6c7e52cf11a3678e6c40307))
+
 ## [0.6.2](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.6.1...speciflow-v0.6.2) (2026-09-13)
 
 
