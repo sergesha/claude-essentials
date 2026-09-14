@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/sergesha/claude-essentials/compare/code-intel-v0.3.1...code-intel-v0.3.2) (2026-09-14)
+
+
+### Bug Fixes
+
+* **code-intel:** detect empty indexes and sync codegraph in post-tool hook ([b2da27f](https://github.com/sergesha/claude-essentials/commit/b2da27f775fe7266fb3dd6556757a4b6d2337d45))
+
 ## [0.3.1](https://github.com/sergesha/claude-essentials/compare/code-intel-v0.3.0...code-intel-v0.3.1) (2026-09-13)
 
 
