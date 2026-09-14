@@ -4,5 +4,5 @@
   "redis-memory-mcp": "0.9.1",
   "lockstep": "0.3.0",
   "speciflow": "0.7.1",
-  "code-intel": "0.3.1"
+  "code-intel": "0.3.2"
 }
