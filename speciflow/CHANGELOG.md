@@ -1,5 +1,56 @@
 # Changelog
 
+## [0.8.0](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.7.1...speciflow-v0.8.0) (2026-09-15)
+
+
+### Features
+
+* **speciflow:** add coordinated planning skill ([be748e2](https://github.com/sergesha/claude-essentials/commit/be748e23e84ff373567c20ead39015167a8ec6d8))
+* **speciflow:** add direct vs adversarial review modes ([0cc4fb9](https://github.com/sergesha/claude-essentials/commit/0cc4fb9b89153fe0456916e3782265c20877c7ea))
+* **speciflow:** add doctor — cross-level consistency checker ([63f91c5](https://github.com/sergesha/claude-essentials/commit/63f91c50811b44cdd5ce46e2ef39f0ef36de16e9))
+* **speciflow:** add inbox triage for incoming items during execution ([6fc23c0](https://github.com/sergesha/claude-essentials/commit/6fc23c00895ff1d12295ad4ea5a4910a19efe38a))
+* **speciflow:** add iterative planning with grilling-driven refinement ([84c52a1](https://github.com/sergesha/claude-essentials/commit/84c52a11b426d2242472cdb4bbb8ee99e88b6cba))
+* **speciflow:** bind wayfinding to native planning owners ([72e0cb6](https://github.com/sergesha/claude-essentials/commit/72e0cb6ab004cdac4ea6cedd5be33d683795bcfe))
+* **speciflow:** compose upstream grilling with native owners ([b810f77](https://github.com/sergesha/claude-essentials/commit/b810f779f0de04c5a37e09c5432d7d6f46bf3cb2))
+* **speciflow:** guard planning and review scope ([#33](https://github.com/sergesha/claude-essentials/issues/33)) ([2777d70](https://github.com/sergesha/claude-essentials/commit/2777d70189bdabc9ea201f122e592edb3f8241ab))
+* **speciflow:** integrate codebase-design, wizard, and writing-for-agents ([df15302](https://github.com/sergesha/claude-essentials/commit/df15302b8498cd48c402e79192d31957b7ad018f))
+* **speciflow:** integrate original grilling methods with native owners ([5321b08](https://github.com/sergesha/claude-essentials/commit/5321b08e3a645fb6f11d5e7fdb09eda606b54f98))
+
+
+### Bug Fixes
+
+* **speciflow:** add component availability check table and Grill detection ([c26b84f](https://github.com/sergesha/claude-essentials/commit/c26b84f8162133de0a7950e6f4c262cb0c0b3989))
+* **speciflow:** address 4 high-severity findings from false-positive audit ([bd9a73f](https://github.com/sergesha/claude-essentials/commit/bd9a73f44b984f7ced572efbc943cc4d719223d2))
+* **speciflow:** address 5 gaps from process analysis ([138b746](https://github.com/sergesha/claude-essentials/commit/138b7469426a4fc5d6c7e52cf11a3678e6c40307))
+* **speciflow:** align packaging version test ([815e1af](https://github.com/sergesha/claude-essentials/commit/815e1afddb3d7a9bc4d72a761ba5abe7e2a6b717))
+* **speciflow:** bound administrative review and authorization ([aa60877](https://github.com/sergesha/claude-essentials/commit/aa60877746b37389010cf05bd058c7fd0786ee7c))
+* **speciflow:** cache CLI help per session, not per operation ([ed039d7](https://github.com/sergesha/claude-essentials/commit/ed039d7bc10015c668b0df5dcd3c0e532a2fd86e))
+* **speciflow:** clarify initialization and diagnostic output contracts ([#53](https://github.com/sergesha/claude-essentials/issues/53)) ([5834204](https://github.com/sergesha/claude-essentials/commit/5834204d42a092beeecc9450d40760da6c82b5df))
+* **speciflow:** classify native lifecycle transitions ([66b01f9](https://github.com/sergesha/claude-essentials/commit/66b01f9c7a6247586286c00473d51179a1352ace))
+* **speciflow:** correct installation guidance and display name ([368d215](https://github.com/sergesha/claude-essentials/commit/368d215ff7f086275284b2ee82207bef40af3e10))
+* **speciflow:** enable model invocation, fix skill namespaces, add dependencies ([06c46b6](https://github.com/sergesha/claude-essentials/commit/06c46b6d42b92d1a9787069d9da053f37e8bc49b))
+* **speciflow:** follow native owner lifecycles ([3d77d83](https://github.com/sergesha/claude-essentials/commit/3d77d83a46b56c3096963101b86fd60407d853e1))
+* **speciflow:** generalize CLI capability checks ([123f337](https://github.com/sergesha/claude-essentials/commit/123f337b05ae347994b081c4f089e02072b4fdf1))
+* **speciflow:** graceful degradation when grilling skills not installed ([079b3e8](https://github.com/sergesha/claude-essentials/commit/079b3e8d4d2b4e2e8b76215b9abbe83aa4aa7fdf))
+* **speciflow:** keep copies non-authoritative ([e466f2d](https://github.com/sergesha/claude-essentials/commit/e466f2d017ec9a886758b949678e19a24dce76bb))
+* **speciflow:** order initialization prerequisites ([4867546](https://github.com/sergesha/claude-essentials/commit/4867546e1c2477cc3d0c3eab29631b9bbe0ce540))
+* **speciflow:** override grilling to one-question-at-a-time format ([23d6cb7](https://github.com/sergesha/claude-essentials/commit/23d6cb7ac769177d3b48de56f81b310139bb3ad8))
+* **speciflow:** preserve instruction reads and exact path previews ([#69](https://github.com/sergesha/claude-essentials/issues/69)) ([52cef8e](https://github.com/sergesha/claude-essentials/commit/52cef8ee352d46bd807d00ada187088b49ec503a))
+* **speciflow:** preserve intent across native transitions ([7c29d5f](https://github.com/sergesha/claude-essentials/commit/7c29d5f3588765717b06946be3031881ff44b1f7))
+* **speciflow:** preserve intent across owner transitions ([5c0d90f](https://github.com/sergesha/claude-essentials/commit/5c0d90f97f6e6690c51759b2b7bb73e25c1ce8fa))
+* **speciflow:** preserve native task levels and scoped approvals ([#40](https://github.com/sergesha/claude-essentials/issues/40)) ([b9433f6](https://github.com/sergesha/claude-essentials/commit/b9433f6ae1b38770263b94a799deb3927441cf22))
+* **speciflow:** reject boolean metadata versions ([9a694df](https://github.com/sergesha/claude-essentials/commit/9a694df7c569864b49fbacc4c4727a2ba21c9b04))
+* **speciflow:** remove the storage lifecycle framework ([8144b4b](https://github.com/sergesha/claude-essentials/commit/8144b4b75984adb256e853d940956305a3f21af0))
+* **speciflow:** require concrete initialization previews ([#49](https://github.com/sergesha/claude-essentials/issues/49)) ([483bbc5](https://github.com/sergesha/claude-essentials/commit/483bbc5b8c439ac974c6c32d1763c00a701a7ad1))
+* **speciflow:** resolve 3 ambiguities and 2 partial fixes from Codex feedback ([95b98cb](https://github.com/sergesha/claude-essentials/commit/95b98cbc672eabcefe7841f1a70ce1d695e45eb9))
+* **speciflow:** rewrite grilling-integration and wayfinding as positive recipes ([e32b28a](https://github.com/sergesha/claude-essentials/commit/e32b28ac4fe4c2ff6bcb27a1bc68c055ec0114f4))
+* **speciflow:** route initialization through the bootstrap preview ([#43](https://github.com/sergesha/claude-essentials/issues/43)) ([fa77dcc](https://github.com/sergesha/claude-essentials/commit/fa77dccd020da0737f0a77f1c0b0b0d5e6f7130d))
+* **speciflow:** separate operational from semantic review, scope doctor triggers ([62f0fc9](https://github.com/sergesha/claude-essentials/commit/62f0fc982ae78f6572a255e695520765a7ca5cc8))
+* **speciflow:** simplify project storage ([6e56616](https://github.com/sergesha/claude-essentials/commit/6e5661603230f7ca821dcddedbb2a50140910493))
+* **speciflow:** streamline first-time bootstrap ([2f7ed4d](https://github.com/sergesha/claude-essentials/commit/2f7ed4d85f1796f3a70feea4337e5e68b0ff3ca8))
+* **speciflow:** tighten spec clarification, catch silent cleanup drops, fix wording ([9863c8f](https://github.com/sergesha/claude-essentials/commit/9863c8f80400d36d7ada05af12f7458582bf3895))
+* **speciflow:** use supported Beads diagnostics ([73eb43e](https://github.com/sergesha/claude-essentials/commit/73eb43e2b256b452e9430dee234c8192a6b3b021))
+
 ## [0.7.1](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.7.0...speciflow-v0.7.1) (2026-09-14)
 
 
