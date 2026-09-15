@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.3](https://github.com/sergesha/claude-essentials/compare/code-intel-v0.3.2...code-intel-v0.3.3) (2026-09-15)
+
+
+### Bug Fixes
+
+* **code-intel:** sync codegraph before every prompt-hook query ([0825515](https://github.com/sergesha/claude-essentials/commit/0825515a3d44144869c4da7667e511993ffea05f))
+
 ## [0.3.2](https://github.com/sergesha/claude-essentials/compare/code-intel-v0.3.1...code-intel-v0.3.2) (2026-09-14)
 
 
