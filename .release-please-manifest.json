@@ -1,7 +1,7 @@
 {
   "tech-radar": "0.7.1",
   "continuous-learning": "0.3.0",
-  "redis-memory-mcp": "0.9.1",
+  "redis-memory-mcp": "0.9.2",
   "lockstep": "0.3.0",
   "speciflow": "0.7.1",
   "code-intel": "0.3.2"
