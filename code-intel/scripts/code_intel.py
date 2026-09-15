@@ -324,9 +324,20 @@ def hook_prompt(codegraph: str = CODEGRAPH) -> int:
     if isinstance(payload, dict):
         cwd = Path(payload.get("cwd") or os.getcwd()).expanduser().resolve()
         repo = git_root(cwd)
-        if repo is not None and project_index_gaps(repo, umbrella=False):
-            if not ensure_repo_indexes(repo):
-                return 0
+        if repo is not None:
+            if project_index_gaps(repo, umbrella=False):
+                if not ensure_repo_indexes(repo):
+                    return 0
+            elif _index_ready(repo / ".codegraph"):
+                try:
+                    subprocess.run(
+                        [codegraph, "sync", str(repo)],
+                        check=False,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                except OSError:
+                    pass
     try:
         result = subprocess.run(
             [codegraph, "prompt-hook"],
