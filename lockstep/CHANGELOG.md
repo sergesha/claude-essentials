@@ -6,6 +6,13 @@
 
 - Add a Codex plugin adapter, shared policy hooks, and Codex one-shot/fractal runner support while preserving Claude Code compatibility.
 
+## [0.3.1](https://github.com/sergesha/claude-essentials/compare/lockstep-v0.3.0...lockstep-v0.3.1) (2026-09-26)
+
+
+### Bug Fixes
+
+* **lockstep:** upgrade YAMLGraph and reduce compatibility patches ([8d463ea](https://github.com/sergesha/claude-essentials/commit/8d463eab0ffec5fa3403d1546a9fa9bb1496de17))
+
 ## [0.3.0](https://github.com/sergesha/claude-essentials/compare/lockstep-v0.2.7...lockstep-v0.3.0) (2026-09-11)
 
 
