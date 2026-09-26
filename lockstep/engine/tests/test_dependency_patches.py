@@ -24,12 +24,12 @@ def _sha256(path: Path) -> str:
 
 def _canonical_paths() -> tuple[Path, Path]:
     root = Path(dp.__file__).parent / "_dependency_patches" / "yamlgraph"
-    return root / "manifest.json", root / "0.5.22-subgraph-config.patch"
+    return root / "manifest.json", root / "0.6.0-timeout-config.patch"
 
 
 def _copy_official_distribution(tmp_path: Path) -> tuple[Path, importlib.metadata.Distribution]:
     source = importlib.metadata.distribution("yamlgraph")
-    assert source.version == "0.5.22"
+    assert source.version == "0.6.0"
     site = tmp_path / "site packages"
     site.mkdir()
     package = Path(source.locate_file("yamlgraph"))
@@ -65,7 +65,7 @@ def _copy_official_distribution(tmp_path: Path) -> tuple[Path, importlib.metadat
         for item in join_manifest["files"]
     ):
         subprocess.run(
-            ["git", "apply", "--reverse", "--no-index", str(asset_root / "0.5.22-native-join.patch")],
+            ["git", "apply", "--reverse", "--no-index", str(asset_root / "0.6.0-native-join.patch")],
             cwd=site, check=True, capture_output=True, text=True,
         )
     return site, copied
@@ -76,16 +76,16 @@ def _manifest() -> dict:
     return json.loads(manifest.read_text())
 
 
-def _states(dist: importlib.metadata.Distribution) -> dict[str, str]:
+def _states(dist: importlib.metadata.Distribution, manifest: dict | None = None) -> dict[str, str]:
     return {
         item["path"]: _sha256(Path(dist.locate_file(item["path"])))
-        for item in _manifest()["files"]
+        for item in (manifest or _manifest())["files"]
     }
 
 
 def _distribution_in_state(tmp_path: Path, state: str) -> Path:
     site, dist = _copy_official_distribution(tmp_path)
-    files = _manifest()["files"]
+    files = (_join_manifest() if state == "mixed" else _manifest())["files"]
     originals = {
         item["path"]: Path(dist.locate_file(item["path"])).read_bytes()
         for item in files
@@ -100,12 +100,12 @@ def _distribution_in_state(tmp_path: Path, state: str) -> Path:
     elif state == "wrong version":
         metadata = next(site.glob("*.dist-info/METADATA"))
         metadata.write_text(
-            metadata.read_text().replace("Version: 0.5.22", "Version: 0.5.21")
+            metadata.read_text().replace("Version: 0.6.0", "Version: 0.5.21")
         )
     return site
 
 
-def test_manifest_is_closed_and_records_reviewed_upstream_artifacts():
+def test_manifest_is_closed_and_limits_the_remaining_timeout_patch():
     """Adding an unaudited manifest field or changing an approved digest breaks review."""
     manifest = _manifest()
     assert set(manifest) == {
@@ -122,28 +122,27 @@ def test_manifest_is_closed_and_records_reviewed_upstream_artifacts():
     }
     assert manifest["schema"] == 1
     assert manifest["distribution"] == "yamlgraph"
-    assert manifest["version"] == "0.5.22"
+    assert manifest["version"] == "0.6.0"
     assert manifest["upstream_repository"] == "https://github.com/sheikkinen/yamlgraph"
-    assert manifest["upstream_issue"] == "https://github.com/sheikkinen/yamlgraph/issues/474"
-    assert manifest["upstream_patch_comment"] == (
-        "https://github.com/sheikkinen/yamlgraph/issues/474#issuecomment-5354688575"
-    )
+    for key in (
+        "upstream_patch_comment",
+        "upstream_patch_sha256",
+    ):
+        assert manifest[key] is None
+    assert manifest["upstream_issue"] == "https://github.com/sheikkinen/yamlgraph/issues/708"
     assert manifest["upstream_issue_body_sha256"] == (
-        "c4ba42b9fd178dc56fad8d736e16b3dd58705112cfd2e31e5d9e3355c58dcc69"
+        "fd7ab7fa15266498cf99ec5f26638ff7cceeb07d9c8b9d05807100150171fc88"
     )
-    assert manifest["upstream_patch_sha256"] == (
-        "dbae9dfa437adcef6d3d60d6a7bb9be44336ba6ca92fd5f568b99412f9b3fec0"
-    )
-    assert manifest["patch_sha256"] == (
-        "2af7f84c2663be4d8416e3a6e0f648b823a89d3b0ae15ee9daaf0c8e4d32d2d6"
-    )
-    assert manifest["files"] == sorted(manifest["files"], key=lambda item: item["path"])
-    assert {item["path"] for item in manifest["files"]} == {
-        "yamlgraph/compile/node_otel.py",
-        "yamlgraph/compile/subgraph_relay.py",
-        "yamlgraph/node_factory/subgraph_nodes.py",
-        "yamlgraph/node_timeout.py",
-    }
+    assert manifest["patch_sha256"] == _sha256(_canonical_paths()[1])
+    assert [item["path"] for item in manifest["files"]] == ["yamlgraph/node_timeout.py"]
+
+
+def _join_manifest() -> dict:
+    return json.loads(dp._JOIN_MANIFEST_PATH.read_text())
+
+
+def _join_arguments() -> dict:
+    return {"manifest_path": dp._JOIN_MANIFEST_PATH, "patch_path": dp._JOIN_PATCH_PATH}
 
 
 def test_exact_original_application_and_idempotent_rerun(tmp_path, monkeypatch):
@@ -164,12 +163,12 @@ def test_exact_original_application_and_idempotent_rerun(tmp_path, monkeypatch):
 
 
 def test_default_installer_applies_and_verifies_native_join_patch(tmp_path):
-    """Startup must reject a legacy-only installation missing the native barrier."""
+    """Startup must reject a timeout-only installation missing the native barrier."""
     site, dist = _copy_official_distribution(tmp_path)
     manifest = json.loads((_canonical_paths()[0].parent / "native-join-manifest.json").read_text())
-    legacy_manifest = tmp_path / "legacy-manifest.json"
-    shutil.copyfile(_canonical_paths()[0], legacy_manifest)
-    dp.apply_dependency_patch(distribution=dist, manifest_path=legacy_manifest)
+    timeout_manifest = tmp_path / "timeout-manifest.json"
+    shutil.copyfile(_canonical_paths()[0], timeout_manifest)
+    dp.apply_dependency_patch(distribution=dist, manifest_path=timeout_manifest)
     with pytest.raises(dp.DependencyPatchError, match="original"):
         dp.verify_dependency_patch(distribution=dist)
     dp.apply_dependency_patch(distribution=dist)
@@ -206,7 +205,7 @@ def test_patch_digest_mismatch_fails_before_modification(tmp_path):
 def test_unknown_mixed_and_partial_states_fail_closed(tmp_path, state):
     """Anything other than all-before or all-after is not a safe patch state."""
     _, dist = _copy_official_distribution(tmp_path)
-    files = _manifest()["files"]
+    files = _join_manifest()["files"]
     if state in {"mixed", "partial"}:
         originals = {
             item["path"]: Path(dist.locate_file(item["path"])).read_bytes()
@@ -217,6 +216,7 @@ def test_unknown_mixed_and_partial_states_fail_closed(tmp_path, state):
         for item in targets:
             Path(dist.locate_file(item["path"])).write_bytes(originals[item["path"]])
     else:
+        dp.apply_dependency_patch(distribution=dist)
         Path(dist.locate_file(files[0]["path"])).write_text("unknown bytes\n")
 
     with pytest.raises(dp.DependencyPatchError, match=state):
@@ -227,7 +227,7 @@ def test_wrong_version_refuses_even_when_files_match(tmp_path):
     """Matching source hashes do not authorize patching a different release."""
     site, _ = _copy_official_distribution(tmp_path)
     metadata = next(site.glob("*.dist-info/METADATA"))
-    metadata.write_text(metadata.read_text().replace("Version: 0.5.22", "Version: 0.5.21"))
+    metadata.write_text(metadata.read_text().replace("Version: 0.6.0", "Version: 0.5.21"))
     dist = next(importlib.metadata.distributions(path=[str(site)]))
 
     with pytest.raises(dp.DependencyPatchError, match="wrong version"):
@@ -242,7 +242,7 @@ def test_newer_versions_are_classified_by_native_probe(tmp_path, probe_result, m
     """A new upstream release must never inherit or silently discard this patch."""
     site, _ = _copy_official_distribution(tmp_path)
     metadata = next(site.glob("*.dist-info/METADATA"))
-    metadata.write_text(metadata.read_text().replace("Version: 0.5.22", "Version: 0.5.23"))
+    metadata.write_text(metadata.read_text().replace("Version: 0.6.0", "Version: 0.6.1"))
     dist = next(importlib.metadata.distributions(path=[str(site)]))
 
     with pytest.raises(dp.DependencyPatchError, match=message):
@@ -255,7 +255,7 @@ def test_newer_versions_are_classified_by_native_probe(tmp_path, probe_result, m
 def test_replace_failure_restores_verified_originals_and_cleans_staging(tmp_path, monkeypatch):
     """A crash during replacement must not leave the installed package mixed."""
     _, dist = _copy_official_distribution(tmp_path)
-    before = _states(dist)
+    before = _states(dist, _join_manifest())
     real_replace = os.replace
     replaced = 0
 
@@ -269,14 +269,14 @@ def test_replace_failure_restores_verified_originals_and_cleans_staging(tmp_path
 
     monkeypatch.setattr(dp.os, "replace", fail_second_replacement)
     with pytest.raises(dp.DependencyPatchError, match="simulated replace failure"):
-        dp.apply_dependency_patch(distribution=dist)
-    assert _states(dist) == before
+        dp.apply_dependency_patch(distribution=dist, **_join_arguments())
+    assert _states(dist, _join_manifest()) == before
 
 
 def test_post_replace_digest_failure_restores_verified_originals(tmp_path, monkeypatch):
     """A corrupted atomic output must roll back even after every replace returned."""
     _, dist = _copy_official_distribution(tmp_path)
-    before = _states(dist)
+    before = _states(dist, _join_manifest())
     real_atomic_write = dp._atomic_write_from
     writes = 0
 
@@ -289,8 +289,8 @@ def test_post_replace_digest_failure_restores_verified_originals(tmp_path, monke
 
     monkeypatch.setattr(dp, "_atomic_write_from", corrupt_second_output)
     with pytest.raises(dp.DependencyPatchError, match="patched output changed during replace"):
-        dp.apply_dependency_patch(distribution=dist)
-    assert _states(dist) == before
+        dp.apply_dependency_patch(distribution=dist, **_join_arguments())
+    assert _states(dist, _join_manifest()) == before
 
 
 def test_final_state_read_failure_restores_verified_originals(tmp_path, monkeypatch):
@@ -492,10 +492,10 @@ def test_black_box_uv_run_fails_closed_after_original_or_mixed_sync_state(tmp_pa
     package = next((project / ".venv" / "lib").glob("python*/site-packages/yamlgraph"))
     originals = {
         item["path"]: (package.parent / item["path"]).read_bytes()
-        for item in _manifest()["files"]
+        for item in _join_manifest()["files"]
     }
     assert uv_run("--no-sync", "lockstep-dependency-install").returncode == 0
-    for item in _manifest()["files"][::2]:
+    for item in _join_manifest()["files"][::2]:
         (package.parent / item["path"]).write_bytes(originals[item["path"]])
 
     mixed = uv_run("lockstep", "--help")
@@ -542,3 +542,30 @@ def test_built_wheel_requires_explicit_packaged_installer(tmp_path):
     assert second.returncode == 0 and "already patched" in second.stdout
     assert after.returncode == 0 and "usage:" in after.stdout.lower()
     assert module.returncode == 0 and "usage:" in module.stdout.lower()
+
+
+@pytest.mark.parametrize("otel_enabled", [False, True])
+def test_yaml_timeout_context_repro_fails_on_release_and_passes_with_patch(
+    tmp_path, otel_enabled
+):
+    """Exercise the published YAML path, not synthetic wrapper composition."""
+    site, dist = _copy_official_distribution(tmp_path)
+    script = ROOT / "docs/upstream/yamlgraph-timeout-context/reproduce.py"
+    env = {**os.environ, "PYTHONPATH": str(site)}
+    if otel_enabled:
+        env["YAMLGRAPH_OTEL_EXPORT"] = "otlp"
+        env["OTEL_SDK_DISABLED"] = "true"
+    else:
+        env.pop("YAMLGRAPH_OTEL_EXPORT", None)
+    original = subprocess.run(
+        [sys.executable, str(script)], env=env, capture_output=True, text=True
+    )
+    assert original.returncode == 1, original.stderr
+    assert original.stdout.count(": PASS") == 2
+    assert original.stdout.count("Called get_config outside of a runnable context") == 2
+    dp.apply_dependency_patch(distribution=dist)
+    patched = subprocess.run(
+        [sys.executable, str(script)], env=env, capture_output=True, text=True
+    )
+    assert patched.returncode == 0, patched.stdout + patched.stderr
+    assert patched.stdout.count(": PASS") == 4

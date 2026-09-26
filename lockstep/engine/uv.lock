@@ -1147,7 +1147,7 @@ wheels = [
 
 [[package]]
 name = "lockstep"
-version = "0.2.5"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "jsonschema" },
@@ -1173,7 +1173,7 @@ requires-dist = [
     { name = "mcp", specifier = ">=2.0,<3" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "sqlalchemy", specifier = ">=2.0,<3" },
-    { name = "yamlgraph", specifier = "==0.5.22" },
+    { name = "yamlgraph", specifier = "==0.6.0" },
 ]
 
 [package.metadata.requires-dev]
@@ -2677,9 +2677,10 @@ wheels = [
 
 [[package]]
 name = "yamlgraph"
-version = "0.5.22"
+version = "0.6.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
+    { name = "anthropic" },
     { name = "jinja2" },
     { name = "langchain-anthropic" },
     { name = "langchain-core" },
@@ -2693,9 +2694,9 @@ dependencies = [
     { name = "python-dotenv" },
     { name = "pyyaml" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f3/43/8559d85be37ca60f83f9fce1b677c6fe5bcf5ca7a8244ef2586e32b7a8b4/yamlgraph-0.5.22.tar.gz", hash = "sha256:7309cf5efcbea882fd321fa90a1d43990d5c6e0f9e91712a92fda354d3bdd326", size = 234800, upload-time = "2026-08-17T12:33:28.855Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ba/bd/47d9e1eb216dc160ed8a6aaf9fb30d018aa4e9d9039840bb8fb9f466f724/yamlgraph-0.6.0.tar.gz", hash = "sha256:ec0e6cd6a86e5bd55a609ccbc6e983fc7ba9fcaeb8f14d4074d865853dd066f4", size = 253765, upload-time = "2026-09-23T19:50:01.547Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/27/fb/1587c55e77aa6fde58eabf8d5e89595ad8849a37da8f849427a68374fb91/yamlgraph-0.5.22-py3-none-any.whl", hash = "sha256:923c324a6cfd3554eee9769abf75c472ae600680321bba5cfb83918602712f58", size = 294962, upload-time = "2026-08-17T12:33:26.888Z" },
+    { url = "https://files.pythonhosted.org/packages/7d/27/6cc7c8ba67c89899bb9c054d1b6cdc421b1e5c4f19df14f4c3a5263962d1/yamlgraph-0.6.0-py3-none-any.whl", hash = "sha256:d39f0a14f87687e0ec10c20f445eb098e15b2f828264b41064a04500d715029b", size = 317424, upload-time = "2026-09-23T19:49:59.801Z" },
 ]
 
 [[package]]

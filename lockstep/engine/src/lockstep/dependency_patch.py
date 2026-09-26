@@ -22,9 +22,9 @@ from typing import Callable
 
 _ASSET_ROOT = Path(__file__).parent / "_dependency_patches" / "yamlgraph"
 _MANIFEST_PATH = _ASSET_ROOT / "manifest.json"
-_PATCH_PATH = _ASSET_ROOT / "0.5.22-subgraph-config.patch"
+_PATCH_PATH = _ASSET_ROOT / "0.6.0-timeout-config.patch"
 _JOIN_MANIFEST_PATH = _ASSET_ROOT / "native-join-manifest.json"
-_JOIN_PATCH_PATH = _ASSET_ROOT / "0.5.22-native-join.patch"
+_JOIN_PATCH_PATH = _ASSET_ROOT / "0.6.0-native-join.patch"
 _MANIFEST_FIELDS = {
     "schema",
     "distribution",

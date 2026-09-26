@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "distribution": "yamlgraph",
-  "version": "0.5.22",
+  "version": "0.6.0",
   "upstream_repository": "https://github.com/sheikkinen/yamlgraph",
   "upstream_issue": null,
   "upstream_patch_comment": null,
@@ -11,8 +11,8 @@
   "files": [
     {
       "path": "yamlgraph/compile/edge_compiler.py",
-      "before_sha256": "23c5e47488a4a0fa1bace9507666d9869b266d0b816078da06b4d10718997330",
-      "after_sha256": "2bbdfb3782de5cc23d48b50bcb6fb9fb74be82f593627a3308ee0434c8fb81e1"
+      "before_sha256": "beecdc0988be1de50ec9b2a46a1116746438dff6994f7889178873d215b0b50c",
+      "after_sha256": "3b5e640203b053c360142bd8690c9ca0cc37ed39c928247e2037a26c5783c2be"
     },
     {
       "path": "yamlgraph/loop_detector.py",
@@ -26,8 +26,8 @@
     },
     {
       "path": "yamlgraph/models/graph_schema.py",
-      "before_sha256": "22ba7b80f45c33170c31008d62c89d8f25c9f0f64c8a472544c5d7c69aea6e32",
-      "after_sha256": "9502e56eb23d0a297ce6572dd3f75833b123ca9620a7e4fecab60185039c7a7d"
+      "before_sha256": "759b3257defc71e001877d1a7a246925a0f7a0fea8793d5e4dbdd4eb2a02c046",
+      "after_sha256": "bf9cdd5609cedc36815cad4d59bf84a4d34bdb87477854b760434bf752dd70d4"
     }
   ]
 }

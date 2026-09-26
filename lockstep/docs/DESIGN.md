@@ -461,11 +461,14 @@ status signal", not "process compliance".
   the project — not in git, easy to deny), `LOCKSTEP_RECIPES` (default
   `<project>/.lockstep/recipes`). Runs: `$LOCKSTEP_STATE_DIR/runs/<run-id>.db`
   + `runs.json` index. Evidence artifacts live in the project (`.lockstep/`).
-- Pins: `langgraph==1.2.10` and official `yamlgraph==0.5.22`. Until upstream
-  issue #474 ships in a release, `scripts/lockstep-install` applies the reviewed
-  four-source-file patch and all later execution uses `uv run --no-sync`.
-  Bootstrap is a read-only, fail-closed verifier; dependency bumps run the
-  native capability probe and require owner review, never silent acceptance.
+- Pins: `langgraph==1.2.10` and official `yamlgraph==0.6.0`. Upstream issue
+  #474's direct-subgraph, OTel config, and child-checkpoint fixes are native.
+  `scripts/lockstep-install` applies only the remaining timeout/config-context
+  and native multi-source join patches (five source files total). All later
+  execution uses `uv run --no-sync`. Bootstrap is a read-only, fail-closed
+  verifier; dependency bumps run the native capability probe and require owner
+  review, never silent acceptance. Timeout regression and upstream issue draft:
+  `docs/upstream/yamlgraph-timeout-context/`.
 - yamlgraph risk: single author, fast pace, no documented schema-versioning —
   hard pin + our own recipe-compilation tests in CI.
 

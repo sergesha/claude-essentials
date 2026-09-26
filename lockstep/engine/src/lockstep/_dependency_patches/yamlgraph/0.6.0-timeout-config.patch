@@ -1,0 +1,38 @@
+diff --git a/yamlgraph/node_timeout.py b/yamlgraph/node_timeout.py
+--- a/yamlgraph/node_timeout.py
++++ b/yamlgraph/node_timeout.py
+@@ -4,12 +4,15 @@
+ 450-line ceiling. Behavior-preserving.
+ """
+ 
+-from __future__ import annotations
+-
++# Keep RunnableConfig annotations concrete for LangGraph config injection.
+ import concurrent.futures
+ from collections.abc import Callable
+ from concurrent.futures import ThreadPoolExecutor
++from contextvars import copy_context
+ from typing import Any
++
++from langchain_core.runnables import RunnableConfig
++from langchain_core.runnables.config import call_func_with_variable_args
+ 
+ 
+ def _maybe_wrap_timeout(
+@@ -38,10 +41,14 @@
+ 
+     state_key = node_config.get("state_key", node_name)
+ 
+-    def timed_fn(state: dict) -> dict:
++    def timed_fn(
++        state: dict, config: RunnableConfig | None = None
++    ) -> dict:
+         pool = ThreadPoolExecutor(max_workers=1)
+         try:
+-            return pool.submit(node_fn, state).result(timeout=timeout)
++            return pool.submit(
++                copy_context().run, call_func_with_variable_args, node_fn, state, config or {}
++            ).result(timeout=timeout)
+         except concurrent.futures.TimeoutError as e:
+             from yamlgraph.models import PipelineError
+             from yamlgraph.models.schemas import ErrorType

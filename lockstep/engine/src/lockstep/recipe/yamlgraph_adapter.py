@@ -1,4 +1,4 @@
-"""ALL yamlgraph (0.5.22 + reviewed source patch) knowledge is isolated here.
+"""ALL yamlgraph (0.6.0 + reviewed source patch) knowledge is isolated here.
 
 Nothing outside this module imports yamlgraph or langgraph directly. The
 dialect below is what the installed packages actually do (read off their
@@ -158,6 +158,7 @@ from typing import Any, Self, TypedDict
 import yaml
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.config import get_config
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
 from yamlgraph.compile.graph_loader import compile_graph, load_graph_config
@@ -674,6 +675,11 @@ def _run_wrapped_injected_config_probe(sentinel: str) -> dict[str, Any]:
         config: Mapping[str, Any],
     ) -> _InjectedConfigProbeState:
         configurable = config.get("configurable") or {}
+        # YAML Python tools receive state only and read their config from the
+        # runnable context. The timeout worker must preserve that context too.
+        assert get_config()["configurable"]["lockstep_probe_sentinel"] == (
+            configurable["lockstep_probe_sentinel"]
+        )
         return {"observed_sentinel": str(configurable["lockstep_probe_sentinel"])}
 
     node_name = "injected_config_probe"

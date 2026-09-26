@@ -1,0 +1,18 @@
+version: "1.0"
+name: timeout-context
+state:
+  observed: str
+tools:
+  observe:
+    type: python
+    module: repro_tools
+    function: observe
+nodes:
+  observe:
+    type: python
+    tool: observe
+    on_error: fail
+    timeout: 2
+edges:
+  - {from: START, to: observe}
+  - {from: observe, to: END}
