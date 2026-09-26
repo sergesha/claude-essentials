@@ -131,7 +131,7 @@ def test_manifest_is_closed_and_limits_the_remaining_timeout_patch():
         assert manifest[key] is None
     assert manifest["upstream_issue"] == "https://github.com/sheikkinen/yamlgraph/issues/708"
     assert manifest["upstream_issue_body_sha256"] == (
-        "fd7ab7fa15266498cf99ec5f26638ff7cceeb07d9c8b9d05807100150171fc88"
+        "ea2c639312e272d50c5bd7e5e9f67236fa5f9dbf7ade19d522dc86d958dbf805"
     )
     assert manifest["patch_sha256"] == _sha256(_canonical_paths()[1])
     assert [item["path"] for item in manifest["files"]] == ["yamlgraph/node_timeout.py"]

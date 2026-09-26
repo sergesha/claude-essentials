@@ -5,7 +5,7 @@
   "upstream_repository": "https://github.com/sheikkinen/yamlgraph",
   "upstream_issue": "https://github.com/sheikkinen/yamlgraph/issues/708",
   "upstream_patch_comment": null,
-  "upstream_issue_body_sha256": "fd7ab7fa15266498cf99ec5f26638ff7cceeb07d9c8b9d05807100150171fc88",
+  "upstream_issue_body_sha256": "ea2c639312e272d50c5bd7e5e9f67236fa5f9dbf7ade19d522dc86d958dbf805",
   "upstream_patch_sha256": null,
   "patch_sha256": "8179b98ca58bd981803c030e76730d796c14642c26232beaa331a0b27ec3447d",
   "files": [
