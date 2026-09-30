@@ -15,6 +15,7 @@ repo now only redirects `start.sh` here, see its README for details.
 - **Auto-expiry** — TTL resets on every read; unused facts expire, popular ones live forever
 - **Multi-project** — `NAMESPACE` isolates data between projects/agents; `tags` filter within one
 - **Dual-scope access** — every tool call takes `shared: bool`, so one client can reach both its own namespaced area and the always-present shared area, per call
+- **Isolated subspaces** — optional per-call `scope` selects an independent subspace inside the own or shared area, without changing the MCP connection's `NAMESPACE`
 - **Shared deployment** — `REDIS_MEMORY_MCP_MODE=shared` lets many agents reuse one backend instead of each starting its own
 - **Self-contained** — Docker stack: Redis Stack + HuggingFace TEI embeddings + MCP server
 
@@ -134,21 +135,23 @@ a pinned backend remains pinned independently of the plugin version.
 
 | Tool | Description |
 |------|-------------|
-| `kv_set(key, value, tags?, ttl_days?, shared?)` | Store a named fact |
-| `kv_get(key, shared?)` | Retrieve by exact key (refreshes TTL) |
-| `kv_delete(key, shared?)` | Delete by key |
-| `kv_list(tag?, pattern?, shared?)` | List entries with filtering |
+| `kv_set(key, value, tags?, ttl_days?, shared?, scope?)` | Store a named fact |
+| `kv_get(key, shared?, scope?)` | Retrieve by exact key (refreshes TTL) |
+| `kv_delete(key, shared?, scope?)` | Delete by key |
+| `kv_list(tag?, pattern?, shared?, scope?)` | List entries with filtering |
 
 ### Semantic Memory — vector search
 
 | Tool | Description |
 |------|-------------|
-| `mem_save(text, code?, tags?, ttl_days?, shared?)` | Save fact with embedding |
-| `mem_search(query, tags?, top_k?, shared?)` | Find by meaning (refreshes TTL on hits) |
-| `mem_list(limit?, tag?, shared?)` | Browse by recency |
-| `mem_delete(memory_id, shared?)` | Delete by ID |
+| `mem_save(text, code?, tags?, ttl_days?, shared?, scope?)` | Save fact with embedding |
+| `mem_search(query, tags?, top_k?, shared?, scope?)` | Find by meaning (refreshes TTL on hits) |
+| `mem_list(limit?, tag?, shared?, scope?)` | Browse by recency |
+| `mem_delete(memory_id, shared?, scope?)` | Delete by ID |
+| `search(query, tags?, top_k?, shared?, scope?)` | Search KV and semantic memory within one selected area |
 
 `shared` (default `false`, all tools) — see [`shared` — reaching both areas from one client](#shared--reaching-both-areas-from-one-client) below.
+`scope` (default `None`, all tools) — see [isolated subspaces](#scope--isolated-subspaces) below.
 
 ## TTL & Auto-Expiry
 
@@ -271,6 +274,59 @@ mem_search('deploy steps', shared=True)    # searches shared area only — never
 
 There's no automatic fallback between the two: a call touches exactly one area, and the caller decides which by setting `shared`. Reading something saved with `shared=True` requires `shared=True` on the read too, or it reports "not found" even though the entry exists in the other area.
 
+### `scope` — isolated subspaces
+
+Every tool accepts optional `scope`. First the existing `NAMESPACE`/`shared`
+rules choose an area, then `scope` selects a separate subspace within it.
+The MCP connection's `NAMESPACE` never changes. With no scope (or `None`), all
+existing keys, indexes, results and TTL behavior remain unchanged.
+
+| MCP configuration / call | Selected area |
+|---|---|
+| `NAMESPACE=alpha`, no scope | Existing alpha area |
+| `NAMESPACE=alpha`, `scope=S` | Alpha's subspace S |
+| Any namespace, `shared=True`, no scope | Existing shared area |
+| Any namespace, `shared=True, scope=S` | Shared subspace S |
+| Empty namespace, `scope=S` | The same shared subspace S, regardless of `shared` |
+
+```python
+# An ordinary name separates data; it is not a secret access key.
+kv_set("status", "active", scope="task-a")
+kv_get("status", scope="task-a")
+mem_save(text="A decision for the shared subspace.", shared=True, scope="task-a")
+search(query="decision", shared=True, scope="task-a")
+```
+
+Use the same `shared` and `scope` on save, read, search, list and delete.
+Unscoped searches/lists exclude all named subspaces; scoped operations exclude
+the parent and siblings. There is no recursive/all-scopes search, scope listing,
+fallback, or global scope switch. Parallel calls can select different subspaces.
+Tags remain filters within an area; multiple search tags use OR.
+
+Names are case-sensitive, 1-128 ASCII letters, digits, underscores or hyphens.
+Empty strings, whitespace, separators and glob characters are rejected before
+Redis/embedding access. Names are never trimmed, sanitized or normalized.
+
+```
+alpha, scope=S  → ns:alpha:scope:S:mem:{id}  ns:alpha:scope:S:kv:{key}  idx:memories:scope:alpha:S
+shared, scope=S → ns::scope:S:mem:{id}       ns::scope:S:kv:{key}       idx:memories:scope::S
+```
+
+These prefixes are disjoint from all existing parent prefixes. Subspace indexes
+are created on the first semantic save; reads of an absent index return empty
+without creating one. Existing subspace index definitions and search-result
+prefixes are checked before data is returned. Key TTLs still refresh on the
+same reads/search hits as before. Indexes do not expire with records, so operators
+must clean up unused indexes separately; scoped writes are not quota-limited.
+
+For **MCP-only access**, a secret name with at least 128 bits of cryptographic
+randomness can serve as a bearer capability. Trusted code can generate it with
+`secrets.token_urlsafe(32)`. Anyone knowing it can read, write and delete that
+subspace; there are no per-holder permissions or individual revocation. Do not
+publish secret scope names in memory content, labels, tags or public output.
+They occur in tool arguments, Redis keys and index names: backend access and
+exposed logs bypass this protection. This is not encryption or a secrets store.
+
 ## Security
 
 **This is not a secrets store, and its default deployment is not hardened.** Read this before
@@ -318,10 +374,18 @@ single-user quick-start keeps working with no auth.
    - `admin` — manual ops / provisioning only (never used by agents). Strong password.
    - `shared` — clients that run with **no** `NAMESPACE`: the shared/base commons only.
    - `ns_<name>` — one per namespace: its private area (`ns:<name>:*` + index `idx:memories:<name>`)
-     **plus** the shared commons (`~mem:* ~kv:* ~idx:memories` — what `shared=True` reaches).
-     Drop those three grants from a line to wall that tenant off from the commons.
+     and its scoped indexes (`idx:memories:scope:<name>:*`), **plus** the shared commons
+     (`~mem:* ~kv:* ~idx:memories`) and shared subspaces
+     (`~ns::scope:* ~idx:memories:scope::*` — what `shared=True, scope=...` reaches).
+     Drop all shared-area grants from a line to wall that tenant off from the commons.
      `-@dangerous -@admin` block `FLUSHALL`/`KEYS`/`CONFIG`/`ACL`; the server needs only hashes,
      `SCAN`, `EXPIRE`, `DEL`, and `FT.*`, all still permitted.
+
+   Existing ACL files must explicitly grant scoped prefixes/indexes before scoped
+   calls can succeed. The updated template keeps each user's existing own/shared
+   access and adds only the corresponding subspaces; it does not enumerate or
+   authorize scopes individually. Secret-scope confidentiality assumes agents
+   cannot use these broad Redis credentials directly.
 
    > **Redis ACL files allow no comments or blank lines** — every line must start with `user`.
    > Keep `redis-acl.acl` to `user …` lines only. Passwords written as `>plaintext` are hashed

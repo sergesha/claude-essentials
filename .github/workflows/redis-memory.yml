@@ -17,6 +17,29 @@ permissions:
   contents: read
 
 jobs:
+  scope-isolation:
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis/redis-stack-server:latest
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install ./redis-memory-mcp/server pytest pytest-asyncio
+      - name: Check scope isolation and legacy compatibility
+        env:
+          REDIS_SCOPE_TEST_URL: redis://127.0.0.1:6379/0
+        run: python -m pytest redis-memory-mcp/tests -q
+
   mcp-startup:
     runs-on: ubuntu-latest
     steps:

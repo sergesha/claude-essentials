@@ -15,7 +15,9 @@ from datetime import datetime, timezone
 
 import httpx
 import redis.asyncio as aio_redis
+from redis.exceptions import ResponseError
 from mcp.server import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 REDIS_URL    = os.getenv("REDIS_URL",    "redis://localhost:6379/0")
 EMBED_URL    = os.getenv("EMBED_URL",    "http://localhost:8081")
@@ -50,25 +52,28 @@ _OWN_MEM = f"ns:{NAMESPACE}:mem:" if NAMESPACE else _BASE_MEM
 _OWN_KV  = f"ns:{NAMESPACE}:kv:"  if NAMESPACE else _BASE_KV
 _OWN_INDEX = f"{_BASE_INDEX}:{NAMESPACE}" if NAMESPACE else _BASE_INDEX
 
-def _scope(shared: bool) -> tuple[str, str, str]:
-    """Resolve (mem_prefix, kv_prefix, index) for one call.
+_SCOPE_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
-    Every kv_*/mem_* tool takes `shared: bool = False` and calls this to pick
-    which of two always-available areas that one call reads/writes:
-      shared=False (default) → NAMESPACE's own area (or the base area if
-        NAMESPACE is unset — same thing, so this is a no-op when there's no
-        namespace to isolate from).
-      shared=True  → the base ("mem:"/"kv:"/idx:memories) area, always,
-        regardless of NAMESPACE.
-    This is a per-call choice, not a per-server-instance one: one MCP client
-    with NAMESPACE=myproject can still reach the fleet-wide shared area by
-    passing shared=True on any individual call, without a second client/
-    registration. There is no cross-scope fallback — a call touches exactly
-    one area; the caller decides which by setting `shared`.
+
+def _scope(shared: bool, scope: str | None = None) -> tuple[str, str, str]:
+    """Choose the existing own/shared area, then an optional isolated subspace.
+
+    None preserves the original prefixes and index. A scope is relative to
+    the selected area: shared=True and an unset NAMESPACE both select the
+    same shared subspace. There is no traversal, fallback or global switch.
     """
+    if scope is not None:
+        if not isinstance(scope, str) or not _SCOPE_RE.fullmatch(scope):
+            raise ToolError("Invalid scope: expected 1-128 ASCII letters, digits, underscores or hyphens.")
+        namespace = "" if shared or not NAMESPACE else NAMESPACE
+        # Sibling prefixes: legacy mem:/kv: and ns:N:mem:/kv: cannot include
+        # subspaces, including when the selected namespace is empty.
+        root = f"ns:{namespace}:scope:{scope}:"
+        return f"{root}mem:", f"{root}kv:", f"{_BASE_INDEX}:scope:{namespace}:{scope}"
     if shared or not NAMESPACE:
         return _BASE_MEM, _BASE_KV, _BASE_INDEX
     return _OWN_MEM, _OWN_KV, _OWN_INDEX
+
 
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 _HEX_PREFIX_RE = re.compile(r"^[0-9a-f]{1,8}$")
@@ -97,19 +102,64 @@ async def _embed(text: str) -> list[float]:
 def _redis():
     return aio_redis.from_url(REDIS_URL, decode_responses=False)
 
+async def _create_index(r, index: str, mem_prefix: str):
+    await r.execute_command(
+        "FT.CREATE", index, "ON", "HASH", "PREFIX", "1", mem_prefix, "SCHEMA",
+        "text",      "TEXT",
+        "label",     "TEXT",
+        "code",      "TEXT",
+        "tags",      "TAG",    "SEPARATOR", ",",
+        "vector",    "VECTOR", "HNSW", "6", "TYPE", "FLOAT32", "DIM", "768", "DISTANCE_METRIC", "COSINE",
+        "timestamp", "NUMERIC",
+    )
+
+
 async def _ensure_index(r, index: str, mem_prefix: str):
+    # Preserve the existing unscoped provisioning behavior.
     try:
         await r.execute_command("FT.INFO", index)
     except Exception:
-        await r.execute_command(
-            "FT.CREATE", index, "ON", "HASH", "PREFIX", "1", mem_prefix, "SCHEMA",
-            "text",      "TEXT",
-            "label",     "TEXT",
-            "code",      "TEXT",
-            "tags",      "TAG",    "SEPARATOR", ",",
-            "vector",    "VECTOR", "HNSW", "6", "TYPE", "FLOAT32", "DIM", "768", "DISTANCE_METRIC", "COSINE",
-            "timestamp", "NUMERIC",
-        )
+        await _create_index(r, index, mem_prefix)
+
+
+def _reply_fields(raw) -> dict:
+    """Normalize FT.INFO maps and alternating-key/value RESP2 lists."""
+    if isinstance(raw, dict):
+        return {_decode(k): v for k, v in raw.items()}
+    return {_decode(raw[i]): raw[i + 1] for i in range(0, len(raw), 2)}
+
+
+async def _scope_index(r, index: str, mem_prefix: str, *, create: bool = False) -> bool:
+    """Validate a subspace index; reads never provision missing indexes.
+
+    Only a missing-index error permits creation. ACL/network errors propagate.
+    A concurrent creator is safe only after checking the resulting definition.
+    """
+    try:
+        info = await r.execute_command("FT.INFO", index)
+    except ResponseError as exc:
+        if "unknown index name" not in str(exc).lower():
+            raise
+        if not create:
+            return False
+        try:
+            await _create_index(r, index, mem_prefix)
+        except ResponseError as create_exc:
+            if "index already exists" not in str(create_exc).lower():
+                raise
+        info = await r.execute_command("FT.INFO", index)
+    definition = _reply_fields(_reply_fields(info).get("index_definition", []))
+    prefixes = [_decode(p) for p in definition.get("prefixes", [])]
+    if _decode(definition.get("key_type", "")) != "HASH" or prefixes != [mem_prefix]:
+        # Do not echo index/key names: a scope can be a bearer secret.
+        raise ToolError("Subspace index prefix does not match the selected area.")
+    return True
+
+
+def _check_scope_key(redis_key: str, mem_prefix: str, scope: str | None):
+    if scope is not None and not redis_key.startswith(mem_prefix):
+        raise ToolError("Search result is outside the selected subspace.")
+
 
 def _decode(v) -> str:
     return v.decode() if isinstance(v, bytes) else str(v)
@@ -170,7 +220,7 @@ def _parse_search_results(raw):
 # ── KV tools ──────────────────────────────────────────────────────────────────
 
 @mcp.tool()
-async def kv_set(key: str, value: str, label: str = "", tags: str = "", ttl_days: int = 90, shared: bool = False) -> str:
+async def kv_set(key: str, value: str, label: str = "", tags: str = "", ttl_days: int = 90, shared: bool = False, scope: str | None = None) -> str:
     """Store a key/value fact — instant lookup, no embeddings.
     Use for discrete facts with a known name: config, settings, versions, names,
     non-secret connection info.
@@ -198,10 +248,16 @@ async def kv_set(key: str, value: str, label: str = "", tags: str = "", ttl_days
       shared are a cooperative key-prefix convention, not a security boundary —
       any client can choose any NAMESPACE or pass shared=True.
 
+    - scope: Optional isolated subspace (1-128 ASCII letters/digits/_/-),
+      inside the area chosen by shared. Omit for the existing unscoped
+      area. shared=True with scope selects a shared subspace. Use the
+      same shared/scope on reads and deletes; no parent/sibling fallback.
+      Secret random names grant access by possession; do not disclose them.
+
     Examples: kv_set('prod-db-host', 'db.internal:5432', label='Production DB host', tags='db')
               kv_set('user-language', 'Russian', label='User preferred language', ttl_days=365)
     """
-    _, kv_prefix, _ = _scope(shared)
+    _, kv_prefix, _ = _scope(shared, scope)
     r = _redis()
     try:
         redis_key = f"{kv_prefix}{key}"
@@ -225,7 +281,7 @@ async def kv_set(key: str, value: str, label: str = "", tags: str = "", ttl_days
 
 
 @mcp.tool()
-async def kv_get(key: str, shared: bool = False) -> str:
+async def kv_get(key: str, shared: bool = False, scope: str | None = None) -> str:
     """Retrieve a value by its exact key — O(1), instant, always consistent.
     Automatically refreshes the TTL on read, so frequently accessed facts never expire.
 
@@ -236,8 +292,13 @@ async def kv_get(key: str, shared: bool = False) -> str:
       used in the kv_set call, or this looks in the wrong area and reports
       "Not found" even though the key exists elsewhere. There is no automatic
       fallback between areas.
+    - scope: Optional isolated subspace (1-128 ASCII letters/digits/_/-),
+      inside the area chosen by shared. Omit for the existing unscoped
+      area. shared=True with scope selects a shared subspace. Use the
+      same shared/scope on reads and deletes; no parent/sibling fallback.
+      Secret random names grant access by possession; do not disclose them.
     """
-    _, kv_prefix, _ = _scope(shared)
+    _, kv_prefix, _ = _scope(shared, scope)
     r = _redis()
     try:
         redis_key = f"{kv_prefix}{key}"
@@ -264,15 +325,20 @@ async def kv_get(key: str, shared: bool = False) -> str:
 
 
 @mcp.tool()
-async def kv_delete(key: str, shared: bool = False) -> str:
+async def kv_delete(key: str, shared: bool = False, scope: str | None = None) -> str:
     """Delete a key/value entry by its exact key.
 
     Parameters:
     - key (required): The exact key to delete. Cannot be undone.
     - shared: Must match how the entry was saved (see kv_get) — deletes from
       that area only.
+    - scope: Optional isolated subspace (1-128 ASCII letters/digits/_/-),
+      inside the area chosen by shared. Omit for the existing unscoped
+      area. shared=True with scope selects a shared subspace. Use the
+      same shared/scope on reads and deletes; no parent/sibling fallback.
+      Secret random names grant access by possession; do not disclose them.
     """
-    _, kv_prefix, _ = _scope(shared)
+    _, kv_prefix, _ = _scope(shared, scope)
     r = _redis()
     try:
         deleted = await r.delete(f"{kv_prefix}{key}")
@@ -282,7 +348,7 @@ async def kv_delete(key: str, shared: bool = False) -> str:
 
 
 @mcp.tool()
-async def kv_list(tag: str = "", pattern: str = "", shared: bool = False) -> str:
+async def kv_list(tag: str = "", pattern: str = "", shared: bool = False, scope: str | None = None) -> str:
     """List stored key/value entries with their TTL.
 
     Parameters:
@@ -290,8 +356,13 @@ async def kv_list(tag: str = "", pattern: str = "", shared: bool = False) -> str
     - pattern: Glob pattern for key names (e.g. pattern='prod-*').
     - shared: List this server's own area (default) or the always-available
       shared area (shared=True). Lists one area at a time, never both.
+    - scope: Optional isolated subspace (1-128 ASCII letters/digits/_/-),
+      inside the area chosen by shared. Omit for the existing unscoped
+      area. shared=True with scope selects a shared subspace. Use the
+      same shared/scope on reads and deletes; no parent/sibling fallback.
+      Secret random names grant access by possession; do not disclose them.
     """
-    _, kv_prefix, _ = _scope(shared)
+    _, kv_prefix, _ = _scope(shared, scope)
     r = _redis()
     try:
         glob = f"{kv_prefix}{pattern}*" if pattern else f"{kv_prefix}*"
@@ -322,7 +393,7 @@ async def kv_list(tag: str = "", pattern: str = "", shared: bool = False) -> str
 # ── Semantic Memory tools ─────────────────────────────────────────────────────
 
 @mcp.tool()
-async def mem_save(text: str, label: str = "", code: str = "", tags: str = "", ttl_days: int = 90, shared: bool = False) -> str:
+async def mem_save(text: str, label: str = "", code: str = "", tags: str = "", ttl_days: int = 90, shared: bool = False, scope: str | None = None) -> str:
     """Save a fact to semantic memory with a vector embedding for similarity search.
     Use for knowledge that needs to be found by meaning: decisions, patterns, context, docs.
 
@@ -341,16 +412,25 @@ async def mem_save(text: str, label: str = "", code: str = "", tags: str = "", t
       should be visible to every other agent/namespace on this instance, not just
       this one. Default (false) stores in this server's own area.
 
+    - scope: Optional isolated subspace (1-128 ASCII letters/digits/_/-),
+      inside the area chosen by shared. Omit for the existing unscoped
+      area. shared=True with scope selects a shared subspace. Use the
+      same shared/scope on reads and deletes; no parent/sibling fallback.
+      Secret random names grant access by possession; do not disclose them.
+
     Returns the memory ID (use mem_delete to remove it).
     """
-    mem_prefix, _, index = _scope(shared)
+    mem_prefix, _, index = _scope(shared, scope)
     embed_input = f"{text}\n{code}" if code else text
     vector_bytes = _encode(await _embed(embed_input))
     mid = str(uuid.uuid4())
 
     r = _redis()
     try:
-        await _ensure_index(r, index, mem_prefix)
+        if scope is None:
+            await _ensure_index(r, index, mem_prefix)
+        else:
+            await _scope_index(r, index, mem_prefix, create=True)
         redis_key = f"{mem_prefix}{mid}"
         mapping = {
             b"text":      text.encode(),
@@ -377,7 +457,7 @@ async def mem_save(text: str, label: str = "", code: str = "", tags: str = "", t
 
 
 @mcp.tool()
-async def mem_search(query: str, tags: str = "", top_k: int = 5, shared: bool = False) -> str:
+async def mem_search(query: str, tags: str = "", top_k: int = 5, shared: bool = False, scope: str | None = None) -> str:
     """Search semantic memory by meaning — finds relevant facts even without exact word matches.
     Automatically refreshes TTL for every result, so popular memories never expire.
 
@@ -389,11 +469,17 @@ async def mem_search(query: str, tags: str = "", top_k: int = 5, shared: bool = 
       shared area (shared=True). Searches one area at a time — call twice
       (shared=False then shared=True) to check both; results are never merged.
 
+    - scope: Optional isolated subspace (1-128 ASCII letters/digits/_/-),
+      inside the area chosen by shared. Omit for the existing unscoped
+      area. shared=True with scope selects a shared subspace. Use the
+      same shared/scope on reads and deletes; no parent/sibling fallback.
+      Secret random names grant access by possession; do not disclose them.
+
     Call at the start of conversations to load relevant context.
     Results show similarity %, TTL remaining, tags, and memory ID.
     """
-    mem_prefix, _, index = _scope(shared)
-    vector_bytes = _encode(await _embed(query))
+    mem_prefix, _, index = _scope(shared, scope)
+    vector_bytes = _encode(await _embed(query)) if scope is None else None
 
     if tags:
         tag_filter = "|".join(_escape_tag(_sanitize_tag(t)) for t in tags.split(",") if _sanitize_tag(t))
@@ -403,7 +489,12 @@ async def mem_search(query: str, tags: str = "", top_k: int = 5, shared: bool = 
 
     r = _redis()
     try:
-        await _ensure_index(r, index, mem_prefix)
+        if scope is None:
+            await _ensure_index(r, index, mem_prefix)
+        else:
+            if not await _scope_index(r, index, mem_prefix):
+                return "No memories found."
+            vector_bytes = _encode(await _embed(query))
         raw = await r.execute_command(
             "FT.SEARCH", index, ft_query,
             "PARAMS", "2", "vec", vector_bytes,
@@ -418,6 +509,7 @@ async def mem_search(query: str, tags: str = "", top_k: int = 5, shared: bool = 
 
         results = []
         for redis_key, fd in docs:
+            _check_scope_key(redis_key, mem_prefix, scope)
             mid = redis_key.replace(mem_prefix, "")
 
             # Refresh TTL on hit
@@ -441,7 +533,7 @@ async def mem_search(query: str, tags: str = "", top_k: int = 5, shared: bool = 
 
 
 @mcp.tool()
-async def mem_list(limit: int = 20, tag: str = "", shared: bool = False) -> str:
+async def mem_list(limit: int = 20, tag: str = "", shared: bool = False, scope: str | None = None) -> str:
     """Browse semantic memories sorted by recency with TTL info.
 
     Parameters:
@@ -449,11 +541,19 @@ async def mem_list(limit: int = 20, tag: str = "", shared: bool = False) -> str:
     - tag: Filter by a single tag. Example: tag='auth'.
     - shared: Browse this server's own area (default) or the always-available
       shared area (shared=True). Lists one area at a time, never both.
+    - scope: Optional isolated subspace (1-128 ASCII letters/digits/_/-),
+      inside the area chosen by shared. Omit for the existing unscoped
+      area. shared=True with scope selects a shared subspace. Use the
+      same shared/scope on reads and deletes; no parent/sibling fallback.
+      Secret random names grant access by possession; do not disclose them.
     """
-    mem_prefix, _, index = _scope(shared)
+    mem_prefix, _, index = _scope(shared, scope)
     r = _redis()
     try:
-        await _ensure_index(r, index, mem_prefix)
+        if scope is None:
+            await _ensure_index(r, index, mem_prefix)
+        elif not await _scope_index(r, index, mem_prefix):
+            return "No semantic memories found."
         if tag:
             safe_tag = _escape_tag(_sanitize_tag(tag))
             raw = await r.execute_command(
@@ -465,6 +565,7 @@ async def mem_list(limit: int = 20, tag: str = "", shared: bool = False) -> str:
             results = []
             _, docs = _parse_search_results(raw)
             for redis_key, fd in docs:
+                _check_scope_key(redis_key, mem_prefix, scope)
                 mid = redis_key.replace(mem_prefix, "")
                 ttl_left = await r.ttl(redis_key)
                 dt = _fmt_ts(fd.get("timestamp", 0))
@@ -498,15 +599,20 @@ async def mem_list(limit: int = 20, tag: str = "", shared: bool = False) -> str:
 
 
 @mcp.tool()
-async def mem_delete(memory_id: str, shared: bool = False) -> str:
+async def mem_delete(memory_id: str, shared: bool = False, scope: str | None = None) -> str:
     """Permanently delete a semantic memory by its ID.
 
     Parameters:
     - memory_id (required): Full UUID or short prefix from mem_save / mem_search / mem_list output.
     - shared: Must match how the entry was saved (see mem_search) — deletes
       from that area only.
+    - scope: Optional isolated subspace (1-128 ASCII letters/digits/_/-),
+      inside the area chosen by shared. Omit for the existing unscoped
+      area. shared=True with scope selects a shared subspace. Use the
+      same shared/scope on reads and deletes; no parent/sibling fallback.
+      Secret random names grant access by possession; do not disclose them.
     """
-    mem_prefix, _, _ = _scope(shared)
+    mem_prefix, _, _ = _scope(shared, scope)
     memory_id = memory_id.strip().lower()
     is_full_uuid = bool(_UUID_RE.match(memory_id))
 
@@ -549,8 +655,8 @@ async def mem_delete(memory_id: str, shared: bool = False) -> str:
 # ── Unified search ────────────────────────────────────────────────────────────
 
 @mcp.tool()
-async def search(query: str, tags: str = "", top_k: int = 5, shared: bool = False) -> str:
-    """Search ALL memory at once — both key-value and semantic.
+async def search(query: str, tags: str = "", top_k: int = 5, shared: bool = False, scope: str | None = None) -> str:
+    """Search both key-value and semantic memory within one selected area.
     Use this as the default search tool. Combines results from both stores.
 
     Parameters:
@@ -561,9 +667,15 @@ async def search(query: str, tags: str = "", top_k: int = 5, shared: bool = Fals
       shared area (shared=True). Searches one area at a time — call twice to
       check both; results are never merged.
 
+    - scope: Optional isolated subspace (1-128 ASCII letters/digits/_/-),
+      inside the area chosen by shared. Omit for the existing unscoped
+      area. shared=True with scope selects a shared subspace. Use the
+      same shared/scope on reads and deletes; no parent/sibling fallback.
+      Secret random names grant access by possession; do not disclose them.
+
     Returns kv matches (by key/value substring) + semantic matches (by meaning), clearly separated.
     """
-    _, kv_prefix, _ = _scope(shared)
+    _, kv_prefix, _ = _scope(shared, scope)
     parts = []
 
     # 1. Search kv by substring in key and value
@@ -599,7 +711,7 @@ async def search(query: str, tags: str = "", top_k: int = 5, shared: bool = Fals
         parts.append("── Key-Value matches ──\n" + "\n".join(kv_results))
 
     # 2. Semantic search
-    mem_result = await mem_search(query=query, tags=tags, top_k=top_k, shared=shared)
+    mem_result = await mem_search(query=query, tags=tags, top_k=top_k, shared=shared, scope=scope)
     if mem_result and mem_result != "No memories found.":
         parts.append("── Semantic matches ──\n" + mem_result)
 
