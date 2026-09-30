@@ -1,5 +1,24 @@
 # Redis Memory checks
 
+`test_scopes.py` checks the optional scope API, legacy area selection, strict
+name validation before service access, real stdio MCP schemas, index validation
+and rejection of foreign search hits. Install the server dependencies plus
+`pytest` and `pytest-asyncio`, then run the package suite:
+
+```bash
+python -m pytest redis-memory-mcp/tests -q
+```
+
+Set `REDIS_SCOPE_TEST_URL` to enable Redis Stack integration checks for all nine
+tools, own/shared/unscoped isolation, parallel operations, index-creation races
+and TTL refresh. Integration fixtures use unique namespaces, shared scope names
+and index names; they remove only their synthetic keys/indexes. They substitute
+deterministic embeddings, so TEI is not required for these checks:
+
+```bash
+REDIS_SCOPE_TEST_URL=redis://127.0.0.1:6379/0 python -m pytest redis-memory-mcp/tests -q
+```
+
 `smoke_mcp.py` checks an already-built image's MCP handshake and tool catalog
 without connecting to Redis (install the test client with `pip install 'mcp>=2,<3'`):
 

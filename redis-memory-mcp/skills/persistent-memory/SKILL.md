@@ -1,11 +1,9 @@
 ---
 name: persistent-memory
 description: >
-  Manages persistent cross-session memory using redis-memory-mcp.
-  Two modes: semantic search (mem_*) for knowledge by meaning,
-  key-value (kv_*) for instant lookup. Auto-expiry via TTL + LRU.
-  Triggers: task start (search), solution found (save), bug fix (save),
-  architecture decision (save), task complete (reflection + save).
+  Use when starting tasks or looking up, saving, listing, or deleting
+  persistent cross-session memory through redis-memory-mcp, including
+  task context that supplies an isolated scope.
 
 allowed_tools:
   - search
@@ -24,7 +22,59 @@ allowed_tools:
 Cross-session memory for AI agents using `redis-memory-mcp`.  
 Requires MCP server `redis-memory-mcp` to be running.
 
+## Choose the Memory Area
+
+All nine tools accept `shared: bool = False` and `scope: str | None = None`.
+`NAMESPACE` is fixed by the MCP connection. `shared` chooses the existing
+own/shared area; `scope` selects an independent subspace inside that area.
+
+| Connection / arguments | Selected area |
+|---|---|
+| Named `NAMESPACE`, arguments omitted | Existing own area, without a scope |
+| Named `NAMESPACE`, `scope=S` | Subspace S inside the own area |
+| Any connection, `shared=True` | Existing shared area, without a scope |
+| Any connection, `shared=True, scope=S` | Subspace S inside the shared area |
+| Empty `NAMESPACE`, `scope=S` | The same shared subspace S, with either shared value |
+
+Each operation touches one area. **Without scope, search/list access only the
+existing unscoped area; they do not discover named subspaces.** With scope,
+operations do not fall back to the parent or other scopes. `search` combines
+KV and semantic results only within the selected area.
+
+Use the area supplied or authorized by the user/host. When task context supplies
+a scope, pass its exact value and the selected `shared` value on **every** memory
+call: task-start search, saves, reads, lists, deletes, and automatic reflections
+or learning captures. A missing result is not permission to try another area.
+Without an assigned scope, omit it to preserve existing behavior. Do not create
+a new scope just to read existing data.
+
+```python
+# scope_id is supplied by the user/host; reuse the same area throughout.
+area = {"shared": True, "scope": scope_id}
+search(query="Earlier decisions", **area)
+mem_save(text="The chosen approach and its rationale.", tags="project,design", **area)
+kv_get(key="status", **area)
+mem_delete(memory_id=memory_id, **area)
+```
+
+Scope names are case-sensitive, 1-128 ASCII letters, digits, `_` or `-`.
+Empty strings, whitespace, separators and wildcards are invalid; preserve the
+exact name rather than cleaning it. There is no tool to enumerate scopes.
+
+An ordinary name organizes data. A secret scope with at least 128 bits of
+cryptographic randomness acts as a bearer key for MCP-only access: knowing it
+permits reading, writing and deletion. Have trusted code generate it (for
+example, `secrets.token_urlsafe(32)`); do not invent a memorable name for
+confidentiality. Use only authorized scopes. Keep secret names out of stored
+labels/tags/text, unscoped memory and public output. They still appear in tool
+arguments and Redis keys/indexes, so direct backend access or exposed logs can
+reveal them. Scope isolation is not encryption or per-holder authorization.
+
 ## Tools Reference
+
+The parameter tables below list tool-specific arguments; all tools also take
+the common `shared` and `scope` arguments above. Workflow examples without
+them use the original area. Apply the task's selected area to those examples.
 
 ### Key-Value Storage (`kv_*`) — instant O(1) lookup, **short discrete values only**
 
@@ -33,9 +83,9 @@ or describes/explains something — use `mem_save` instead.
 
 ✅ Good kv: non-secret URL/host, version number, flag, short JSON config, timezone, username.
 ❌ Bad kv: architecture description, tech stack list, workflow explanation, pattern description.
-❌ Never kv: API keys, passwords, tokens, or any secret — this backend has no auth and is
-   readable by every client on it (see [Security](#security)). Store a *reference* to where
-   the secret lives, not the secret.
+❌ Never kv: API keys, passwords, tokens, or any secret — the default backend has no
+   Redis password, and unrestricted direct Redis access bypasses scope isolation
+   (see [Security](#security)). Store a *reference* to where the secret lives, not the secret.
 
 | Tool | Parameters | Purpose |
 |------|-----------|---------|
@@ -56,7 +106,7 @@ architecture notes, explanations — anything that answers "how", "why", "what h
 | `mem_list` | `limit` (int, default 20), `tag` (str, optional) | Browse by recency. |
 | `mem_delete` | `memory_id` (str) | Delete by UUID from search results. |
 
-### Unified Search (`search`) — search everywhere at once
+### Unified Search (`search`) — both stores in the selected area
 
 | Tool | Parameters | Purpose |
 |------|-----------|---------|
@@ -172,34 +222,37 @@ mem_save(
 )
 ```
 
-## Multi-Project Isolation
+## Project Tags
 
 **Always include project tag** as first tag in every save and search:
 ```
 tags="myproject,auth,backend"    ← project is first
 ```
 
-This ensures facts don't mix between projects. Use consistent project identifiers.
+Tags organize/filter entries within the selected area; they do not isolate
+projects or scope KV keys. Multiple search tags match ANY supplied tag (OR),
+so `tags="myproject,auth"` can also match another project's `auth` entries.
+Use `NAMESPACE` and/or an assigned scope when separate areas are required.
 
 ## Priority Rules
 
 1. **ALWAYS search before starting** — leverage past work
 2. **ALWAYS save solutions** — non-trivial problem → save pattern
 3. **ALWAYS reflect after long tasks** — extract lessons
-4. **ALWAYS tag with project** — multi-project isolation
+4. **ALWAYS tag with project** — consistent organization within the selected area
 5. **ALWAYS use kv_* for named facts** — faster, more reliable than search
 6. **`ttl_days=0` only in extreme cases** — permanent storage, no expiry ever. Almost never needed — TTL auto-resets on every read.
 
 ## Security
 
-- **Not a secrets store.** The backend has no per-client authentication and, by default, no
-  Redis password. Anything stored is readable by every agent/client that can reach the same
-  Redis. **Never** store API keys, passwords, tokens, or other secrets — keep those in a real
+- **Not a secrets store.** By default the backend has no Redis password.
+  Any client with unrestricted direct Redis access can read stored data, including
+  scoped data. **Never** store API keys, passwords, tokens, or other secrets — keep those in a real
   secret manager or environment variables, and store at most a non-secret *reference* here.
-- **`NAMESPACE` and `shared` are cooperative, not a boundary.** They are a key-prefix
-  convention; nothing server-side enforces them. Any client can pick any `NAMESPACE` or pass
-  `shared=True`, and anyone with direct Redis access reads every key regardless. Do not rely
-  on them to keep one project's data secret from another.
+- **`NAMESPACE` and `shared` are cooperative by default.** A client's startup configuration
+  chooses its namespace; `shared=True` selects the commons. Optional Redis ACLs can
+  enforce namespace boundaries (see README). Without ACLs, direct Redis access
+  bypasses both namespace and secret-scope isolation.
 - **Network exposure.** The shipped `docker-compose.yaml` publishes Redis on all host
   interfaces with no auth (and Docker's iptables rules typically bypass ufw). Run it only on
   a trusted network / behind a firewall. See README's Security section.
