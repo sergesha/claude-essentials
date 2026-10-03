@@ -5,6 +5,14 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0](https://github.com/sergesha/claude-essentials/compare/redis-memory-mcp-v0.10.0...redis-memory-mcp-v0.11.0) (2026-10-03)
+
+
+### Features
+
+* **redis-memory-mcp:** Gemma Q4, configurable chunks and offline migration ([f23b94a](https://github.com/sergesha/claude-essentials/commit/f23b94a85bd5d53ffda7a6d09321005664e83279))
+* **redis-memory-mcp:** use Gemma Q4 with configurable chunked embeddings ([f23b94a](https://github.com/sergesha/claude-essentials/commit/f23b94a85bd5d53ffda7a6d09321005664e83279))
+
 ## [0.10.0](https://github.com/sergesha/claude-essentials/compare/redis-memory-mcp-v0.9.1...redis-memory-mcp-v0.10.0) (2026-09-30)
 
 
