@@ -11,7 +11,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Features
 
 * **redis-memory-mcp:** Gemma Q4, configurable chunks and offline migration ([f23b94a](https://github.com/sergesha/claude-essentials/commit/f23b94a85bd5d53ffda7a6d09321005664e83279))
-* **redis-memory-mcp:** use Gemma Q4 with configurable chunked embeddings ([f23b94a](https://github.com/sergesha/claude-essentials/commit/f23b94a85bd5d53ffda7a6d09321005664e83279))
+
+### Upgrade
+
+Existing semantic records require the explicit [one-off migration](MIGRATION.md)
+with a verified backup and all clients stopped. Do not replace the old embedding
+endpoint in place. Defaults are `CHUNK_MAX_TOKENS=256` and `EMBED_DIMENSION=256`;
+changing either later requires re-embedding. KV, scopes and TTL refresh on reads
+are preserved. The new dedicated Gemma service uses port8082.
+
+The distribution includes Gemma Terms, Prohibited Use Policy, Notice and model-use
+terms under `server/licenses/`; the plugin code remains MIT licensed.
 
 ## [0.10.0](https://github.com/sergesha/claude-essentials/compare/redis-memory-mcp-v0.9.1...redis-memory-mcp-v0.10.0) (2026-09-30)
 
