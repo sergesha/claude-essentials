@@ -26,37 +26,27 @@ services:
       retries: 5
     restart: unless-stopped
 
-  redis-init:
-    image: redis/redis-stack-server:latest
-    platform: linux/amd64
-    depends_on:
-      redis:
-        condition: service_healthy
-    command: >
-      bash -c "redis-cli -h redis FT.CREATE idx:memories ON HASH PREFIX 1 mem: SCHEMA label TEXT text TEXT code TEXT tags TAG SEPARATOR , vector VECTOR HNSW 6 TYPE FLOAT32 DIM 768 DISTANCE_METRIC COSINE timestamp NUMERIC || echo 'Index already exists'"
-    restart: "no"
-
   embeddings:
-    image: ghcr.io/huggingface/text-embeddings-inference:cpu-latest
-    container_name: embeddings-inference
-    platform: linux/amd64
+    build:
+      context: ./server
+      target: embeddings
+    container_name: embeddings-gemma
     ports:
-      - "8081:80"
-    environment:
-      - HF_MODEL_ID=sentence-transformers/paraphrase-multilingual-mpnet-base-v2
+      - "8082:80"
     volumes:
-      - ./embeddings_cache:/data
-    command: --model-id sentence-transformers/paraphrase-multilingual-mpnet-base-v2
+      - ./gemma_cache:/data
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:80/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost/health', timeout=5)"]
       interval: 15s
       timeout: 10s
-      retries: 10
-      start_period: 60s
+      retries: 20
+      start_period: 120s
     restart: unless-stopped
 
   redis-memory-mcp:
-    build: ./server
+    build:
+      context: ./server
+      target: mcp
     image: redis-memory-mcp
     container_name: redis-memory-mcp
     depends_on:
@@ -68,7 +58,8 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - EMBED_URL=http://embeddings:80
       - INDEX_NAME=idx:memories
-      - "KEY_PREFIX=mem:"
+      - "CHUNK_MAX_TOKENS=${CHUNK_MAX_TOKENS:-256}"
+      - "EMBED_DIMENSION=${EMBED_DIMENSION:-256}"
     stdin_open: true
     tty: false
     restart: unless-stopped

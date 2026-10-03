@@ -38,6 +38,7 @@ jobs:
       - name: Check scope isolation and legacy compatibility
         env:
           REDIS_SCOPE_TEST_URL: redis://127.0.0.1:6379/0
+          REDIS_GRANITE_TEST_URL: redis://127.0.0.1:6379/0
         run: python -m pytest redis-memory-mcp/tests -q
 
   mcp-startup:

@@ -263,3 +263,24 @@ If redis-memory-mcp is unavailable:
 - Log warning, continue without memory
 - Don't block the main workflow
 - Inform user that memory features are temporarily disabled
+
+## Chunked memory and profile errors
+
+Send a complete fact through one `mem_save`, including its full `text`, optional
+`code`, and concise `label`. The server uses Gemma Q4 and internally chunks long
+records; defaults are256 total input tokens,32 overlap inside oversized paragraphs,
+and256 vector dimensions. Search returns each complete record once. Do not manually
+split or trim a fact merely to fit256 tokens; that budget is internal, not an MCP
+text limit. Inputs needing more than256 chunks are rejected before publication;
+report that error and agree on meaningful smaller records instead of dropping text.
+
+`CHUNK_MAX_TOKENS` and `EMBED_DIMENSION` are operator startup settings. Changing
+either changes the stored embedding profile and requires explicit re-embedding.
+If an operation reports a profile mismatch or incomplete migration, preserve the
+selected area, report the failure, and continue independent work without memory.
+Do not delete data, switch scope/namespace, change dimension to bypass the error,
+or run migration automatically. An explicitly authorized operator follows the
+[backup, quiescence and migration runbook](../../MIGRATION.md); listing may remain
+possible before migration, while active migration blocks semantic operations.
+Never claim a save succeeded without a successful tool result. TTL refresh on
+returned hits intentionally extends the parent and its existing chunks together.

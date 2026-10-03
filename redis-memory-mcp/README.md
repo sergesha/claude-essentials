@@ -17,7 +17,7 @@ repo now only redirects `start.sh` here, see its README for details.
 - **Dual-scope access** — every tool call takes `shared: bool`, so one client can reach both its own namespaced area and the always-present shared area, per call
 - **Isolated subspaces** — optional per-call `scope` selects an independent subspace inside the own or shared area, without changing the MCP connection's `NAMESPACE`
 - **Shared deployment** — `REDIS_MEMORY_MCP_MODE=shared` lets many agents reuse one backend instead of each starting its own
-- **Self-contained** — Docker stack: Redis Stack + HuggingFace TEI embeddings + MCP server
+- **Self-contained** — Docker stack: Redis Stack + EmbeddingGemma Q4 embeddings + MCP server
 
 ## Quick Start (standalone, outside Claude Code)
 
@@ -43,7 +43,7 @@ docker compose up -d
       "args": [
         "run", "--rm", "-i",
         "-e", "REDIS_URL=redis://host.docker.internal:6379/0",
-        "-e", "EMBED_URL=http://host.docker.internal:8081",
+        "-e", "EMBED_URL=http://host.docker.internal:8082",
         "-e", "INDEX_NAME=idx:memories",
         "redis-memory-mcp"
       ]
@@ -69,7 +69,7 @@ spawned process). For a non-interactive install (e.g. scripted, over SSH), pass 
 claude plugin install redis-memory@claude-essentials \
   --config mode=shared \
   --config redis_url=redis://127.0.0.1:6379/0 \
-  --config embed_url=http://127.0.0.1:8081 \
+  --config embed_url=http://127.0.0.1:8082 \
   --config namespace=my-project   # omit for the fleet-wide/shared default
 ```
 
@@ -92,7 +92,7 @@ new Codex session:
 ```bash
 export REDIS_MEMORY_MCP_MODE=shared
 export REDIS_URL=redis://host.docker.internal:6379/0
-export EMBED_URL=http://host.docker.internal:8081
+export EMBED_URL=http://host.docker.internal:8082
 export NAMESPACE=my-project
 codex
 ```
@@ -171,22 +171,22 @@ a pinned backend remains pinned independently of the plugin version.
 ┌─────────────────┐     ┌────────────────────┐     ┌───────────────────┐
 │  Cursor / Claude │────▶│  redis-memory-mcp  │────▶│   Redis Stack     │
 │  (MCP client)    │ MCP │  (Python, stdio)   │     │   + RediSearch    │
-└─────────────────┘     └────────┬───────────┘     │   + HNSW index    │
+└─────────────────┘     └────────┬───────────┘     │   + FLAT index    │
                                  │                  └───────────────────┘
                                  ▼
                         ┌────────────────────┐
-                        │  HuggingFace TEI   │
+                        │  EmbeddingGemma Q4   │
                         │  (embeddings, CPU) │
                         └────────────────────┘
 ```
 
-- **Redis Stack** — RediSearch module with HNSW vector index (768 dim, cosine)
-- **TEI** — `paraphrase-multilingual-mpnet-base-v2` (multilingual, runs on CPU)
+- **Redis Stack** — RediSearch module with exact FLAT vector indexes (256 dimensions by default, cosine)
+- **Gemma service** — `onnx-community/embeddinggemma-300m-ONNX`, pinned Q4 conversion (multilingual, ONNX Runtime CPU)
 - **MCP server** — Python MCP SDK 2.x (`MCPServer`) over stdio
 
 The server uses the [current SDK API](https://py.sdk.modelcontextprotocol.io/migration/#fastmcp-renamed-to-mcpserver),
 not the removed `mcp.server.fastmcp` import. Existing tool names, parameters and
-stored memory formats are unchanged.
+canonical memory payloads are preserved. Existing semantic vectors require the explicit [migration](MIGRATION.md).
 
 ## Native Python
 
@@ -197,7 +197,7 @@ environment (replace the tag after later releases):
 ```bash
 python3.11 -m venv .venv
 .venv/bin/python -m pip install \
-  'https://github.com/sergesha/claude-essentials/archive/refs/tags/redis-memory-mcp-v0.9.1.tar.gz#subdirectory=redis-memory-mcp/server'
+  'https://github.com/sergesha/claude-essentials/archive/refs/tags/redis-memory-mcp-v0.11.0.tar.gz#subdirectory=redis-memory-mcp/server'
 ```
 
 Point the executable at backend services that are already reachable, then run
@@ -205,7 +205,7 @@ it as a stdio MCP server:
 
 ```bash
 export REDIS_URL=redis://127.0.0.1:6379/0
-export EMBED_URL=http://127.0.0.1:8081
+export EMBED_URL=http://127.0.0.1:8082
 export NAMESPACE=my-project  # optional
 .venv/bin/redis-memory-mcp
 ```
@@ -222,7 +222,7 @@ settings such as `REDIS_MEMORY_MCP_MODE`, `REDIS_MEMORY_MCP_NETWORK`, and
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `REDIS_URL` | `redis://localhost:6379/0` | Redis connection URL |
-| `EMBED_URL` | `http://localhost:8081` | TEI embeddings endpoint |
+| `EMBED_URL` | `http://localhost:8082` | Compatible Gemma Q4 HTTP endpoint |
 | `INDEX_NAME` | `idx:memories` (or `idx:memories:{NAMESPACE}`, see below) | Redis search index name |
 | `NAMESPACE` | unset | Isolates `kv_*`/`mem_*` data on a shared instance — see below |
 | `DEFAULT_TTL` | `7776000` (90 days) | Default TTL in seconds |
@@ -234,17 +234,17 @@ settings such as `REDIS_MEMORY_MCP_MODE`, `REDIS_MEMORY_MCP_NETWORK`, and
 
 ### Shared Deployment (one backend, many agents)
 
-By default (`start.sh`, mode `dedicated`) every invocation brings up its own Redis Stack + TEI containers — fine for a single user on a laptop, wasteful when several agents share one machine (a fleet of Claude Code agents, for example): each would spin up a duplicate, unused backend.
+By default (`start.sh`, mode `dedicated`) the launcher ensures the shared local Redis Stack and Gemma containers are running. Each stdio MCP connection still has its own lightweight bridge container; the backend and model are shared.
 
-`REDIS_MEMORY_MCP_MODE=shared` skips that: it requires `REDIS_URL` and `EMBED_URL` to already point at a backend started elsewhere, and connects to it instead of starting a new one. Typical layout — one user/process owns the backend (plain `docker compose up -d redis embeddings redis-init`, no `start.sh` involved), every other user's MCP client config runs `start.sh` with:
+`REDIS_MEMORY_MCP_MODE=shared` skips that: it requires `REDIS_URL` and `EMBED_URL` to already point at a backend started elsewhere, and connects to it instead of starting a new one. Typical layout — one user/process owns the backend (plain `docker compose up -d redis embeddings`, no `start.sh` involved), every other user's MCP client config runs `start.sh` with:
 
 ```bash
 REDIS_MEMORY_MCP_MODE=shared
 REDIS_URL=redis://<backend-host>:6379/0
-EMBED_URL=http://<backend-host>:8081
+EMBED_URL=http://<backend-host>:8082
 ```
 
-Sharing a backend need not mean sharing data — see `NAMESPACE` below for keeping agents that point at the same Redis/TEI in separate key areas. Note this is a cooperative convention, not an enforced boundary (see [Security](#security)).
+Sharing a backend need not mean sharing data — see `NAMESPACE` below for keeping agents that point at the same Redis/Gemma in separate key areas. Note this is a cooperative convention, not an enforced boundary (see [Security](#security)).
 
 ### NAMESPACE (data isolation on a shared instance)
 
@@ -341,7 +341,7 @@ storing anything sensitive or exposing the backend beyond a single trusted machi
   `shared=True`, and anyone with direct Redis access reads every namespace's keys regardless.
   Two namespaces are isolated *only* for well-behaved clients going through these tools — not
   against a direct connection or a client that simply picks another namespace's prefix.
-- **Ports publish on all interfaces.** `6379` (Redis) and `8081` (TEI embeddings) are published
+- **Ports publish on all interfaces.** `6379` (Redis) and `8082` (Gemma service embeddings) are published
   without a host-IP restriction, so Docker binds them on every interface — and Docker's iptables
   rules typically **bypass `ufw`**. On a host with a public IP that is an open, unauthenticated
   database. Restrict it: bind the ports to a trusted interface, put the host behind a firewall
@@ -445,3 +445,62 @@ redis-memory-mcp/                     # this package, within the claude-essentia
 ## License
 
 MIT
+
+## Gemma Q4 and configurable chunks
+
+Semantic memory now uses one shared EmbeddingGemma Q4 CPU service, paragraph
+chunks and exact Redis FLAT retrieval. A long record keeps one canonical ID;
+search returns complete unique records ranked by their best chunk. Returned hits
+refresh parent and existing chunk TTLs together. KV and scope selection are unchanged.
+
+| Startup setting | Default | Supported values |
+|---|---:|---|
+| `CHUNK_MAX_TOKENS` |256|64–2048 total tokens including label/prompt/specials|
+| `EMBED_DIMENSION` |256|128,256,512,768|
+
+Set these in the MCP process environment, pass them through the launcher, or use
+the Claude plugin `chunk_max_tokens`/`embed_dimension` settings. Codex forwards the
+environment variables. Native installs use the same names. Docker Compose accepts
+these variables or a `.env` file. **Changing either requires the explicit migration
+below for existing semantic data; restarting alone cannot convert old vectors.**
+
+```bash
+CHUNK_MAX_TOKENS=256 EMBED_DIMENSION=256 bash redis-memory-mcp/start.sh
+# Native shared embedding service (once per backend):
+pip install './redis-memory-mcp/server[embeddings]'
+EMBED_PORT=8082 redis-memory-embeddings
+# Native MCP process (one per client):
+EMBED_URL=http://127.0.0.1:8082 CHUNK_MAX_TOKENS=256 EMBED_DIMENSION=256 redis-memory-mcp
+```
+
+The native embedding command binds 127.0.0.1:8081 by default; set `EMBED_PORT=8082`
+for the new dedicated-stack port. Docker dedicated mode uses8082, a new
+`embeddings-gemma` container and `gemma_cache`, preserving the previous 8081 endpoint
+for migration/rollback. It does not automatically migrate records or remove old
+containers. `REDIS_MEMORY_MCP_MODE=shared` still requires explicit `REDIS_URL` and
+`EMBED_URL`; the endpoint must advertise the pinned Gemma profile, not an arbitrary embedding service.
+
+The service uses the pinned ONNX-community Gemma conversion, verifies artifact
+hashes, and loads model weights once. MCP clients load only the matching tokenizer.
+No input is silently truncated. Label context is capped at min(64,chunk-budget/4)
+tokens while the stored full label is preserved. Overlap32 is applied only when
+splitting oversized paragraphs; it is not an overlap between every adjacent chunk.
+A record requiring more than256 chunks is rejected before publication. Queries
+must fit2048 tokens including their prompt. Embedding dimension truncation is
+followed by normalization. Returned similarity is a ranking score, not confidence.
+
+**Existing installations:** follow [MIGRATION.md](MIGRATION.md) for backup, offline
+build/resume, verification, coordinated cutover and separate cleanup. Existing ACL
+users need derived-key and index grants from the updated example. Admin migration
+permissions are not granted to ordinary namespaced MCP clients.
+
+### Model licensing
+
+Plugin code remains MIT. EmbeddingGemma weights/Q4 derivatives have separate
+[model-use terms](server/licenses/MODEL-USE-TERMS.md), including the complete
+[Gemma Terms](server/licenses/GEMMA-TERMS.txt) and
+[Prohibited Use Policy](server/licenses/GEMMA-PROHIBITED-USE.txt).
+Read them before the first model download/use. Redistributors and hosted-service
+operators must pass on the model restrictions and terms; an MIT notice alone is
+insufficient. [Notice](server/licenses/NOTICE) and
+[provenance/modifications](server/licenses/THIRD-PARTY.md) ship in the wheel and images.

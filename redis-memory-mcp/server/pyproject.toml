@@ -9,14 +9,21 @@ dependencies = [
     "redis>=5.0.0,<9",
     "httpx>=0.27.0",
     "numpy>=1.26.0",
+    "tokenizers>=0.22,<0.23",
+    "huggingface-hub>=0.34,<2",
 ]
+
+[project.optional-dependencies]
+embeddings = ["onnxruntime==1.30.0"]
 
 [project.scripts]
 redis-memory-mcp = "memory_mcp:main"
+redis-memory-migrate = "migrate:main"
+redis-memory-embeddings = "embedding_service:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-only-include = ["memory_mcp.py"]
+only-include = ["memory_mcp.py", "embedding.py", "embedding_service.py", "chunking.py", "memory_index.py", "migrate.py", "licenses"]

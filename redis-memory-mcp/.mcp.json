@@ -13,9 +13,11 @@
         "NAMESPACE": "${user_config.namespace}",
         "REDIS_MEMORY_MCP_NETWORK": "${user_config.network}",
         "EMBED_SOCKET": "${user_config.embed_socket}",
-        "REDIS_MEMORY_MCP_SOCKET_DIR": "${user_config.socket_dir}"
+        "REDIS_MEMORY_MCP_SOCKET_DIR": "${user_config.socket_dir}",
+        "CHUNK_MAX_TOKENS": "${user_config.chunk_max_tokens}",
+        "EMBED_DIMENSION": "${user_config.embed_dimension}"
       },
-      "_description": "Self-installing: downloads sources, builds images, starts Redis+TEI, launches MCP server",
+      "_description": "Self-installing Redis + shared Gemma Q4 embeddings + MCP server",
       "_required": true,
       "_setup": "Only dependency: Docker."
     }

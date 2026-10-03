@@ -27,12 +27,6 @@ services:
       - source: redis_acl
         target: /etc/redis/users.acl
 
-  # The base-index bootstrap runs unauthenticated `redis-cli FT.CREATE`, which
-  # the locked `default` user can no longer do — and it is redundant anyway: the
-  # MCP server's own _ensure_index() creates each index (base and per-namespace)
-  # on demand, as the authenticated user. Neutralize the init container.
-  redis-init:
-    command: ["true"]
 
 configs:
   redis_acl:

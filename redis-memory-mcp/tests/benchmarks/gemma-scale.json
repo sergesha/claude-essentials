@@ -1,0 +1,74 @@
+[
+  {
+    "repeat": 1,
+    "parents": 1000,
+    "chunks_per_parent": 1,
+    "cumulative_save_seconds": 3.505170500022359,
+    "used_bytes": 6493992,
+    "evictions": 0,
+    "cached_query_latency": {
+      "1": {
+        "p50_ms": 17.474916530773044,
+        "p95_ms": 25.773334875702854
+      },
+      "4": {
+        "p50_ms": 19.478188070934266,
+        "p95_ms": 24.77545794681646
+      }
+    }
+  },
+  {
+    "repeat": 1,
+    "parents": 10000,
+    "chunks_per_parent": 1,
+    "cumulative_save_seconds": 43.42695054109208,
+    "used_bytes": 50998792,
+    "evictions": 0,
+    "cached_query_latency": {
+      "1": {
+        "p50_ms": 25.554875028319657,
+        "p95_ms": 31.164772366173565
+      },
+      "4": {
+        "p50_ms": 64.85577102284878,
+        "p95_ms": 81.19358388357796
+      }
+    }
+  },
+  {
+    "repeat": 2,
+    "parents": 1000,
+    "chunks_per_parent": 1,
+    "cumulative_save_seconds": 3.799876832985319,
+    "used_bytes": 6714632,
+    "evictions": 0,
+    "cached_query_latency": {
+      "1": {
+        "p50_ms": 17.86410453496501,
+        "p95_ms": 23.905427724821493
+      },
+      "4": {
+        "p50_ms": 19.38560395501554,
+        "p95_ms": 27.87596876150928
+      }
+    }
+  },
+  {
+    "repeat": 2,
+    "parents": 10000,
+    "chunks_per_parent": 1,
+    "cumulative_save_seconds": 44.38701854203828,
+    "used_bytes": 51136496,
+    "evictions": 0,
+    "cached_query_latency": {
+      "1": {
+        "p50_ms": 25.985666550695896,
+        "p95_ms": 31.548337370622903
+      },
+      "4": {
+        "p50_ms": 60.59718754841015,
+        "p95_ms": 72.32624206808396
+      }
+    }
+  }
+]

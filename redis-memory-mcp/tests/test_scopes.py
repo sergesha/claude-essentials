@@ -137,19 +137,26 @@ async def test_scope_index_validates_redis_reply_formats(mapping):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("name,arguments", [("mem_search", {"query": "fact"}), ("mem_list", {"tag": "fixture"})])
 async def test_outside_search_results_are_rejected_without_refreshing_ttl(monkeypatch, name, arguments):
+    from memory_index import MemoryIndex
+    from embedding import Profile
+    import struct
     client = AsyncMock()
-    prefix, _, _ = server._scope(False, "test")
-    client.execute_command.side_effect = [
-        [b"index_definition", [b"key_type", b"HASH", b"prefixes", [prefix.encode()]]],
-        [1, b"outside:mem:id", [b"text", b"private text", b"ttl_days", b"7"]],
-    ]
-    monkeypatch.setattr(server, "_redis", lambda: client)
-    monkeypatch.setattr(server, "_embed", AsyncMock(return_value=[1.0] + [0.0] * 767))
-    # Fail immediately if a foreign hit causes any TTL access or mutation.
-    client.expire.side_effect = AssertionError("foreign TTL refreshed")
-    client.ttl.side_effect = AssertionError("foreign TTL read")
-    with pytest.raises(server.ToolError, match="outside"):
-        await getattr(server, name)(**arguments, scope="test")
+    prefix, _, index = server._scope(False, 'test')
+    if name == 'mem_search':
+        store = MemoryIndex(client, prefix, index, Profile())
+        monkeypatch.setattr(store, 'ensure', AsyncMock(return_value=True))
+        client.execute_command.side_effect = [[b'num_docs', 1], [1, b'outside:mem:id', [b'parent', b'id', b'generation', b'g', b'score', b'0']]]
+        with pytest.raises(ValueError, match='outside'):
+            await store.search(struct.pack('<256f',1,*([0]*255)), '', 5)
+        client.eval.assert_not_awaited()
+    else:
+        async def keys(*a, **kw):yield b'outside:mem:id'
+        client.scan_iter = keys
+        client.exists.return_value = False
+        monkeypatch.setattr(server, '_redis', lambda:client)
+        with pytest.raises(server.ToolError, match='outside'):
+            await server.mem_list(scope='test')
+        client.ttl.assert_not_awaited()
 
 
 @pytest_asyncio.fixture
@@ -167,6 +174,13 @@ async def backend(monkeypatch):
         return [1.0] + [0.0] * 767
 
     monkeypatch.setattr(server, "_embed", embedding)
+    class Encoder:
+        def __init__(self, *a, **kw):pass
+        async def record(self, *a):return [server._encode([1.0]+[0.0]*255)]*2
+        async def query(self, *a):return server._encode([1.0]+[0.0]*255)
+        async def aclose(self):pass
+    monkeypatch.setattr(server, 'Embedder', Encoder)
+
     client = redis.from_url(url, decode_responses=False)
     await client.ping()
     scopes = [f"a_{fixture_id}", f"b_{fixture_id}"]
@@ -292,10 +306,15 @@ async def test_wrong_index_prefix_is_rejected_before_disclosing_data(backend):
     await server.mem_save("scope-b-secret", scope=b)
     a_prefix, _, a_index = server._scope(False, a)
     b_prefix, _, _ = server._scope(False, b)
-    # Simulate a stale/misconfigured index that points at another scope.
-    await server._ensure_index(client, a_index, b_prefix)
-    for call in [lambda: server.mem_save("fact", scope=a), lambda: server.mem_search("fact", scope=a), lambda: server.mem_list(tag="fixture", scope=a), lambda: server.mem_list(scope=a)]:
-        with pytest.raises(server.ToolError, match="index.*prefix|prefix.*index"):
+    from memory_index import MemoryIndex
+    from embedding import Profile
+    target = MemoryIndex(client, a_prefix, a_index, Profile())
+    foreign = MemoryIndex(client, b_prefix, a_index, Profile())
+    # Give the selected index another area's prefix while preserving vector schema.
+    await foreign.ensure_index()
+    await client.hset(target.state,mapping={'status':'active','profile':Profile().fingerprint})
+    for call in [lambda: server.mem_save('fact',scope=a),lambda:server.mem_search('fact',scope=a),lambda:server.mem_list(scope=a)]:
+        with pytest.raises(server.ToolError,match='Index.*area|Index.*profile'):
             await call()
 
 
