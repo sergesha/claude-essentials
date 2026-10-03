@@ -44,7 +44,7 @@ if [ -z "$REF" ]; then
 fi
 log "Using ref: $REF"
 
-# MODE selects whether this invocation owns its own Redis+TEI backend
+# MODE selects whether this invocation owns its own Redis+Gemma backend
 # (dedicated, default — current behavior) or connects to one already running
 # elsewhere (shared — e.g. one backend started once by a "fleet" user, reused
 # by every other agent/user on the same host via REDIS_URL/EMBED_URL pointed
@@ -82,21 +82,34 @@ if [ "$INSTALLED_REF" != "$REF" ] || [ ! -f "$COMPOSE_FILE" ] || [ ! -d "$SERVER
   log "Downloading sources for $REF..."
   curl -fsSL --connect-timeout 10 --max-time 60 "$RAW_URL/docker-compose.yaml" -o "$COMPOSE_FILE"
   mkdir -p "$SERVER_DIR"
-  for f in memory_mcp.py Dockerfile pyproject.toml; do
+  for f in memory_mcp.py embedding.py embedding_service.py chunking.py memory_index.py migrate.py Dockerfile pyproject.toml README.md; do
     curl -fsSL --connect-timeout 10 --max-time 60 "$RAW_URL/server/$f" -o "$SERVER_DIR/$f"
+  done
+  mkdir -p "$SERVER_DIR/licenses"
+  for f in GEMMA-TERMS.txt GEMMA-PROHIBITED-USE.txt NOTICE MODEL-USE-TERMS.md THIRD-PARTY.md; do
+    curl -fsSL --connect-timeout 10 --max-time 60 "$RAW_URL/server/licenses/$f" -o "$SERVER_DIR/licenses/$f"
   done
   echo "$REF" > "$REF_FILE"
 fi
 
-# ── 2-3. Start Redis + TEI and wait for Redis — dedicated mode only ───────────
+# ── 2-3. Start Redis + Gemma and wait for Redis — dedicated mode only ───────────
 # In shared mode, the backend is owned and started elsewhere; connecting to
 # someone else's REDIS_URL/EMBED_URL is all this invocation should do.
 if [ "$MODE" = "dedicated" ]; then
   log "Starting infrastructure..."
-  docker compose -f "$COMPOSE_FILE" up -d redis embeddings redis-init >/dev/null 2>&1
+  docker compose -f "$COMPOSE_FILE" up -d --build redis embeddings >/dev/null 2>&1
 
   log "Waiting for Redis..."
   until docker exec redis-stack redis-cli ping >/dev/null 2>&1; do sleep 1; done
+  log "Waiting for Gemma (first start downloads the pinned model)..."
+  GEMMA_DEADLINE=$((SECONDS + 180))
+  until docker exec embeddings-gemma python -c "import urllib.request; urllib.request.urlopen('http://localhost/health', timeout=5)" >/dev/null 2>&1; do
+    if [ "$SECONDS" -ge "$GEMMA_DEADLINE" ]; then
+      log "Gemma is not ready after 180 seconds. Check 'docker logs embeddings-gemma' and retry after model download/startup finishes."
+      exit 1
+    fi
+    sleep 2
+  done
 else
   log "MODE=shared: skipping local infra bring-up, connecting to REDIS_URL/EMBED_URL from environment."
 fi
@@ -105,7 +118,7 @@ fi
 # Tagging the image per ref means switching REF rebuilds instead of reusing stale layers.
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
   log "Building $IMAGE..."
-  docker build -t "$IMAGE" "$SERVER_DIR" >&2
+  docker build --target mcp -t "$IMAGE" "$SERVER_DIR" >&2
 fi
 
 log "Ready ($REF)."
@@ -113,7 +126,7 @@ log "Ready ($REF)."
 # ── 5. Launch MCP server — only this writes to stdout ─────────────────────────
 # --add-host maps host.docker.internal to the host gateway. On Docker Desktop
 # (macOS/Windows) it already resolves; on Linux Docker Engine it does not unless
-# mapped explicitly, so the server couldn't reach Redis/TEI on the host there.
+# mapped explicitly, so the server couldn't reach Redis/Gemma on the host there.
 # That gateway address only reaches host-published ports, though -- a backend
 # bound to 127.0.0.1 (loopback-only, e.g. for host-level isolation) is not
 # reachable through it from a different container's network namespace, no
@@ -157,10 +170,12 @@ fi
 # empty string (verified against podman), which is what the old explicit
 # `-e "EMBED_SOCKET="` did.
 export REDIS_URL="${REDIS_URL:-redis://host.docker.internal:6379/0}"
-export EMBED_URL="${EMBED_URL:-http://host.docker.internal:8081}"
+export EMBED_URL="${EMBED_URL:-http://host.docker.internal:8082}"
 export EMBED_SOCKET="${EMBED_SOCKET:-}"
 export INDEX_NAME="${INDEX_NAME:-idx:memories}"
 export NAMESPACE="${NAMESPACE:-}"
+export CHUNK_MAX_TOKENS="${CHUNK_MAX_TOKENS:-256}"
+export EMBED_DIMENSION="${EMBED_DIMENSION:-256}"
 
 exec docker run --rm -i \
   --add-host=host.docker.internal:host-gateway \
@@ -171,4 +186,6 @@ exec docker run --rm -i \
   -e EMBED_SOCKET \
   -e INDEX_NAME \
   -e NAMESPACE \
+  -e CHUNK_MAX_TOKENS \
+  -e EMBED_DIMENSION \
   "$IMAGE"

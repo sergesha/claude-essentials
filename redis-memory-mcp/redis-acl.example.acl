@@ -1,5 +1,5 @@
 user default on nopass resetchannels -@all +ping
 user admin off >CHANGE_ME_ADMIN ~* &* +@all
-user shared off >CHANGE_ME_SHARED ~mem:* ~kv:* ~idx:memories ~ns::scope:* ~idx:memories:scope::* +@all -@dangerous -@admin
-user ns_alice off >CHANGE_ME_ALICE ~ns:alice:* ~idx:memories:alice ~idx:memories:scope:alice:* ~mem:* ~kv:* ~idx:memories ~ns::scope:* ~idx:memories:scope::* +@all -@dangerous -@admin
-user ns_bob off >CHANGE_ME_BOB ~ns:bob:* ~idx:memories:bob ~idx:memories:scope:bob:* ~mem:* ~kv:* ~idx:memories ~ns::scope:* ~idx:memories:scope::* +@all -@dangerous -@admin
+user shared off >CHANGE_ME_SHARED ~mem:* ~kv:* ~emb:state ~emb:[0-9a-f]* ~idx:memories ~idx:memories:emb:* ~ns::scope:* ~idx:memories:scope::* +@all -@dangerous -@admin
+user ns_alice off >CHANGE_ME_ALICE ~ns:alice:* ~idx:memories:alice ~idx:memories:alice:emb:* ~idx:memories:scope:alice:* ~mem:* ~kv:* ~emb:state ~emb:[0-9a-f]* ~idx:memories ~idx:memories:emb:* ~ns::scope:* ~idx:memories:scope::* +@all -@dangerous -@admin
+user ns_bob off >CHANGE_ME_BOB ~ns:bob:* ~idx:memories:bob ~idx:memories:bob:emb:* ~idx:memories:scope:bob:* ~mem:* ~kv:* ~emb:state ~emb:[0-9a-f]* ~idx:memories ~idx:memories:emb:* ~ns::scope:* ~idx:memories:scope::* +@all -@dangerous -@admin

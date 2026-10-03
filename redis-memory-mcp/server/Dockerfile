@@ -1,5 +1,13 @@
-FROM python:3.12-slim
+FROM python:3.12-slim AS base
 WORKDIR /app
-RUN pip install --no-cache-dir "mcp[cli]>=2.0.0,<3" "redis>=5.0.0" "httpx>=0.27.0" "numpy>=1.26.0"
-COPY memory_mcp.py .
-CMD ["python", "memory_mcp.py"]
+COPY . .
+RUN pip install --no-cache-dir .
+CMD ["redis-memory-mcp"]
+
+FROM base AS embeddings
+RUN pip install --no-cache-dir '.[embeddings]'
+ENV EMBED_HOST=0.0.0.0 EMBED_PORT=80 HF_HOME=/data
+CMD ["redis-memory-embeddings"]
+
+FROM base AS mcp
+CMD ["redis-memory-mcp"]

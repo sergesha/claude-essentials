@@ -1,0 +1,11 @@
+{
+  "parents": 94,
+  "kv": 1,
+  "areas": 1,
+  "seconds": 11.116685083019547,
+  "before_bytes": 6749704,
+  "coexisting_bytes": 9132344,
+  "after_bytes": 4038232,
+  "phase": "cleaned",
+  "backup_sha256": "68e8ea93322e72390977a224d623b48a95ec05842ab92b6eda9d7dbd6badcd36"
+}

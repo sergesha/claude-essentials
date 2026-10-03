@@ -13,7 +13,7 @@
     "mode": {
       "type": "string",
       "title": "Mode",
-      "description": "\"dedicated\" (this client starts its own Redis+TEI backend) or \"shared\" (connect to a backend already running elsewhere)",
+      "description": "\"dedicated\" (ensure the shared local Redis+Gemma backend is running) or \"shared\" (connect to a backend already running elsewhere)",
       "default": "dedicated"
     },
     "redis_url": {
@@ -24,7 +24,7 @@
     "embed_url": {
       "type": "string",
       "title": "Embeddings URL",
-      "description": "TEI embeddings endpoint. Required when mode is \"shared\" (e.g. http://127.0.0.1:8081)"
+      "description": "Gemma Q4 embedding service URL. Required in shared mode (default dedicated port8082)."
     },
     "namespace": {
       "type": "string",
@@ -45,6 +45,18 @@
       "type": "string",
       "title": "Shared socket directory to bind-mount",
       "description": "Host directory containing redis_url's/embed_socket's Unix socket files. When set, this directory is bind-mounted into the bridge container at the same path, and the container joins the socket owner's group (--group-add keep-groups) so it can actually reach group-gated sockets owned by a different host user."
+    },
+    "chunk_max_tokens": {
+      "type": "string",
+      "title": "Chunk token budget",
+      "description": "Total model input tokens per chunk (64\u20132048). Changing requires migration.",
+      "default": "256"
+    },
+    "embed_dimension": {
+      "type": "string",
+      "title": "Embedding dimension",
+      "description": "128, 256, 512 or 768. Changing requires migration.",
+      "default": "256"
     }
   }
 }

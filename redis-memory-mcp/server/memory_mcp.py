@@ -2,7 +2,7 @@
 Redis Memory MCP — Server
 Two tool sets:
   kv_*  — simple key/value store (instant, no embeddings)
-  mem_* — semantic memory (vector search via TEI + Redis HNSW)
+  mem_* — semantic memory (chunk search via Gemma Q4 + Redis FLAT)
 
 TTL strategy (volatile-lru):
   - Every key has a TTL (default 90 days)
@@ -16,11 +16,15 @@ from datetime import datetime, timezone
 import httpx
 import redis.asyncio as aio_redis
 from redis.exceptions import ResponseError
+from embedding import Profile, Embedder
+from memory_index import MemoryIndex
+
+PROFILE = Profile.from_env()
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
 REDIS_URL    = os.getenv("REDIS_URL",    "redis://localhost:6379/0")
-EMBED_URL    = os.getenv("EMBED_URL",    "http://localhost:8081")
+EMBED_URL    = os.getenv("EMBED_URL",    "http://localhost:8082")
 # When set, embedding requests go over this Unix socket (e.g. a socat sidecar
 # proxying TEI's HTTP port) instead of resolving EMBED_URL's host/port --
 # httpx has no unix:// URL scheme, so this needs a real transport, not just an
@@ -421,31 +425,23 @@ async def mem_save(text: str, label: str = "", code: str = "", tags: str = "", t
     Returns the memory ID (use mem_delete to remove it).
     """
     mem_prefix, _, index = _scope(shared, scope)
-    embed_input = f"{text}\n{code}" if code else text
-    vector_bytes = _encode(await _embed(embed_input))
+    if ttl_days < 0:
+        raise ToolError('ttl_days cannot be negative')
     mid = str(uuid.uuid4())
-
+    safe_tags = ",".join(_sanitize_tag(t) for t in tags.split(",") if _sanitize_tag(t)) if tags else ""
     r = _redis()
+    encoder = Embedder(PROFILE, EMBED_URL, EMBED_SOCKET)
     try:
-        if scope is None:
-            await _ensure_index(r, index, mem_prefix)
-        else:
-            await _scope_index(r, index, mem_prefix, create=True)
-        redis_key = f"{mem_prefix}{mid}"
-        mapping = {
-            b"text":      text.encode(),
-            b"vector":    vector_bytes,
-            b"timestamp": str(int(time.time())).encode(),
-            b"ttl_days":  str(ttl_days).encode(),
-        }
-        safe_tags = ",".join(_sanitize_tag(t) for t in tags.split(",") if _sanitize_tag(t)) if tags else ""
-        if label:     mapping[b"label"] = label.encode()
-        if code:      mapping[b"code"]  = code.encode()
-        if safe_tags: mapping[b"tags"]  = safe_tags.encode()
-        await r.hset(redis_key, mapping=mapping)
-        if ttl_days > 0:
-            await r.expire(redis_key, ttl_days * 86400)
+        store = MemoryIndex(r, mem_prefix, index, PROFILE)
+        await store.ensure(create=True)
+        vectors = await encoder.record(text, label, code)
+        fields = {'text': text, 'label': label, 'code': code, 'tags': safe_tags,
+                  'timestamp': str(int(time.time())), 'ttl_days': str(ttl_days)}
+        await store.save(mid, fields, vectors)
+    except ValueError as exc:
+        raise ToolError(str(exc)) from None
     finally:
+        await encoder.aclose()
         await r.aclose()
 
     display = f"'{label}'" if label else f"'{text[:60]}'"
@@ -479,57 +475,30 @@ async def mem_search(query: str, tags: str = "", top_k: int = 5, shared: bool = 
     Results show similarity %, TTL remaining, tags, and memory ID.
     """
     mem_prefix, _, index = _scope(shared, scope)
-    vector_bytes = _encode(await _embed(query)) if scope is None else None
-
-    if tags:
-        tag_filter = "|".join(_escape_tag(_sanitize_tag(t)) for t in tags.split(",") if _sanitize_tag(t))
-        ft_query = f"(@tags:{{{tag_filter}}})=>[KNN {top_k} @vector $vec AS score]"
-    else:
-        ft_query = f"*=>[KNN {top_k} @vector $vec AS score]"
-
     r = _redis()
+    encoder = Embedder(PROFILE, EMBED_URL, EMBED_SOCKET)
     try:
-        if scope is None:
-            await _ensure_index(r, index, mem_prefix)
-        else:
-            if not await _scope_index(r, index, mem_prefix):
-                return "No memories found."
-            vector_bytes = _encode(await _embed(query))
-        raw = await r.execute_command(
-            "FT.SEARCH", index, ft_query,
-            "PARAMS", "2", "vec", vector_bytes,
-            "RETURN", "7", "label", "text", "code", "tags", "timestamp", "score", "ttl_days",
-            "SORTBY", "score",
-            "DIALECT", "2",
-        )
-
-        total, docs = _parse_search_results(raw)
-        if total == 0 or not docs:
+        store = MemoryIndex(r, mem_prefix, index, PROFILE)
+        if not await store.ensure():
             return "No memories found."
-
+        tag_filter = "|".join(_escape_tag(_sanitize_tag(t)) for t in tags.split(",") if _sanitize_tag(t)) if tags else ""
+        hits = await store.search(await encoder.query(query), tag_filter, top_k)
         results = []
-        for redis_key, fd in docs:
-            _check_scope_key(redis_key, mem_prefix, scope)
-            mid = redis_key.replace(mem_prefix, "")
-
-            # Refresh TTL on hit
-            ttl_days = int(fd.get("ttl_days", "90") or 90)
-            if ttl_days > 0:
-                await r.expire(redis_key, ttl_days * 86400)
-            ttl_left = await r.ttl(redis_key)
-
-            sim  = round((1 - float(fd.get("score", 1.0))) * 100, 1)
-            dt   = _fmt_ts(fd.get("timestamp", 0))
-            label = fd.get("label") or fd.get("text", "")[:60]
+        for mid, fd, score, ttl_left in hits:
+            sim = round((1-score)*100, 1)
+            dt = _fmt_ts(fd.get('timestamp', 0))
+            label = fd.get('label') or fd.get('text', '')[:60]
             head = f"[{sim}% | {dt} | ttl:{_fmt_ttl(ttl_left)}] {label}  ID:{mid}"
-            if fd.get("tags"): head += f"  tags=[{fd['tags']}]"
-            body = fd.get("text", "")
-            if fd.get("code"): body += f"\n```\n{fd['code']}\n```"
-            results.append(f"{head}\n{body}")
+            if fd.get('tags'):head += f"  tags=[{fd['tags']}]"
+            body = fd.get('text', '')
+            if fd.get('code'):body += f"\n```\n{fd['code']}\n```"
+            results.append(head+'\n'+body)
+        return "\n\n---\n".join(results) if results else "No memories found."
+    except ValueError as exc:
+        raise ToolError(str(exc)) from None
     finally:
+        await encoder.aclose()
         await r.aclose()
-
-    return "\n\n---\n".join(results)
 
 
 @mcp.tool()
@@ -550,52 +519,31 @@ async def mem_list(limit: int = 20, tag: str = "", shared: bool = False, scope: 
     mem_prefix, _, index = _scope(shared, scope)
     r = _redis()
     try:
-        if scope is None:
-            await _ensure_index(r, index, mem_prefix)
-        elif not await _scope_index(r, index, mem_prefix):
-            return "No semantic memories found."
-        if tag:
-            safe_tag = _escape_tag(_sanitize_tag(tag))
-            raw = await r.execute_command(
-                "FT.SEARCH", index, f"@tags:{{{safe_tag}}}",
-                "RETURN", "5", "label", "text", "tags", "timestamp", "ttl_days",
-                "LIMIT", "0", str(limit),
-                "SORTBY", "timestamp", "DESC",
-            )
-            results = []
-            _, docs = _parse_search_results(raw)
-            for redis_key, fd in docs:
-                _check_scope_key(redis_key, mem_prefix, scope)
-                mid = redis_key.replace(mem_prefix, "")
-                ttl_left = await r.ttl(redis_key)
-                dt = _fmt_ts(fd.get("timestamp", 0))
-                label = fd.get("label") or fd.get("text", "")[:60]
-                line = f"[{dt} | ttl:{_fmt_ttl(ttl_left)}] {label}  ID:{mid}"
-                if fd.get("tags"): line += f"  [{fd['tags']}]"
-                line += f"\n{fd.get('text','')[:100]}"
-                results.append(line)
-        else:
-            keys = [k async for k in r.scan_iter(f"{mem_prefix}*", count=100)][:limit]
-            results = []
-            for k in keys:
-                data = await r.hgetall(k)
-                if b"vector" not in data:
-                    continue
-                mid   = _decode(k).replace(mem_prefix, "")
-                label_ = _decode(data.get(b"label", b""))
-                text  = _decode(data.get(b"text",  b""))
-                tags_ = _decode(data.get(b"tags",  b""))
-                ttl_left = await r.ttl(k)
-                dt    = _fmt_ts(data.get(b"timestamp", b"0"))
-                label = label_ or text[:60]
-                line  = f"[{dt} | ttl:{_fmt_ttl(ttl_left)}] {label}  ID:{mid}"
-                if tags_: line += f"  [{tags_}]"
-                line += f"\n{text[:100]}"
-                results.append(line)
+        store = MemoryIndex(r, mem_prefix, index, PROFILE)
+        # Listing canonical data remains possible before migration, without embeddings.
+        if await r.exists(store.state):
+            await store.ensure()
+        entries = []
+        async for key in r.scan_iter(mem_prefix+'*', count=200):
+            _check_scope_key(_decode(key), mem_prefix, scope)
+            mid = _decode(key)[len(mem_prefix):]
+            if not _UUID_RE.fullmatch(mid):continue
+            data = await r.hgetall(key)
+            if b'text' not in data:continue
+            fd = {_decode(k):_decode(v) for k,v in data.items() if k != b'vector' and not _decode(k).startswith('_')}
+            if tag and _sanitize_tag(tag) not in fd.get('tags','').split(','):continue
+            entries.append((int(fd.get('timestamp',0)), mid, fd, await r.ttl(key)))
+        results = []
+        for _, mid, fd, ttl_left in sorted(entries, reverse=True)[:max(0,limit)]:
+            label = fd.get('label') or fd.get('text','')[:60]
+            line = f"[{_fmt_ts(fd.get('timestamp',0))} | ttl:{_fmt_ttl(ttl_left)}] {label}  ID:{mid}"
+            if fd.get('tags'):line += f"  [{fd['tags']}]"
+            results.append(line+'\n'+fd.get('text','')[:100])
+        return "\n\n".join(results) if results else "No semantic memories found."
+    except ValueError as exc:
+        raise ToolError(str(exc)) from None
     finally:
         await r.aclose()
-
-    return "\n\n".join(results) if results else "No semantic memories found."
 
 
 @mcp.tool()
@@ -612,7 +560,7 @@ async def mem_delete(memory_id: str, shared: bool = False, scope: str | None = N
       same shared/scope on reads and deletes; no parent/sibling fallback.
       Secret random names grant access by possession; do not disclose them.
     """
-    mem_prefix, _, _ = _scope(shared, scope)
+    mem_prefix, _, index = _scope(shared, scope)
     memory_id = memory_id.strip().lower()
     is_full_uuid = bool(_UUID_RE.match(memory_id))
 
@@ -621,8 +569,11 @@ async def mem_delete(memory_id: str, shared: bool = False, scope: str | None = N
 
     r = _redis()
     try:
+        store = MemoryIndex(r, mem_prefix, index, PROFILE)
+        if not await store.ensure():
+            return f"Not found: '{memory_id}'"
         if is_full_uuid:
-            deleted = await r.delete(f"{mem_prefix}{memory_id}")
+            deleted = await store.delete(memory_id)
             if deleted:
                 return f"Deleted mem[{memory_id}]"
             return f"Not found: '{memory_id}'"
@@ -645,7 +596,7 @@ async def mem_delete(memory_id: str, shared: bool = False, scope: str | None = N
         if len(matches) > 1:
             ids = ", ".join(_decode(k).replace(mem_prefix, "") for k in matches[:5])
             return f"Ambiguous ID '{memory_id}', multiple matches: {ids}. Use full UUID."
-        deleted = await r.delete(matches[0])
+        deleted = await store.delete(_decode(matches[0])[len(mem_prefix):])
         full_id = _decode(matches[0]).replace(mem_prefix, "")
         return f"Deleted mem[{full_id}]" if deleted else f"Not found: '{memory_id}'"
     finally:

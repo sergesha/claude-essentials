@@ -1,0 +1,138 @@
+{
+  "profile": {
+    "chunk_tokens": 256,
+    "dimension": 256,
+    "format": "gemma-title-quarter-max64-text-newline-code-paragraph-v1",
+    "index_algorithm": "FLAT",
+    "max_chunks": 256,
+    "model": "onnx-community/embeddinggemma-300m-ONNX",
+    "normalize": true,
+    "overlap": 32,
+    "pooling": "sentence_embedding",
+    "quantization": "q4",
+    "revision": "5090578d9565bb06545b4552f76e6bc2c93e4a66",
+    "tokenizer_sha256": "4dda02faaf32bc91031dc8c88457ac272b00c1016cc679757d1c441b248b9c47"
+  },
+  "corpus_sha256": "ac0a3d820e58a5bcb84f3d7beaa20a60e601d005576561fa078dd4344d39e112",
+  "vectors": 313,
+  "ingestion_seconds": 22.68706458294764,
+  "top1": 18,
+  "top5": 26,
+  "quality": [
+    {
+      "id": 0,
+      "rank": 1
+    },
+    {
+      "id": 1,
+      "rank": 1
+    },
+    {
+      "id": 2,
+      "rank": 2
+    },
+    {
+      "id": 3,
+      "rank": 1
+    },
+    {
+      "id": 4,
+      "rank": 1
+    },
+    {
+      "id": 5,
+      "rank": 1
+    },
+    {
+      "id": 6,
+      "rank": 1
+    },
+    {
+      "id": 7,
+      "rank": 2
+    },
+    {
+      "id": 8,
+      "rank": 3
+    },
+    {
+      "id": 9,
+      "rank": 1
+    },
+    {
+      "id": 10,
+      "rank": 3
+    },
+    {
+      "id": 11,
+      "rank": 2
+    },
+    {
+      "id": 12,
+      "rank": 2
+    },
+    {
+      "id": 13,
+      "rank": 1
+    },
+    {
+      "id": 14,
+      "rank": 1
+    },
+    {
+      "id": 15,
+      "rank": 1
+    },
+    {
+      "id": 16,
+      "rank": 1
+    },
+    {
+      "id": 17,
+      "rank": 1
+    },
+    {
+      "id": 18,
+      "rank": 1
+    },
+    {
+      "id": 19,
+      "rank": 1
+    },
+    {
+      "id": 20,
+      "rank": 1
+    },
+    {
+      "id": 21,
+      "rank": 2
+    },
+    {
+      "id": 22,
+      "rank": 3
+    },
+    {
+      "id": 23,
+      "rank": 1
+    },
+    {
+      "id": 24,
+      "rank": 1
+    },
+    {
+      "id": 25,
+      "rank": 1
+    }
+  ],
+  "latencies": {
+    "1": {
+      "p50_ms": 28.898187447339296,
+      "p95_ms": 34.24359556520358
+    },
+    "4": {
+      "p50_ms": 52.485583000816405,
+      "p95_ms": 59.79325793450698
+    }
+  },
+  "redis_used_bytes": 4108424
+}
