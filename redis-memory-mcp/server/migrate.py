@@ -313,7 +313,13 @@ def main():
             if args.phase=='inspect':
                 counts=[]
                 for prefix in areas:
-                    counts.append(sum(1 async for _ in r.scan_iter(prefix+'*',count=200)))
+                    parents=set()
+                    async for raw in r.scan_iter(prefix+'*',count=200):
+                        key=decode(raw)
+                        if (UUID.fullmatch(key[len(prefix):]) and await r.type(key)==b'hash'
+                                and await r.hexists(key,'text')):
+                            parents.add(key)
+                    counts.append(len(parents))
                 print(json.dumps({'areas':len(areas),'records':sum(counts),'target_profile':profile.fingerprint,'config':json.loads(profile.json)}))
                 return
             with args.backup.open('rb') as f:

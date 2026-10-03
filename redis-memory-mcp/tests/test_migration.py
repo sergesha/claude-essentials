@@ -214,3 +214,23 @@ async def test_interrupted_build_resumes_without_reencoding_completed_parents(tm
         keys=[k async for k in r.scan_iter(root+'*')]
         if keys:await r.delete(*keys)
         await r.aclose()
+
+@pytest.mark.asyncio
+async def test_cli_inspect_counts_only_canonical_records_without_writes():
+    import subprocess,json
+    url=os.getenv('REDIS_GRANITE_TEST_URL')
+    if not url:pytest.skip('isolated Redis required')
+    r=redis.from_url(url,protocol=2);scope='inspect_'+uuid.uuid4().hex
+    prefix='ns::scope:'+scope+':mem:'
+    keys=[prefix+str(uuid.uuid4()),prefix+'not-a-memory',prefix+str(uuid.uuid4())]
+    try:
+        await r.hset(keys[0],mapping={'text':'canonical','vector':b'legacy'})
+        await r.hset(keys[1],mapping={'text':'not a canonical UUID'})
+        await r.set(keys[2],'not a memory hash')
+        before=[await r.dump(k) for k in keys]
+        result=subprocess.run([sys.executable,str(Path(__file__).parents[1]/'server/migrate.py'),'inspect','--shared','--scope',scope],env={**os.environ,'REDIS_URL':url},capture_output=True,text=True,timeout=30)
+        assert result.returncode==0,result.stderr
+        assert json.loads(result.stdout)['records']==1
+        assert before==[await r.dump(k) for k in keys]
+    finally:
+        await r.delete(*keys);await r.aclose()
