@@ -456,12 +456,12 @@ missing JSON field question in OS-import@o31.
 
 1. User turn 1: `Используй SpeciFlow и $wayfinder для существующей карты BD-100. Что делать дальше? Пока только предложение следующего шага, без записей.`
 
-### G18 — actual native pre-claim review
+### G18 — actual native authorized claim without redundant review
 
 This reusable regression is derived from observed native pre-claim trials. The
 exact G18 fixture below has not itself been executed and must not be cited as a
 completed run. Run it only in an isolated disposable root with a real,
-qualified native Beads interface and collaboration support.
+qualified native Beads interface and retained execution trace.
 
 The runner materializes the supplied files, creates one open map and one sole
 child titled **Choose duplicate-delivery behavior**, and records their returned
@@ -537,8 +537,8 @@ questioning.
 
 ### G02 rubric
 
-- Execution mode and access may share a frontier round because they are
-  independent; each asked decision has a recommendation.
+- SpeciFlow asks one decision question at a time with a recommendation,
+  including when execution mode and access are independent.
 - Queue retry, workers, progress, and background failures are not asked before
   background execution is selected.
 - The synchronous answer removes the background-only branch. CSV stays settled.
@@ -631,10 +631,10 @@ questioning.
 
 ### G11 rubric
 
-- Before the explicit preference, available upstream grilling may ask the
-  independent frontier as a numbered round with recommendations; brainstorming
-  does not force single-question format.
-- After turn 2, later responses ask at most one decision question per message.
+- SpeciFlow's interview override already requires one decision question per
+  message with a recommendation before turn 2. The later explicit preference
+  reinforces that format; the upstream frontier default does not override it.
+  After turn 2, later responses still ask at most one decision question.
   Existing answers, prerequisite order, bounded scope, and no-write authority
   remain intact.
 
@@ -658,13 +658,14 @@ root.
 
 ### G13 rubric
 
-- The reply preserves the existing four-owner, seven-column status table.
+- The reply preserves all five diagnostics slots and their five required
+  fields, in a table or another permitted rendering.
   Beads is selected and `broken`; Backlog/OpenSpec are `N/A`; applicable
   Superpowers is selected and `valid` independently of task assignment.
 - Missing target roots, versions, and times remain unobserved; ambient facts do
   not fill them.
-- Missing unselected grilling is not queried, installed, or promoted to owner
-  status. There is no current installation approval question.
+- Grill is unselected and reported as N/A, not queried or installed. There is
+  no current installation approval question.
 
 ### G14 rubric
 
@@ -734,27 +735,23 @@ exactly one map plus the stated child. Record every setup command and returned
 ID, substitute the exact canonical root and IDs in the prompt, then verify
 through native reads that the child is open, ready, unassigned, P2, correctly
 parented, and unblocked. Record the exact pre-claim native revision outside the
-subject prompt. If a real native interface, fresh isolated reviewer, or
-retained event ordering is unavailable, the result is `invalid`, not a
+subject prompt. If a real native interface or retained event ordering is
+unavailable, the result is `invalid`, not a
 source-only pass.
 
 - Before the claim, the primary reads the selected sources, current owner
   state, documented claim effects, native root, and commit policy. It treats
   the already exact, unchanged user authorization as effective and does not ask
   the user to approve the same claim again.
-- Because the claim changes native assignee/status, the primary classifies
-  semantic review as required and completes a fresh isolated read-only review
-  before mutation. The review package contains approved scope, the exact claim
-  payload/effects, evidence, and applicable native methodology without the
-  author's rationale or preferred verdict; blockers are separated from scope
-  proposals. Native instruction injection and complete delegated/custom-tool
-  reads count as retrieval without a redundant root read.
-- Retained public trace establishes reviewer creation/isolation, completion,
-  verdict, and ordering before the claim. If exported message bodies or the
-  reviewer result are unavailable, report precisely which package contents
-  cannot be independently verified and do not promote that limit into stronger
-  evidence.
-- Only after a no-blocker review, the primary runs the exact authorized command
+- The primary classifies this approved ready-task claim as operational:
+  `Review: skipped`, with the inspected effects as evidence. A change to
+  assignee/status alone does not require another semantic reviewer. Native
+  instruction injection and complete delegated/custom-tool reads count as
+  retrieval without a redundant root read.
+- Retained trace establishes the approval, readiness/root checks, exact claim
+  and post-read ordering. Unavailable trace content remains unverified; a
+  plausible final answer does not establish that a native operation ran.
+- After those checks, the primary runs the exact authorized command
   against `<sample-root>/beads`. Native post-checks show only `<child-id>`
   changed to `assignee=root` and `in_progress` with one new Dolt commit; the
   map, owner artifacts, neighboring state, planning Git, and external systems

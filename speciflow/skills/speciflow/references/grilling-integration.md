@@ -102,22 +102,17 @@ These are human-invoked only — SpeciFlow never calls them:
 A prior direct invocation by the user continues within the same activity.
 Reading an entrypoint's instructions is not the same as invoking it.
 
-## When the formal method is not installed
+## When the formal method is unavailable
 
-The `mattpocock/skills` package provides structured interview
-methodology. When it is not installed:
+Resolve the original source through the receiving host before choosing a fallback
+(see [installation.md](installation.md)). A readable file and a host-discovered
+method are separate checks.
 
-1. **Interviews still work.** Conduct clarification, domain modeling,
-   and stress-testing using the same principles: challenge assumptions,
-   surface gaps, explore domain boundaries. The formal skill adds
-   structure and question discipline; it is not required for the
-   interview itself.
-2. **Report availability.** Note that the formal Grill method is not
-   installed — the interview uses general principles instead.
-3. **Offer installation** through [installation.md](installation.md)
-   if the user wants the full structured methodology.
+| Requested activity | Action when the required original method cannot be loaded |
+| --- | --- |
+| User selected the original method, the full method set, or prohibited substitution | Report the unavailable method and pause that dependent activity. Offer recovery or an explicitly agreed alternative. Start the alternative only after the user chooses it. |
+| Ordinary clarification with no required original method | Use general interview principles and identify them as such. |
 
-The absence of the formal Grill skill never blocks clarification,
-domain work, or research activities. It only means the structured
-question algorithm and templates from `mattpocock/skills` are not
-available.
+Continue already-authorized independent work. Completing that work does not
+complete the unavailable-method activity. Reading a method establishes access;
+its prescribed actions and results establish execution.
