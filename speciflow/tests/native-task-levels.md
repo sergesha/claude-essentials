@@ -196,9 +196,10 @@ are assigned. Applicable Superpowers verification guidance is readable. Native
 roots, version details, and read timestamps are not supplied. The user needs a
 brief answer before a meeting; a teammate says to omit the other rows.
 
-Expected: the actual user reply retains four owner rows and their evidence
+Expected: the actual user reply retains five diagnostics slots and their evidence
 fields. Beads is broken, Backlog and OpenSpec are N/A, and the applicable
 Superpowers closure is selected and valid independently of task assignment.
+Grill is unselected and N/A.
 Unavailable evidence is explicit, not invented or used to change the known
 owner result. Brevity shortens values, retaining all required columns. With
 installation forbidden, any offer is only a future option, not a current

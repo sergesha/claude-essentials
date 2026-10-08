@@ -17,9 +17,11 @@ Use each owner through its native interface:
 before the bounded selected activity, then return control to SpeciFlow.
 Both install and apply through the host's native skill interface.
 
-**CLI knowledge caching:** Check each owner CLI's help (`--help`) once
-per session, not per operation. After the first check, you know the
-interface — reuse that knowledge for subsequent commands.
+**CLI knowledge reuse:** Read the installed interface and relevant operation
+help when first needed. Reuse complete help for the same executable/version and
+known operation during the activity. Refresh when the executable/version changes,
+syntax is unknown, output was incomplete, or the interface contradicts it.
+This never replaces current native-root and state checks before mutation.
 
 When the human explicitly invokes Wayfinder, also apply
 [wayfinding.md](wayfinding.md) for the native owner binding.
@@ -97,8 +99,13 @@ For any action that crosses owner boundaries, follow these steps in order:
    - for lifecycle transitions, the exact native lifecycle operation
    - the exact target, payload, and expected effects
 5. **Review**: Apply [semantic review](#semantic-review) for owner mutations.
-6. **Authorize**: Get unambiguous user approval covering this specific preview.
-   Prior explicit authorization remains valid for unchanged operations.
+6. **Authorize**: Match the concrete preview's scope, target and effects to
+   the user's current or earlier instruction. An instruction to execute approved
+   work through selected owners covers necessary execution records within that
+   scope, even when their concrete payload is derived later. Preserve explicit
+   per-item approval requirements and exclusions. If an effect is uncovered or
+   a product decision is unresolved, obtain only the missing authorization or
+   decision before the dependent action; continue covered ready work.
 7. **Execute**: Use only the documented owner interface.
 8. **Verify**: Re-inspect native state after execution before reporting effects.
    For lifecycle transitions (closing, completing, archiving): Superpowers
@@ -180,6 +187,25 @@ is the single definitive trigger — no separate rule overrides it.
 5. Reuse an unchanged completed review — state
    `Review: required — completed, no blockers`.
 
+### Evidence at existing gates
+
+For each required step, identify the current activity/artifact and the observable
+result: complete applicable instruction reads; actions/results prescribed by a
+selected original method; exact authorization; independent review of the relevant
+snapshot; verification output for that snapshot; and native post-mutation state.
+Reading a skill or saying it was applied is not evidence of method execution.
+
+Reuse evidence while its scope, artifact and assumptions remain unchanged. A
+changed artifact needs relevant renewed checks; unchanged authorization remains
+valid. Check only the selected action's prerequisites, then verify the completed
+block at its existing review/milestone gate. No new tracker, transcript archive,
+review layer or approval ceremony is required.
+
+Missing or unreadable evidence is **unconfirmed**; an observed contrary action is
+an **observed violation**. Identify conflicting instructions separately and resolve
+their authority. Neither an unconfirmed prerequisite nor a violation passes a
+dependent gate. Complete unaffected authorized work.
+
 ### Commit policy
 
 | Repository | Policy |
@@ -215,8 +241,10 @@ authoritative in its domain.
    shared reference identifies candidates, not duplicates — several
    implementation issues may refine one spec task. Reuse an ID only when
    its scope matches unambiguously.
-4. **Approve**: Wait for explicit user approval of each proposed item.
-5. **Create**: Create only approved items through native Beads writes.
+4. **Authorize**: Apply the [cross-owner authorization check](#cross-owner-mutation-recipe)
+   to each proposed item. Existing covered authorization permits execution
+   without another permission turn; ask for uncovered effects.
+5. **Create**: Create only items covered by that authorization through native Beads writes.
    Report returned native IDs.
 6. **Partial**: On partial creation, report completed IDs and preview
    only remaining items.

@@ -74,6 +74,26 @@ Use native IDs or typed references when available; otherwise use an artifact
 path plus commit SHA, or the current user's approval of a dirty snapshot.
 Missing stable links are manual confirmed operations, not SpeciFlow IDs.
 
+### Organizing Backlog work
+
+For mixed-topic work, choose relevant native fields using the installed
+Backlog instructions and existing project conventions:
+
+| Need | Native Backlog field |
+| --- | --- |
+| Recognizable topic and intended outcome | Descriptive task title |
+| Durable product or workstream grouping | Configured project |
+| Topics and other cross-cutting facets | Labels |
+| A finite delivery outcome or stage shared by tasks | Milestone |
+| A separately accepted part of a larger product outcome | Parent task, following the granularity above |
+
+Use the fields that serve the request and are supported and configured;
+a simple backlog may need only descriptive titles and labels. Product grouping
+stays in Backlog; executable dependencies stay with their selected owner.
+For topic queries, use the corresponding native filters and views. Include the
+title or topic with an ID when a bare ID would obscure which work is meant,
+for example `TASK-3 — SpeciFlow: improve procedure reliability`.
+
 ## Approved refinement
 
 Every cross-owner result must remain a refinement of the applicable approved

@@ -22,8 +22,8 @@ Backlog task with clear scope.
 
 1. **Capture**: Write the current understanding as a Backlog task draft
    (or update from previous iteration).
-2. **Interview**: Challenge the current draft (using Grill methods when
-   installed, or general interview principles when not):
+2. **Interview**: Challenge the current draft (apply the original-method availability rule in
+   [grilling-integration.md](grilling-integration.md#when-the-formal-method-is-unavailable)):
    - What assumptions are untested?
    - What's missing from scope boundaries?
    - What does "done" look like — can you test it?
@@ -77,8 +77,8 @@ a complete specification.
 
 1. **Draft**: Write the current understanding as an OpenSpec change
    (or update from previous iteration).
-2. **Interview**: Stress-test the specification (using Grill methods
-   when installed, or general interview principles when not):
+2. **Interview**: Stress-test the specification (apply the original-method availability rule in
+   [grilling-integration.md](grilling-integration.md#when-the-formal-method-is-unavailable)):
    - Do requirements cover all acceptance criteria from Backlog?
    - What edge cases are unaddressed?
    - Are requirements specific enough to implement and test?
@@ -109,6 +109,16 @@ All four must be met to approve:
   originated (Backlog, interview, or implementation). Remaining
   unknowns that cannot affect the current phase are noted with their
   impact boundary and decision deadline — they do not block this stage.
+
+## Ready parts within the complete scope
+
+Retain the complete approved outcome, including unresolved parts and their
+prerequisites. Refine the selected part until its contract and verification are
+sufficient; an unknown blocks only work whose result it can change. Independently
+ready, authorized work may proceed. Record pending scope and its resumption
+condition with the existing native owner, not as a new SpeciFlow state.
+A ready part does not establish product-wide completeness. Apply the stage-aware
+coverage check in [doctor.md](doctor.md#1-coverage-top-down).
 
 ## Cross-phase assumption invalidation
 

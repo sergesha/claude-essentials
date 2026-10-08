@@ -5,9 +5,42 @@ SpeciFlow is instructions and references, not an installer. It ships no
 Installation is performed only when the user requests it.
 
 Before any host-side write, show one exact preview containing the source,
-version or channel, command or UI action, target, and external effects. Wait for
-explicit approval before running the requested host installation action. Start
+version or channel, command or UI action, target, and external effects. Use
+existing explicit approval when it covers these exact effects; otherwise obtain
+it before running the requested host installation action. Start
 a new session when the host requires a reload, then invoke SpeciFlow explicitly.
+
+## Discover, reuse, or recover a selected dependency
+
+First inspect the current host's catalog and supported discovery/registration
+mechanism, then resolve existing installed, shared and linked original sources,
+including those managed by another host. Inspect source identity/revision,
+compatibility, the entrypoint and required relative resources/dependencies.
+Resolve the entire link chain, including versioned cache paths. A path's existence
+alone does not establish receiving-host availability.
+
+| Observed condition | Selected action |
+| --- | --- |
+| Compatible closure already discoverable and readable in receiving host | Reuse it; no installation. |
+| Compatible source exists elsewhere; receiving host supports shared discovery or a link | Prefer that supported reuse to a duplicate copy. Inspect conflicts and preview the exact discovery/link effect. |
+| Link target moved; a compatible source is identified | Relink through the supported receiving-host mechanism under applicable authorization; retain source identity and required resources. |
+| Linked source was removed; receiving host still requires it | Restore a standalone installation through the receiving host's supported installer under applicable authorization. A dangling link is not an installation. |
+| Receiving-host discovery was intentionally disabled | Preserve that choice; report the dependent capability unavailable. Re-enabling requires authorization covering the changed preference. |
+| Source is incompatible, resources are missing, or destination contains unrelated content | Report the concrete conflict and stop that repair; continue independent work. Inspect replacement effects before proposing recovery. |
+
+Apply these conditions in either direction between hosts only where the receiving
+host documents support. Do not infer Claude support from Codex support or vice
+versa. A skill-file link shares instructions and resources; it does not register
+MCP servers, hooks, permissions or other plugin components. Qualify those through
+the receiving host's own plugin mechanism when the selected capability needs them.
+Do not duplicate a full bundle merely because a required capability is only a skill.
+
+After a repair, verify source resolution, complete readable closure and receiving
+host discovery/loading. If the host needs reload, report readiness as pending until
+that check succeeds. Source-host removal or cache replacement can invalidate a
+link: re-evaluate when the selected method next fails discovery or load. Recovery
+is an explicit host action, not a SpeciFlow daemon, registry or automatic reinstall.
+Use the installation routes below when reuse cannot supply the required capability.
 
 ## Codex
 

@@ -33,8 +33,9 @@ reinterpret, or repair another owner's artifact.
 Before proposing a mutation:
 
 1. **Inspect** the installed owner's version, help, native root, current
-   artifact state, and available lifecycle operations. Installed docs win
-   over remembered syntax.
+   artifact state, and available lifecycle operations. Apply
+   [operations.md](operations.md#native-owners) for bounded help reuse;
+   installed docs win over remembered syntax.
 2. **Classify** the effect: a change that promotes pending content into
    canonical state is a lifecycle transition (create, apply, archive,
    close, claim, commit) regardless of its filesystem mechanism.

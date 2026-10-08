@@ -16,6 +16,30 @@ interfaces; do not create or assume a `speciflow` command. Native owner edits
 remain authoritative. Supporting disciplines never acquire owner authority.
 Never copy owner content into a SpeciFlow schema.
 
+## Working language
+
+Write all persistent working artifacts in **English**: documents, plans, task
+content, comments, review records and other project notes. Use another language
+only when the user or an applicable project instruction **explicitly and
+unambiguously** establishes it for that project or artifact. Conversation
+language, locale and existing examples alone do not establish an exception.
+
+## Working order
+
+1. Select the concern's native owner and applicable original methods using
+   [ownership.md](references/ownership.md).
+2. Read the applicable routes below; resolve selected dependencies through
+   [installation.md](references/installation.md).
+3. Inspect current owner state and existing authorization. For mutations,
+   use [operations.md](references/operations.md); for cross-owner work, compare
+   intended coverage using [transitions.md](references/transitions.md).
+4. Apply the selected method, review and verification to the bounded activity.
+   Reuse unchanged authorization and evidence; complete authorized ready work.
+5. Verify native effects and report each owner's actual state. Use
+   [doctor.md](references/doctor.md) at its existing milestone gates.
+
+This is routing; the linked procedures define the gates and their authority.
+
 ## Quick start
 
 SpeciFlow coordinates your installed planning and execution tools through
@@ -66,7 +90,9 @@ its exact preview is already approved; that continuation still reads
 
 Resolve each link relative to the file containing it, using its literal target.
 Before answering or acting, determine each required file's availability from
-the actual read output in this invocation, not a handover's historical status:
+actual complete read output for the bounded activity, not a handover's historical
+status. Reuse unchanged content already present in context. Read again when the
+source changes, the route needs another file, or content was lost or truncated:
 
 1. Complete successful current read, with the returned content rather than
    just a success code or claim: apply that file; its reading requirement
@@ -101,25 +127,20 @@ owner; continue through the selected owners' setup outline.
 
 ## Missing tools
 
-On first invocation, check availability of all five components and report
-missing ones:
+Select applicable owners and methods before checking availability. Use the
+host's skill catalog and the discovery/recovery procedure in
+[installation.md](references/installation.md); query selected owner CLIs through
+their installed interfaces. Existing compatible sources may be shared or linked.
 
-| Component | Claude Code — how to check | Codex — how to check |
-| --- | --- | --- |
-| Backlog.md | `backlog --help` | `backlog --help` |
-| OpenSpec | `openspec --help` | `openspec --help` |
-| Beads/Dolt | `bd --help` | `bd --help` |
-| Superpowers | `Skill("superpowers:brainstorming")` loads | Check `.agents/skills/` |
-| Grill | `Skill("mattpocock-skills:grilling")` loads | Check `.agents/skills/{grilling,domain-modeling,research,prototype}` |
+[diagnostics.md](references/diagnostics.md#per-owner-result) defines results:
+`N/A` means unselected, `broken` means a selected required interface is missing,
+and `unknown` means the required fact could not be verified. Report the affected
+capability and continue independently authorized work.
 
-For missing components, offer installation through
-[references/installation.md](references/installation.md) — one component at a
-time, with preview and approval. Work continues with available components;
-missing ones are reported as `N/A` in diagnostics.
-
-Grill is strongly recommended but not a hard blocker — interviews work
-without the formal methodology (see
-[references/grilling-integration.md](references/grilling-integration.md)).
+For an unavailable original method, use the request-dependent rule in
+[grilling-integration.md](references/grilling-integration.md#when-the-formal-method-is-unavailable).
+An installation or repair uses its exact effects and applicable existing
+approval; dependency discovery alone does not authorize host changes.
 
 ## Supporting disciplines
 
