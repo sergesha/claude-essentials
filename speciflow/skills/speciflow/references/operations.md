@@ -86,7 +86,8 @@ For any action that crosses owner boundaries, follow these steps in order:
 
 1. **Preserve intent**: Complete the ephemeral check in
    [transitions.md](transitions.md) — verify every approved upstream item
-   appears in the proposed downstream result. For epic-level closures
+   appears in the proposed downstream result and every added obligation has
+   authority or is necessary implementation detail. For epic-level closures
    (archive OpenSpec spec, mark Backlog task Done), run
    [doctor](doctor.md) first. Individual Beads issue close with passing
    code review and evidence does not need full doctor.
@@ -98,6 +99,8 @@ For any action that crosses owner boundaries, follow these steps in order:
    - the documented owner operation (or editing interface for in-state edits)
    - for lifecycle transitions, the exact native lifecycle operation
    - the exact target, payload, and expected effects
+   - source, effect coverage, and next action from the
+     [approval boundary](ownership.md#approval-boundary)
 5. **Review**: Apply [semantic review](#semantic-review) for owner mutations.
 6. **Authorize**: Match the concrete preview's scope, target and effects to
    the user's current or earlier instruction. An instruction to execute approved
@@ -159,7 +162,8 @@ unreliable.
 **Adversarial review** — "is the agent's own judgment trustworthy?"
 - Reviewer receives: **original user intent** + **subsequent explicit
   user decisions** (scope amendments, agreed exclusions, architecture
-  pivots) + current state. Agent's intermediate rationalizations are
+  pivots) + approved linked snapshots and bounded delegation grants + current
+  state + the exact proposed semantic change. Agent's intermediate rationalizations are
   excluded — they are the thing being checked, not a trusted source.
 - Original intent detects gradual drift. Subsequent user decisions
   have equal authority — a later explicit decision is not a deviation
@@ -171,7 +175,7 @@ is the single definitive trigger — no separate rule overrides it.
 | Situation | Mode | Rationale |
 | --- | --- | --- |
 | Code review, user-initiated spec change | Direct | User is the origin |
-| Agent proposes spec change at a lifecycle gate | **Adversarial** | Agent origin + semantic + gate |
+| Agent proposes an addition or strengthening of scope, requirements, dependencies, or acceptance | **Adversarial** | Agent origin + semantic change, including in-state edits |
 | Agent removes or weakens a requirement ("cleanup", "simplification") | **Adversarial** | Removal risk justifies check regardless of lifecycle position |
 | Doctor at epic closure | **Adversarial** | Milestone boundary — verifies cumulative drift |
 | Typo fix, formatting, mechanical correction | No review | No semantic change |
@@ -181,8 +185,12 @@ is the single definitive trigger — no separate rule overrides it.
 
 1. Select mode from the table above.
 2. Spawn a clean-context subagent with the appropriate inputs.
-3. The reviewer returns blocking defects (vs approved scope) separately
-   from scope proposals.
+3. For agent-origin semantic changes, first establish authority and necessity
+   against the approved outcome and existing narrower paths; then assess the
+   proposed solution. Return blocking defects within the current assignment
+   separately from scope proposals. Review does not authorize either.
+   Rejecting an uncovered addition outright needs no review of that abandoned
+   proposal; use existing review for any resulting implementation correction.
 4. End review when no approved-scope blockers remain.
 5. Reuse an unchanged completed review — state
    `Review: required — completed, no blockers`.
@@ -231,19 +239,35 @@ authoritative in its domain.
 
 ### Projection protocol
 
-1. **Read**: Analyze the approved OpenSpec change — requirements, tasks,
-   acceptance criteria.
+1. **Read**: Inspect the actual user decisions and their approved linked
+   snapshots, then analyze the OpenSpec requirements, tasks, and acceptance
+   criteria. Resolve disputed authority from that evidence before preparing
+   the preview; a worker's claim, committed plan, or review verdict is not
+   a substitute for inspecting the grant.
 2. **Preview**: Present item-by-item proposed Beads issues with:
    - bounded work description and verification criteria
    - dependency edges between issues
    - stable source reference back to the approved OpenSpec item
+   - source, effect coverage, and next action from the
+     [approval boundary](ownership.md#approval-boundary)
 3. **Deduplicate**: Search existing Beads issues by source reference. A
    shared reference identifies candidates, not duplicates — several
    implementation issues may refine one spec task. Reuse an ID only when
    its scope matches unambiguously.
-4. **Authorize**: Apply the [cross-owner authorization check](#cross-owner-mutation-recipe)
-   to each proposed item. Existing covered authorization permits execution
-   without another permission turn; ask for uncovered effects.
+4. **Authorize the write**: Read or reuse the actual instruction and select
+   the applicable branch for each item:
+   - A user instruction authorizes executing this work through selected owners
+     or creating its execution records, or a delegated decision is within a
+     user grant covering that effect → match the scoped payload and proceed
+     without another permission turn.
+   - Only the specification's content is approved or local implementation is
+     ready, with no grant covering record creation → keep the issue preview
+     read-only and obtain the missing projection authority before creating it.
+     Continue independently authorized implementation whose prerequisites hold;
+     new issue creation is not automatically its prerequisite.
+   An approved status, readiness, or technical review cannot select the first
+   branch. Apply the [cross-owner authorization check](#cross-owner-mutation-recipe)
+   to the actual grant, not an inferred “authorized projection” label.
 5. **Create**: Create only items covered by that authorization through native Beads writes.
    Report returned native IDs.
 6. **Partial**: On partial creation, report completed IDs and preview
@@ -313,10 +337,12 @@ unapproved exploratory work.
 When completed work needs to reopen (production incident, discovered
 defect, requirement change):
 
-1. **Classify**: Is this a defect in approved scope (bug fix) or a new
-   requirement (scope expansion)?
-2. **Bug fix**: Reopen the affected Beads issue. The approved scope still
-   covers it — no new Backlog approval needed.
+1. **Classify**: Apply the current-assignment defect boundary in
+   [ownership.md](ownership.md#review-authority-and-scope-discipline).
+   Distinguish a covered repair, unrelated defect, and new requirement.
+2. **Covered bug fix**: Repair under existing authority. If reopening is
+   needed, preview that native effect and check its authorization separately.
+   An unrelated defect remains a proposal until a repair grant covers it.
 3. **New requirement**: Route through Backlog as a new scope item, then
    OpenSpec, then Beads. The emergency does not bypass the process.
 4. **Lifecycle reversal**: Reopening a closed Beads issue, un-archiving
