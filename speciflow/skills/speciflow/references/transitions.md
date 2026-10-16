@@ -14,7 +14,11 @@ refinement that retains each item at the authorized granularity. Require an
 executable downstream path when projecting executable work. For product
 framing or specification work whose implementation is explicitly deferred,
 retain the outcome, prerequisite, and resumption condition without inventing
-execution issues. Persist none of this comparison.
+execution issues. Also identify every added or strengthened downstream
+obligation and its approval provenance or necessity for the unchanged outcome.
+Check additions under [ownership.md](ownership.md#review-authority-and-scope-discipline),
+including agent-selected mechanisms presented as requirements. Persist none of
+this comparison.
 
 A downstream artifact may refine approved intent with implementation detail,
 but must not narrow or replace an approved outcome, omit required work because
@@ -23,9 +27,11 @@ result, hide an unresolved dependency, or introduce an exclusion, deferral, or
 substitution without approval from the owner of the upstream intent
 (Backlog owns product intent; OpenSpec owns specification intent).
 
-Proceed only when every applicable item is retained. Otherwise stop and report
-the authoritative source, target transition, and exact unmatched, weakened,
-deferred, substituted, or prematurely terminated intent. Do not silently edit,
+Proceed only when every applicable item is retained and added obligations are
+covered. Otherwise withhold the dependent mutation and report the authoritative
+source, target transition, and exact uncovered addition, unmatched, weakened,
+deferred, substituted, or prematurely terminated intent. Continue independent
+covered work. Do not silently edit,
 reinterpret, or repair another owner's artifact.
 
 ## Native lifecycle fidelity
@@ -64,7 +70,10 @@ rationale to the current OpenSpec context; return product-scope proposals to
 Backlog; keep execution state in Beads and source evidence in Product Git/CI.
 Persist only authorized owner-native artifacts and links. The result of an
 original method is not approval for transfer into production, external
-publication, a new owner write, or any lifecycle transition.
+publication, a new owner write, or any lifecycle transition. Before the next
+worker dispatch, return uncovered semantic additions to coordination as
+proposals; preserve the authorized assignment in the handoff. A supporting
+review cannot turn an extra capability into a stable downstream obligation.
 
 For human-invoked Wayfinder, apply [wayfinding.md](wayfinding.md). A child
 scoped only to bounded research or prerequisite work may complete in Beads when

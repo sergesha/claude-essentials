@@ -32,9 +32,18 @@ language, locale and existing examples alone do not establish an exception.
    [installation.md](references/installation.md).
 3. Inspect current owner state and existing authorization. For mutations,
    use [operations.md](references/operations.md); for cross-owner work, compare
-   intended coverage using [transitions.md](references/transitions.md).
+   retained intent and added obligations using [transitions.md](references/transitions.md).
+   Read or reuse the actual grant covering proposed native-owner writes;
+   inspect its source when authority is disputed. Content approval alone
+   does not authorize execution records. For worker dispatch, preserve the
+   authorized assignment and check added obligations or effects against
+   applicable authority. Do not require fresh approval for implementation
+   or necessary repairs already covered by an existing grant.
 4. Apply the selected method, review and verification to the bounded activity.
    Reuse unchanged authorization and evidence; complete authorized ready work.
+   Even a mandatory human decision pauses only its dependent branch. Dispatch
+   independently authorized work whose prerequisites hold while that decision
+   or an unrelated review remains pending.
 5. Verify native effects and report each owner's actual state. Use
    [doctor.md](references/doctor.md) at its existing milestone gates.
 

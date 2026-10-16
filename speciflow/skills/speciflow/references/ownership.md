@@ -123,56 +123,65 @@ store. Apply [wayfinding.md](wayfinding.md) after explicit human invocation.
 
 ## Review authority and scope discipline
 
-Backlog.md is the sole scope authority. Two invariants apply at every level
+Backlog.md is the sole scope authority. These rules apply at every level
 and stage:
 
 **1. Review findings have three categories:**
-- **Implementation defect** (code doesn't match spec) → fix immediately
-- **Spec gap** (a concrete approved outcome is impossible to deliver
-  without an addition the spec omitted) → mandatory spec amendment, may
-  block if it creates a safety/security risk
-- **Enhancement** (new capability beyond what approved goals require) →
-  non-blocking scope proposal, returns to Backlog for approval
+- **Implementation defect** (code does not match approved behavior) → repair
+  within the current assignment under rule 4.
+- **Spec gap** (a demonstrated conflict prevents an approved outcome) →
+  resolve the conflict: correct the implementation, reconsider the mechanism,
+  clarify the requirement, or obtain an authorized spec amendment.
+- **Enhancement** (capability beyond approved goals) → non-blocking scope
+  proposal to Backlog.
 
-A reviewer cannot promote enhancements into blockers. A spec gap claim
-requires concrete justification: which approved outcome is impossible,
-under what scenario, and why existing constraints don't cover it. The
-reviewer may stop affected work and escalate the risk to the user, but
-cannot auto-assign a new requirement or override an agreed exclusion.
-A spec gap that creates a safety or security risk CAN block — but
-only when the risk is specific and demonstrable, not inferred from the
-feature's category.
+For a claimed gap, identify the approved outcome, failing scenario, and why
+existing behavior or a narrower mechanism cannot satisfy it. Investigate that
+necessity before adopting the proposed solution. A dependency of the agent's
+chosen mechanism is not automatically a dependency of the approved outcome.
+Prior implementation effort and review agreement establish neither necessity
+nor approval. A gap requires resolution, not necessarily a spec amendment.
+A specific, demonstrated safety or security risk may stop affected work;
+a reviewer cannot assign new scope or override an agreed exclusion.
 
-**2. Every action traces to approved upstream intent.** Before proposing any
-operation, verify it serves the user's stated goal. Self-invented tasks,
-busy-work that looks productive, and drift into tangential improvements are
-the most common failure modes. If the proposed action cannot be traced to an
-approved Backlog outcome, stop and ask.
+**2. Every action traces to applicable approved intent.** Inspect the
+user's goal, later decisions, approved linked sources, and bounded delegation
+using the approval boundary below. When authority is missing, withhold only
+the dependent action and obtain the missing decision; continue independent
+covered work. Discarding an unnecessary agent proposal and returning to the
+approved task does not require permission to expand scope.
 
-**3. Implementation detail vs scope expansion.** Two tests, both must pass
+**3. Implementation detail vs scope expansion.** Two tests must pass
 for a choice to be automatic:
-- Does it serve an approved requirement? (not a future one)
-- Does it preserve approved installation, operation, and compatibility
-  requirements? A library that adds a new runtime (e.g., Python in a
-  Node.js project), a required service, or a manual setup step changes
-  user-facing requirements — surface this to the user before implementing,
-  even if it serves an approved feature.
+- Does it serve an approved requirement rather than a future one?
+- Does it preserve approved installation, operation, compatibility, and
+  security requirements?
 
-Adding a field, endpoint, or capability for unapproved future needs is
-scope expansion. "We'll need it eventually" and "it makes the code better"
-are not approved intent.
+A necessary stronger internal mechanism can pass both tests. A required
+service, runtime, account, setup step, or new public contract signals effects
+to inspect against current authority, not an automatic technical ban.
+Adding a field, endpoint, or capability for unapproved future needs is scope
+expansion. Route uncovered effects before implementing them.
 
-**4. Defects in completed work are current scope.** A broken test, a race
-condition, or a regression in already-completed issues is a defect within
-approved scope — fix it as part of normal work. Marking it "known-flaky"
-or filing a separate issue to avoid fixing it is a quality shortcut, not
-scope management.
+**4. Repair defects within the current assignment.** This includes defects
+in the assigned work, regressions it introduced, and pre-existing defects whose
+repair is necessary for its approved outcome or required verification. An
+explicit broader repair grant, such as fixing all repository test failures,
+also applies. Preserve existing behavior and verify affected paths.
 
-**5. Scope proposals that intersect current work require a user decision.**
-When a review raises a proposal that may conflict with or require rework of
-in-progress approved work, flag the intersection to the user rather than
-choosing to continue or pause unilaterally. Non-intersecting proposals never
-block current work.
+An unrelated pre-existing defect does not join the assignment merely because
+a full-suite run or reviewer found it. Separate any drafted repair from the
+current change and retain that patch with the failure evidence as an unadopted
+proposal. Report the failure and its provenance honestly; continue independent
+verification. A gate requiring a green suite remains unmet; running that suite
+alone does not authorize unrelated repairs. Conversely, calling a necessary
+repair “known-flaky” or filing it away does not satisfy the assignment.
+
+**5. Resolve genuine intersections, without promoting agent proposals.**
+When a proposal exposes an unresolved choice that affects approved work,
+explain the intersection and obtain the authorized decision before dependent
+work. An unnecessary uncovered addition can be rejected outright. Neither it
+nor a non-intersecting proposal blocks independent approved work.
 
 ## Delegation for autonomous flows
 
@@ -186,7 +195,7 @@ instead of stopping for human input. This enables autonomous scenarios.
 | --- | --- | --- |
 | **Mandatory stop** | Security boundary changes, irreversible operations (delete, archive, close), scope authority changes, budget/contract decisions | Human only — no delegation possible |
 | **Delegatable** | Scope proposal evaluation, ambiguity within approved scope, trade-off decisions within approved constraints, priority ordering | Subagent, if pre-authorized by user |
-| **Automatic** | Defect fixes within approved scope, mechanical operations with established patterns | Agent proceeds without stopping |
+| **Automatic** | Defect fixes within the current assignment (rule 4), mechanical operations with established patterns | Agent proceeds without stopping |
 
 ### Subagent context modes
 
@@ -277,15 +286,44 @@ inconsistencies the process prevents.
 
 ## Approval boundary
 
-Inspect native state, preview one concrete owner action and its effects, and
-check explicit user authorization before mutation. Applicable earlier approval
-and user instructions approving intermediate actions remain effective; do not
-ask again for an action they cover. If authority or scope is missing, ask.
+When resolving an authorization claim, preparing an owner mutation, or
+dispatching work, include these three parts in the existing preview or
+next-action explanation:
+
+1. **Source**: Identify the actual user instruction or bounded delegated
+   decision and applicable approved snapshot, actually read now or reused
+   unchanged from context. An available but unread source remains pending.
+   For a disputed artifact-based claim, inspect the underlying
+   user decisions and linked approval evidence. If that inspection is still
+   pending, make the concrete source read a next operation and keep its
+   authorization conclusion pending.
+2. **Effects**: Match each proposed effect to what that source authorizes.
+   Distinguish approved content, implementation, native record creation,
+   and lifecycle transitions; state which effects are covered and which
+   await a decision or inspection. An implementation or ordinary
+   execution-record grant does not by itself authorize closure, archive,
+   deletion, or claim release. Apply existing human-only decision
+   requirements to those effects, reusing a matching human grant rather
+   than requesting it again. An instruction to execute approved work
+   through selected owners can cover necessary execution records under the
+   [cross-owner mutation recipe](operations.md#cross-owner-mutation-recipe).
+3. **Next action**: Execute or dispatch covered ready work and inspect or
+   obtain only the missing authority for its dependent effects. Keep proposed
+   uncovered writes as read-only previews. Continue independently covered
+   implementation while a separate record-creation or scope decision is pending.
+
+Use the current conversation and native evidence; reuse unchanged reads and
+grants. These parts complete the existing ephemeral preview, not a new stored
+record or approval round. Inspect current native state before its mutation.
 
 OpenSpec proposal or projection requires current explicit user approval by
 default. A durable approval is valid only through a documented native signal,
 or a user-named attestation that the user confirms authorizes projection.
-Validation, files, review activity, and an ordinary Git commit never implies approval.
+Inspect the actual authorization and its covered snapshot: a later explicit
+user decision, an identified approved linked plan, or a decision within a
+user-granted delegation can supply authority. Preserve that authority even
+when a short summary omits its detail. A file, plan, commit, review verdict,
+or execution reference alone does not supply approval.
 
 When Beads is selected, OpenSpec `tasks.md` is a design-time checklist and
 projection index, not live executable status, assignment, claim, or completion;
@@ -307,18 +345,30 @@ SpeciFlow selects the cross-tool action. Before the bounded selected activity:
    modeling, research, or prototyping.
 3. Each discipline shapes the activity, then returns control to SpeciFlow.
 
-SpeciFlow retains cross-owner selection — supporting disciplines select
-methods within the bounded activity, not the next owner action.
+SpeciFlow retains cross-owner selection. Supporting disciplines select
+methods and make rulings within the bounded assignment and applicable
+approval; their autonomy, review verdicts, and local ledgers confer no new
+scope authority. Return uncovered semantic additions as proposals before
+owner mutation or downstream dispatch, while continuing covered work.
+A discipline's task-review gate governs that task and its dependants. Correct
+and re-review the affected task while independently ready, authorized work
+continues; its dispatch does not wait for that unrelated review gate.
 
 ### Discipline handoff
 
 When one discipline discovers it needs another mid-activity:
 
-1. The active discipline pauses (preserve work-in-progress).
+1. The active discipline pauses the dependent activity (preserve work-in-progress).
 2. SpeciFlow takes control and selects the needed discipline.
 3. That discipline completes and returns results to the appropriate owner.
-4. SpeciFlow routes the owner update (spec change, evidence, etc.).
-5. The original discipline resumes with the updated context.
+4. SpeciFlow checks authority and necessity. If the result requires a real
+   design or specification change, route the covered owner update through
+   its existing review and authorization gates. A finding that confirms the
+   approved design is evidence, not automatically a required owner change.
+5. The original discipline resumes when its actual prerequisite is resolved.
+   Do not make recording a confirming finding a new prerequisite to already
+   authorized implementation. Include the finding in its working context;
+   route any nonblocking evidence update separately.
 
 ## What SpeciFlow owns
 
