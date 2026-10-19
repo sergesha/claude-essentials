@@ -6,9 +6,9 @@ Use each owner through its native interface:
 
 | Owner | Use for |
 | --- | --- |
-| Backlog.md | Product intent, priority, acceptance criteria |
-| OpenSpec | Requirements, design, specification tasks |
-| Beads/Dolt | Executable decomposition, dependencies, claim, completion |
+| Backlog.md | Outcomes, high-level requirements, DoD, NFRs, constraints, priority |
+| OpenSpec | Technical solution, derived testable requirements, design, specification plan |
+| Beads/Dolt | Atomic verifiable decomposition of the approved solution, dependencies, claim, completion |
 | Superpowers | TDD, debugging, verification, implementation review |
 | Grill | Interviews, domain modeling, research, prototyping |
 | Product Git/CI | Source changes, review history, implementation evidence |
@@ -70,6 +70,9 @@ proposal. Read each installed owner's instructions before refining its tasks.
 Keep Backlog acceptance at outcome level, OpenSpec checklists at specification
 level, and executable decomposition and status in Beads. Do not mirror task
 checkmarks or synthesize automatic cross-owner completion.
+Backlog contains no implementation recipe, including in a native plan field;
+link to the OpenSpec design/plan instead. Apply the
+[owner granularity](ownership.md#native-artifacts-and-granularity) contract.
 
 When specification task authoring is explicitly deferred, keep the reason and
 resumption condition in the current proposal/design. Leave the task artifact
@@ -87,7 +90,9 @@ For any action that crosses owner boundaries, follow these steps in order:
 1. **Preserve intent**: Complete the ephemeral check in
    [transitions.md](transitions.md) — verify every approved upstream item
    appears in the proposed downstream result and every added obligation has
-   authority or is necessary implementation detail. For epic-level closures
+   authority or is necessary implementation detail. A proposed parent semantic
+   change first follows [parent contract amendments](ownership.md#parent-contract-amendments);
+   review cannot adopt it or supply the user's answer. For epic-level closures
    (archive OpenSpec spec, mark Backlog task Done), run
    [doctor](doctor.md) first. Individual Beads issue close with passing
    code review and evidence does not need full doctor.
@@ -108,7 +113,8 @@ For any action that crosses owner boundaries, follow these steps in order:
    scope, even when their concrete payload is derived later. Preserve explicit
    per-item approval requirements and exclusions. If an effect is uncovered or
    a product decision is unresolved, obtain only the missing authorization or
-   decision before the dependent action; continue covered ready work.
+   decision before the dependent action; use the mandatory grilling route for
+   unresolved parent semantic changes. Continue covered ready work.
 7. **Execute**: Use only the documented owner interface.
 8. **Verify**: Re-inspect native state after execution before reporting effects.
    For lifecycle transitions (closing, completing, archiving): Superpowers
@@ -189,6 +195,9 @@ is the single definitive trigger — no separate rule overrides it.
    against the approved outcome and existing narrower paths; then assess the
    proposed solution. Return blocking defects within the current assignment
    separately from scope proposals. Review does not authorize either.
+   Apply the level-specific review questions and amendment route in
+   [ownership.md](ownership.md#parent-contract-amendments); do not patch a parent
+   to make the reviewed child conform.
    Rejecting an uncovered addition outright needs no review of that abandoned
    proposal; use existing review for any resulting implementation correction.
 4. End review when no approved-scope blockers remain.
@@ -302,9 +311,9 @@ not as authoritative owners.
 1. **Identify**: Ask the user for links/access to each external source.
 2. **Read**: Extract the content from external sources (read-only).
 3. **Classify**: Map each item to its native owner by concern:
-   - Product intent, priorities, acceptance → Backlog.md
-   - Requirements, design, specifications → OpenSpec
-   - Implementation tasks, dependencies, status → Beads/Dolt
+   - Outcomes, high-level requirements, DoD, NFRs, constraints, priority → Backlog.md
+   - Technical solution, derived requirements, design and plan → OpenSpec
+   - Atomic implementation tasks, dependencies, status → Beads/Dolt
 4. **Preview**: Present a migration plan showing what goes where, item by
    item. Flag conflicts and ambiguous items.
 5. **Approve**: Get explicit approval before creating any native artifacts.
@@ -381,7 +390,9 @@ interrupt.
    database choice, wrong runtime — every finished task increases rework)
 
 **Any YES → interrupt.** Apply the appropriate protocol (scope amendment,
-mandatory stop, cross-phase invalidation). Current work pauses.
+mandatory stop, cross-phase invalidation), routing parent semantic changes
+through [ownership.md](ownership.md#parent-contract-amendments). Only dependent
+work pauses; independently authorized work continues.
 
 **All NO → capture to inbox, continue current work.**
 

@@ -148,8 +148,13 @@ Include the summary line always.
 ## Doctor in autonomous flows
 
 When doctor runs during an autonomous pipeline, classify each finding
-using the delegation authority table from
+using the decision and delegation rules from
 [ownership.md](ownership.md#delegation-for-autonomous-flows):
+
+Delegating analysis of an orphan or drift does not delegate its resolution.
+Any newly required parent semantic change follows
+[parent contract amendments](ownership.md#parent-contract-amendments); diagnosis,
+review, and a proposed repair do not authorize updating a parent.
 
 | Finding | Authority level |
 | --- | --- |

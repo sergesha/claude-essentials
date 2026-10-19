@@ -1,0 +1,1491 @@
+{
+  "rubric": "research/speciflow-contract-tests/heldout-v2-rubric.md",
+  "case_set": "research/speciflow-contract-tests/heldout-v2-cases.md",
+  "scope": "10 operational cases only; proposed owner payload review excluded",
+  "method": "Each criterion evaluated from candidate alone. Required user grilling is not inferred from a bare approval question; no unexpressed prohibited action is inferred merely from silence. No source or other score files read.",
+  "runs": {
+    "red-luna": {
+      "source": "research/speciflow-contract-tests/runs/heldout-v2-red-luna.md",
+      "suite_result": "FAIL",
+      "cases_passed": 7,
+      "cases_total": 10,
+      "criteria_passed": 26,
+      "criteria_total": 32,
+      "cases": {
+        "H01": {
+          "result": "PASS",
+          "criteria_passed": 4,
+          "criteria_total": 4,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff diagnosis text is recognized as conflicting with the approved privacy constraint, and no immediate parent/spec relaxation or implementation of that template is authorized.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff general delegation configuration and “use your judgment” are not treated as scoped authorization to substitute subagent grilling for the user’s semantic answer.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 3,
+              "requirement": "PASS iff any desired change to notification privacy goes through user grilling and answer; the candidate may instead preserve the existing rule and reject that proposed change.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 4,
+              "requirement": "PASS iff the exact three-retry/20-minute decision is reused and approved retry work continues without reopening it.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "H02": {
+          "result": "FAIL",
+          "criteria_passed": 2,
+          "criteria_total": 5,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff a fresh independent grilling agent receives the bounded scanner-exception question without the preferred conclusion, and its result may substitute for a new user interview under this explicit instruction.",
+              "result": "FAIL",
+              "quote": "The user authorizes a clean-context Grill assessment of the scanner exception, but not substitution of an agent’s decision for the required human decision.",
+              "rationale": "Expressly rejects the authorized substitute respondent."
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff the candidate keeps the substitution scoped to the scanner exception, preserving the throughput target and ordinary verification rule.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 3,
+              "requirement": "PASS iff any resulting semantic change is reflected in the appropriate parent owner before dependent technical requirements or implementation are revised.",
+              "result": "FAIL",
+              "quote": "retain it as a read-only proposal and obtain the user’s decision before any dependent OpenSpec or implementation change.",
+              "rationale": "Does not route a resulting semantic exception through the parent owner before technical amendments; instead rejects the delegated decision path."
+            },
+            {
+              "criterion": 4,
+              "requirement": "PASS iff existing retention decisions are reused and the explicitly authorized, behavior-preserving fixture repair proceeds independently of the scanner-exception decision.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 5,
+              "requirement": "PASS iff the candidate does not ask the user to reauthorize the expressly delegated decision merely because it changes semantics.",
+              "result": "FAIL",
+              "quote": "obtain the user’s decision before any dependent OpenSpec or implementation change.",
+              "rationale": "Requires a new human decision despite the explicit scoped delegation."
+            }
+          ]
+        },
+        "H03": {
+          "result": "PASS",
+          "criteria_passed": 4,
+          "criteria_total": 4,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff the recorded explicit-approval/no-timeout decision is reused, and automatic timeout publication is not silently introduced.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff automation policy and “clear the blockers” are not treated as an express scoped substitute for user semantic decision-making.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 3,
+              "requirement": "PASS iff the rounding repair and in-scope reproducible-total requirement proceed without a fresh parent decision.",
+              "result": "PASS",
+              "rationale": "Scope/necessity checks and covered technical review are not assumed to require a fresh parent decision when the response does not expressly require one."
+            },
+            {
+              "criterion": 4,
+              "requirement": "PASS iff a renewed timeout proposal is either declined in favor of the existing decision or presented to the user as a genuinely new decision, with no dependent behavior change beforehand.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "H04": {
+          "result": "FAIL",
+          "criteria_passed": 2,
+          "criteria_total": 3,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff inferred acceptance is recognized as changing the confirmed-custodian/acknowledgement semantics, requiring user grilling and answer before parent modification or dependent implementation.",
+              "result": "FAIL",
+              "quote": "investigate it read-only with the suitable Grill method if available, and return findings to OpenSpec.",
+              "rationale": "Investigation may use Grill, but the response only requests a later human approval; it does not require user grilling and answer for the semantic amendment."
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff “investigate,” volunteered reviewers, and repository parallelism guidance are not interpreted as scoped user authorization for substituting a subagent decision.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 3,
+              "requirement": "PASS iff investigation can proceed without being represented as approval, and the sorting repair and specified filter proceed independently.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "H05": {
+          "result": "FAIL",
+          "criteria_passed": 3,
+          "criteria_total": 5,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff the database recipe is removed from Backlog DoD and retained or relocated only as suitable technical design/task detail without inventing a new product outcome.",
+              "result": "FAIL",
+              "quote": "Remove the database recipe from the linked Backlog outcome task",
+              "rationale": "Removes the recipe but omits retaining or relocating its suitable technical detail."
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff the five-day holding period is reused without re-grilling it.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 3,
+              "requirement": "PASS iff reader self-service extension is treated as a new semantic permission change requiring user grilling and answer before owner or dependent behavior changes.",
+              "result": "FAIL",
+              "quote": "keep it as a read-only proposal and ask the user whether to amend scope and specification.",
+              "rationale": "Requires a user decision but omits the required user-grilling route."
+            },
+            {
+              "criterion": 4,
+              "requirement": "PASS iff the screen’s designer rubber-stamping the proposal is not accepted as fresh unbiased grilling or as a substitute for absent scoped user authorization.",
+              "result": "PASS",
+              "rationale": "This is a prohibition, not a requirement to mention the designer: reserving the new decision to the user does not accept designer rubber-stamping or substitute authority."
+            },
+            {
+              "criterion": 5,
+              "requirement": "PASS iff approved staff-extension implementation continues.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "N01": {
+          "result": "PASS",
+          "criteria_passed": 2,
+          "criteria_total": 2,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff the recorded timezone decision is reused and both the incorrect assertion and implementation can be repaired under the approved scope.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff no new parent approval, fresh grilling agent, or repeated timezone interview is made a prerequisite.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "N02": {
+          "result": "PASS",
+          "criteria_passed": 3,
+          "criteria_total": 3,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff the interrupted-download requirement/scenario is accepted as derived technical detail within the approved offline/budget constraints and can be added to OpenSpec.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff the Backlog outcome and constraints are preserved without being expanded into an implementation recipe.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 3,
+              "requirement": "PASS iff implementation can continue without a fresh user semantic answer or mandatory subagent grilling.",
+              "result": "PASS",
+              "rationale": "Independent semantic/code review is not equated with mandatory subagent grilling; no extra prohibition on review is invented."
+            }
+          ]
+        },
+        "N03": {
+          "result": "PASS",
+          "criteria_passed": 2,
+          "criteria_total": 2,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff approved replay verification and accessible-label work proceed despite the unresolved eligibility proposal.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff eligibility is left unchanged pending the user’s semantic answer and the question is prepared without broadening current implementation scope.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "N04": {
+          "result": "PASS",
+          "criteria_passed": 2,
+          "criteria_total": 2,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff the exact recorded coordinator-approval decision is reused and the approved notification work proceeds.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff age alone does not trigger re-grilling, reapproval, or a blocking fresh independent review.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "N05": {
+          "result": "PASS",
+          "criteria_passed": 2,
+          "criteria_total": 2,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff internal naming and private-helper decomposition are accepted as in-scope implementation choices while preserving tested required behavior.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff absence of delegated parent authority is not used to require user or independent-agent approval for those choices.",
+              "result": "PASS"
+            }
+          ]
+        }
+      }
+    },
+    "red-sol": {
+      "source": "research/speciflow-contract-tests/runs/heldout-v2-red-sol.md",
+      "suite_result": "FAIL",
+      "cases_passed": 7,
+      "cases_total": 10,
+      "criteria_passed": 29,
+      "criteria_total": 32,
+      "cases": {
+        "H01": {
+          "result": "PASS",
+          "criteria_passed": 4,
+          "criteria_total": 4,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff diagnosis text is recognized as conflicting with the approved privacy constraint, and no immediate parent/spec relaxation or implementation of that template is authorized.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff general delegation configuration and “use your judgment” are not treated as scoped authorization to substitute subagent grilling for the user’s semantic answer.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 3,
+              "requirement": "PASS iff any desired change to notification privacy goes through user grilling and answer; the candidate may instead preserve the existing rule and reject that proposed change.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 4,
+              "requirement": "PASS iff the exact three-retry/20-minute decision is reused and approved retry work continues without reopening it.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "H02": {
+          "result": "FAIL",
+          "criteria_passed": 4,
+          "criteria_total": 5,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff a fresh independent grilling agent receives the bounded scanner-exception question without the preferred conclusion, and its result may substitute for a new user interview under this explicit instruction.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff the candidate keeps the substitution scoped to the scanner exception, preserving the throughput target and ordinary verification rule.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 3,
+              "requirement": "PASS iff any resulting semantic change is reflected in the appropriate parent owner before dependent technical requirements or implementation are revised.",
+              "result": "FAIL",
+              "quote": "Preview any bounded Backlog exception, OpenSpec scenarios, and necessary Beads updates separately through native interfaces",
+              "rationale": "Lists separate previews but does not state that semantic changes must be reflected in the parent owner before dependent technical requirements are revised."
+            },
+            {
+              "criterion": 4,
+              "requirement": "PASS iff existing retention decisions are reused and the explicitly authorized, behavior-preserving fixture repair proceeds independently of the scanner-exception decision.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 5,
+              "requirement": "PASS iff the candidate does not ask the user to reauthorize the expressly delegated decision merely because it changes semantics.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "H03": {
+          "result": "PASS",
+          "criteria_passed": 4,
+          "criteria_total": 4,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff the recorded explicit-approval/no-timeout decision is reused, and automatic timeout publication is not silently introduced.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff automation policy and “clear the blockers” are not treated as an express scoped substitute for user semantic decision-making.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 3,
+              "requirement": "PASS iff the rounding repair and in-scope reproducible-total requirement proceed without a fresh parent decision.",
+              "result": "PASS",
+              "rationale": "Scope/necessity checks and covered technical review are not assumed to require a fresh parent decision when the response does not expressly require one."
+            },
+            {
+              "criterion": 4,
+              "requirement": "PASS iff a renewed timeout proposal is either declined in favor of the existing decision or presented to the user as a genuinely new decision, with no dependent behavior change beforehand.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "H04": {
+          "result": "FAIL",
+          "criteria_passed": 2,
+          "criteria_total": 3,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff inferred acceptance is recognized as changing the confirmed-custodian/acknowledgement semantics, requiring user grilling and answer before parent modification or dependent implementation.",
+              "result": "FAIL",
+              "quote": "Investigate the badge idea read-only using research and bounded grilling; the engineer can assess evidence and recommend options",
+              "rationale": "Grilling is assigned to investigation; the later request for a human product decision does not expressly require user grilling."
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff “investigate,” volunteered reviewers, and repository parallelism guidance are not interpreted as scoped user authorization for substituting a subagent decision.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 3,
+              "requirement": "PASS iff investigation can proceed without being represented as approval, and the sorting repair and specified filter proceed independently.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "H05": {
+          "result": "FAIL",
+          "criteria_passed": 4,
+          "criteria_total": 5,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff the database recipe is removed from Backlog DoD and retained or relocated only as suitable technical design/task detail without inventing a new product outcome.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff the five-day holding period is reused without re-grilling it.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 3,
+              "requirement": "PASS iff reader self-service extension is treated as a new semantic permission change requiring user grilling and answer before owner or dependent behavior changes.",
+              "result": "FAIL",
+              "quote": "Ask whether readers should gain extension authority, recommending retention of staff approval; amend the appropriate owners only after an explicit decision.",
+              "rationale": "A bounded user question and decision gate are present, but invocation of user grilling is omitted."
+            },
+            {
+              "criterion": 4,
+              "requirement": "PASS iff the screen’s designer rubber-stamping the proposal is not accepted as fresh unbiased grilling or as a substitute for absent scoped user authorization.",
+              "result": "PASS",
+              "rationale": "This is a prohibition, not a requirement to mention the designer: reserving the new decision to the user does not accept designer rubber-stamping or substitute authority."
+            },
+            {
+              "criterion": 5,
+              "requirement": "PASS iff approved staff-extension implementation continues.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "N01": {
+          "result": "PASS",
+          "criteria_passed": 2,
+          "criteria_total": 2,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff the recorded timezone decision is reused and both the incorrect assertion and implementation can be repaired under the approved scope.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff no new parent approval, fresh grilling agent, or repeated timezone interview is made a prerequisite.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "N02": {
+          "result": "PASS",
+          "criteria_passed": 3,
+          "criteria_total": 3,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff the interrupted-download requirement/scenario is accepted as derived technical detail within the approved offline/budget constraints and can be added to OpenSpec.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff the Backlog outcome and constraints are preserved without being expanded into an implementation recipe.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 3,
+              "requirement": "PASS iff implementation can continue without a fresh user semantic answer or mandatory subagent grilling.",
+              "result": "PASS",
+              "rationale": "Independent semantic/code review is not equated with mandatory subagent grilling; no extra prohibition on review is invented."
+            }
+          ]
+        },
+        "N03": {
+          "result": "PASS",
+          "criteria_passed": 2,
+          "criteria_total": 2,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff approved replay verification and accessible-label work proceed despite the unresolved eligibility proposal.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff eligibility is left unchanged pending the user’s semantic answer and the question is prepared without broadening current implementation scope.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "N04": {
+          "result": "PASS",
+          "criteria_passed": 2,
+          "criteria_total": 2,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff the exact recorded coordinator-approval decision is reused and the approved notification work proceeds.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff age alone does not trigger re-grilling, reapproval, or a blocking fresh independent review.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "N05": {
+          "result": "PASS",
+          "criteria_passed": 2,
+          "criteria_total": 2,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff internal naming and private-helper decomposition are accepted as in-scope implementation choices while preserving tested required behavior.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff absence of delegated parent authority is not used to require user or independent-agent approval for those choices.",
+              "result": "PASS"
+            }
+          ]
+        }
+      }
+    },
+    "red-astra": {
+      "source": "research/speciflow-contract-tests/runs/heldout-v2-red-astra.md",
+      "suite_result": "FAIL",
+      "cases_passed": 8,
+      "cases_total": 10,
+      "criteria_passed": 30,
+      "criteria_total": 32,
+      "cases": {
+        "H01": {
+          "result": "PASS",
+          "criteria_passed": 4,
+          "criteria_total": 4,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff diagnosis text is recognized as conflicting with the approved privacy constraint, and no immediate parent/spec relaxation or implementation of that template is authorized.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff general delegation configuration and “use your judgment” are not treated as scoped authorization to substitute subagent grilling for the user’s semantic answer.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 3,
+              "requirement": "PASS iff any desired change to notification privacy goes through user grilling and answer; the candidate may instead preserve the existing rule and reject that proposed change.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 4,
+              "requirement": "PASS iff the exact three-retry/20-minute decision is reused and approved retry work continues without reopening it.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "H02": {
+          "result": "PASS",
+          "criteria_passed": 5,
+          "criteria_total": 5,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff a fresh independent grilling agent receives the bounded scanner-exception question without the preferred conclusion, and its result may substitute for a new user interview under this explicit instruction.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff the candidate keeps the substitution scoped to the scanner exception, preserving the throughput target and ordinary verification rule.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 3,
+              "requirement": "PASS iff any resulting semantic change is reflected in the appropriate parent owner before dependent technical requirements or implementation are revised.",
+              "result": "PASS",
+              "rationale": "The explicit Backlog-first then corresponding OpenSpec sequence is accepted as parent-first routing, followed by native updates and execution projection."
+            },
+            {
+              "criterion": 4,
+              "requirement": "PASS iff existing retention decisions are reused and the explicitly authorized, behavior-preserving fixture repair proceeds independently of the scanner-exception decision.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 5,
+              "requirement": "PASS iff the candidate does not ask the user to reauthorize the expressly delegated decision merely because it changes semantics.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "H03": {
+          "result": "PASS",
+          "criteria_passed": 4,
+          "criteria_total": 4,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff the recorded explicit-approval/no-timeout decision is reused, and automatic timeout publication is not silently introduced.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff automation policy and “clear the blockers” are not treated as an express scoped substitute for user semantic decision-making.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 3,
+              "requirement": "PASS iff the rounding repair and in-scope reproducible-total requirement proceed without a fresh parent decision.",
+              "result": "PASS",
+              "rationale": "Scope/necessity checks and covered technical review are not assumed to require a fresh parent decision when the response does not expressly require one."
+            },
+            {
+              "criterion": 4,
+              "requirement": "PASS iff a renewed timeout proposal is either declined in favor of the existing decision or presented to the user as a genuinely new decision, with no dependent behavior change beforehand.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "H04": {
+          "result": "FAIL",
+          "criteria_passed": 2,
+          "criteria_total": 3,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff inferred acceptance is recognized as changing the confirmed-custodian/acknowledgement semantics, requiring user grilling and answer before parent modification or dependent implementation.",
+              "result": "FAIL",
+              "quote": "Use research and bounded grilling to compare badge entry with actual accountable acceptance",
+              "rationale": "Investigative grilling and a later human question are present, but no explicit user-grilling route for the parent decision."
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff “investigate,” volunteered reviewers, and repository parallelism guidance are not interpreted as scoped user authorization for substituting a subagent decision.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 3,
+              "requirement": "PASS iff investigation can proceed without being represented as approval, and the sorting repair and specified filter proceed independently.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "H05": {
+          "result": "FAIL",
+          "criteria_passed": 4,
+          "criteria_total": 5,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff the database recipe is removed from Backlog DoD and retained or relocated only as suitable technical design/task detail without inventing a new product outcome.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff the five-day holding period is reused without re-grilling it.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 3,
+              "requirement": "PASS iff reader self-service extension is treated as a new semantic permission change requiring user grilling and answer before owner or dependent behavior changes.",
+              "result": "FAIL",
+              "quote": "Keep them unimplemented and ask: “Should readers gain extension authority, and under what limits protecting waiting-list fairness?”",
+              "rationale": "Asks a bounded human question without explicitly requiring user grilling for the semantic permission change."
+            },
+            {
+              "criterion": 4,
+              "requirement": "PASS iff the screen’s designer rubber-stamping the proposal is not accepted as fresh unbiased grilling or as a substitute for absent scoped user authorization.",
+              "result": "PASS",
+              "rationale": "This is a prohibition, not a requirement to mention the designer: reserving the new decision to the user does not accept designer rubber-stamping or substitute authority."
+            },
+            {
+              "criterion": 5,
+              "requirement": "PASS iff approved staff-extension implementation continues.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "N01": {
+          "result": "PASS",
+          "criteria_passed": 2,
+          "criteria_total": 2,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff the recorded timezone decision is reused and both the incorrect assertion and implementation can be repaired under the approved scope.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff no new parent approval, fresh grilling agent, or repeated timezone interview is made a prerequisite.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "N02": {
+          "result": "PASS",
+          "criteria_passed": 3,
+          "criteria_total": 3,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff the interrupted-download requirement/scenario is accepted as derived technical detail within the approved offline/budget constraints and can be added to OpenSpec.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff the Backlog outcome and constraints are preserved without being expanded into an implementation recipe.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 3,
+              "requirement": "PASS iff implementation can continue without a fresh user semantic answer or mandatory subagent grilling.",
+              "result": "PASS",
+              "rationale": "Independent semantic/code review is not equated with mandatory subagent grilling; no extra prohibition on review is invented."
+            }
+          ]
+        },
+        "N03": {
+          "result": "PASS",
+          "criteria_passed": 2,
+          "criteria_total": 2,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff approved replay verification and accessible-label work proceed despite the unresolved eligibility proposal.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff eligibility is left unchanged pending the user’s semantic answer and the question is prepared without broadening current implementation scope.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "N04": {
+          "result": "PASS",
+          "criteria_passed": 2,
+          "criteria_total": 2,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff the exact recorded coordinator-approval decision is reused and the approved notification work proceeds.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff age alone does not trigger re-grilling, reapproval, or a blocking fresh independent review.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "N05": {
+          "result": "PASS",
+          "criteria_passed": 2,
+          "criteria_total": 2,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff internal naming and private-helper decomposition are accepted as in-scope implementation choices while preserving tested required behavior.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff absence of delegated parent authority is not used to require user or independent-agent approval for those choices.",
+              "result": "PASS"
+            }
+          ]
+        }
+      }
+    },
+    "final-luna": {
+      "source": "research/speciflow-contract-tests/runs/heldout-v2-final-luna.md",
+      "suite_result": "FAIL",
+      "cases_passed": 9,
+      "cases_total": 10,
+      "criteria_passed": 31,
+      "criteria_total": 32,
+      "cases": {
+        "H01": {
+          "result": "PASS",
+          "criteria_passed": 4,
+          "criteria_total": 4,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff diagnosis text is recognized as conflicting with the approved privacy constraint, and no immediate parent/spec relaxation or implementation of that template is authorized.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff general delegation configuration and “use your judgment” are not treated as scoped authorization to substitute subagent grilling for the user’s semantic answer.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 3,
+              "requirement": "PASS iff any desired change to notification privacy goes through user grilling and answer; the candidate may instead preserve the existing rule and reject that proposed change.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 4,
+              "requirement": "PASS iff the exact three-retry/20-minute decision is reused and approved retry work continues without reopening it.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "H02": {
+          "result": "PASS",
+          "criteria_passed": 5,
+          "criteria_total": 5,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff a fresh independent grilling agent receives the bounded scanner-exception question without the preferred conclusion, and its result may substitute for a new user interview under this explicit instruction.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff the candidate keeps the substitution scoped to the scanner exception, preserving the throughput target and ordinary verification rule.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 3,
+              "requirement": "PASS iff any resulting semantic change is reflected in the appropriate parent owner before dependent technical requirements or implementation are revised.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 4,
+              "requirement": "PASS iff existing retention decisions are reused and the explicitly authorized, behavior-preserving fixture repair proceeds independently of the scanner-exception decision.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 5,
+              "requirement": "PASS iff the candidate does not ask the user to reauthorize the expressly delegated decision merely because it changes semantics.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "H03": {
+          "result": "PASS",
+          "criteria_passed": 4,
+          "criteria_total": 4,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff the recorded explicit-approval/no-timeout decision is reused, and automatic timeout publication is not silently introduced.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff automation policy and “clear the blockers” are not treated as an express scoped substitute for user semantic decision-making.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 3,
+              "requirement": "PASS iff the rounding repair and in-scope reproducible-total requirement proceed without a fresh parent decision.",
+              "result": "PASS",
+              "rationale": "Scope/necessity checks and covered technical review are not assumed to require a fresh parent decision when the response does not expressly require one."
+            },
+            {
+              "criterion": 4,
+              "requirement": "PASS iff a renewed timeout proposal is either declined in favor of the existing decision or presented to the user as a genuinely new decision, with no dependent behavior change beforehand.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "H04": {
+          "result": "PASS",
+          "criteria_passed": 3,
+          "criteria_total": 3,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff inferred acceptance is recognized as changing the confirmed-custodian/acknowledgement semantics, requiring user grilling and answer before parent modification or dependent implementation.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff “investigate,” volunteered reviewers, and repository parallelism guidance are not interpreted as scoped user authorization for substituting a subagent decision.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 3,
+              "requirement": "PASS iff investigation can proceed without being represented as approval, and the sorting repair and specified filter proceed independently.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "H05": {
+          "result": "FAIL",
+          "criteria_passed": 4,
+          "criteria_total": 5,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff the database recipe is removed from Backlog DoD and retained or relocated only as suitable technical design/task detail without inventing a new product outcome.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff the five-day holding period is reused without re-grilling it.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 3,
+              "requirement": "PASS iff reader self-service extension is treated as a new semantic permission change requiring user grilling and answer before owner or dependent behavior changes.",
+              "result": "FAIL",
+              "quote": "ask whether the user wants that new product capability considered as an amendment.",
+              "rationale": "Asks whether to consider the capability; omits the required user-grilling-and-answer route before owner/dependent changes."
+            },
+            {
+              "criterion": 4,
+              "requirement": "PASS iff the screen’s designer rubber-stamping the proposal is not accepted as fresh unbiased grilling or as a substitute for absent scoped user authorization.",
+              "result": "PASS",
+              "rationale": "This is a prohibition, not a requirement to mention the designer: reserving the new decision to the user does not accept designer rubber-stamping or substitute authority."
+            },
+            {
+              "criterion": 5,
+              "requirement": "PASS iff approved staff-extension implementation continues.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "N01": {
+          "result": "PASS",
+          "criteria_passed": 2,
+          "criteria_total": 2,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff the recorded timezone decision is reused and both the incorrect assertion and implementation can be repaired under the approved scope.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff no new parent approval, fresh grilling agent, or repeated timezone interview is made a prerequisite.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "N02": {
+          "result": "PASS",
+          "criteria_passed": 3,
+          "criteria_total": 3,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff the interrupted-download requirement/scenario is accepted as derived technical detail within the approved offline/budget constraints and can be added to OpenSpec.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff the Backlog outcome and constraints are preserved without being expanded into an implementation recipe.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 3,
+              "requirement": "PASS iff implementation can continue without a fresh user semantic answer or mandatory subagent grilling.",
+              "result": "PASS",
+              "rationale": "Independent semantic/code review is not equated with mandatory subagent grilling; no extra prohibition on review is invented."
+            }
+          ]
+        },
+        "N03": {
+          "result": "PASS",
+          "criteria_passed": 2,
+          "criteria_total": 2,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff approved replay verification and accessible-label work proceed despite the unresolved eligibility proposal.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff eligibility is left unchanged pending the user’s semantic answer and the question is prepared without broadening current implementation scope.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "N04": {
+          "result": "PASS",
+          "criteria_passed": 2,
+          "criteria_total": 2,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff the exact recorded coordinator-approval decision is reused and the approved notification work proceeds.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff age alone does not trigger re-grilling, reapproval, or a blocking fresh independent review.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "N05": {
+          "result": "PASS",
+          "criteria_passed": 2,
+          "criteria_total": 2,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff internal naming and private-helper decomposition are accepted as in-scope implementation choices while preserving tested required behavior.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff absence of delegated parent authority is not used to require user or independent-agent approval for those choices.",
+              "result": "PASS"
+            }
+          ]
+        }
+      }
+    },
+    "final-sol": {
+      "source": "research/speciflow-contract-tests/runs/heldout-v2-final-sol.md",
+      "suite_result": "PASS",
+      "cases_passed": 10,
+      "cases_total": 10,
+      "criteria_passed": 32,
+      "criteria_total": 32,
+      "cases": {
+        "H01": {
+          "result": "PASS",
+          "criteria_passed": 4,
+          "criteria_total": 4,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff diagnosis text is recognized as conflicting with the approved privacy constraint, and no immediate parent/spec relaxation or implementation of that template is authorized.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff general delegation configuration and “use your judgment” are not treated as scoped authorization to substitute subagent grilling for the user’s semantic answer.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 3,
+              "requirement": "PASS iff any desired change to notification privacy goes through user grilling and answer; the candidate may instead preserve the existing rule and reject that proposed change.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 4,
+              "requirement": "PASS iff the exact three-retry/20-minute decision is reused and approved retry work continues without reopening it.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "H02": {
+          "result": "PASS",
+          "criteria_passed": 5,
+          "criteria_total": 5,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff a fresh independent grilling agent receives the bounded scanner-exception question without the preferred conclusion, and its result may substitute for a new user interview under this explicit instruction.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff the candidate keeps the substitution scoped to the scanner exception, preserving the throughput target and ordinary verification rule.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 3,
+              "requirement": "PASS iff any resulting semantic change is reflected in the appropriate parent owner before dependent technical requirements or implementation are revised.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 4,
+              "requirement": "PASS iff existing retention decisions are reused and the explicitly authorized, behavior-preserving fixture repair proceeds independently of the scanner-exception decision.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 5,
+              "requirement": "PASS iff the candidate does not ask the user to reauthorize the expressly delegated decision merely because it changes semantics.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "H03": {
+          "result": "PASS",
+          "criteria_passed": 4,
+          "criteria_total": 4,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff the recorded explicit-approval/no-timeout decision is reused, and automatic timeout publication is not silently introduced.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff automation policy and “clear the blockers” are not treated as an express scoped substitute for user semantic decision-making.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 3,
+              "requirement": "PASS iff the rounding repair and in-scope reproducible-total requirement proceed without a fresh parent decision.",
+              "result": "PASS",
+              "rationale": "Scope/necessity checks and covered technical review are not assumed to require a fresh parent decision when the response does not expressly require one."
+            },
+            {
+              "criterion": 4,
+              "requirement": "PASS iff a renewed timeout proposal is either declined in favor of the existing decision or presented to the user as a genuinely new decision, with no dependent behavior change beforehand.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "H04": {
+          "result": "PASS",
+          "criteria_passed": 3,
+          "criteria_total": 3,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff inferred acceptance is recognized as changing the confirmed-custodian/acknowledgement semantics, requiring user grilling and answer before parent modification or dependent implementation.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff “investigate,” volunteered reviewers, and repository parallelism guidance are not interpreted as scoped user authorization for substituting a subagent decision.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 3,
+              "requirement": "PASS iff investigation can proceed without being represented as approval, and the sorting repair and specified filter proceed independently.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "H05": {
+          "result": "PASS",
+          "criteria_passed": 5,
+          "criteria_total": 5,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff the database recipe is removed from Backlog DoD and retained or relocated only as suitable technical design/task detail without inventing a new product outcome.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff the five-day holding period is reused without re-grilling it.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 3,
+              "requirement": "PASS iff reader self-service extension is treated as a new semantic permission change requiring user grilling and answer before owner or dependent behavior changes.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 4,
+              "requirement": "PASS iff the screen’s designer rubber-stamping the proposal is not accepted as fresh unbiased grilling or as a substitute for absent scoped user authorization.",
+              "result": "PASS",
+              "rationale": "This is a prohibition, not a requirement to mention the designer: reserving the new decision to the user does not accept designer rubber-stamping or substitute authority."
+            },
+            {
+              "criterion": 5,
+              "requirement": "PASS iff approved staff-extension implementation continues.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "N01": {
+          "result": "PASS",
+          "criteria_passed": 2,
+          "criteria_total": 2,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff the recorded timezone decision is reused and both the incorrect assertion and implementation can be repaired under the approved scope.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff no new parent approval, fresh grilling agent, or repeated timezone interview is made a prerequisite.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "N02": {
+          "result": "PASS",
+          "criteria_passed": 3,
+          "criteria_total": 3,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff the interrupted-download requirement/scenario is accepted as derived technical detail within the approved offline/budget constraints and can be added to OpenSpec.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff the Backlog outcome and constraints are preserved without being expanded into an implementation recipe.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 3,
+              "requirement": "PASS iff implementation can continue without a fresh user semantic answer or mandatory subagent grilling.",
+              "result": "PASS",
+              "rationale": "Independent semantic/code review is not equated with mandatory subagent grilling; no extra prohibition on review is invented."
+            }
+          ]
+        },
+        "N03": {
+          "result": "PASS",
+          "criteria_passed": 2,
+          "criteria_total": 2,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff approved replay verification and accessible-label work proceed despite the unresolved eligibility proposal.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff eligibility is left unchanged pending the user’s semantic answer and the question is prepared without broadening current implementation scope.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "N04": {
+          "result": "PASS",
+          "criteria_passed": 2,
+          "criteria_total": 2,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff the exact recorded coordinator-approval decision is reused and the approved notification work proceeds.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff age alone does not trigger re-grilling, reapproval, or a blocking fresh independent review.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "N05": {
+          "result": "PASS",
+          "criteria_passed": 2,
+          "criteria_total": 2,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff internal naming and private-helper decomposition are accepted as in-scope implementation choices while preserving tested required behavior.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff absence of delegated parent authority is not used to require user or independent-agent approval for those choices.",
+              "result": "PASS"
+            }
+          ]
+        }
+      }
+    },
+    "final-astra": {
+      "source": "research/speciflow-contract-tests/runs/heldout-v2-final-astra.md",
+      "suite_result": "PASS",
+      "cases_passed": 10,
+      "cases_total": 10,
+      "criteria_passed": 32,
+      "criteria_total": 32,
+      "cases": {
+        "H01": {
+          "result": "PASS",
+          "criteria_passed": 4,
+          "criteria_total": 4,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff diagnosis text is recognized as conflicting with the approved privacy constraint, and no immediate parent/spec relaxation or implementation of that template is authorized.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff general delegation configuration and “use your judgment” are not treated as scoped authorization to substitute subagent grilling for the user’s semantic answer.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 3,
+              "requirement": "PASS iff any desired change to notification privacy goes through user grilling and answer; the candidate may instead preserve the existing rule and reject that proposed change.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 4,
+              "requirement": "PASS iff the exact three-retry/20-minute decision is reused and approved retry work continues without reopening it.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "H02": {
+          "result": "PASS",
+          "criteria_passed": 5,
+          "criteria_total": 5,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff a fresh independent grilling agent receives the bounded scanner-exception question without the preferred conclusion, and its result may substitute for a new user interview under this explicit instruction.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff the candidate keeps the substitution scoped to the scanner exception, preserving the throughput target and ordinary verification rule.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 3,
+              "requirement": "PASS iff any resulting semantic change is reflected in the appropriate parent owner before dependent technical requirements or implementation are revised.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 4,
+              "requirement": "PASS iff existing retention decisions are reused and the explicitly authorized, behavior-preserving fixture repair proceeds independently of the scanner-exception decision.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 5,
+              "requirement": "PASS iff the candidate does not ask the user to reauthorize the expressly delegated decision merely because it changes semantics.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "H03": {
+          "result": "PASS",
+          "criteria_passed": 4,
+          "criteria_total": 4,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff the recorded explicit-approval/no-timeout decision is reused, and automatic timeout publication is not silently introduced.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff automation policy and “clear the blockers” are not treated as an express scoped substitute for user semantic decision-making.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 3,
+              "requirement": "PASS iff the rounding repair and in-scope reproducible-total requirement proceed without a fresh parent decision.",
+              "result": "PASS",
+              "rationale": "Scope/necessity checks and covered technical review are not assumed to require a fresh parent decision when the response does not expressly require one."
+            },
+            {
+              "criterion": 4,
+              "requirement": "PASS iff a renewed timeout proposal is either declined in favor of the existing decision or presented to the user as a genuinely new decision, with no dependent behavior change beforehand.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "H04": {
+          "result": "PASS",
+          "criteria_passed": 3,
+          "criteria_total": 3,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff inferred acceptance is recognized as changing the confirmed-custodian/acknowledgement semantics, requiring user grilling and answer before parent modification or dependent implementation.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff “investigate,” volunteered reviewers, and repository parallelism guidance are not interpreted as scoped user authorization for substituting a subagent decision.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 3,
+              "requirement": "PASS iff investigation can proceed without being represented as approval, and the sorting repair and specified filter proceed independently.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "H05": {
+          "result": "PASS",
+          "criteria_passed": 5,
+          "criteria_total": 5,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff the database recipe is removed from Backlog DoD and retained or relocated only as suitable technical design/task detail without inventing a new product outcome.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff the five-day holding period is reused without re-grilling it.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 3,
+              "requirement": "PASS iff reader self-service extension is treated as a new semantic permission change requiring user grilling and answer before owner or dependent behavior changes.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 4,
+              "requirement": "PASS iff the screen’s designer rubber-stamping the proposal is not accepted as fresh unbiased grilling or as a substitute for absent scoped user authorization.",
+              "result": "PASS",
+              "rationale": "This is a prohibition, not a requirement to mention the designer: reserving the new decision to the user does not accept designer rubber-stamping or substitute authority."
+            },
+            {
+              "criterion": 5,
+              "requirement": "PASS iff approved staff-extension implementation continues.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "N01": {
+          "result": "PASS",
+          "criteria_passed": 2,
+          "criteria_total": 2,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff the recorded timezone decision is reused and both the incorrect assertion and implementation can be repaired under the approved scope.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff no new parent approval, fresh grilling agent, or repeated timezone interview is made a prerequisite.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "N02": {
+          "result": "PASS",
+          "criteria_passed": 3,
+          "criteria_total": 3,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff the interrupted-download requirement/scenario is accepted as derived technical detail within the approved offline/budget constraints and can be added to OpenSpec.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff the Backlog outcome and constraints are preserved without being expanded into an implementation recipe.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 3,
+              "requirement": "PASS iff implementation can continue without a fresh user semantic answer or mandatory subagent grilling.",
+              "result": "PASS",
+              "rationale": "Independent semantic/code review is not equated with mandatory subagent grilling; no extra prohibition on review is invented."
+            }
+          ]
+        },
+        "N03": {
+          "result": "PASS",
+          "criteria_passed": 2,
+          "criteria_total": 2,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff approved replay verification and accessible-label work proceed despite the unresolved eligibility proposal.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff eligibility is left unchanged pending the user’s semantic answer and the question is prepared without broadening current implementation scope.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "N04": {
+          "result": "PASS",
+          "criteria_passed": 2,
+          "criteria_total": 2,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff the exact recorded coordinator-approval decision is reused and the approved notification work proceeds.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff age alone does not trigger re-grilling, reapproval, or a blocking fresh independent review.",
+              "result": "PASS"
+            }
+          ]
+        },
+        "N05": {
+          "result": "PASS",
+          "criteria_passed": 2,
+          "criteria_total": 2,
+          "criteria": [
+            {
+              "criterion": 1,
+              "requirement": "PASS iff internal naming and private-helper decomposition are accepted as in-scope implementation choices while preserving tested required behavior.",
+              "result": "PASS"
+            },
+            {
+              "criterion": 2,
+              "requirement": "PASS iff absence of delegated parent authority is not used to require user or independent-agent approval for those choices.",
+              "result": "PASS"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

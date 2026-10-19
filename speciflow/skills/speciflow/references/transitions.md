@@ -27,6 +27,12 @@ result, hide an unresolved dependency, or introduce an exclusion, deferral, or
 substitution without approval from the owner of the upstream intent
 (Backlog owns product intent; OpenSpec owns specification intent).
 
+An unresolved change to that parent meaning requires the
+[parent contract amendment route](ownership.md#parent-contract-amendments).
+Downstream review cannot authorize an upward rewrite. Preserve the separation:
+Backlog outcomes and constraints → OpenSpec technical solution and plan →
+Beads atomic, independently verifiable implementation tasks.
+
 Proceed only when every applicable item is retained and added obligations are
 covered. Otherwise withhold the dependent mutation and report the authoritative
 source, target transition, and exact uncovered addition, unmatched, weakened,

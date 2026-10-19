@@ -1,0 +1,146 @@
+{
+  "variant": "candidate-v13",
+  "passed": 6,
+  "total": 6,
+  "trials": [
+    {
+      "trial": "candidate-v13-1",
+      "pass": true,
+      "rounds": [
+        [
+          "format"
+        ],
+        [
+          "filename"
+        ],
+        [
+          "delimiter"
+        ],
+        [
+          "date_clock"
+        ],
+        [
+          "timezone"
+        ]
+      ],
+      "failures": [],
+      "plan": "# Exhibition-catalog export plan\n\n- Format: CSV\n- Encoding: UTF-8\n- Delimiter: semicolon (;)\n- Filename: date-based\n- Date clock: local time\n- Timezone: Europe/Berlin\n\nThe date in the filename is determined using local time in Europe/Berlin. The delimiter decision applies because CSV is selected; the filename choice is independent of format. This plan reflects the respondent-confirmed shared understanding.\n"
+    },
+    {
+      "trial": "candidate-v13-2",
+      "pass": true,
+      "rounds": [
+        [
+          "format"
+        ],
+        [
+          "filename"
+        ],
+        [
+          "delimiter"
+        ],
+        [
+          "date_clock"
+        ],
+        [
+          "timezone"
+        ]
+      ],
+      "failures": [],
+      "plan": "# Exhibition-catalog export design\n\n- Export format: CSV, encoded as UTF-8.\n- Filename pattern: date.\n- CSV delimiter: semicolon.\n- Date clock: local time in Europe/Berlin.\n\nThese choices use capabilities already supported by the offline exporter.\n"
+    },
+    {
+      "trial": "candidate-v13-3",
+      "pass": true,
+      "rounds": [
+        [
+          "format"
+        ],
+        [
+          "filename"
+        ],
+        [
+          "delimiter"
+        ],
+        [
+          "date_clock"
+        ],
+        [
+          "timezone"
+        ]
+      ],
+      "failures": [],
+      "plan": "Agreed exhibition-catalog export design\n\nThe offline exporter produces UTF-8 CSV using a semicolon delimiter. Export filenames use the date calculated in local time in Europe/Berlin, observing its timezone rules.\n\nSettled choices: format=CSV; filename=date; delimiter=semicolon; date_clock=local; timezone=Europe/Berlin.\n\nThe simulated user corrected UTC to local time at the first shared-understanding confirmation. After resolving the newly active timezone branch, the user confirmed the complete revised design and requested publication.\n\nVerification criteria: export is UTF-8 CSV; field delimiter is semicolon; filename uses the local date in Europe/Berlin, including cases where its date differs from UTC. No implementation or real owner writes are part of this fixture.\n"
+    },
+    {
+      "trial": "candidate-v13-4",
+      "pass": true,
+      "rounds": [
+        [
+          "format"
+        ],
+        [
+          "filename"
+        ],
+        [
+          "delimiter"
+        ],
+        [
+          "date_clock"
+        ],
+        [
+          "timezone"
+        ]
+      ],
+      "failures": [],
+      "plan": "# Agreed exhibition-catalog export plan\n\nThe offline exporter produces UTF-8 CSV, with semicolon delimiters. Filenames use dates, calculated using local time in the named Europe/Berlin timezone.\n\nThe simulated user corrected the initial UTC choice to local time, selected Europe/Berlin, and confirmed the revised shared understanding before publication.\n"
+    },
+    {
+      "trial": "candidate-v13-5",
+      "pass": true,
+      "rounds": [
+        [
+          "format"
+        ],
+        [
+          "filename"
+        ],
+        [
+          "delimiter"
+        ],
+        [
+          "date_clock"
+        ],
+        [
+          "timezone"
+        ]
+      ],
+      "failures": [],
+      "plan": "Agreed exhibition-catalog export plan\n\nThe offline exporter will produce UTF-8 CSV files using a semicolon delimiter. Filenames use the date pattern, with the date determined by local time in the named timezone Europe/Berlin.\n\nThe format and filename decisions are independent. The CSV branch is resolved by the semicolon choice; the date filename branch is resolved by local time and Europe/Berlin. The final local-time decision supersedes the earlier UTC answer.\n\nAll bounded design decisions are resolved. The simulated user confirmed this shared understanding and explicitly instructed publication. This plan is confined to the fixture and does not authorize or perform real project owner writes.\n"
+    },
+    {
+      "trial": "candidate-v13-6",
+      "pass": true,
+      "rounds": [
+        [
+          "format"
+        ],
+        [
+          "filename"
+        ],
+        [
+          "delimiter"
+        ],
+        [
+          "date_clock"
+        ],
+        [
+          "timezone"
+        ]
+      ],
+      "failures": [],
+      "plan": "Agreed exhibition-catalog export plan\n\nUse the existing offline exporter to produce UTF-8 CSV files. Separate CSV fields with semicolons. Use date-based filenames, calculating their date in local time in the named timezone Europe/Berlin.\n\nThe final local-time decision supersedes the earlier UTC selection. CSV and the date-based filename were chosen independently; the resulting delimiter, date clock, and timezone branches have all been resolved.\n\nThis is an isolated fixture design plan. Publication does not implement the exporter or mutate production Backlog, OpenSpec, Beads, or Git state.\n\nThe simulated user confirmed this complete shared understanding and explicitly requested publication.\n"
+    }
+  ],
+  "note": "Manual plan/content and event inspection required; programmatic flags are not final adjudication."
+}
