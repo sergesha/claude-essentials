@@ -1,0 +1,665 @@
+{
+  "rubric": "heldout-v2-rubric.md",
+  "cases_source": "heldout-v2-cases.md",
+  "scope": "Operational cases H01-H05 and N01-N05 only. No owner payload sections, skill source, prior runs, or prior scores used.",
+  "grading_rule": "Required actions must be expressed; prohibited actions are not inferred from silence. Semantic conformance review is not treated as substitute grilling or new parent authorization.",
+  "runs": {
+    "luna": {
+      "source": "runs/heldout-v2-v13-luna.md",
+      "cases_passed": 10,
+      "cases_total": 10,
+      "criteria_passed": 32,
+      "criteria_total": 32,
+      "cases": {
+        "H01": {
+          "passed": true,
+          "criteria": [
+            {
+              "id": "H01.1",
+              "passed": true,
+              "reason": "Rejects the appointment-reason template as conflicting with privacy and preserves the approved privacy owners."
+            },
+            {
+              "id": "H01.2",
+              "passed": true,
+              "reason": "States that general agents-may-delegate configuration does not substitute a respondent or authorize scope change; executes only the settled retry grant despite the urgency/judgment instruction."
+            },
+            {
+              "id": "H01.3",
+              "passed": true,
+              "reason": "Rejects disclosure for the current assignment; any pursued amendment uses original grilling with the user."
+            },
+            {
+              "id": "H01.4",
+              "passed": true,
+              "reason": "Continues the approved retry Bead with exactly three retries within 20 minutes."
+            }
+          ]
+        },
+        "H02": {
+          "passed": true,
+          "criteria": [
+            {
+              "id": "H02.1",
+              "passed": true,
+              "reason": "Calls for original grilling with a fresh independent substitute respondent using only authoritative snapshots, exact delegation, the question, and neutral facts; explicitly permits the bounded substituted decision."
+            },
+            {
+              "id": "H02.2",
+              "passed": true,
+              "reason": "Preserves throughput and normal verification while limiting substituted decision authority to the scanner exception."
+            },
+            {
+              "id": "H02.3",
+              "passed": true,
+              "reason": "Sequences a changed exception through Backlog first, then OpenSpec and dependent Beads/implementation."
+            },
+            {
+              "id": "H02.4",
+              "passed": true,
+              "reason": "Reuses audit retention and immediately proceeds with independent behavior-preserving fixture repair."
+            },
+            {
+              "id": "H02.5",
+              "passed": true,
+              "reason": "Applies the bounded result under the existing grant without requesting repeat user authorization for its semantic nature."
+            }
+          ]
+        },
+        "H03": {
+          "passed": true,
+          "criteria": [
+            {
+              "id": "H03.1",
+              "passed": true,
+              "reason": "Reuses explicit manager approval for every final statement and rejects timeout publication."
+            },
+            {
+              "id": "H03.2",
+              "passed": true,
+              "reason": "Rejects generic automation policy and clear-blockers language as overriding the settled user decision."
+            },
+            {
+              "id": "H03.3",
+              "passed": true,
+              "reason": "Proceeds with rounding repair and derived reproducible-totals OpenSpec refinement under existing scope."
+            },
+            {
+              "id": "H03.4",
+              "passed": true,
+              "reason": "Declines the timeout proposal and continues existing approved behavior without dependent timeout changes."
+            }
+          ]
+        },
+        "H04": {
+          "passed": true,
+          "criteria": [
+            {
+              "id": "H04.1",
+              "passed": true,
+              "reason": "Identifies inferred acceptance as changing acknowledgement semantics and requires original user grilling before affected owner or implementation changes."
+            },
+            {
+              "id": "H04.2",
+              "passed": true,
+              "reason": "Explicitly rejects the engineer offer and repository parallelism guidance as authority for substitute decision-making."
+            },
+            {
+              "id": "H04.3",
+              "passed": true,
+              "reason": "Allows factual investigation without adoption and independently continues sorting repair and the specified filter."
+            }
+          ]
+        },
+        "H05": {
+          "passed": true,
+          "criteria": [
+            {
+              "id": "H05.1",
+              "passed": true,
+              "reason": "Removes the database recipe from Backlog DoD and relocates it to OpenSpec technical design while preserving product criteria."
+            },
+            {
+              "id": "H05.2",
+              "passed": true,
+              "reason": "Reuses the settled five-day holding period without reopening it."
+            },
+            {
+              "id": "H05.3",
+              "passed": true,
+              "reason": "Treats reader self-extension as a new permission/contract decision requiring user grilling before owner or dependent behavior changes."
+            },
+            {
+              "id": "H05.4",
+              "passed": true,
+              "reason": "Keeps self-service outside owner records and requires original grilling with the user before amendment or dependent implementation; gives the screen designer no substitute decision or rubber-stamp role."
+            },
+            {
+              "id": "H05.5",
+              "passed": true,
+              "reason": "Continues approved staff extension implementation and verification."
+            }
+          ]
+        },
+        "N01": {
+          "passed": true,
+          "criteria": [
+            {
+              "id": "N01.1",
+              "passed": true,
+              "reason": "Reuses UTC storage/local display and repairs both the erroneous assertion and implementation under approved scope."
+            },
+            {
+              "id": "N01.2",
+              "passed": true,
+              "reason": "Continues under existing authority without new parent approval, grilling agent, or repeated timezone interview."
+            }
+          ]
+        },
+        "N02": {
+          "passed": true,
+          "criteria": [
+            {
+              "id": "N02.1",
+              "passed": true,
+              "reason": "Adds interrupted-network resumption and verified-segment reuse as a derived testable OpenSpec requirement within the approved budget."
+            },
+            {
+              "id": "N02.2",
+              "passed": true,
+              "reason": "Preserves offline playback, captions/accessibility, and budget while leaving Backlog outcome unchanged."
+            },
+            {
+              "id": "N02.3",
+              "passed": true,
+              "reason": "Expressly treats the current user instruction as covering technical refinement and implementation; independent semantic review checks fit and explicitly does not confer authority, with no new grilling required."
+            }
+          ]
+        },
+        "N03": {
+          "passed": true,
+          "criteria": [
+            {
+              "id": "N03.1",
+              "passed": true,
+              "reason": "Proceeds with deterministic replay verification and accessible labels independently of eligibility."
+            },
+            {
+              "id": "N03.2",
+              "passed": true,
+              "reason": "Prepares the unresolved eligibility question for user grilling while leaving current policy and implementation unchanged."
+            }
+          ]
+        },
+        "N04": {
+          "passed": true,
+          "criteria": [
+            {
+              "id": "N04.1",
+              "passed": true,
+              "reason": "Reuses coordinator approval and rejection of automatic approval and proceeds with notification implementation."
+            },
+            {
+              "id": "N04.2",
+              "passed": true,
+              "reason": "Rejects age alone as grounds for reopening the decision or blocking it on fresh decision review."
+            }
+          ]
+        },
+        "N05": {
+          "passed": true,
+          "criteria": [
+            {
+              "id": "N05.1",
+              "passed": true,
+              "reason": "Accepts internal naming and private-helper decomposition as implementation choices while preserving required signoff and failure behavior."
+            },
+            {
+              "id": "N05.2",
+              "passed": true,
+              "reason": "Requires no parent or grilling-agent approval for those choices under the implementation grant."
+            }
+          ]
+        }
+      }
+    },
+    "sol": {
+      "source": "runs/heldout-v2-v13-sol.md",
+      "cases_passed": 10,
+      "cases_total": 10,
+      "criteria_passed": 32,
+      "criteria_total": 32,
+      "cases": {
+        "H01": {
+          "passed": true,
+          "criteria": [
+            {
+              "id": "H01.1",
+              "passed": true,
+              "reason": "Rejects the appointment-reason template as conflicting with privacy and preserves the approved privacy owners."
+            },
+            {
+              "id": "H01.2",
+              "passed": true,
+              "reason": "Explicitly rejects general delegation/urgency as authority to substitute an agent for the user."
+            },
+            {
+              "id": "H01.3",
+              "passed": true,
+              "reason": "Rejects disclosure for the current assignment; any pursued amendment uses original grilling with the user."
+            },
+            {
+              "id": "H01.4",
+              "passed": true,
+              "reason": "Continues the approved retry Bead with exactly three retries within 20 minutes."
+            }
+          ]
+        },
+        "H02": {
+          "passed": true,
+          "criteria": [
+            {
+              "id": "H02.1",
+              "passed": true,
+              "reason": "Uses fresh independent interviewing/substitute-respondent contexts, neutral inputs excluding the preferred answer, and original grilling under the explicit bounded delegation."
+            },
+            {
+              "id": "H02.2",
+              "passed": true,
+              "reason": "Preserves throughput and normal verification while limiting substituted decision authority to the scanner exception."
+            },
+            {
+              "id": "H02.3",
+              "passed": true,
+              "reason": "Sequences a changed exception through Backlog first, then OpenSpec and dependent Beads/implementation."
+            },
+            {
+              "id": "H02.4",
+              "passed": true,
+              "reason": "Reuses audit retention and immediately proceeds with independent behavior-preserving fixture repair."
+            },
+            {
+              "id": "H02.5",
+              "passed": true,
+              "reason": "Applies the bounded result under the existing grant without requesting repeat user authorization for its semantic nature."
+            }
+          ]
+        },
+        "H03": {
+          "passed": true,
+          "criteria": [
+            {
+              "id": "H03.1",
+              "passed": true,
+              "reason": "Reuses explicit manager approval for every final statement and rejects timeout publication."
+            },
+            {
+              "id": "H03.2",
+              "passed": true,
+              "reason": "Rejects generic automation policy and clear-blockers language as overriding the settled user decision."
+            },
+            {
+              "id": "H03.3",
+              "passed": true,
+              "reason": "Proceeds with rounding repair and derived reproducible-totals OpenSpec refinement under existing scope."
+            },
+            {
+              "id": "H03.4",
+              "passed": true,
+              "reason": "Declines the timeout proposal and continues existing approved behavior without dependent timeout changes."
+            }
+          ]
+        },
+        "H04": {
+          "passed": true,
+          "criteria": [
+            {
+              "id": "H04.1",
+              "passed": true,
+              "reason": "Identifies inferred acceptance as changing acknowledgement semantics and requires original user grilling before affected owner or implementation changes."
+            },
+            {
+              "id": "H04.2",
+              "passed": true,
+              "reason": "Explicitly rejects the engineer offer and repository parallelism guidance as authority for substitute decision-making."
+            },
+            {
+              "id": "H04.3",
+              "passed": true,
+              "reason": "Allows factual investigation without adoption and independently continues sorting repair and the specified filter."
+            }
+          ]
+        },
+        "H05": {
+          "passed": true,
+          "criteria": [
+            {
+              "id": "H05.1",
+              "passed": true,
+              "reason": "Removes the database recipe from Backlog DoD and relocates it to OpenSpec technical design while preserving product criteria."
+            },
+            {
+              "id": "H05.2",
+              "passed": true,
+              "reason": "Reuses the settled five-day holding period without reopening it."
+            },
+            {
+              "id": "H05.3",
+              "passed": true,
+              "reason": "Treats reader self-extension as a new permission/contract decision requiring user grilling before owner or dependent behavior changes."
+            },
+            {
+              "id": "H05.4",
+              "passed": true,
+              "reason": "Rejects designer rubber-stamping and directs the semantic decision to original grilling with the user."
+            },
+            {
+              "id": "H05.5",
+              "passed": true,
+              "reason": "Continues approved staff extension implementation and verification."
+            }
+          ]
+        },
+        "N01": {
+          "passed": true,
+          "criteria": [
+            {
+              "id": "N01.1",
+              "passed": true,
+              "reason": "Reuses UTC storage/local display and repairs both the erroneous assertion and implementation under approved scope."
+            },
+            {
+              "id": "N01.2",
+              "passed": true,
+              "reason": "Continues under existing authority without new parent approval, grilling agent, or repeated timezone interview."
+            }
+          ]
+        },
+        "N02": {
+          "passed": true,
+          "criteria": [
+            {
+              "id": "N02.1",
+              "passed": true,
+              "reason": "Adds interrupted-network resumption and verified-segment reuse as a derived testable OpenSpec requirement within the approved budget."
+            },
+            {
+              "id": "N02.2",
+              "passed": true,
+              "reason": "Preserves offline playback, captions/accessibility, and budget while leaving Backlog outcome unchanged."
+            },
+            {
+              "id": "N02.3",
+              "passed": true,
+              "reason": "Continues implementation under the existing grant without a fresh semantic answer or mandatory grilling; semantic conformance review is distinguished from decision authority."
+            }
+          ]
+        },
+        "N03": {
+          "passed": true,
+          "criteria": [
+            {
+              "id": "N03.1",
+              "passed": true,
+              "reason": "Proceeds with deterministic replay verification and accessible labels independently of eligibility."
+            },
+            {
+              "id": "N03.2",
+              "passed": true,
+              "reason": "Prepares the unresolved eligibility question for user grilling while leaving current policy and implementation unchanged."
+            }
+          ]
+        },
+        "N04": {
+          "passed": true,
+          "criteria": [
+            {
+              "id": "N04.1",
+              "passed": true,
+              "reason": "Reuses coordinator approval and rejection of automatic approval and proceeds with notification implementation."
+            },
+            {
+              "id": "N04.2",
+              "passed": true,
+              "reason": "Rejects age alone as grounds for reopening the decision or blocking it on fresh decision review."
+            }
+          ]
+        },
+        "N05": {
+          "passed": true,
+          "criteria": [
+            {
+              "id": "N05.1",
+              "passed": true,
+              "reason": "Accepts internal naming and private-helper decomposition as implementation choices while preserving required signoff and failure behavior."
+            },
+            {
+              "id": "N05.2",
+              "passed": true,
+              "reason": "Requires no parent or grilling-agent approval for those choices under the implementation grant."
+            }
+          ]
+        }
+      }
+    },
+    "astra": {
+      "source": "runs/heldout-v2-v13-astra.md",
+      "cases_passed": 10,
+      "cases_total": 10,
+      "criteria_passed": 32,
+      "criteria_total": 32,
+      "cases": {
+        "H01": {
+          "passed": true,
+          "criteria": [
+            {
+              "id": "H01.1",
+              "passed": true,
+              "reason": "Rejects the appointment-reason template as conflicting with privacy and preserves the approved privacy owners."
+            },
+            {
+              "id": "H01.2",
+              "passed": true,
+              "reason": "Explicitly rejects general delegation/urgency as authority to substitute an agent for the user."
+            },
+            {
+              "id": "H01.3",
+              "passed": true,
+              "reason": "Rejects disclosure for the current assignment; any pursued amendment uses original grilling with the user."
+            },
+            {
+              "id": "H01.4",
+              "passed": true,
+              "reason": "Continues the approved retry Bead with exactly three retries within 20 minutes."
+            }
+          ]
+        },
+        "H02": {
+          "passed": true,
+          "criteria": [
+            {
+              "id": "H02.1",
+              "passed": true,
+              "reason": "Uses fresh independent interviewing/substitute-respondent contexts, neutral inputs excluding the preferred answer, and original grilling under the explicit bounded delegation."
+            },
+            {
+              "id": "H02.2",
+              "passed": true,
+              "reason": "Preserves throughput and normal verification while limiting substituted decision authority to the scanner exception."
+            },
+            {
+              "id": "H02.3",
+              "passed": true,
+              "reason": "Sequences a changed exception through Backlog first, then OpenSpec and dependent Beads/implementation."
+            },
+            {
+              "id": "H02.4",
+              "passed": true,
+              "reason": "Reuses audit retention and immediately proceeds with independent behavior-preserving fixture repair."
+            },
+            {
+              "id": "H02.5",
+              "passed": true,
+              "reason": "Applies the bounded result under the existing grant without requesting repeat user authorization for its semantic nature."
+            }
+          ]
+        },
+        "H03": {
+          "passed": true,
+          "criteria": [
+            {
+              "id": "H03.1",
+              "passed": true,
+              "reason": "Reuses explicit manager approval for every final statement and rejects timeout publication."
+            },
+            {
+              "id": "H03.2",
+              "passed": true,
+              "reason": "Rejects generic automation policy and clear-blockers language as overriding the settled user decision."
+            },
+            {
+              "id": "H03.3",
+              "passed": true,
+              "reason": "Proceeds with rounding repair and derived reproducible-totals OpenSpec refinement under existing scope."
+            },
+            {
+              "id": "H03.4",
+              "passed": true,
+              "reason": "Declines the timeout proposal and continues existing approved behavior without dependent timeout changes."
+            }
+          ]
+        },
+        "H04": {
+          "passed": true,
+          "criteria": [
+            {
+              "id": "H04.1",
+              "passed": true,
+              "reason": "Identifies inferred acceptance as changing acknowledgement semantics and requires original user grilling before affected owner or implementation changes."
+            },
+            {
+              "id": "H04.2",
+              "passed": true,
+              "reason": "Explicitly rejects the engineer offer and repository parallelism guidance as authority for substitute decision-making."
+            },
+            {
+              "id": "H04.3",
+              "passed": true,
+              "reason": "Allows factual investigation without adoption and independently continues sorting repair and the specified filter."
+            }
+          ]
+        },
+        "H05": {
+          "passed": true,
+          "criteria": [
+            {
+              "id": "H05.1",
+              "passed": true,
+              "reason": "Removes the database recipe from Backlog DoD and relocates it to OpenSpec technical design while preserving product criteria."
+            },
+            {
+              "id": "H05.2",
+              "passed": true,
+              "reason": "Reuses the settled five-day holding period without reopening it."
+            },
+            {
+              "id": "H05.3",
+              "passed": true,
+              "reason": "Treats reader self-extension as a new permission/contract decision requiring user grilling before owner or dependent behavior changes."
+            },
+            {
+              "id": "H05.4",
+              "passed": true,
+              "reason": "Rejects designer rubber-stamping and directs the semantic decision to original grilling with the user."
+            },
+            {
+              "id": "H05.5",
+              "passed": true,
+              "reason": "Continues approved staff extension implementation and verification."
+            }
+          ]
+        },
+        "N01": {
+          "passed": true,
+          "criteria": [
+            {
+              "id": "N01.1",
+              "passed": true,
+              "reason": "Reuses UTC storage/local display and repairs both the erroneous assertion and implementation under approved scope."
+            },
+            {
+              "id": "N01.2",
+              "passed": true,
+              "reason": "Continues under existing authority without new parent approval, grilling agent, or repeated timezone interview."
+            }
+          ]
+        },
+        "N02": {
+          "passed": true,
+          "criteria": [
+            {
+              "id": "N02.1",
+              "passed": true,
+              "reason": "Adds interrupted-network resumption and verified-segment reuse as a derived testable OpenSpec requirement within the approved budget."
+            },
+            {
+              "id": "N02.2",
+              "passed": true,
+              "reason": "Preserves offline playback, captions/accessibility, and budget while leaving Backlog outcome unchanged."
+            },
+            {
+              "id": "N02.3",
+              "passed": true,
+              "reason": "Continues implementation under the existing grant without a fresh semantic answer or mandatory grilling; semantic conformance review is distinguished from decision authority."
+            }
+          ]
+        },
+        "N03": {
+          "passed": true,
+          "criteria": [
+            {
+              "id": "N03.1",
+              "passed": true,
+              "reason": "Proceeds with deterministic replay verification and accessible labels independently of eligibility."
+            },
+            {
+              "id": "N03.2",
+              "passed": true,
+              "reason": "Prepares the unresolved eligibility question for user grilling while leaving current policy and implementation unchanged."
+            }
+          ]
+        },
+        "N04": {
+          "passed": true,
+          "criteria": [
+            {
+              "id": "N04.1",
+              "passed": true,
+              "reason": "Reuses coordinator approval and rejection of automatic approval and proceeds with notification implementation."
+            },
+            {
+              "id": "N04.2",
+              "passed": true,
+              "reason": "Rejects age alone as grounds for reopening the decision or blocking it on fresh decision review."
+            }
+          ]
+        },
+        "N05": {
+          "passed": true,
+          "criteria": [
+            {
+              "id": "N05.1",
+              "passed": true,
+              "reason": "Accepts internal naming and private-helper decomposition as implementation choices while preserving required signoff and failure behavior."
+            },
+            {
+              "id": "N05.2",
+              "passed": true,
+              "reason": "Requires no parent or grilling-agent approval for those choices under the implementation grant."
+            }
+          ]
+        }
+      }
+    }
+  }
+}

@@ -5,6 +5,12 @@ supplies interview, domain, research, and prototype methods. SpeciFlow
 selects when to invoke Grill; Grill shapes the bounded activity; results
 return to the appropriate owner.
 
+For an unresolved change to approved parent meaning, grilling is mandatory
+under [ownership.md](ownership.md#parent-contract-amendments). Its actual user
+answer is a prerequisite to dependent mutation, not a recommendation that
+review can waive. An exact settled user decision is reused. Ordinary technical
+refinement and covered repairs do not acquire a new interview gate.
+
 ## Method selection
 
 | Activity needs | Skill to invoke |
@@ -49,31 +55,54 @@ Return condition and destination owner:
 
 For planning-phase interviews (iterative refinement): use the simplified
 3-slot context from [iterative-planning.md](iterative-planning.md).
+If the question would change an approved parent, use the full context above
+even during planning. If the user explicitly substitutes a fresh subagent as
+respondent, apply the [bounded delegation and clean-context rule](ownership.md#delegation-for-autonomous-flows);
+do not inherit the orchestrator's conclusions or infer authority from settings.
 
-### Step 3: Run the interview
+### Step 3: Execute the original skill
 
-Invoke through the host's native skill interface. SpeciFlow provides the
-bounded context; the method provides the practice.
+Invoke the resolved original `mattpocock-skills:grilling` through the host's
+native skill interface and execute its complete bounded process. SpeciFlow
+supplies scope and owner routing, not an interview algorithm. The loaded skill
+governs question rounds, dependencies, recommendations, fact-finding delegation,
+answer handling, and its completion/confirmation condition. Do not override
+the method beyond the presentation adaptation below, paraphrase it into a
+substitute interview, or stop after an answer while its completion condition
+remains unmet.
 
-**Interview format override:** When invoked through SpeciFlow, use
-one-question-at-a-time format regardless of the method's default:
+**Presentation adaptation: one question at a time.** Ask one currently eligible
+question, with the recommendation required by the original skill, and wait for
+the respondent's answer. Then continue under the original method's decision
+and dependency rules. This changes question delivery, not the interview's
+coverage or completion condition: unasked questions remain unresolved, answers
+may change which question comes next, and a fixed orchestrator-written script
+cannot replace that process. Complete every branch of the bounded interview
+before requesting its final shared-understanding confirmation. An answer to
+one question does not authorize early return to owner mutation.
 
-1. Ask **one** question with your recommended answer.
-2. Wait for the user's response or counter-question.
-3. Only then move to the next question.
+A method label, a source read, a generic approval question, and an orchestrator's
+claim that it "grilled" someone are not execution evidence. Verify the actual
+prescribed actions, responses, and completion against the loaded original
+closure before any dependent owner amendment. Keep independently authorized
+work moving while the interview's prerequisite or answer is pending.
 
-This overrides grilling's "ask the whole frontier in one round" default.
-The user's response may change the next question — sequential questions
-produce better refinement than batch rounds.
+An explicitly authorized subagent substitution changes the respondent, not the
+method. Run the delegated interaction in fresh contexts under the original
+skill. Recommendations required by that skill must arise in the clean interview
+context, not be imported from the orchestrator's preferred answer. Do not invent
+the respondent's answers or confirmation.
 
 ### Step 4: Return results
 
-When shared understanding is reached, route results by type:
+After the original skill's completion condition, including its required
+confirmation of shared understanding from the authorized respondent, is met,
+route results by type:
 
 | Result type | Goes to | How |
 | --- | --- | --- |
 | Design decisions and rationale | OpenSpec | Preview spec update → review → approve → write |
-| Product-scope proposals | Backlog | Return as scope proposal for prioritization |
+| Product-scope proposals | Backlog | Keep proposed until the user decision covers the concrete amendment; then apply the existing mutation recipe |
 | Research findings and evidence | Authorized native artifacts | As evidence or inputs |
 | Prototype artifacts | Product Git | Only with explicit approval |
 
@@ -110,7 +139,7 @@ method are separate checks.
 
 | Requested activity | Action when the required original method cannot be loaded |
 | --- | --- |
-| User selected the original method, the full method set, or prohibited substitution | Report the unavailable method and pause that dependent activity. Offer recovery or an explicitly agreed alternative. Start the alternative only after the user chooses it. |
+| User selected the original method, the full method set, prohibited substitution, or the parent amendment route requires grilling | Report the unavailable original skill and pause that dependent activity. Recover the required method; do not replace it with an orchestrator-made interview or a different method. A later explicit user change to the requested method is a new instruction, never an inferred fallback. |
 | Ordinary clarification with no required original method | Use general interview principles and identify them as such. |
 
 Continue already-authorized independent work. Completing that work does not

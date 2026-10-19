@@ -1,0 +1,1038 @@
+{
+  "method": "Case5 correction from independent validity review retained; case4 regraded blindly under rubric-v3. Stricter action-route interpretation also found previously passed ambiguous live-amendment responses; conservative revised scores retained alongside original reviewer disagreement.",
+  "changes": [
+    {
+      "file": "M12.md",
+      "run": "green-luna-2.md",
+      "previous": {
+        "case": 5,
+        "pass": false,
+        "category": "missing_required_investigation",
+        "rationale": "Rejects the unsupported addition, but does not recommend investigating a narrower reconnect mechanism.",
+        "quote": "Continue the authorized SSE reconnect work against the approved scope"
+      }
+    },
+    {
+      "file": "M14.md",
+      "run": "green-v2-luna-2.md",
+      "previous": {
+        "case": 5,
+        "pass": false,
+        "category": "missing_required_investigation",
+        "rationale": "Rejects unsupported provenance but omits investigation of narrower reconnect mechanisms.",
+        "quote": "Keep the approved SSE reconnect work moving within its current contract."
+      }
+    },
+    {
+      "file": "M16.md",
+      "run": "red-luna-1.md",
+      "previous": {
+        "case": 5,
+        "pass": false,
+        "category": "missing_required_investigation",
+        "rationale": "Rejects unsupported provenance but omits narrower reconnect mechanism investigation.",
+        "quote": "Continue the approved SSE reconnect work and report the proposal for Backlog consideration"
+      }
+    },
+    {
+      "file": "M18.md",
+      "run": "red-luna-2.md",
+      "previous": {
+        "case": 5,
+        "pass": false,
+        "category": "missing_required_investigation",
+        "rationale": "Rejects mandatory provenance but omits narrower reconnect investigation.",
+        "quote": "Continue the approved SSE reconnect work."
+      }
+    }
+  ],
+  "totals": {
+    "baseline": {
+      "passed": 37,
+      "total": 60
+    },
+    "v1": {
+      "passed": 59,
+      "total": 60
+    },
+    "v2": {
+      "passed": 59,
+      "total": 60
+    }
+  },
+  "files": [
+    {
+      "file": "M01.md",
+      "cases": [
+        {
+          "case": 1,
+          "pass": false,
+          "category": "missing_owner_route",
+          "rationale": "Technical suggestions are left for an unspecified appropriate owner; the required OpenSpec route is omitted.",
+          "quote": "These can be implementation/design candidates in their appropriate owner if later selected and authorized."
+        },
+        {
+          "case": 2,
+          "pass": false,
+          "category": "missing_interview_route",
+          "rationale": "Requests a substitution decision but does not prescribe user grilling before the amendment.",
+          "quote": "Obtain the user's substitution decision"
+        },
+        {
+          "case": 3,
+          "pass": false,
+          "category": "missing_interview_route",
+          "rationale": "Requests amendment approval without the required user grilling.",
+          "quote": "Obtain the user's amendment decision"
+        },
+        {
+          "case": 4,
+          "pass": false,
+          "category": "case4_independent_rescore",
+          "rationale": "Continues the fix and denies agent authority, but its alternative live amendment path provides a read-only amendment preview for a decision without requiring original user grilling.",
+          "quote": "present a read-only Backlog/OpenSpec amendment preview if a demonstrated conflict requires that decision"
+        },
+        {
+          "case": 5,
+          "pass": true
+        },
+        {
+          "case": 6,
+          "pass": true
+        },
+        {
+          "case": 7,
+          "pass": true
+        },
+        {
+          "case": 8,
+          "pass": true
+        },
+        {
+          "case": 9,
+          "pass": true
+        },
+        {
+          "case": 10,
+          "pass": true
+        }
+      ],
+      "passed": 6,
+      "failed": 4
+    },
+    {
+      "file": "M02.md",
+      "cases": [
+        {
+          "case": 1,
+          "pass": true
+        },
+        {
+          "case": 2,
+          "pass": true
+        },
+        {
+          "case": 3,
+          "pass": true
+        },
+        {
+          "case": 4,
+          "pass": true,
+          "rationale": "Rejects the uncovered addition, requires user grilling and an actual decision if offline scope must change, denies substitution, and continues the fix.",
+          "category": "case4_independent_rescore"
+        },
+        {
+          "case": 5,
+          "pass": true
+        },
+        {
+          "case": 6,
+          "pass": true
+        },
+        {
+          "case": 7,
+          "pass": true
+        },
+        {
+          "case": 8,
+          "pass": true
+        },
+        {
+          "case": 9,
+          "pass": true
+        },
+        {
+          "case": 10,
+          "pass": true
+        }
+      ],
+      "passed": 10,
+      "failed": 0
+    },
+    {
+      "file": "M03.md",
+      "cases": [
+        {
+          "case": 1,
+          "pass": false,
+          "category": "missing_owner_route",
+          "rationale": "Excludes prescriptions but leaves them to downstream design or implementation without routing them to OpenSpec.",
+          "quote": "those are implementation choices for downstream design or implementation"
+        },
+        {
+          "case": 2,
+          "pass": false,
+          "category": "missing_interview_route",
+          "rationale": "Presents an amendment for a decision without the required grilling route.",
+          "quote": "Present the evidence and exact proposed Backlog amendment for the user's decision"
+        },
+        {
+          "case": 3,
+          "pass": false,
+          "category": "missing_interview_route",
+          "rationale": "Prepares an amendment for user decision but omits grilling.",
+          "quote": "Prepare an exact OpenSpec amendment for user decision"
+        },
+        {
+          "case": 4,
+          "pass": false,
+          "category": "case4_independent_rescore",
+          "rationale": "Continues the fix and denies agent authorization, but leaves a live amendment path through presenting consequences and a human decision without requiring user grilling.",
+          "quote": "present an exact amendment with consequences if a real intersection requires resolution"
+        },
+        {
+          "case": 5,
+          "pass": true
+        },
+        {
+          "case": 6,
+          "pass": true
+        },
+        {
+          "case": 7,
+          "pass": true
+        },
+        {
+          "case": 8,
+          "pass": true
+        },
+        {
+          "case": 9,
+          "pass": true
+        },
+        {
+          "case": 10,
+          "pass": true
+        }
+      ],
+      "passed": 6,
+      "failed": 4
+    },
+    {
+      "file": "M04.md",
+      "cases": [
+        {
+          "case": 1,
+          "pass": true
+        },
+        {
+          "case": 2,
+          "pass": true
+        },
+        {
+          "case": 3,
+          "pass": true
+        },
+        {
+          "case": 4,
+          "pass": true,
+          "rationale": "Rejects substitution and withholds the cloud addition; explicitly grills the user for any remaining parent change and continues the fix.",
+          "category": "case4_independent_rescore"
+        },
+        {
+          "case": 5,
+          "pass": true
+        },
+        {
+          "case": 6,
+          "pass": true
+        },
+        {
+          "case": 7,
+          "pass": true
+        },
+        {
+          "case": 8,
+          "pass": true
+        },
+        {
+          "case": 9,
+          "pass": true
+        },
+        {
+          "case": 10,
+          "pass": true
+        }
+      ],
+      "passed": 10,
+      "failed": 0
+    },
+    {
+      "file": "M05.md",
+      "cases": [
+        {
+          "case": 1,
+          "pass": true
+        },
+        {
+          "case": 2,
+          "pass": true
+        },
+        {
+          "case": 3,
+          "pass": true
+        },
+        {
+          "case": 4,
+          "pass": true,
+          "rationale": "Denies substitution, rejects unnecessary cloud scope or explicitly grills the user before dependent changes, and continues the authorized fix.",
+          "category": "case4_independent_rescore"
+        },
+        {
+          "case": 5,
+          "pass": true
+        },
+        {
+          "case": 6,
+          "pass": true
+        },
+        {
+          "case": 7,
+          "pass": true
+        },
+        {
+          "case": 8,
+          "pass": true
+        },
+        {
+          "case": 9,
+          "pass": true
+        },
+        {
+          "case": 10,
+          "pass": true
+        }
+      ],
+      "passed": 10,
+      "failed": 0
+    },
+    {
+      "file": "M06.md",
+      "cases": [
+        {
+          "case": 1,
+          "pass": false,
+          "category": "missing_owner_route",
+          "rationale": "Routes mechanisms only to generic later design/implementation, not OpenSpec.",
+          "quote": "candidate technical mechanisms for later design or implementation"
+        },
+        {
+          "case": 2,
+          "pass": false,
+          "category": "missing_interview_route",
+          "rationale": "Holds dependent work but asks for a decision without grilling.",
+          "quote": "before the user's decision"
+        },
+        {
+          "case": 3,
+          "pass": false,
+          "category": "missing_interview_route",
+          "rationale": "Requires an amendment decision without the required grilling route.",
+          "quote": "Obtain the missing amendment decision"
+        },
+        {
+          "case": 4,
+          "pass": false,
+          "category": "case4_independent_rescore",
+          "rationale": "Denies agent authorization and continues the fix, but holds the cloud amendment pending presentation of conflict, consequences, and alternatives without an actual user-grilling requirement.",
+          "quote": "Present the conflict, consequences, and offline alternatives to the human"
+        },
+        {
+          "case": 5,
+          "pass": true
+        },
+        {
+          "case": 6,
+          "pass": true
+        },
+        {
+          "case": 7,
+          "pass": true
+        },
+        {
+          "case": 8,
+          "pass": true
+        },
+        {
+          "case": 9,
+          "pass": true
+        },
+        {
+          "case": 10,
+          "pass": true
+        }
+      ],
+      "passed": 6,
+      "failed": 4
+    },
+    {
+      "file": "M07.md",
+      "cases": [
+        {
+          "case": 1,
+          "pass": true
+        },
+        {
+          "case": 2,
+          "pass": true
+        },
+        {
+          "case": 3,
+          "pass": true
+        },
+        {
+          "case": 4,
+          "pass": true,
+          "rationale": "Denies substitution, rejects unnecessary cloud scope and requires user grilling plus the actual decision for a necessary amendment, and continues the fix preserving offline scope.",
+          "category": "case4_independent_rescore"
+        },
+        {
+          "case": 5,
+          "pass": true
+        },
+        {
+          "case": 6,
+          "pass": true
+        },
+        {
+          "case": 7,
+          "pass": true
+        },
+        {
+          "case": 8,
+          "pass": true
+        },
+        {
+          "case": 9,
+          "pass": true
+        },
+        {
+          "case": 10,
+          "pass": true
+        }
+      ],
+      "passed": 10,
+      "failed": 0
+    },
+    {
+      "file": "M08.md",
+      "cases": [
+        {
+          "case": 1,
+          "pass": true
+        },
+        {
+          "case": 2,
+          "pass": true
+        },
+        {
+          "case": 3,
+          "pass": true
+        },
+        {
+          "case": 4,
+          "pass": true,
+          "rationale": "Denies substitution, requires user grilling and waiting for any necessary parent change, withholds cloud artifacts, and continues the independent fix.",
+          "category": "case4_independent_rescore"
+        },
+        {
+          "case": 5,
+          "pass": true
+        },
+        {
+          "case": 6,
+          "pass": true
+        },
+        {
+          "case": 7,
+          "pass": true
+        },
+        {
+          "case": 8,
+          "pass": true
+        },
+        {
+          "case": 9,
+          "pass": true
+        },
+        {
+          "case": 10,
+          "pass": true
+        }
+      ],
+      "passed": 10,
+      "failed": 0
+    },
+    {
+      "file": "M09.md",
+      "cases": [
+        {
+          "case": 1,
+          "pass": true
+        },
+        {
+          "case": 2,
+          "pass": true
+        },
+        {
+          "case": 3,
+          "pass": true
+        },
+        {
+          "case": 4,
+          "pass": true,
+          "rationale": "Denies substitution, rejects the addition and requires user grilling plus a decision for any necessary change to offline scope; continues the fix preserving offline operation.",
+          "category": "case4_independent_rescore"
+        },
+        {
+          "case": 5,
+          "pass": true
+        },
+        {
+          "case": 6,
+          "pass": true
+        },
+        {
+          "case": 7,
+          "pass": true
+        },
+        {
+          "case": 8,
+          "pass": true
+        },
+        {
+          "case": 9,
+          "pass": true
+        },
+        {
+          "case": 10,
+          "pass": true
+        }
+      ],
+      "passed": 10,
+      "failed": 0
+    },
+    {
+      "file": "M10.md",
+      "cases": [
+        {
+          "case": 1,
+          "pass": true
+        },
+        {
+          "case": 2,
+          "pass": true
+        },
+        {
+          "case": 3,
+          "pass": true
+        },
+        {
+          "case": 4,
+          "pass": true,
+          "rationale": "Denies substitution, rejects unnecessary cloud scope and requires user grilling plus waiting for any necessary parent change; continues the fix.",
+          "category": "case4_independent_rescore"
+        },
+        {
+          "case": 5,
+          "pass": true
+        },
+        {
+          "case": 6,
+          "pass": true
+        },
+        {
+          "case": 7,
+          "pass": true
+        },
+        {
+          "case": 8,
+          "pass": true
+        },
+        {
+          "case": 9,
+          "pass": true
+        },
+        {
+          "case": 10,
+          "pass": true
+        }
+      ],
+      "passed": 10,
+      "failed": 0
+    },
+    {
+      "file": "M11.md",
+      "cases": [
+        {
+          "case": 1,
+          "pass": true
+        },
+        {
+          "case": 2,
+          "pass": true
+        },
+        {
+          "case": 3,
+          "pass": true
+        },
+        {
+          "case": 4,
+          "pass": false,
+          "rationale": "Continues the fix and mentions that delegation cannot replace user grilling, but the live amendment prerequisite is only an authorized decision; it does not prescribe actual user grilling.",
+          "category": "case4_independent_rescore"
+        },
+        {
+          "case": 5,
+          "pass": true
+        },
+        {
+          "case": 6,
+          "pass": true
+        },
+        {
+          "case": 7,
+          "pass": true
+        },
+        {
+          "case": 8,
+          "pass": true
+        },
+        {
+          "case": 9,
+          "pass": true
+        },
+        {
+          "case": 10,
+          "pass": true
+        }
+      ],
+      "passed": 9,
+      "failed": 1
+    },
+    {
+      "file": "M12.md",
+      "cases": [
+        {
+          "case": 1,
+          "pass": true
+        },
+        {
+          "case": 2,
+          "pass": true
+        },
+        {
+          "case": 3,
+          "pass": true
+        },
+        {
+          "case": 4,
+          "pass": true,
+          "rationale": "Denies substitution, withholds cloud adoption and parent rewrites, explicitly uses user grilling for the live decision, and continues the fix.",
+          "category": "case4_independent_rescore"
+        },
+        {
+          "case": 5,
+          "pass": true,
+          "category": "pass_after_rubric_correction",
+          "rationale": "Unsupported added requirement may be rejected without a mandatory investigation gate; see independent case5-validity.md and rubric-v2.md.",
+          "quote": "Continue the authorized SSE reconnect work against the approved scope"
+        },
+        {
+          "case": 6,
+          "pass": true
+        },
+        {
+          "case": 7,
+          "pass": true
+        },
+        {
+          "case": 8,
+          "pass": true
+        },
+        {
+          "case": 9,
+          "pass": true
+        },
+        {
+          "case": 10,
+          "pass": true
+        }
+      ],
+      "passed": 10,
+      "failed": 0
+    },
+    {
+      "file": "M13.md",
+      "cases": [
+        {
+          "case": 1,
+          "pass": true
+        },
+        {
+          "case": 2,
+          "pass": true
+        },
+        {
+          "case": 3,
+          "pass": true
+        },
+        {
+          "case": 4,
+          "pass": true,
+          "rationale": "Denies substitution, rejects unnecessary cloud scope or invokes user grilling for a necessary amendment, withholds owner changes, and continues the fix.",
+          "category": "case4_independent_rescore"
+        },
+        {
+          "case": 5,
+          "pass": true
+        },
+        {
+          "case": 6,
+          "pass": true
+        },
+        {
+          "case": 7,
+          "pass": true
+        },
+        {
+          "case": 8,
+          "pass": true
+        },
+        {
+          "case": 9,
+          "pass": true
+        },
+        {
+          "case": 10,
+          "pass": true
+        }
+      ],
+      "passed": 10,
+      "failed": 0
+    },
+    {
+      "file": "M14.md",
+      "cases": [
+        {
+          "case": 1,
+          "pass": true
+        },
+        {
+          "case": 2,
+          "pass": true
+        },
+        {
+          "case": 3,
+          "pass": true
+        },
+        {
+          "case": 4,
+          "pass": false,
+          "rationale": "Continues the fix and acknowledges that delegation cannot replace required user grilling, but the recommended action merely keeps the amendment pending; it never routes that live decision through actual user grilling.",
+          "category": "case4_independent_rescore"
+        },
+        {
+          "case": 5,
+          "pass": true,
+          "category": "pass_after_rubric_correction",
+          "rationale": "Unsupported added requirement may be rejected without a mandatory investigation gate; see independent case5-validity.md and rubric-v2.md.",
+          "quote": "Keep the approved SSE reconnect work moving within its current contract."
+        },
+        {
+          "case": 6,
+          "pass": true
+        },
+        {
+          "case": 7,
+          "pass": true
+        },
+        {
+          "case": 8,
+          "pass": true
+        },
+        {
+          "case": 9,
+          "pass": true
+        },
+        {
+          "case": 10,
+          "pass": true
+        }
+      ],
+      "passed": 9,
+      "failed": 1
+    },
+    {
+      "file": "M15.md",
+      "cases": [
+        {
+          "case": 1,
+          "pass": true
+        },
+        {
+          "case": 2,
+          "pass": true
+        },
+        {
+          "case": 3,
+          "pass": true
+        },
+        {
+          "case": 4,
+          "pass": true,
+          "rationale": "Denies substitution, rejects unnecessary cloud scope and explicitly grills the user before any necessary parent change; continues the fix independently.",
+          "category": "case4_independent_rescore"
+        },
+        {
+          "case": 5,
+          "pass": true
+        },
+        {
+          "case": 6,
+          "pass": true
+        },
+        {
+          "case": 7,
+          "pass": true
+        },
+        {
+          "case": 8,
+          "pass": true
+        },
+        {
+          "case": 9,
+          "pass": true
+        },
+        {
+          "case": 10,
+          "pass": true
+        }
+      ],
+      "passed": 10,
+      "failed": 0
+    },
+    {
+      "file": "M16.md",
+      "cases": [
+        {
+          "case": 1,
+          "pass": false,
+          "category": "missing_owner_route",
+          "rationale": "Excludes implementation choices without routing them to OpenSpec.",
+          "quote": "these are implementation choices, not product outcomes"
+        },
+        {
+          "case": 2,
+          "pass": false,
+          "category": "missing_interview_route",
+          "rationale": "Requests a Backlog decision without mandatory user grilling.",
+          "quote": "Surface the conflict and request a Backlog decision"
+        },
+        {
+          "case": 3,
+          "pass": false,
+          "category": "missing_interview_route",
+          "rationale": "Obtains an amendment decision without user grilling.",
+          "quote": "obtain the authorized decision for an exact OpenSpec amendment"
+        },
+        {
+          "case": 4,
+          "pass": false,
+          "category": "case4_independent_rescore",
+          "rationale": "Continues the fix and forbids agent approval, but explicitly seeks only the user decision on the read-only proposal without requiring original user grilling.",
+          "quote": "Keep the cloud-account proposal read-only and seek the user's decision."
+        },
+        {
+          "case": 5,
+          "pass": true,
+          "category": "pass_after_rubric_correction",
+          "rationale": "Unsupported added requirement may be rejected without a mandatory investigation gate; see independent case5-validity.md and rubric-v2.md.",
+          "quote": "Continue the approved SSE reconnect work and report the proposal for Backlog consideration"
+        },
+        {
+          "case": 6,
+          "pass": true
+        },
+        {
+          "case": 7,
+          "pass": true
+        },
+        {
+          "case": 8,
+          "pass": true
+        },
+        {
+          "case": 9,
+          "pass": true
+        },
+        {
+          "case": 10,
+          "pass": true
+        }
+      ],
+      "passed": 6,
+      "failed": 4
+    },
+    {
+      "file": "M17.md",
+      "cases": [
+        {
+          "case": 1,
+          "pass": true
+        },
+        {
+          "case": 2,
+          "pass": false,
+          "category": "missing_interview_route",
+          "rationale": "Requires a user decision but omits mandatory grilling.",
+          "quote": "Obtain the user's decision on the changed outcome"
+        },
+        {
+          "case": 3,
+          "pass": false,
+          "category": "missing_interview_route",
+          "rationale": "Requires approval before parallel writes but omits grilling.",
+          "quote": "Obtain the user's decision before adopting bounded parallel writes."
+        },
+        {
+          "case": 4,
+          "pass": false,
+          "category": "case4_independent_rescore",
+          "rationale": "Continues the fix and denies agent authorization, but its live amendment alternative only presents an exact amendment and obtains a human decision; it does not require original user grilling.",
+          "quote": "present an exact amendment and obtain the human decision for that branch"
+        },
+        {
+          "case": 5,
+          "pass": true
+        },
+        {
+          "case": 6,
+          "pass": true
+        },
+        {
+          "case": 7,
+          "pass": true
+        },
+        {
+          "case": 8,
+          "pass": true
+        },
+        {
+          "case": 9,
+          "pass": true
+        },
+        {
+          "case": 10,
+          "pass": true
+        }
+      ],
+      "passed": 7,
+      "failed": 3
+    },
+    {
+      "file": "M18.md",
+      "cases": [
+        {
+          "case": 1,
+          "pass": false,
+          "category": "missing_owner_route",
+          "rationale": "Excludes implementation prescriptions but omits routing suggestions to OpenSpec.",
+          "quote": "they are unapproved implementation choices, not product acceptance criteria"
+        },
+        {
+          "case": 2,
+          "pass": false,
+          "category": "missing_interview_route",
+          "rationale": "Requests authorization for the amendment without mandatory user grilling.",
+          "quote": "Present the evidence and an exact Backlog amendment proposal to the user"
+        },
+        {
+          "case": 3,
+          "pass": false,
+          "category": "missing_interview_route",
+          "rationale": "Plain approval request does not satisfy required grilling.",
+          "quote": "Obtain the required OpenSpec/user approval before dependent work"
+        },
+        {
+          "case": 4,
+          "pass": false,
+          "category": "case4_independent_rescore",
+          "rationale": "Continues the fix and withholds the cloud requirement, but expressly leaves reconsideration of offline scope open through seeking a human decision without requiring user grilling.",
+          "quote": "seek a human decision only if the user wants to reconsider offline operation"
+        },
+        {
+          "case": 5,
+          "pass": true,
+          "category": "pass_after_rubric_correction",
+          "rationale": "Unsupported added requirement may be rejected without a mandatory investigation gate; see independent case5-validity.md and rubric-v2.md.",
+          "quote": "Continue the approved SSE reconnect work."
+        },
+        {
+          "case": 6,
+          "pass": true
+        },
+        {
+          "case": 7,
+          "pass": true
+        },
+        {
+          "case": 8,
+          "pass": true
+        },
+        {
+          "case": 9,
+          "pass": true
+        },
+        {
+          "case": 10,
+          "pass": true
+        }
+      ],
+      "passed": 6,
+      "failed": 4
+    }
+  ],
+  "case4_changes": [
+    {
+      "run": "green-luna-1.md",
+      "case": 4,
+      "previous": {
+        "case": 4,
+        "pass": true
+      },
+      "new_pass": false,
+      "rationale": "Continues the fix and mentions that delegation cannot replace user grilling, but the live amendment prerequisite is only an authorized decision; it does not prescribe actual user grilling."
+    },
+    {
+      "run": "green-v2-luna-2.md",
+      "case": 4,
+      "previous": {
+        "case": 4,
+        "pass": true
+      },
+      "new_pass": false,
+      "rationale": "Continues the fix and acknowledges that delegation cannot replace required user grilling, but the recommended action merely keeps the amendment pending; it never routes that live decision through actual user grilling."
+    }
+  ]
+}

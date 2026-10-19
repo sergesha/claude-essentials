@@ -1,0 +1,21 @@
+{
+  "frozen_at": "2026-10-19T21:33:52.341955+00:00",
+  "reason": "Explicit approved-work continuation when rejecting uncovered addition, after retained v12 main case5 omission",
+  "files": {
+    "skill/SKILL.md": "8791c14b4f663aaf3afe1978a46b53eaf0db893dfa520cd4cda80524c74637ff",
+    "skill/references/storage.md": "f6ceafc2c5d66a3f4782201c2757e4d349a12c37ab150948da4b1a969c7c4e92",
+    "skill/references/examples.md": "1e09cb143c6c3205f848f9e8a1c07aa3ccfa4b94e7185566be56cd42a23b15f8",
+    "skill/references/operations.md": "0b6c1a171d262c786105a7491239dc6288b987729373b708a87648b7dbfa9a83",
+    "skill/references/initialization.md": "0b5386badb538df517b493da6a94ffcbf2465ecfdec2cb89dc0b676bca347314",
+    "skill/references/transitions.md": "563c7ba0f0844092a65063de36b6ce80c4732ba326435ec5846835638a80df52",
+    "skill/references/doctor.md": "21f6d84e1e869a007580d05912b3a9b4043519f5da6eb5f937f06b893682adad",
+    "skill/references/grilling-integration.md": "ee3c0e0c7ed5efa3313bba13fa5b0997741a16dcb7180bcebd4c910bf77f804d",
+    "skill/references/wayfinding.md": "c1b0cea9b8fa17979ba3bb3dbd33cd438734d0b12e33a55098d8b1b043805a4a",
+    "skill/references/iterative-planning.md": "6f826a1cf2c53e846fec60af3706b958c3021be50ff89859bd243f5fa9b06ff1",
+    "skill/references/ownership.md": "9e76bf15f57ed82f5f4b1024d60d987cd5d25f3cb0f05a424a18516aecaffb16",
+    "skill/references/installation.md": "438998be85ac344d7c5efc60a0d657a724f917c138f5cf5239ce03d610cbcf84",
+    "skill/references/diagnostics.md": "7b95a180ee9d8a0c1f345148bd5c7d789738c6d36905a0688bd2016f9c1ec52b",
+    "skill/agents/openai.yaml": "9c3cf5d9d1b2998f380302990dc8a354aa2350f16c09eb0731f9cd26d1b0a479",
+    "skill/scripts/storage.py": "856db16f8a3aec6b90ddb9775b99bceb16cd3d3c8da4a25c767479981b0c75f7"
+  }
+}

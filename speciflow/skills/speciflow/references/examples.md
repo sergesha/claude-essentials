@@ -111,17 +111,16 @@ add them to the spec, start implementation planning.
 | Proposal | Intersection | Action |
 | --- | --- | --- |
 | SAML SSO | None — independent auth flow | Continue current work |
-| Rate limiting on token endpoint | Potential — may require reworking the endpoint we are building now | Flag conflict to user: continue or pause this part until scope decision? |
+| Rate limiting on token endpoint | Potential — investigate necessity against approved behavior | Seek a compliant mechanism first; a demonstrated unresolved parent change uses user grilling |
 
-4. Report: "Review raised two scope proposals. SAML SSO is independent —
-   current work continues. Rate limiting intersects with the token endpoint
-   we are building — continue as-is, or pause that part for a scope decision?"
+4. Continue authorized work. If investigation demonstrates a necessary parent
+   change, invoke the [amendment route](ownership.md#parent-contract-amendments)
+   for that branch; do not adopt a requirement because review requested it.
 
 **Key principle:** Review can flag defects against approved scope. Anything
-that adds new scope is a proposal that goes through Backlog approval. When
-a proposal intersects with current work, surface the conflict to the user
-rather than choosing to continue or pause unilaterally. Non-intersecting
-proposals never block current work.
+that adds new scope remains a proposal. Unnecessary additions can be rejected;
+actual unresolved contract changes require user grilling and an answer.
+Non-intersecting proposals never block current work.
 
 ## Example 6 — Mid-execution spec amendment
 
@@ -135,17 +134,20 @@ instead of synchronous. The approved spec says sync but I changed my mind."
 2. Assess impact: "Issues #1-#2 are complete with sync implementation.
    Switching to async requires reworking both, plus the in-progress issue #3.
    Compound cost: this is a deeper redesign than changing one endpoint."
-3. Route through spec: "I'll preview the spec amendment for your approval
-   before changing any implementation."
+3. Route through spec: reuse the user's concrete sync→async decision and
+   inspect which implementation and owner-write effects the existing grant
+   covers. Do not ask the user to repeat that settled choice.
 4. Present: spec diff showing sync→async change, affected requirements,
    rework scope.
-5. Wait for explicit approval of the spec amendment.
-6. Only after approval: update implementation to match new spec.
+5. Apply the existing review and mutation recipe to covered effects. If async
+   exposes a new unresolved contract choice, grill the user about that choice
+   and wait for the answer before its dependent changes.
+6. Update OpenSpec first, then dependent implementation under the applicable
+   grant. Obtain only any genuinely missing write authority.
 
-**Key principle:** The user is the authority, but "just do it" is the exact
-moment the process is most valuable. The spec amendment protects against
-cascading untracked changes. Always route through the spec, even when the
-user who approved the original is the one changing it.
+**Key principle:** Reuse settled decisions while keeping specifications and
+implementation aligned. An exact preview and review are not automatically
+another user approval round.
 
 ## Example 7 — Delegated decision in autonomous flow
 
@@ -157,21 +159,23 @@ should also validate PKCE challenge."
 
 **SpeciFlow delegates to a clean-context subagent:**
 
-The subagent receives: approved OAuth2 scope, the current token endpoint
-spec, and the PKCE proposal. No current implementation details (clean
-context avoids sunk-cost bias).
+The subagent receives original user inputs, later explicit decisions, approved
+OAuth2 scope and token endpoint spec, the PKCE proposal as an unadopted proposal,
+neutral facts, and the analysis-only grant. It receives no orchestrator conclusion.
 
 The subagent evaluates:
 - PKCE is a security-adjacent concern → check mandatory stop list
-- PKCE doesn't add a new security boundary, it strengthens an approved
-  one → delegatable
+- Analysis is delegated; adopting any material security-boundary change
+  remains human-only, including strengthening an existing boundary
 - PKCE directly affects the token endpoint under construction → intersects
 
 **Subagent returns:** "Intersecting proposal. PKCE affects the approved
 token endpoint. Recommend pause on token endpoint work until scope decision."
 
-**SpeciFlow acts:** Pauses the intersecting portion, continues independent
-work, queues the scope proposal for human review at next checkpoint.
+**SpeciFlow acts:** Investigates the claimed necessity. A demonstrated unresolved
+parent change pauses only dependent work and invokes user grilling before
+mutation. The analysis-only grant cannot replace the user's answer. Independent
+authorized work continues.
 
 **Contrast — if the proposal were "add admin dashboard":** No intersection
 with OAuth2 work. Subagent returns "non-intersecting, continue." Current
@@ -253,8 +257,10 @@ Drift:    3 Backlog criteria → 4 OpenSpec requirements (1 extra)
 trace to any Backlog acceptance criterion. This looks like scope drift.
 
 Options:
-1. Remove it from the spec before projection
-2. Add a corresponding Backlog criterion (scope expansion → needs approval)
+1. Establish whether it is an unadopted agent addition or an actual approved
+   contract before proposing removal; do not silently weaken an approved parent
+2. Propose a corresponding Backlog criterion through
+   [user grilling and answer](ownership.md#parent-contract-amendments), not a review verdict
 3. Confirm it's intentional and provide the Backlog trace I missed"
 
 **Key principle:** Doctor caught scope drift automatically, before it

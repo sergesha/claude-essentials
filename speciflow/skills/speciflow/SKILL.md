@@ -16,6 +16,40 @@ interfaces; do not create or assume a `speciflow` command. Native owner edits
 remain authoritative. Supporting disciplines never acquire owner authority.
 Never copy owner content into a SpeciFlow schema.
 
+Backlog defines **what and why**, OpenSpec defines **how**, and Beads decomposes
+the approved solution into **atomic, verifiable tasks**. A lower level cannot
+change its parent. A necessary unresolved parent decision selects the original
+`mattpocock-skills:grilling`, not a generic question or approval request. Load
+and execute that skill through actual answers and completion confirmation, with
+[one question at a time](references/grilling-integration.md#step-3-execute-the-original-skill).
+The respondent is the user unless their direct, scoped instruction explicitly
+substitutes a fresh unbiased agent. That exception may settle the named parent
+amendment; do not restrict it to choices that leave that parent unchanged.
+Apply the [amendment route](references/ownership.md#parent-contract-amendments)
+and its actual human-only limits. Apply a settled amendment at the **highest
+affected owner first**: changed Backlog outcomes, DoD, NFRs or constraints go
+into Backlog before OpenSpec; a technical-only contract change goes into
+OpenSpec before Beads. A delegated answer does not bypass that order.
+Keep authorized factual investigation, technical refinement and independent
+repairs moving while a semantic decision waits. Investigation establishes
+facts; it neither adopts the proposed change nor needs its approval. Before
+returning next actions, account for **every authorized work item** in the
+request: proceed with it, or identify its actual unresolved prerequisite.
+Do not omit independent work when explaining a separate amendment. This is
+an ephemeral completeness check, not a new artifact or approval gate. Include
+the applicable settled decisions and constraints in that check, even when the
+new question does not change them. Moving a requirement to its proper owner
+preserves its approved meaning; removing a misplaced recipe from Backlog is
+not permission to discard still-applicable technical detail.
+
+For each **pending parent decision**, the next action or handoff must state the
+selected original grilling method and its authorized respondent. Do not reduce
+that prerequisite to “user decision” or “approval needed”: those descriptions
+lose which process must actually run before the affected amendment. When an
+uncovered addition is rejected, explicitly state the authorized implementation
+or verification that continues. Rejecting the addition does not complete or
+replace the approved task.
+
 ## Working language
 
 Write all persistent working artifacts in **English**: documents, plans, task

@@ -18,6 +18,10 @@ Each phase is a loop of: interview → refine → commit → check sufficiency.
 Start with the user's rough idea. Each iteration sharpens it into a
 Backlog task with clear scope.
 
+Define what and why: high-level requirements, DoD, NFRs, and constraints.
+Do not prescribe implementation. OpenSpec owns the technical solution and
+plan; absence of those details here does not make Backlog insufficient.
+
 ### Iteration protocol
 
 1. **Capture**: Write the current understanding as a Backlog task draft
@@ -28,9 +32,9 @@ Backlog task with clear scope.
    - What's missing from scope boundaries?
    - What does "done" look like — can you test it?
    - What domain concepts are ambiguous?
-3. **Refine**: Switch from adversary to facilitator. Help the user fill
-   the gaps surfaced by the interview. Use the agent's knowledge to
-   propose answers, but the user decides.
+3. **Refine**: After the original interview process and required confirmation
+   are complete, incorporate only its settled outcomes into the draft. Unresolved
+   choices remain in that process; do not introduce a coordinator-written interview.
 4. **Commit**: Save the refined Backlog task as a versioned checkpoint.
    Commit message: `plan(backlog): iteration N — <what changed>`.
 5. **Sufficiency check**: Evaluate against the criteria below.
@@ -83,8 +87,12 @@ a complete specification.
    - What edge cases are unaddressed?
    - Are requirements specific enough to implement and test?
    - Do any requirements contradict each other?
-3. **Refine**: Help the user formalize findings into spec language.
-   Requirements should be testable and unambiguous.
+3. **Refine**: Formulate the technical solution and design in OpenSpec,
+   within Backlog's approved outcomes and constraints.
+   Derived requirements and scenarios should be testable and unambiguous;
+   implementation details belong in OpenSpec design/plan artifacts. A new
+   product requirement or change to an approved parent uses
+   [parent contract amendments](ownership.md#parent-contract-amendments).
 4. **Commit**: Save the refined spec as a versioned checkpoint.
    Commit message: `plan(openspec): iteration N — <what changed>`.
 5. **Completeness check**: Evaluate against the criteria below.
@@ -128,14 +136,18 @@ history" turns out to be "we only have browse behavior").
 
 When this happens:
 
-1. **Don't patch the spec around the wrong assumption.** The Backlog
-   task's outcome may still be valid, but its framing is wrong.
-2. **Return to Backlog**: Update the task with the corrected assumption.
-   This is a Backlog amendment, not scope expansion.
-3. **Re-evaluate sufficiency**: The corrected Backlog task may still be
-   sufficient, or it may need another iteration.
-4. **Resume OpenSpec**: After the Backlog correction, continue OpenSpec
-   refinement with the corrected foundation.
+1. **Check the effect on approved meaning.** A factual discovery does not
+   authorize changing a requirement or substituting the promised outcome.
+2. **Seek a solution within the current contract.** If none works without
+   changing a parent, use [parent contract amendments](ownership.md#parent-contract-amendments):
+   user grilling and an actual answer before dependent owner mutation. Reuse
+   an exact existing decision; a reviewer agreeing the premise is wrong is
+   not that decision.
+3. **Amend only covered effects** at the highest affected owner, then
+   re-evaluate sufficiency and refine its dependants. Calling the update a
+   correction rather than scope expansion supplies no authority.
+4. **Resume affected work** after the prerequisite is resolved. Independent
+   authorized work continues throughout.
 
 This is not a failure — it's the process working. Discovering wrong
 assumptions during spec refinement is better than discovering them
@@ -143,43 +155,39 @@ during implementation.
 
 ## Grill invocation for planning
 
-Planning iterations use a simplified Grill context — not the full 6-slot
-invocation from grilling-integration.md. For a planning interview, pass:
+Planning exploration without an approved-parent amendment uses a simplified
+Grill context. For that interview, pass:
 
 ```text
 Question: <the specific gap or assumption being challenged>
 Current draft: <link to or summary of the current Backlog/OpenSpec artifact>
-Return condition: answer the question, then switch to facilitator mode
+Return condition: complete the original grilling process for this bounded question, including its required confirmation, then return to coordination
 ```
 
-The full 6-slot context (permitted effects, upstream entrypoints, etc.)
-is for bounded implementation-phase interviews where mutations may follow.
-Planning interviews are read-only explorations — keep them lightweight.
+Use the full 6-slot context from [grilling-integration.md](grilling-integration.md)
+for approved-parent amendments in any phase and for bounded implementation
+interviews. A planning label does not remove the applicable authority checks.
 
-## Role switching within iterations
+## Returning from the interview
 
-The agent plays two distinct roles within each iteration:
-
-**First half — Adversary (Grill interview):**
-Challenge assumptions, surface gaps, stress-test claims. Follow the
-Grill method's question discipline. Don't help — probe.
-
-**Second half — Facilitator (refinement):**
-"The interview surfaced these gaps. Let me help address them."
-Use domain knowledge, propose options, help formulate. The user decides.
-
-The switch is explicit — announce it. Don't blur the roles.
+SpeciFlow supplies the bounded planning question; the original grilling skill
+controls the interview process. Do not replace it with an adversary/facilitator
+script or switch to refinement before its completion condition is met.
+After completion, return to coordination and record only covered results with
+the correct owner through the existing mutation recipe. The user remains the
+decision-maker except for an explicitly authorized bounded respondent substitution.
 
 ## Scope drift protection
 
 After each iteration, compare the refined version with the previous:
 
 - **Added detail within existing scope** → normal refinement, proceed.
-- **New capability, actor, or requirement appeared** → this is scope
-  expansion. Apply ownership.md rule 1: return to Backlog as a scope
-  proposal. Don't sneak it in as "clarification."
-- **Scope narrowed** → explicit decision. Record what was excluded and
-  why. Don't silently drop requirements.
+- **Derived testable technical requirement within Backlog's boundaries** → OpenSpec
+  refinement under the authoring grant, not automatically scope expansion.
+- **New product requirement or changed approved parent contract** → use
+  [parent contract amendments](ownership.md#parent-contract-amendments).
+  This includes narrowing, exclusions, and substitutions. A draft proposal
+  or interview finding is not an adopted requirement.
 
 ## What to commit
 

@@ -4,9 +4,9 @@ Each concern has one authoritative owner:
 
 | Owner | Sole authority |
 | --- | --- |
-| Backlog.md | Product intent and priority |
-| OpenSpec | Proposals, requirements, design, and specification tasks |
-| Beads/Dolt | Executable graph, dependencies, readiness, claim, blockers, and completion |
+| Backlog.md | What and why: product outcomes, high-level requirements, DoD, NFRs, constraints, and priority |
+| OpenSpec | How: technical solution, architecture, derived testable requirements, design, and specification plan |
+| Beads/Dolt | Atomic implementation tasks derived from OpenSpec; executable dependencies, readiness, claim, blockers, and completion |
 | Superpowers | TDD, debugging, verification, review, and implementation discipline |
 | Grill | Interviews, domain modeling, research, and prototyping discipline |
 | Product Git and CI | Source changes, review history, dirty state, and implementation evidence |
@@ -40,9 +40,9 @@ Use selected tools to the extent the work needs:
 
 | Concern | Native representation |
 | --- | --- |
-| Committed product initiative | A Backlog task expressing the outcome, scope, product acceptance criteria, and priority. Link an existing brief for detail. |
-| Specification and technical refinement | An OpenSpec change with requirements, scenarios, design, and, when authorized, its native design-time task checklist. |
-| Concrete implementation | Beads issues with bounded work, verification, executable dependencies, and references to the approved OpenSpec source. |
+| Committed product initiative | A Backlog task expressing outcomes, scope, high-level requirements, DoD, NFRs, constraints, and priority. No implementation recipe. |
+| Specification and technical refinement | An OpenSpec change describing the technical solution, architecture, interfaces, derived requirements, scenarios, design, and authorized design-time plan/checklist. |
+| Concrete implementation | Beads issues decomposing that solution into independently verifiable results, with executable dependencies and references to the approved OpenSpec source. |
 | Multi-session Wayfinder work | A Beads parent/index and bounded child work linked to Backlog scope and current OpenSpec questions; semantic questions, answers, and rationale remain in OpenSpec. |
 
 When Backlog is selected for a committed initiative, search for and reuse its
@@ -56,6 +56,22 @@ Link the OpenSpec change to its Backlog task using native references or an
 artifact path and revision. Decompose by need, not one-to-one: a framing task
 may have several changes, and a specification task several implementation
 issues. Links carry provenance; the source owner keeps authority.
+
+Backlog never dictates the implementation: classes, algorithms, call sequences,
+batch sizes, and engineering steps belong in OpenSpec. Allowed change locations
+or architectural patterns may constrain the solution space without prescribing
+the solution. Missing implementation detail in Backlog is intentional, not a gap
+requiring a user decision. OpenSpec chooses and explains the solution within
+those boundaries, keeping technical contracts and scenarios in specifications
+and implementation details in its design/plan artifacts. Beads decomposes that
+approved solution; an atomic task has one independently verifiable result, not
+a fixed file count or a copied specification checklist.
+
+A native tool's optional plan field or default workflow does not change this
+allocation. Use a reference to OpenSpec where needed, not a second plan in
+Backlog. Do not silently remove or relocate an existing approved constraint
+because it was recorded at the wrong level; apply the amendment route below
+when its meaning would change.
 
 An external prerequisite does not erase the product commitment. Retain its
 reference and entry condition in the framing task using native fields or
@@ -102,9 +118,10 @@ coverage. The downstream owner may add detail within its authority, but may not
 narrow an outcome, discard required work at a blocker or intermediate
 milestone, or conceal an unresolved dependency.
 
-Only the owner of the upstream intent may approve an exclusion, deferral, or
-substitution. Validation, review, downstream acceptance, and implementation
-evidence do not supply that approval. Use the ephemeral comparison in
+An exclusion, deferral, substitution, or new obligation requires the decision
+defined by [parent contract amendments](#parent-contract-amendments), recorded
+with the upstream owner. Validation, review, downstream acceptance, and
+implementation evidence do not supply that decision. Use the ephemeral comparison in
 [transitions.md](transitions.md); never persist a coverage table or SpeciFlow
 traceability record.
 
@@ -131,7 +148,7 @@ and stage:
   within the current assignment under rule 4.
 - **Spec gap** (a demonstrated conflict prevents an approved outcome) →
   resolve the conflict: correct the implementation, reconsider the mechanism,
-  clarify the requirement, or obtain an authorized spec amendment.
+  clarify the requirement, or use the parent contract amendment route below.
 - **Enhancement** (capability beyond approved goals) → non-blocking scope
   proposal to Backlog.
 
@@ -183,31 +200,78 @@ explain the intersection and obtain the authorized decision before dependent
 work. An unnecessary uncovered addition can be rejected outright. Neither it
 nor a non-intersecting proposal blocks independent approved work.
 
+## Parent contract amendments
+
+This is the single route for a newly discovered decision that would change an
+approved parent: OpenSpec cannot expand, narrow, or contradict Backlog; Beads
+and implementation cannot change the approved OpenSpec contract. It applies
+even when a proposed spec amendment preserves Backlog's high-level outcome.
+
+1. **Compare meaning** against actual approved parents and later user decisions.
+   Distinguish derived detail from a change to an outcome, requirement, DoD,
+   NFR, constraint, exclusion, or approved technical contract.
+2. **Find an in-contract solution first.** Repair a defect, investigate a
+   narrower mechanism, or reject an unnecessary reviewer addition under the
+   current grant. Initial technical design and testable derived requirements
+   within Backlog are OpenSpec work, not new product requirements. Ordinary
+   repairs, debugging, factual investigation, and such authorized refinement
+   require no new interview.
+3. **If a parent semantic change is necessary and unresolved, invoke
+   the original `mattpocock-skills:grilling` with the user and execute its full
+   process through the actual answers and required completion confirmation.**
+   Apply [grilling-integration.md](grilling-integration.md). Present the conflict,
+   evidence, compliant alternatives considered, and proposed effects. A generic
+   approval request, reviewer PASS, planning commit, or failed test is not this
+   decision process. Keep affected owner mutations and dependent implementation
+   pending; continue independently authorized work. If the required method is
+   unavailable, pause this branch under its availability rule, not a silent
+   substitute interview.
+4. **Reuse a settled decision.** An exact applicable prior user answer or an
+   explicit user instruction settling the same concrete question need not be
+   asked again. Generic permission to implement/review is not such an answer.
+   Apply only its covered effects through the existing mutation recipe and
+   review, updating the highest affected owner first and then its dependants.
+   Record decisions at their owner; links, not a new authority ledger.
+
+Review may discover and propose an amendment, never adopt it by rewriting a
+parent to make a child pass. Calling an amendment “clarification”, “corrected
+assumption”, or “not scope expansion” does not bypass this route. Neither can
+moving implementation instructions out of Backlog silently weaken an approved
+constraint. Review each level for its own responsibility:
+
+| Reviewed level | Question |
+| --- | --- |
+| Backlog | Is the outcome meaningful, architecturally appropriate and internally coherent, with high-level requirements and constraints rather than a solution recipe? |
+| OpenSpec | Does this technical solution and its testable contract satisfy the Backlog task completely, without new product requirements or contradictions? |
+| Beads | Do these atomic tasks implement the approved specification, with verifiable results and no new specification or product obligations? |
+
 ## Delegation for autonomous flows
 
-When the user pre-authorizes it (by direct instruction or a configured
-mechanism), scope and conflict decisions can be delegated to subagents
-instead of stopping for human input. This enables autonomous scenarios.
+Implementation and read-only review can be delegated within their existing
+grant. They confer no authority to answer a user decision or amend a parent.
 
-### Decision authority levels
+Replacing user grilling with subagent grilling requires a **direct, clear user
+instruction explicitly authorizing that substitution for a bounded question**.
+Configuration, an autonomy setting, “use subagents”, and implementation/review
+delegation do not qualify. Do not infer the exception from the user's desire
+for speed or uninterrupted work. An explicit substitution for a named parent
+amendment authorizes resolving that amendment, not merely recommending options
+that preserve the old parent. Apply its covered result at the highest affected
+owner before dependent changes; do not demand a second human answer solely
+because the named decision changes parent semantics. The human-only categories
+below still apply to their actual effects.
 
-| Level | When | Who decides |
-| --- | --- | --- |
-| **Mandatory stop** | Security boundary changes, irreversible operations (delete, archive, close), scope authority changes, budget/contract decisions | Human only — no delegation possible |
-| **Delegatable** | Scope proposal evaluation, ambiguity within approved scope, trade-off decisions within approved constraints, priority ordering | Subagent, if pre-authorized by user |
-| **Automatic** | Defect fixes within the current assignment (rule 4), mechanical operations with established patterns | Agent proceeds without stopping |
-
-### Subagent context modes
-
-When a decision is delegated, the subagent's context determines its
-perspective:
-
-- **Clean context**: Fresh evaluation without current-task bias — like an
-  independent reviewer. Use for scope conflict assessment and proposal
-  evaluation where objectivity matters.
-- **Top-level context**: Knows approved scope, goals, and constraints but
-  not current implementation detail. Use for alignment checks and priority
-  decisions where scope awareness is needed.
+For that explicit exception, the interviewing agent and substitute respondent
+use fresh contexts: original user inputs, later
+explicit decisions, approved parent snapshots, the exact delegation grant,
+unresolved question, and neutral facts. Exclude the orchestrator's conclusions,
+preferred answer, implementation rationalizations, and inherited session
+narrative. Apply the original skill with only SpeciFlow's documented
+one-question-at-a-time presentation adaptation; do not substitute the
+coordinator's interview algorithm. The subagent is the substitute respondent for
+that bounded process, not a reviewer whose PASS approves scope. Its answer cannot extend the
+grant; uncovered questions return to the user. Owner writes still use the
+existing mutation recipe.
 
 ### Mandatory stop — no exceptions
 
@@ -220,9 +284,14 @@ These always require human decision regardless of delegation settings:
 3. Changing who defines scope (Backlog authority transfer, project
    ownership change)
 4. Budget, infrastructure, or contractual commitments
-5. Overriding a previous explicit human decision
+5. Overriding a previous explicit human decision outside the precise question
+   the user has explicitly authorized the substitute respondent to reconsider
 
-A subagent may recommend but cannot authorize these actions.
+A subagent may recommend but cannot authorize these actions. Classify them by
+actual effects, not vocabulary: an ordinary product or quality-control rule is
+not an authentication/access-control boundary merely because it uses words
+such as “identity”, “verification”, or “approval”. A parent requirement changing
+under a scoped substitution is not itself a transfer of scope ownership.
 
 ## Pushback obligation
 
@@ -253,9 +322,11 @@ When the user contradicts their own approved spec during execution:
    you're now asking for Y. These conflict."
 2. **Assess impact on completed work**: Does the change require rework
    on already-completed issues? State the cost.
-3. **Route through the spec**: The change goes through OpenSpec update
-   with preview → review → approve, even if the user says "just do it."
-   The process protects the user from cascading untracked changes.
+3. **Resolve at the highest affected owner**: Apply
+   [parent contract amendments](#parent-contract-amendments). Reuse a concrete
+   decision the user has already settled; grill only unresolved semantic
+   choices. Update Backlog first if product meaning changes, then OpenSpec and
+   dependent tasks through the existing preview, review, and mutation gates.
 4. **Batch when possible**: Multiple related changes can be previewed
    together as one spec amendment. Unrelated changes are separate.
    When changes arrive in rapid succession, collect related ones before
@@ -329,7 +400,8 @@ When Beads is selected, OpenSpec `tasks.md` is a design-time checklist and
 projection index, not live executable status, assignment, claim, or completion;
 Beads owns those facts. Without Beads, OpenSpec may use its native task
 workflow. A requirements, contract, security, or material architecture change
-stops execution for renewed OpenSpec or user approval.
+uses [parent contract amendments](#parent-contract-amendments); only affected
+execution pauses until its actual prerequisites are resolved.
 
 Closure is separate by owner: Beads completion, OpenSpec verification or
 archive, Backlog outcome acceptance, and product Git/CI evidence are separate
@@ -362,8 +434,8 @@ When one discipline discovers it needs another mid-activity:
 2. SpeciFlow takes control and selects the needed discipline.
 3. That discipline completes and returns results to the appropriate owner.
 4. SpeciFlow checks authority and necessity. If the result requires a real
-   design or specification change, route the covered owner update through
-   its existing review and authorization gates. A finding that confirms the
+   design or specification change, apply the parent contract amendment route,
+   then its existing review and mutation gates. A finding that confirms the
    approved design is evidence, not automatically a required owner change.
 5. The original discipline resumes when its actual prerequisite is resolved.
    Do not make recording a confirming finding a new prerequisite to already

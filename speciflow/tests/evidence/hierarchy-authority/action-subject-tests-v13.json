@@ -1,0 +1,32 @@
+[
+  {
+    "fixture": "candidate-v13-1",
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": "test_encode_preserves_newlines (test_encoder.EncoderTests.test_encode_preserves_newlines) ... ok\ntest_encode_preserves_text_without_newlines (test_encoder.EncoderTests.test_encode_preserves_text_without_newlines) ... ok\n\n----------------------------------------------------------------------\nRan 2 tests in 0.000s\n\nOK\n"
+  },
+  {
+    "fixture": "candidate-v13-2",
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": "test_preserves_invoice_line_breaks (test_encoder.EncodeTests.test_preserves_invoice_line_breaks) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nOK\n"
+  },
+  {
+    "fixture": "candidate-v13-3",
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": "test_preserves_crlf (test_encoder.EncoderTests.test_preserves_crlf) ... ok\ntest_preserves_empty_text (test_encoder.EncoderTests.test_preserves_empty_text) ... ok\ntest_preserves_invoice_line_breaks (test_encoder.EncoderTests.test_preserves_invoice_line_breaks) ... ok\ntest_preserves_plain_unicode_text (test_encoder.EncoderTests.test_preserves_plain_unicode_text) ... ok\n\n----------------------------------------------------------------------\nRan 4 tests in 0.000s\n\nOK\n"
+  },
+  {
+    "fixture": "candidate-v13-4",
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": "test_preserves_invoice_data (test_encoder.EncoderTests.test_preserves_invoice_data) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nOK\n"
+  },
+  {
+    "fixture": "candidate-v13-5",
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": "test_preserves_invoice_text_and_line_endings (test_encoder.EncoderTests.test_preserves_invoice_text_and_line_endings) ... ok\n\n----------------------------------------------------------------------\nRan 1 test in 0.000s\n\nOK\n"
+  }
+]
