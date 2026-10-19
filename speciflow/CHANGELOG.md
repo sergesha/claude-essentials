@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.2](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.8.1...speciflow-v0.8.2) (2026-10-19)
+
+
+### Bug Fixes
+
+* **speciflow:** enforce hierarchy and original grilling authority ([#126](https://github.com/sergesha/claude-essentials/issues/126)) ([cb4112a](https://github.com/sergesha/claude-essentials/commit/cb4112aef46f70c058dc1dec9a117fd89db712bc))
+
 ## [0.8.1](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.8.0...speciflow-v0.8.1) (2026-10-16)
 
 
