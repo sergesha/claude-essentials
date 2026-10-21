@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.3](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.8.2...speciflow-v0.8.3) (2026-10-21)
+
+
+### Bug Fixes
+
+* **speciflow:** route direct planning writes through native owners ([#128](https://github.com/sergesha/claude-essentials/issues/128)) ([0886695](https://github.com/sergesha/claude-essentials/commit/08866954c430b215d3f9c41b83ef90a8e96e6b93))
+
 ## [0.8.2](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.8.1...speciflow-v0.8.2) (2026-10-19)
 
 
