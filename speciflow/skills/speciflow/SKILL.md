@@ -16,6 +16,12 @@ interfaces; do not create or assume a `speciflow` command. Native owner edits
 remain authoritative. Supporting disciplines never acquire owner authority.
 Never copy owner content into a SpeciFlow schema.
 
+The full plugin also bundles a bounded [planning direct-write guard](references/backlog-guard.md)
+for Claude Code and Codex. It redirects recognized direct Backlog mutations to
+this skill/native CLI and active OpenSpec mutations to the change workflow.
+Change artifacts remain editable; a permitted operation alone does not establish
+that the whole procedure was followed.
+
 Backlog defines **what and why**, OpenSpec defines **how**, and Beads decomposes
 the approved solution into **atomic, verifiable tasks**. A lower level cannot
 change its parent. A necessary unresolved parent decision selects the original

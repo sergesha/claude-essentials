@@ -8,5 +8,6 @@
   },
   "homepage": "https://github.com/sergesha/claude-essentials",
   "repository": "https://github.com/sergesha/claude-essentials",
-  "license": "MIT"
+  "license": "MIT",
+  "hooks": "./hooks/backlog-guard.json"
 }

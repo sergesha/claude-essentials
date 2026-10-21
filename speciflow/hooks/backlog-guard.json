@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^(Write|Edit|MultiEdit|NotebookEdit|apply_patch|Bash|exec_command)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/backlog_guard.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
