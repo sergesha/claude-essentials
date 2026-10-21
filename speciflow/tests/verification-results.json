@@ -1,0 +1,84 @@
+{
+  "red": {
+    "exit": 1,
+    "cases": 412,
+    "failures": 85,
+    "errors": 0,
+    "skips": 0
+  },
+  "green": {
+    "exit": 0,
+    "cases": 412,
+    "failures": 0,
+    "errors": 0,
+    "skips": 0
+  },
+  "identical_test_hashes": {
+    "test_active_spec_guard.py": "e8681a32e6414f1fbb88b0c804625d58707253a9ce83901dfbcc9f72dbae91e8",
+    "test_backlog_guard.py": "b350baf8a63f4bb8ce9758cb86d074e91ff7663d4b452fcadff54b7e8d9cb849",
+    "test_packaging.py": "c1590194190e7802253be13f6eca6f1bb085d7b90a670ae0ad736632ad40f464",
+    "test_read_guard_regressions.py": "7a16d1be4e220eb00f4d32c248cb4862e8f662430a4f1a218f83a3517f6dd60d",
+    "test_storage.py": "8d932392c68dd3799764665735ef145047e9cb96d1aa049730a42d0959476ea3"
+  },
+  "runtime_sha256": "b3882964ab13c931fcab4a1eb42083225b4b7655deeec9e732446f12847e4fb6",
+  "before_hook_sha256": "2a07a8932a2f98a99df2a2fe543a64f0e42756f3f1135c93911a37627a8249dc",
+  "same_case_ids": true,
+  "resolved_failures_by_test": {
+    "test_reads_and_independent_draft_writes_execute": 32,
+    "test_recognized_python_mutations_are_denied": 2,
+    "test_unknown_code_passes_without_claiming_prevention": 10,
+    "test_mentions_and_unrelated_targets_pass": 16,
+    "test_names_alone_do_not_initialize_native_owners": 1,
+    "test_copy_to_project_directory_changes_only_its_own_destination": 10,
+    "test_find_unknown_filters_do_not_mark_the_entire_root_as_mutated": 2,
+    "test_descriptor_redirect_preserves_actual_copy_destination": 4,
+    "test_move_to_directory_changes_only_source_and_destination_child": 6,
+    "test_heredoc_text_and_comments_do_not_hide_following_mutation": 2
+  },
+  "review_fixes": {
+    "before": {
+      "failed": 22,
+      "passed": 8
+    },
+    "after": {
+      "failed": 0,
+      "passed": 30
+    }
+  },
+  "host_acceptance": {
+    "runtime_sha256": "b3882964ab13c931fcab4a1eb42083225b4b7655deeec9e732446f12847e4fb6",
+    "hosts": [
+      "Claude Code 2.1.304",
+      "Codex 0.163.0"
+    ],
+    "original_cases": 18,
+    "original_direct_denials": 8,
+    "original_successful_quiet_controls": 8,
+    "original_fixture_failures_hook_allowed": 2,
+    "corrected_loop_cases": 2,
+    "corrected_loop_successful_quiet": 2,
+    "protected_hashes_unchanged": true,
+    "native_registration_and_installed_source_hashes_match": true,
+    "recovery": {
+      "claude": {
+        "actual_denial_reminder": true,
+        "change_artifacts_written": true,
+        "native_validation": true,
+        "planning_complete": true
+      },
+      "codex": {
+        "actual_denial_reminder": true,
+        "native_artifact_instructions": true,
+        "change_artifacts_written": false,
+        "timeout_seconds": 120,
+        "planning_complete": false
+      }
+    },
+    "cleanup": {
+      "owned_test_processes_remaining": 0,
+      "temporary_auth_links_remaining": 0,
+      "original_credentials_retained": true
+    },
+    "raw_evidence": "/private/tmp/speciflow-target-mutation-rewrite/host-evidence/run2/"
+  }
+}

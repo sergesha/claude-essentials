@@ -1,7 +1,8 @@
 # User-level installation
 
-SpeciFlow is instructions and references, not an installer. It ships no
-`speciflow` CLI, runtime, daemon, installer script, or universal host command.
+SpeciFlow ships instructions, references and a bounded planning routing hook,
+not an installer. It ships no
+`speciflow` CLI, workflow engine, daemon, installer script, or universal host command.
 Installation is performed only when the user requests it.
 
 Before any host-side write, show one exact preview containing the source,
@@ -44,7 +45,17 @@ Use the installation routes below when reuse cannot supply the required capabili
 
 ## Codex
 
-Use Codex's built-in `$skill-installer` with the canonical GitHub skill URL.
+For instructions **and the planning guard**, install the full SpeciFlow plugin
+through Codex's native plugin mechanism from the `sergesha/claude-essentials`
+marketplace. Preview the selected version, marketplace registration and managed
+plugin files before the authorized installation. Inspect the current native
+plugin interface for the exact action. Review and trust the hook definition in
+`/hooks`, then verify actual loading and a disposable denial plus silent native
+CLI/read controls. Installation alone does not trust Codex hooks. See
+[backlog-guard.md](backlog-guard.md) for coverage and failure limits.
+
+For instructions alone, Codex's built-in `$skill-installer` can install the
+canonical GitHub skill URL. This route **does not install the guard**.
 This is a Codex prompt, not a shell command:
 
 ```text
@@ -74,6 +85,9 @@ The targets are the user's Claude marketplace registration and installed
 SpeciFlow bundle. External effects are limited to those host-managed entries
 and files. Obtain separate explicit approval before each requested action,
 start a new Claude session, and invoke SpeciFlow explicitly.
+Verify that the plugin's planning hook loads, denies disposable Backlog and active-spec edits,
+and silently passes native CLI/read controls. Skill-file discovery alone is
+not evidence that the hook is active.
 
 ## Owner dependencies
 
