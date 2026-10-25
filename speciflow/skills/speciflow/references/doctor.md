@@ -24,6 +24,14 @@ only — full cross-level doctor runs at epic/milestone boundaries.
 
 ### 1. Coverage (top-down)
 
+For specification/plan review and completeness claims, apply
+[scope-review.md](scope-review.md). Compare the current work and completion
+claims with applicable approved requirements; retain unresolved mandatory work.
+At the same gate inspect adopted work and actual continuation: unsupported
+additions, unjustified layers of tests around testing machinery, or an exhausted/canceled method that
+continues without a new justified basis fail the necessary-work check. A green
+helper suite does not establish the original outcome; retain necessary repairs.
+
 Identify the selected stage and owner transition before evaluating coverage:
 
 | Checkpoint | Coverage evidence |
@@ -94,6 +102,8 @@ Use [operations.md](operations.md#evidence-at-existing-gates) to check the
 applicable evidence against the current activity/artifact. Closed Beads issues,
 archived OpenSpec changes and accepted Backlog outcomes each require their own
 supporting evidence; one owner's state does not prove another's completion.
+Check reused verdicts against their basis, purpose, remainder and permitted use
+under [scope-review.md](scope-review.md#existing-report-and-downstream-handoff).
 
 Unavailable evidence means **unconfirmed**, not proof that a step was skipped.
 An observed transition contrary to its required gate is a **false close**; cite

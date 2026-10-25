@@ -5,6 +5,15 @@ projected, applied, promoted, archived, closed, or reported through another.
 
 ## Intent preservation
 
+When authoring/adopting work, refining/reviewing scope, returning from a method
+or relying on a verdict for the selected transition,
+apply [scope-review.md](scope-review.md) before the comparison below. Carry the
+review's source basis, purpose, mandatory remainder and permitted use into the
+actual downstream dispatch; retrieve missing limits before relying on a PASS.
+Carry the justified next action and its effort/evidence/stop boundary, including
+cancellation and unresolved obligations. A handoff cannot restart an exhausted
+method or turn its own supporting work into a product requirement.
+
 Before proposing the target mutation, compare the authoritative upstream
 artifact with the proposed downstream result read-only and in memory. Identify
 the inspected source revision or the user's approved dirty snapshot, the target

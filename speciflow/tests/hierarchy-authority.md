@@ -1,9 +1,12 @@
 # Hierarchy and decision-authority regression protocol
 
-Run alongside `procedure-verification.md` using fresh subjects and frozen
-baseline/candidate bundles. Keep evaluator criteria outside subject context.
-The source change is instructions, so source-string assertions alone cannot
-establish compliance.
+Use these cases when evaluating hierarchy or decision-authority changes to
+SpeciFlow itself. Select the relevant cases and bound their execution under
+[procedure-verification.md](procedure-verification.md); this protocol adds no
+automatic campaign beyond that selection. Preserve applicable approved evidence
+requirements and explicit method commitments. Keep evaluator criteria outside
+subject context. Source-string assertions alone cannot establish behavioral
+compliance.
 
 ## Required distinctions
 
@@ -24,13 +27,18 @@ establish compliance.
 
 1. Observe RED before editing production instructions. Freeze case text, rubric,
    source hashes, model/effort and repetition counts; preserve every trial.
-2. Use repeated matched decision probes on models of differing strengths, plus
-   action trials in disposable owner adapters. At least five fresh action trials
-   per wording variant and a no-guidance control. Grade choices separately from
-   actual writes, unchanged parent state, and completed independent repairs.
-3. Include independently authored cases withheld during candidate authoring.
-   Freeze candidate before exposure. A rerun after adapting to a heldout failure
-   is regression evidence, no longer an unseen evaluation.
+2. Use repeated matched decisions on models of differing strengths. Select
+   repetitions, controls and necessary action isolation under the approved bounded
+   plan and the shared procedure. Use disposable adapters only when the target
+   action requires them. A five-trial wording study or no-guidance arm requires
+   its own relevant acceptance question; it is not a universal minimum here.
+   Honor already approved method commitments through their existing amendment
+   route. Grade choices separately from actual writes, unchanged parent state
+   and completed independent repairs.
+3. When the planned claim requires an unseen evaluation, include independently
+   authored cases withheld during candidate authoring and freeze the candidate
+   before exposure. A rerun after adapting to a heldout failure is regression
+   evidence, no longer an unseen evaluation.
 4. Inspect raw outputs and actual artifacts independently. Distinguish missing
    required interview method, unauthorized mutation, unnecessary blocking, and
    infrastructure failure. Do not equate a method name in a simulated request
