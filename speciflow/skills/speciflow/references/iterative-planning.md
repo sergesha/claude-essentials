@@ -103,6 +103,13 @@ a complete specification.
 
 Before checking completeness, run [doctor](doctor.md) to verify that
 all Backlog criteria are covered and no orphan requirements appeared.
+For both specification and implementation-plan reviews, first apply
+[scope-review.md](scope-review.md): recover applicable upper obligations beyond
+the nearest task and preserve the resulting verdict's purpose and permitted use.
+Apply its [necessary-work check](scope-review.md#select-necessary-work-before-adopting-it)
+before writing or adopting your own plan, including its verification dependencies.
+Expose material effort/evidence boundaries and stopping conditions in the plan
+and its approval summary; they do not reduce the required outcome.
 
 All four must be met to approve:
 
@@ -117,6 +124,46 @@ All four must be met to approve:
   originated (Backlog, interview, or implementation). Remaining
   unknowns that cannot affect the current phase are noted with their
   impact boundary and decision deadline — they do not block this stage.
+
+## Present a specification or plan for approval
+
+At each existing user-approval handoff for a written specification or
+implementation plan, fill the decision block below from the actual document and
+applicable parent. Present it in the user's conversation language before asking.
+Keep every part explicit; concise wording preserves the material commitments.
+
+**Document and decision:** document type, written version and a working link to
+that exact document; for a plan, its governing specification and version.
+**Goal and scope:** the full approved upstream outcome, the problem being solved,
+included work, exclusions and all mandatory remaining work with continuation.
+**Approach and delivery:** the chosen mechanism and main behavior; for a plan,
+main work/stages, dependencies and expected results. Each separate plan approval
+request states the material behavior and verification inherited from its governing
+specification in that request's own summary. Stage names such as "implement the
+procedure" and a specification link do not explain that mechanism to the user.
+**Completion and checks:** in EACH separate request, state the actual
+DoD/verification conditions: required repetitions and comparison/model conditions,
+required controls and retention of unsuccessful results, where the source requires
+these. A generic “GREEN and checks” does not preserve those commitments; the
+specification's summary does not fill omissions in the plan's summary.
+**Risks and current readiness:** material constraints, unresolved prerequisites,
+what is demonstrated and what remains unimplemented or unverified.
+**Effect of approval:** the exact covered decision/effects, distinguished from
+execution authority, implementation success and owner acceptance.
+**Confirmation:** one explicit question about that identified document/decision.
+
+Before presenting this block, compare every part with the written sources.
+Complete a missing material commitment and correct a contradiction or unsupported
+completion claim before asking. Make the essential commitments understandable
+without opening files. Use absolute local document links, or resolve relative
+links from the saved request's directory and check their targets actually exist.
+For an artifact supplied inside a document or JSON file, link that real containing
+file and identify the exact section/field and revision. Lack of a standalone file
+does not make an available containing-document link unavailable.
+Details are optional; a document link does not fill a missing decision-block part.
+Existing exact grants remain effective and need no repeated permission.
+This is presentation at an existing gate. Required unresolved parent decisions
+still use the original method, and independently authorized work continues.
 
 ## Ready parts within the complete scope
 

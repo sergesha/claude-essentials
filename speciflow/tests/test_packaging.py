@@ -46,6 +46,7 @@ EXPECTED_DISTRIBUTABLE_FILES = frozenset(
         "skills/speciflow/references/wayfinding.md",
         "skills/speciflow/references/operations.md",
         "skills/speciflow/references/ownership.md",
+        "skills/speciflow/references/scope-review.md",
         "skills/speciflow/references/transitions.md",
         "skills/speciflow/references/storage.md",
         "skills/speciflow/references/diagnostics.md",

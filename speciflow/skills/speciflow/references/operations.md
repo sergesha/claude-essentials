@@ -83,6 +83,11 @@ placeholder through the documented artifact-editing interface. A real checklist
 must not be removed to change a dashboard. Native validation alone is not a
 semantic task-content check.
 
+When asking the user to approve a written specification or implementation plan,
+apply [the decision-summary procedure](iterative-planning.md#present-a-specification-or-plan-for-approval)
+to the identified document before the question. Preserve the exact approval
+effects and existing grants under the approval boundary below.
+
 ### Cross-owner mutation recipe
 
 For any action that crosses owner boundaries, follow these steps in order:
@@ -128,6 +133,11 @@ are two separate gates. One does not grant the other.
 
 If the installed owner has no operation for the required lifecycle transition,
 report it as unsupported and stop.
+
+Before adopting your own assignment, dispatching a worker or continuing after a
+supporting-method result, apply [the necessary-work check](scope-review.md#select-necessary-work-before-adopting-it).
+Use its outcome and bounded continuation in the existing assignment; do not
+turn method-maintenance work into a new acceptance obligation.
 
 ## Semantic review
 
@@ -190,7 +200,12 @@ is the single definitive trigger — no separate rule overrides it.
 **Protocol:**
 
 1. Select mode from the table above.
-2. Spawn a clean-context subagent with the appropriate inputs.
+2. Before specification/implementation-plan review or a completeness verdict,
+   apply [scope-review.md](scope-review.md). Supply its actual upper-source,
+   decision, proposed-snapshot and full reused-verdict inputs in either mode;
+   state the review purpose and require its report content, plus handoff content
+   for an actual transfer, using the existing delivery form. Then spawn the
+   clean-context reviewer with those inputs.
 3. For agent-origin semantic changes, first establish authority and necessity
    against the approved outcome and existing narrower paths; then assess the
    proposed solution. Return blocking defects within the current assignment
@@ -201,8 +216,10 @@ is the single definitive trigger — no separate rule overrides it.
    Rejecting an uncovered addition outright needs no review of that abandoned
    proposal; use existing review for any resulting implementation correction.
 4. End review when no approved-scope blockers remain.
-5. Reuse an unchanged completed review — state
-   `Review: required — completed, no blockers`.
+5. Reuse an unchanged completed review together with its basis, purpose,
+   remaining mandatory work and permitted downstream use under
+   [scope-review.md](scope-review.md#existing-report-and-downstream-handoff).
+   State `Review: required — completed, no blockers` only within that boundary.
 
 ### Evidence at existing gates
 

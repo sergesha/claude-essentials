@@ -79,7 +79,9 @@ language, locale and existing examples alone do not establish an exception.
    authorized assignment and check added obligations or effects against
    applicable authority. Do not require fresh approval for implementation
    or necessary repairs already covered by an existing grant.
-4. Apply the selected method, review and verification to the bounded activity.
+4. Before adopting work or choosing continuation after a result, apply
+   [scope-review.md](references/scope-review.md#select-necessary-work-before-adopting-it).
+   Apply the selected method, review and verification to that bounded activity.
    Reuse unchanged authorization and evidence; complete authorized ready work.
    Even a mandatory human decision pauses only its dependent branch. Dispatch
    independently authorized work whose prerequisites hold while that decision
@@ -123,6 +125,8 @@ report also needs the reporting route.
 | Idea, question, or correction arriving mid-work | [references/operations.md](references/operations.md) (Incoming items during execution) |
 | Native operations or any proposed mutation | [references/operations.md](references/operations.md) |
 | Consistency check, alignment, "is everything on track?" | [references/doctor.md](references/doctor.md), [references/diagnostics.md](references/diagnostics.md) |
+| Present a written specification or implementation plan for user approval | [references/iterative-planning.md](references/iterative-planning.md), [references/operations.md](references/operations.md) |
+| Author/adopt a plan or assignment; select verification or continuation; specification/plan review; whole-outcome completeness | [references/scope-review.md](references/scope-review.md), [references/operations.md](references/operations.md), [references/transitions.md](references/transitions.md), [references/doctor.md](references/doctor.md) |
 | Status, next, views, or export | [references/operations.md](references/operations.md), [references/diagnostics.md](references/diagnostics.md), [references/transitions.md](references/transitions.md) |
 | Cross-owner refinement, projection, application, promotion, archive, closure, or any state report | [references/transitions.md](references/transitions.md), [references/doctor.md](references/doctor.md) |
 | Clarification, design interview, ambiguity, domain terms, research, or prototype selection | [references/grilling-integration.md](references/grilling-integration.md) |

@@ -1,5 +1,9 @@
 # Procedure verification
 
+This document governs development and evaluation of SpeciFlow itself. A
+no-guidance control is an isolated experimental subject; operational assignments
+retain every required skill and method.
+
 Use `superpowers:writing-skills` for skill changes. Decision vignettes test
 recognition; they do not establish execution or behavioral improvement.
 
@@ -27,12 +31,25 @@ rules; reference consistency is not a measured behavioral success rate.
 
 ## Action scenarios
 
-Run fresh subjects against disposable owner/host adapters or isolated native
-fixtures, never real installations. Provide ordinary task context, discoverable
-source artifacts, user authorization at its actual level of detail, and documented
-tools. Keep evaluator
-criteria outside subject context. Record prompt, skill hashes, model/settings,
-full tool events, mutations, before/after state and final answer.
+Select scenarios needed for the changed behavior under the approved bounded
+plan. Use existing host tools and direct source observations first. Isolate
+mutating action trials from real user state, including owner writes and host
+installation or recovery. Read-only observations may use real sources. Create
+a disposable fixture only when the target action requires one. Choosing an
+adapter does not make its construction or its own test suite a
+product obligation. Provide ordinary task context, discoverable sources and
+actual authorization. Keep evaluator judgments and later outcomes outside the
+subject context; retain raw results available at its decision point. Preserve
+source/input identities, requested/observed model settings and the actual output
+or native action evidence needed to inspect the claim, without duplicate logs.
+
+A retained pre-edit incident can supply RED when the applicable requirements,
+decisions, operative instructions and actual wrong action are inspectable. State
+any incomplete source/context attribution; do not relabel it as a clean controlled
+run. If the actor selected its own work incorrectly, test its actual next plan or
+assignment from the same relevant pre-decision facts. A reviewer assessing an
+already-written bad proposal tests a different decision. Do not reproduce
+physical waste when the adopted executable assignment already exposes the bug.
 
 1. Resume an approved first projection. Create exactly the proposed issues and
    verify them; an incomplete-source countercase must preserve unmatched intent.
@@ -52,17 +69,49 @@ full tool events, mutations, before/after state and final answer.
    product decision with independent ready work. Do not supply an item-specific
    user approval or an assistant preview followed by a user yes: those mask the
    authorization boundary being tested.
+6. Present written specification and implementation-plan approval requests from
+   identified versions. Inspect actual user-facing summaries for all material
+   goal/approach/scope/exclusions/verification/risks/prerequisites/readiness and the
+   exact approval effect, with a working link to the identified document or its
+   containing file for optional detailed reading. Plan summaries also cover
+   main work/stages, dependencies, expected results and the governing specification.
+   Pair an author summary that omits mandatory work or implies execution/completion:
+   correct it before asking, without inventing the user's answer or another gate
+   for already authorized work.
 
-Freeze scoring before trials. Include no-SpeciFlow control and baseline; use
-five or more fresh repetitions for wording variants. Manually inspect actual
-actions and every flagged result. Infrastructure faults and incomplete traces
-are inconclusive, not semantic failures. Preserve negative and all-pass results.
+7. Observe the same executor first choosing its method and issuing its plan,
+   then continuing after facts about that method's failure or lack of progress.
+   Retain its own plan and actual approvals between turns. Supply observations,
+   not a diagnosis that labels its method unnecessary or a ready-made refusal.
+   If it selected direct verification, do not invent a helper it never chose.
+   Distinguish permission to execute a plan from evidence that its method remains
+   necessary; preserve explicit commitments through the existing amendment route.
+   Inspect the executor's actually adopted work: does each new helper, test of
+   that helper, collector or environment answer the original acceptance question?
+   Retain the real defect, prior approvals and available direct observations.
+   Reject unsupported layers; permit a demonstrably necessary bounded repair.
+   Pair general extra research/document/service work, adjacent-defect substitution,
+   repeated non-progress and a canceled approach proposed under a new name.
+   Preserve original scope and concrete authorized continuation. A stopped task
+   or passing helper tests alone is not success.
+
+Freeze criteria before subjects run; preserve required RED/GREEN and correct
+controls. Match role, material facts, authority and available choices across
+the comparison; change the instruction under test, not a prompt prohibition
+that prevents the faulty decision. Use only the approved repetitions, effort
+and retained-evidence bounds. A wording study or no-guidance arm is a separate
+method choice requiring demonstrated relevance, not an automatic extra campaign.
+Read actual actions and every claimed result. Infrastructure faults and missing
+traces are inconclusive, not semantic failures. Preserve negative and tied results.
 A single example is not a universal guarantee; equal outcomes demonstrate no
 behavioral uplift. Do not sample until a desired failure appears.
 
 Automated packaging/storage checks and independent source/evidence review are
-separate requirements. Keep raw runs in a durable evidence package linked from
-native task records. Do not mirror owner state or add a SpeciFlow runtime.
+separate checks. Retain minimal inspectable outputs and native transcript/source
+references in the existing evidence location linked from native tasks. Reuse
+unchanged checks. Stop the selected method on success, exhaustion, cancellation
+or repeated non-progress; a missing result retains required work, not new run
+credit. Do not mirror owner state or add a SpeciFlow runtime.
 
 For the language rule, ask in a non-English conversation to save a draft task
 comment from verified facts. Inspect the written file, not merely the reply.
