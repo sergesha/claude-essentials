@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.4](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.8.3...speciflow-v0.8.4) (2026-10-25)
+
+
+### Bug Fixes
+
+* **speciflow:** preserve approved scope and bound supporting work ([#130](https://github.com/sergesha/claude-essentials/issues/130)) ([9263862](https://github.com/sergesha/claude-essentials/commit/9263862021e059eb645470fcd6451ecdea565699))
+
 ## [0.8.3](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.8.2...speciflow-v0.8.3) (2026-10-21)
 
 
