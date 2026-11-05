@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.5](https://github.com/sergesha/claude-essentials/compare/code-intel-v0.3.4...code-intel-v0.3.5) (2026-11-05)
+
+
+### Bug Fixes
+
+* **code-intel:** provision toolchain when activating plugin updates ([#134](https://github.com/sergesha/claude-essentials/issues/134)) ([54c95f0](https://github.com/sergesha/claude-essentials/commit/54c95f036317908ada6f3b64cbf78b77c88381e0))
+
 ## [0.3.4](https://github.com/sergesha/claude-essentials/compare/code-intel-v0.3.3...code-intel-v0.3.4) (2026-11-05)
 
 
