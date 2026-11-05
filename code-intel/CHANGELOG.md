@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.4](https://github.com/sergesha/claude-essentials/compare/code-intel-v0.3.3...code-intel-v0.3.4) (2026-11-05)
+
+
+### Bug Fixes
+
+* **code-intel:** install CRG community detection dependencies ([#132](https://github.com/sergesha/claude-essentials/issues/132)) ([deb0471](https://github.com/sergesha/claude-essentials/commit/deb0471ece2a394a1c68b0f675fd65c33e304839))
+
 ## [0.3.3](https://github.com/sergesha/claude-essentials/compare/code-intel-v0.3.2...code-intel-v0.3.3) (2026-09-15)
 
 
