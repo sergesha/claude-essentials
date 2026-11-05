@@ -16,8 +16,10 @@ claude plugin list --json
 For Claude Code, select only IDs ending in `@claude-essentials` and retain each
 installation's scope. Update the selected installed plugins, not every available
 marketplace entry. Keep enabled/disabled choices, credentials, namespaces,
-backend pins and data directories. Updating a plugin does not authorize a data
-migration or upgrading separately installed backend tools.
+backend pins and data directories. Code Intel installation/update includes
+provisioning its two CLI tools and required extensions, preserving mise version
+requests. Data migrations and other plugins' separately installed backends
+require their own authorization.
 
 ## Claude Code
 
@@ -71,6 +73,18 @@ Do not invent `/reload-plugins` for Codex, guess a control socket, or treat
 See the [App Server protocol](https://developers.openai.com/codex/app-server)
 and the 0.154.0 [CLI handler](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/cli/src/marketplace_cmd.rs)
 and [server handler](https://github.com/openai/codex/blob/rust-v0.154.0/codex-rs/app-server/src/request_processors/marketplace_processor.rs).
+
+## Complete Code Intel tool provisioning
+
+After updating Code Intel, resolve `scripts/code_intel.py` inside the installed
+version reported by the client and run `python3 /absolute/installed/path/scripts/code_intel.py ensure-tools`.
+This step installs/upgrades the tools and verifies igraph in CRG's own Python
+environment. Do not treat a plugin version bump as proof of tool readiness.
+The new `SessionStart` hook runs the same operation on activation. Both clients
+share its success receipt, so successful provisioning is not repeated for the
+same release and unchanged tool environment. Failed provisioning is reported and
+retried; it does not mark the update complete. Package managers are not installed
+automatically, and loaded MCP servers still need reload/restart.
 
 ## Verify installation and activation separately
 
