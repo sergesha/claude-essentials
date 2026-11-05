@@ -390,8 +390,8 @@ def install_tools(*, upgrade: bool = False) -> int:
         commands.append([npm, "install", "--global", "@colbymchenry/codegraph"])
     if need_crg:
         commands.append(
-            [uv, "tool", "install", "--upgrade", "code-review-graph"]
-            if uv else [pipx, "install", "--force", "code-review-graph"]
+            [uv, "tool", "install", "--upgrade", "code-review-graph[communities]"]
+            if uv else [pipx, "install", "--force", "code-review-graph[communities]"]
         )
     return sum(1 for command in commands if run(command) != 0)
 
