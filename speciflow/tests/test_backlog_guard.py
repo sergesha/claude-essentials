@@ -43,6 +43,91 @@ def silent(result):
     assert (result.returncode, result.stdout, result.stderr) == (0, "", "")
 
 
+@pytest.mark.parametrize("command", [
+    "backlog task edit 10 --ref openspec/changes/current/proposal.md",
+    "backlog tasks edit TASK-10 --ref=openspec/changes/current/proposal.md",
+    "backlog task edit 10 --ref ''",
+    "command backlog task edit 10 --ref a --ref b",
+    "env LANG=C backlog task edit 10 --ref a",
+    "/tools/backlog task edit 10 --ref a",
+    "backlog task 10 --plain && backlog task edit 10 --ref a",
+    "backlog task edit 10 --clear-milestone --ref a",
+    "backlog task edit 10 -tTitle --ref a",
+    "backlog task edit 10 --title=Title --ref a",
+])
+@pytest.mark.parametrize("host_name", ["Bash", "exec_command"])
+def test_reference_replacement_shorthand_is_denied(workspace, command, host_name):
+    root, task = workspace
+    before = task.read_bytes()
+    key = "cmd" if host_name == "exec_command" else "command"
+    result = invoke(root, host_name, {key: command})
+    assert result.returncode == 2, (result.stdout, result.stderr)
+    assert result.stdout == ""
+    assert "--add-ref" in result.stderr and "replace" in result.stderr.lower()
+    assert task.read_bytes() == before
+
+
+@pytest.mark.parametrize("command", [
+    "backlog task create 'New outcome' --ref a",
+    "backlog task edit 10 --add-ref a",
+    "backlog task edit 10 --remove-ref old --add-ref new",
+    "backlog task edit 10 --clear-refs",
+    "backlog task edit 10 --title '--ref'",
+    "backlog task edit 10 --description '--ref'",
+    "backlog task edit 10 -t '--ref'",
+    "backlog task edit 10 -tTitle --add-ref a",
+    "backlog task edit 10 -tTitle --help --ref a",
+    "backlog task edit 10 --notes 'backlog task edit 10 --ref a'",
+    "backlog task edit 10 --ref a --help",
+    "backlog task edit --help --ref a",
+    "backlog task edit 10 -- --ref",
+    "printf '%s' 'backlog task edit 10 --ref a'",
+])
+def test_additive_and_explicit_delta_reference_operations_are_silent(workspace, command):
+    root, _ = workspace
+    silent(invoke(root, "Bash", {"command": command}))
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not os.environ.get("SPECIFLOW_TEST_BACKLOG"), reason="real Backlog CLI trial is opt-in")
+def test_native_reference_addition_and_intentional_replacement(tmp_path):
+    backlog = os.environ["SPECIFLOW_TEST_BACKLOG"]
+    env = {**os.environ, "BACKLOG_CWD": str(tmp_path)}
+
+    def native(*args):
+        result = subprocess.run([backlog, *args], cwd=tmp_path, env=env,
+                                capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        return result.stdout
+
+    native("init", "Reference fixture", "--defaults", "--no-git", "--agent-instructions", "none")
+    first, second, added = (f"https://tracker.invalid/ISSUE-{i}" for i in (101, 102, 103))
+    native("task", "create", "Keep source references", "--ref", first, "--ref", second, "--plain")
+    assert first in native("task", "1", "--plain") and second in native("task", "1", "--plain")
+
+    # Establish the installed owner's actual asymmetric semantics in disposable data.
+    native("task", "edit", "1", "--ref", added)
+    replaced = native("task", "1", "--plain")
+    assert added in replaced and first not in replaced and second not in replaced
+    native("task", "edit", "1", "--remove-ref", added, "--add-ref", first, "--add-ref", second)
+
+    task = next((tmp_path / "backlog/tasks").glob("*.md"))
+    before = task.read_bytes()
+    denied_call = invoke(tmp_path, "Bash", {"command": f"backlog task edit 1 --ref {added}"})
+    assert denied_call.returncode == 2
+    assert task.read_bytes() == before
+
+    silent(invoke(tmp_path, "Bash", {"command": f"backlog task edit 1 --add-ref {added}"}))
+    native("task", "edit", "1", "--add-ref", added)
+    readback = native("task", "1", "--plain")
+    assert all(ref in readback for ref in (first, second, added))
+
+    silent(invoke(tmp_path, "Bash", {"command": f"backlog task edit 1 --remove-ref {first} --remove-ref {added}"}))
+    native("task", "edit", "1", "--remove-ref", first, "--remove-ref", added)
+    readback = native("task", "1", "--plain")
+    assert second in readback and first not in readback and added not in readback
+
+
 @pytest.mark.parametrize("tool,args", [
     ("Write", {"file_path": "backlog/tasks/task-1.md", "content": "lost"}),
     ("Edit", {"file_path": "backlog/tasks/task-1.md", "old_string": "Outcome", "new_string": "lost"}),

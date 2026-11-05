@@ -23,6 +23,20 @@ known operation during the activity. Refresh when the executable/version changes
 syntax is unknown, output was incomplete, or the interface contradicts it.
 This never replaces current native-root and state checks before mutation.
 
+### Backlog references
+
+Inspect the task's current references before editing them. To add a link to an
+existing task, use `backlog task edit <id> --add-ref <link>` and read the task
+back to verify that the new link and all existing unrelated references remain.
+Operation help is specific: `task create --ref` adds initial references, while
+`task edit --ref` replaces the entire list. Reading create help does not cover edit.
+
+For an authorized replacement, derive explicit `--remove-ref` and `--add-ref`
+changes from the current and intended lists; retain every unrelated reference.
+Use `--clear-refs` only when the authorized result is an empty list. Apply the
+existing authorization boundary; this adds no new approval round. The bundled
+guard redirects recognized `task edit --ref` calls to these explicit operations.
+
 When the human explicitly invokes Wayfinder, also apply
 [wayfinding.md](wayfinding.md) for the native owner binding.
 

@@ -7,10 +7,11 @@ SpeciFlow and the native owner's interface.
 
 ## Decision
 
-A denial requires a recognized mutation and its associated protected path.
-Mentioning a protected path, reading it or using an unfamiliar program is not
-a reason to deny. The hook maintains no permitted-read-command, Python-import
-or text-method list.
+A direct-write denial requires a recognized mutation and its associated
+protected path. A separate native-CLI check redirects Backlog's reference
+replacement shorthand, described below. Mentioning a protected path, reading
+it or using an unfamiliar program is not a reason to deny. The hook maintains
+no permitted-read-command, Python-import or text-method list.
 
 - Structured editor paths and patch add/update/delete/move targets are checked.
 - Shell checks associate deletion, movement, destination copies, in-place edits
@@ -18,7 +19,13 @@ or text-method list.
 - Python checks recognize direct filesystem mutations with literal paths and
   ordinary local path assignments. Text processing and unknown readers need
   no exemption. String replacement is distinct from path replacement.
-- Native `backlog` and `openspec` calls pass without a subcommand allowlist.
+- Native `backlog` and `openspec` calls pass without a subcommand allowlist,
+  with one flag-specific check: `backlog task edit ... --ref` (also `tasks` and
+  `--ref=value`) is blocked because it replaces every reference. The reminder
+  directs additions to `--add-ref` and intentional replacements to explicit
+  `--remove-ref`/`--add-ref` changes. Create's `--ref`, edit help and explicit
+  add/remove/clear operations pass. This check applies to recognized native
+  commands even when the target owner root is not locally discoverable.
   Separate shell mutations and external output redirections remain checked.
 
 Allowed calls return exit 0 with no hook output. Recognized direct mutations
