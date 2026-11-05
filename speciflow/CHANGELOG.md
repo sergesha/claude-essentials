@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.5](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.8.4...speciflow-v0.8.5) (2026-11-05)
+
+
+### Bug Fixes
+
+* **speciflow:** preserve existing Backlog task references ([#136](https://github.com/sergesha/claude-essentials/issues/136)) ([b844700](https://github.com/sergesha/claude-essentials/commit/b84470010e4080b80a759404048764e6675c80ef))
+
 ## [0.8.4](https://github.com/sergesha/claude-essentials/compare/speciflow-v0.8.3...speciflow-v0.8.4) (2026-10-25)
 
 
