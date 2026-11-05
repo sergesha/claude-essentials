@@ -80,9 +80,15 @@ package-manager-specific paths. Existing installations from any manager work
 when their executables are available in the host's environment.
 
 For automated provisioning, `install-tools` and `upgrade` use npm for CodeGraph
-and an available uv or pipx for code-review-graph. `install-tools` installs only
-missing tools and leaves existing installations unchanged; `upgrade` explicitly
-updates both. They check only the installers needed for the requested work and
+and an available uv or pipx for `code-review-graph[communities]`. The `communities`
+extra installs igraph in the tool's own Python environment for graph-based
+community detection instead of the file-based fallback.
+`install-tools` installs only missing tools and leaves existing installations
+unchanged; `upgrade` explicitly updates both and includes the `communities` extra.
+For an existing CRG installation without igraph, use `upgrade --base BASE`;
+repeating `install-tools` will skip it. With the user's preferred installer,
+include `communities` in that same tool environment.
+They check only the installers needed for the requested work and
 do not install package managers. Alternatively install the tools with the user's
 preferred manager.
 Ensure both commands are on the PATH inherited by Claude Code/Codex, including

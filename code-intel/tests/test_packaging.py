@@ -85,15 +85,15 @@ class PackagingTests(unittest.TestCase):
                                           str(Path(directory).resolve()), "stdio payload"])
             self.assertTrue((installed / "skills/code-intel/../../scripts/code_intel.py").is_file())
 
-    def test_install_and_upgrade_keep_baseline_tool_commands(self):
+    def test_install_and_upgrade_include_community_detection(self):
         import io
 
         spec = importlib.util.spec_from_file_location("code_intel", PACKAGE / "scripts/code_intel.py")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         for available, python_command in (
-            ({"npm", "uv", "pipx"}, ["/tools/uv", "tool", "install", "--upgrade", "code-review-graph"]),
-            ({"npm", "pipx"}, ["/tools/pipx", "install", "--force", "code-review-graph"]),
+            ({"npm", "uv", "pipx"}, ["/tools/uv", "tool", "install", "--upgrade", "code-review-graph[communities]"]),
+            ({"npm", "pipx"}, ["/tools/pipx", "install", "--force", "code-review-graph[communities]"]),
         ):
             with (
                 self.subTest(available=available),

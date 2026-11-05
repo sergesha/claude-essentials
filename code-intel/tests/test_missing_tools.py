@@ -82,8 +82,8 @@ class MissingToolsTests(unittest.TestCase):
     def test_install_only_missing_engines_with_only_required_managers(self):
         for available, expected in (
             ({"codegraph", "code-review-graph"}, []),
-            ({"codegraph", "uv"}, ["uv", "tool", "install", "--upgrade", "code-review-graph"]),
-            ({"codegraph", "pipx"}, ["pipx", "install", "--force", "code-review-graph"]),
+            ({"codegraph", "uv"}, ["uv", "tool", "install", "--upgrade", "code-review-graph[communities]"]),
+            ({"codegraph", "pipx"}, ["pipx", "install", "--force", "code-review-graph[communities]"]),
             ({"code-review-graph", "npm"}, ["npm", "install", "--global", "@colbymchenry/codegraph"]),
         ):
             with self.subTest(available=available):
@@ -99,13 +99,19 @@ class MissingToolsTests(unittest.TestCase):
         self.assertEqual(added, set())
 
     def test_upgrade_still_upgrades_both_existing_engines(self):
-        result, calls, _ = self.invoke({"npm", "uv", "codegraph", "code-review-graph"}, "upgrade")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(calls[:9], [
-            "npm", "install", "--global", "@colbymchenry/codegraph",
-            "uv", "tool", "install", "--upgrade", "code-review-graph",
-        ])
-        self.assertEqual(calls[9:], ["codegraph", "--version", "code-review-graph", "--version"])
+        for manager, install_args in (
+            ("uv", ["tool", "install", "--upgrade"]),
+            ("pipx", ["install", "--force"]),
+        ):
+            with self.subTest(manager=manager):
+                result, calls, _ = self.invoke({"npm", manager, "codegraph", "code-review-graph"}, "upgrade")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                expected = [
+                    "npm", "install", "--global", "@colbymchenry/codegraph",
+                    manager, *install_args, "code-review-graph[communities]",
+                ]
+                self.assertEqual(calls[:len(expected)], expected)
+                self.assertEqual(calls[len(expected):], ["codegraph", "--version", "code-review-graph", "--version"])
 
 
 if __name__ == "__main__":
