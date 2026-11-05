@@ -45,7 +45,7 @@ class HookLaunchTests(unittest.TestCase):
                 "print(json.dumps([sys.argv, sys.stdin.read(), __name__, __file__]))\n"
                 "sys.exit(7)\n"
             )
-            for event, argument in [("SessionStart", "hook-status"),
+            for event, argument in [("SessionStart", "hook-start"),
                                     ("UserPromptSubmit", "hook-prompt"),
                                     ("PostToolUse", "hook-update")]:
                 with self.subTest(event=event):

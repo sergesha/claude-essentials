@@ -14,6 +14,7 @@ working directory in the target project.
 ## Operations
 
 - Install missing tools: `python3 "$CODE_INTEL" install-tools`
+- Complete plugin installation/update: `python3 "$CODE_INTEL" ensure-tools`
 - Upgrade tools and check the installation: `python3 "$CODE_INTEL" upgrade --base BASE`
 - Initialize one project or umbrella: `python3 "$CODE_INTEL" setup-project PATH`
 - Initialize all eligible projects: `python3 "$CODE_INTEL" setup-batch BASE`
@@ -36,21 +37,22 @@ Explicit `setup-project` on an umbrella initializes every non-excluded nested Gi
 
 ## Session-start discovery
 
-Claude Code and Codex use the same plugin `SessionStart` command. It first checks
-whether `codegraph` and `code-review-graph` are available on PATH, even outside a
-Git repository or when indexes already exist. If a tool is missing, it reports
-the missing commands and asks the agent to offer installation; it does not run
-installers or initialize indexes.
+Claude Code and Codex use the same `SessionStart` command, `hook-start`. Before
+checking indexes, it calls `ensure-tools`: on first activation of each plugin
+release it installs or upgrades both tools, including CRG's `communities` extra.
+This is part of the code-intel installation/update operation. When updating this
+plugin yourself, run `ensure-tools` from the updated installed copy immediately;
+do not report the update complete based only on the plugin version.
 
-On that notification, tell the user which tools are missing and offer to install
-them. After consent, run `install-tools` yourself; do not make the user discover
-or type the installation command. An explicit request to install is consent.
-If they decline, continue with normal search/file tools without installing.
-If prerequisites for installation are missing, explain the reported prerequisite
-and agree on provisioning it or using the user's preferred installer.
-After installation, verify tool availability with `status --base PATH`, resume
-the requested project setup, and ask the user to restart the host for MCP pickup.
-Do not claim MCP is connected until the host confirms it.
+Both clients share a locked success receipt. It is saved only after both PATH
+commands work and igraph imports and runs Leiden in CRG's own Python environment.
+Later sessions recheck that environment and skip installers when the receipt
+still matches. Changed or broken tools trigger provisioning again.
+Missing package managers, failed installations, or failed capability checks are
+reported; the hook remains fail-open and does not record success or initialize
+indexes on failure. Resolve the reported problem and retry `ensure-tools`.
+Do not install package managers implicitly. Restart the host for MCP pickup;
+do not claim an already running MCP server reloaded until the host confirms it.
 
 When both tools are available, in a Git repository or linked worktree it
 automatically initializes both indexes when
@@ -80,12 +82,15 @@ package-manager-specific paths. Existing installations from any manager work
 when their executables are available in the host's environment.
 
 For automated provisioning, `install-tools` and `upgrade` use npm for CodeGraph
-and an available uv or pipx for `code-review-graph[communities]`. The `communities`
+and an available uv or pipx for `code-review-graph[communities]`. Existing
+mise-managed tools are updated through their declaring mise config, preserving
+version requests and existing extras; `communities` is added to CRG's extras.
+The `communities`
 extra installs igraph in the tool's own Python environment for graph-based
 community detection instead of the file-based fallback.
 `install-tools` installs only missing tools and leaves existing installations
 unchanged; `upgrade` explicitly updates both and includes the `communities` extra.
-For an existing CRG installation without igraph, use `upgrade --base BASE`;
+For an existing CRG installation without igraph, use `ensure-tools`;
 repeating `install-tools` will skip it. With the user's preferred installer,
 include `communities` in that same tool environment.
 They check only the installers needed for the requested work and

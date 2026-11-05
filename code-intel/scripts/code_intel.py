@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -364,19 +365,85 @@ def hook_prompt(codegraph: str = CODEGRAPH) -> int:
     return 0
 
 
-def install_tools(*, upgrade: bool = False) -> int:
+def tool_executable(name: str) -> str | None:
+    executable = shutil.which(name)
+    if executable and Path(executable).resolve().name == "mise":
+        mise = shutil.which("mise")
+        if not mise:
+            raise RuntimeError(f"Cannot resolve mise shim {executable}")
+        result = subprocess.run([mise, "which", name], capture_output=True, text=True, timeout=15)
+        if result.returncode or not result.stdout.strip():
+            raise RuntimeError(f"Cannot resolve mise shim {name}: {result.stderr.strip()}")
+        return result.stdout.strip()
+    return executable
+
+
+def mise_install_command(tool: str, executable: str) -> list[str] | None:
+    """Keep mise-owned tools in their declared config, including version pins."""
+    mise = shutil.which("mise")
+    if not mise:
+        return None
+    result = subprocess.run([mise, "ls", "--json", tool], capture_output=True, text=True, timeout=15)
+    if result.returncode:
+        raise RuntimeError(f"Cannot inspect mise tool {tool}: {result.stderr.strip()}")
+    entries = json.loads(result.stdout)
+    entry = next((item for item in entries if item.get("active")), None)
+    if entry is None and len(entries) == 1 and entries[0].get("source"):
+        entry = entries[0]
+    if entry is None:
+        return None
+    current = shutil.which(executable)
+    if current and Path(current).resolve().name != "mise":
+        owned = any(Path(current).resolve().is_relative_to(Path(item["install_path"]).resolve()) for item in entries)
+        if not owned:
+            return None
+    source = entry.get("source", {})
+    if source.get("type") != "mise.toml":
+        raise RuntimeError(f"Cannot preserve mise configuration for {tool}: {source}")
+    config = Path(source["path"])
+    command = [mise, "use", "--path", str(config)]
+    if executable == "code-review-graph":
+        definition = tomllib.loads(config.read_text()).get("tools", {}).get(tool, {})
+        extras = definition.get("extras", []) if isinstance(definition, dict) else []
+        if isinstance(extras, str):
+            extras = extras.split(",")
+        extras = sorted({*extras, "communities"})
+        command += ["--force", "--tool-option", f"extras={json.dumps(extras)}"]
+    command.append(f"{tool}@{entry['requested_version']}")
+    return command
+
+
+def refresh_mise_paths() -> None:
+    """Mise may move a tool to a new directory when its extras change."""
+    for tool, executable in (("npm:@colbymchenry/codegraph", "codegraph"), ("pipx:code-review-graph", "code-review-graph")):
+        if not shutil.which(executable):
+            continue
+        command = mise_install_command(tool, executable)
+        if command:
+            result = subprocess.run([command[0], "which", executable], capture_output=True, text=True, timeout=15)
+            if result.returncode == 0 and result.stdout.strip():
+                directory = str(Path(result.stdout.strip()).parent)
+                os.environ["PATH"] = directory + os.pathsep + os.environ.get("PATH", "")
+
+
+def install_tools(*, upgrade: bool = False, runner: Runner | None = None) -> int:
+    runner = runner or run
     need_codegraph = upgrade or shutil.which("codegraph") is None
     need_crg = upgrade or shutil.which("code-review-graph") is None
     if not (need_codegraph or need_crg):
         print("Code intelligence tools are already available on PATH.")
         return 0
-    npm = shutil.which("npm") if need_codegraph else None
-    uv = shutil.which("uv") if need_crg else None
-    pipx = shutil.which("pipx") if need_crg and not uv else None
+    cg_command = mise_install_command("npm:@colbymchenry/codegraph", "codegraph") if need_codegraph else None
+    crg_command = mise_install_command("pipx:code-review-graph", "code-review-graph") if need_crg else None
+    npm = shutil.which("npm") if need_codegraph and not cg_command else None
+    current_crg = tool_executable("code-review-graph") if need_crg and not crg_command else None
+    pipx_owned = current_crg and (Path(current_crg).resolve().parent.parent / "pipx_metadata.json").is_file()
+    uv = shutil.which("uv") if need_crg and not (crg_command or pipx_owned) else None
+    pipx = shutil.which("pipx") if need_crg and not (crg_command or uv) else None
     missing = []
-    if need_codegraph and not npm:
+    if need_codegraph and not (cg_command or npm):
         missing.append("npm")
-    if need_crg and not (uv or pipx):
+    if need_crg and not (crg_command or uv or pipx):
         missing.append("uv or pipx")
     if missing:
         print(
@@ -387,13 +454,103 @@ def install_tools(*, upgrade: bool = False) -> int:
         return 127
     commands = []
     if need_codegraph:
-        commands.append([npm, "install", "--global", "@colbymchenry/codegraph"])
+        commands.append(cg_command or [npm, "install", "--global", "@colbymchenry/codegraph"])
     if need_crg:
         commands.append(
-            [uv, "tool", "install", "--upgrade", "code-review-graph[communities]"]
-            if uv else [pipx, "install", "--force", "code-review-graph[communities]"]
+            crg_command or (
+                [uv, "tool", "install", "--upgrade", "code-review-graph[communities]"]
+                if uv else [pipx, "install", "--force", "code-review-graph[communities]"]
+            )
         )
-    return sum(1 for command in commands if run(command) != 0)
+    return sum(1 for command in commands if runner(command) != 0)
+
+
+def plugin_version() -> str:
+    return load_json(Path(__file__).resolve().parents[1] / ".claude-plugin/plugin.json")["version"]
+
+
+def toolchain_health() -> dict[str, str]:
+    """Verify the actual PATH commands and igraph in CRG's own interpreter."""
+    health = {}
+    for name in ("codegraph", "code-review-graph"):
+        executable = tool_executable(name)
+        if not executable:
+            raise RuntimeError(f"Missing {name} on PATH")
+        result = subprocess.run([executable, "--version"], capture_output=True, text=True, timeout=15)
+        if result.returncode:
+            raise RuntimeError(f"{name} failed: {result.stderr.strip()}")
+        health[name] = f"{Path(executable).resolve()}: {result.stdout.strip()}"
+    executable = Path(tool_executable("code-review-graph")).resolve()
+    python = executable.with_name("python")
+    if not python.is_file():
+        raise RuntimeError(f"Cannot locate CRG's Python next to {executable}")
+    result = subprocess.run(
+        [str(python), "-c", "import igraph; "
+         "assert len(igraph.Graph.Famous('Zachary').community_leiden().membership) == 34; "
+         "print(igraph.__version__)"],
+        capture_output=True, text=True, timeout=15,
+    )
+    if result.returncode:
+        raise RuntimeError(f"igraph unavailable in CRG environment: {result.stderr.strip()}")
+    health["igraph"] = result.stdout.strip()
+    return health
+
+
+def run_provision(command: list[str]) -> int:
+    result = subprocess.run(command, capture_output=True, text=True, timeout=120)
+    if result.returncode:
+        print(f"Installer failed: {shlex.join(command)}\n{(result.stdout + result.stderr)[-2000:]}")
+    return result.returncode
+
+
+def ensure_tools() -> int:
+    """Provision on first activation of each plugin release; verify before caching."""
+    global CODEGRAPH, CRG
+    # Both clients share this receipt and lock, avoiding simultaneous installers.
+    receipt = HOME / ".cache/code-intel/toolchain.json"
+    try:
+        receipt.parent.mkdir(parents=True, exist_ok=True)
+        with receipt.with_suffix(".lock").open("a+b") as lock:
+            if os.name == "nt":
+                import msvcrt
+                lock.write(b"\0")
+                lock.flush()
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(lock, fcntl.LOCK_EX)
+            version = plugin_version()
+            refresh_mise_paths()
+            try:
+                previous = load_json(receipt)
+            except (OSError, ValueError):
+                previous = {}
+            try:
+                health = toolchain_health()
+            except (OSError, RuntimeError, subprocess.SubprocessError):
+                health = None
+            if health is not None and previous == {"plugin_version": version, "tools": health}:
+                return 0
+            print("Code Intel: installing/updating tools and required communities extension.")
+            if install_tools(upgrade=True, runner=run_provision):
+                raise RuntimeError("Tool installation failed; activation remains incomplete")
+            refresh_mise_paths()
+            CODEGRAPH = tool_executable("codegraph") or "codegraph"
+            CRG = tool_executable("code-review-graph") or "code-review-graph"
+            health = toolchain_health()
+            atomic_write(receipt, json.dumps({"plugin_version": version, "tools": health}) + "\n")
+            print(f"Code Intel: toolchain verified; igraph {health['igraph']} available in CRG.")
+            return 0
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError) as error:
+        print(f"Code Intel: tool provisioning failed: {error}")
+        return 1
+
+
+def hook_start() -> int:
+    if ensure_tools() == 0:
+        return hook_status()
+    return 0
 
 
 def upgrade(base: Path) -> int:
@@ -653,6 +810,7 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     subcommands = result.add_subparsers(dest="command", required=True)
     subcommands.add_parser("install-tools")
+    subcommands.add_parser("ensure-tools")
     upgrade_parser = subcommands.add_parser("upgrade")
     upgrade_parser.add_argument("--base", type=Path, default=HOME / "Projects")
 
@@ -680,6 +838,7 @@ def parser() -> argparse.ArgumentParser:
 
     subcommands.add_parser("hook-update")
     subcommands.add_parser("hook-status")
+    subcommands.add_parser("hook-start")
     subcommands.add_parser("hook-prompt")
     return result
 
@@ -688,6 +847,8 @@ def main() -> int:
     arguments = parser().parse_args()
     if arguments.command == "install-tools":
         return install_tools()
+    if arguments.command == "ensure-tools":
+        return ensure_tools()
     if arguments.command == "upgrade":
         return upgrade(arguments.base)
     if arguments.command == "setup-project":
@@ -709,6 +870,8 @@ def main() -> int:
         return hook_update()
     if arguments.command == "hook-status":
         return hook_status()
+    if arguments.command == "hook-start":
+        return hook_start()
     if arguments.command == "hook-prompt":
         return hook_prompt()
     return 2
