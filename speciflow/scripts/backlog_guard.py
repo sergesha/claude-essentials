@@ -20,6 +20,32 @@ REMINDERS = {
 PATCH_PATH = re.compile(r'^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$', re.MULTILINE)
 
 
+class ReferenceReplacement(Exception):
+    pass
+
+
+def replaces_backlog_references(args):
+    if len(args) < 2 or args[0] not in {'task', 'tasks'} or args[1] != 'edit':
+        return False
+    # Edit's remaining ordinary options take a value. Keep value words such as
+    # --title '--ref' distinct from actual flags; unknown syntax is not inferred.
+    switches = {'--plain', '--clear-milestone', '--clear-due-date', '--clear-labels', '--clear-ac',
+                '--clear-deps', '--clear-final-summary', '--clear-refs', '--clear-docs'}
+    replace, i = False, 2
+    while i < len(args):
+        arg = args[i]
+        if arg == '--':
+            break
+        if arg in {'--help', '-h'}:
+            return False
+        option = arg.split('=', 1)[0]
+        if option == '--ref':
+            replace = True
+        attached_short_value = arg.startswith('-') and not arg.startswith('--') and len(arg) > 2
+        i += 2 if arg.startswith('-') and '=' not in arg and arg not in switches and not attached_short_value else 1
+    return replace
+
+
 def lexical(value, cwd):
     return Path(os.path.abspath(cwd / Path(value).expanduser()))
 
@@ -291,6 +317,8 @@ def command_targets(words, cwd, doc=None):
     if not words:
         return []
     name, args = Path(words[0]).name, words[1:]
+    if name == 'backlog' and replaces_backlog_references(args):
+        raise ReferenceReplacement
     if name in {'backlog', 'openspec'}:
         return []
     if name in {'rm', 'rmdir', 'tee', 'touch', 'mkdir'}:
@@ -396,6 +424,12 @@ def main():
                 print(REMINDERS[owner], file=sys.stderr)
                 return 2
         return 0
+    except ReferenceReplacement:
+        print('SpeciFlow: Backlog CLI task edit --ref replaces ALL references; it does not append. '
+              'Use --add-ref to add a link. For an authorized replacement, inspect current references '
+              'and use explicit --remove-ref/--add-ref changes; use --clear-refs for an authorized clear. '
+              'Read backlog task edit --help and verify the resulting references.', file=sys.stderr)
+        return 2
     except (OSError, ValueError, TypeError, AttributeError) as error:
         print(f'SpeciFlow planning guard could not inspect this call: {error}', file=sys.stderr)
         return 1
