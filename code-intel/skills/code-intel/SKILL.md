@@ -122,6 +122,11 @@ Install `code-intel` from the `claude-essentials` marketplace in Claude Code or
 Codex. The plugin supplies both MCP servers, hooks, and this skill. It does not
 rewrite global instructions, hooks, MCP settings, or skill symlinks.
 
+In Codex, always pass the absolute working project path as `repo_root` to CRG
+tools. Its MCP process bootstraps from the plugin directory using native relative
+`cwd` support; requests without an explicit project are rejected so this cannot
+silently index the plugin. Claude Code retains its project working directory.
+
 Python 3.11+ is required for the setup script. Both MCP servers and setup commands
 find `codegraph` and `code-review-graph` through `PATH`; there are no
 package-manager-specific paths. Existing installations from any manager work

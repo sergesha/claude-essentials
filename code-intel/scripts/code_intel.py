@@ -1187,7 +1187,7 @@ def parser() -> argparse.ArgumentParser:
     repair.add_argument("--engine", choices=("both", "codegraph", "crg"), default="both")
 
     server = subcommands.add_parser("serve")
-    server.add_argument("engine", choices=("codegraph", "crg"))
+    server.add_argument("engine", choices=("codegraph", "crg", "crg-explicit"))
 
     subcommands.add_parser("hook-update")
     subcommands.add_parser("hook-worker")
@@ -1221,7 +1221,8 @@ def main() -> int:
     if arguments.command == "repair-project":
         return repair_project(arguments.path, engine=arguments.engine)
     if arguments.command == "serve":
-        command = [CODEGRAPH, "serve", "--mcp"] if arguments.engine == "codegraph" else crg_command(["serve"])
+        command = ([CODEGRAPH, "serve", "--mcp"] if arguments.engine == "codegraph"
+                   else crg_command(["serve-explicit" if arguments.engine == "crg-explicit" else "serve"]))
         os.execvp(command[0], command)
     if arguments.command == "hook-update":
         return hook_update()

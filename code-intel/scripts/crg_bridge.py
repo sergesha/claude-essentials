@@ -114,6 +114,21 @@ def main() -> int:
         incremental.get_data_dir = lambda _repo, **_kwargs: directory
         incremental.get_db_path = lambda _repo, **_kwargs: directory / "graph.db"
         sys.argv = [sys.argv[0], "build", "--repo", str(repo)]
+    if len(sys.argv) > 1 and sys.argv[1] == "serve-explicit":
+        # Legacy Codex resolves relative cwd against the plugin root but does
+        # not interpolate plugin-root placeholders in arguments. Never let
+        # that bootstrap cwd become an implicit graph target.
+        from code_review_graph import main as server
+
+        def explicit_repo_root(repo_root):
+            if not repo_root:
+                raise ValueError("Code Intel: pass repo_root explicitly as the absolute path of the working project.")
+            if not Path(repo_root).is_absolute():
+                raise ValueError("Code Intel: repo_root must be an absolute project path.")
+            return repo_root
+
+        server._resolve_repo_root = explicit_repo_root
+        sys.argv[1] = "serve"
     from code_review_graph.cli import main as native_main
 
     native_main()

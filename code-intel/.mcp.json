@@ -10,10 +10,11 @@
     "code-review-graph": {
       "command": "python3",
       "args": [
-        "${PLUGIN_ROOT}/scripts/code_intel.py",
+        "scripts/code_intel.py",
         "serve",
-        "crg"
-      ]
+        "crg-explicit"
+      ],
+      "cwd": "."
     }
   }
 }
