@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.6](https://github.com/sergesha/claude-essentials/compare/code-intel-v0.3.5...code-intel-v0.3.6) (2026-11-09)
+
+
+### Bug Fixes
+
+* **code-intel:** run indexing outside foreground hooks ([#138](https://github.com/sergesha/claude-essentials/issues/138)) ([e83586f](https://github.com/sergesha/claude-essentials/commit/e83586fc7a133498b96cfa8069ab64911c688c42))
+
 ## [0.3.5](https://github.com/sergesha/claude-essentials/compare/code-intel-v0.3.4...code-intel-v0.3.5) (2026-11-05)
 
 
