@@ -42,15 +42,16 @@ class PackagingTests(unittest.TestCase):
             entries = read_json(REPO / relative)["plugins"]
             self.assertEqual(next(item for item in entries if item["name"] == "code-intel")["source"], source)
 
-    def test_hooks_share_baseline_entrypoints_and_build_timeout(self):
+    def test_hooks_use_short_foreground_timeouts_for_indexing(self):
         hooks = read_json(PACKAGE / "hooks/indexing.json")["hooks"]
-        for event, command in (
-            ("SessionStart", "hook-status"),
-            ("UserPromptSubmit", "hook-prompt"),
-            ("PostToolUse", "hook-update"),
+        for event, command, timeout in (
+            ("SessionStart", "hook-start", 300),
+            ("UserPromptSubmit", "hook-prompt", 20),
+            ("PostToolUse", "hook-update", 10),
         ):
             hook = hooks[event][0]["hooks"][0]
-            self.assertEqual(hook["timeout"], 300)
+            self.assertEqual(hook["timeout"], timeout)
+            self.assertTrue(hook["command"].endswith(" " + command))
         self.assertIn("apply_patch", hooks["PostToolUse"][0]["matcher"].split("|"))
 
     def test_installed_copy_resolves_mcp_entrypoints(self):
