@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.8](https://github.com/sergesha/claude-essentials/compare/code-intel-v0.3.7...code-intel-v0.3.8) (2026-11-09)
+
+
+### Bug Fixes
+
+* **code-intel:** launch legacy Codex MCP without root placeholders ([99befc7](https://github.com/sergesha/claude-essentials/commit/99befc7f2de6d4fcd0025c8f065186d69ad04805))
+
 ## [0.3.7](https://github.com/sergesha/claude-essentials/compare/code-intel-v0.3.6...code-intel-v0.3.7) (2026-11-09)
 
 
