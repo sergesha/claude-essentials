@@ -29,8 +29,12 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(codex["skills"], "./skills/")
         self.assertEqual(codex["hooks"], "./hooks/indexing.json")
         self.assertEqual(codex["mcpServers"], "./.mcp.json")
-        self.assertEqual(json.loads(json.dumps(claude["mcpServers"]).replace("CLAUDE_PLUGIN_ROOT", "PLUGIN_ROOT")),
-                         read_json(PACKAGE / ".mcp.json")["mcpServers"])
+        codex_servers = read_json(PACKAGE / ".mcp.json")["mcpServers"]
+        self.assertEqual(claude["mcpServers"]["codegraph"], codex_servers["codegraph"])
+        self.assertEqual(codex_servers["code-review-graph"], {
+            "command": "python3", "args": ["scripts/code_intel.py", "serve", "crg-explicit"], "cwd": "."})
+        self.assertEqual(claude["mcpServers"]["code-review-graph"]["args"],
+                         ["${CLAUDE_PLUGIN_ROOT}/scripts/code_intel.py", "serve", "crg"])
         self.assertEqual(claude["version"], read_json(REPO / ".release-please-manifest.json")["code-intel"])
         config = read_json(REPO / "release-please-config.json")["packages"]["code-intel"]
         self.assertEqual({item["path"] for item in config["extra-files"]},
@@ -80,16 +84,18 @@ class PackagingTests(unittest.TestCase):
             ):
                 for engine, server in servers.items():
                     with self.subTest(engine=engine, server=server):
+                        working = installed if server.get("cwd") == "." else Path(directory)
                         result = subprocess.run(
                             [server["command"], *[arg.replace("${PLUGIN_ROOT}", str(installed)).replace("${CLAUDE_PLUGIN_ROOT}", str(installed)) for arg in server["args"]]],
-                            cwd=directory, env=env, input="stdio payload\n",
+                            cwd=working, env=env, input="stdio payload\n",
                             text=True, capture_output=True, timeout=10,
                         )
                         self.assertEqual(result.returncode, 0, result.stderr)
-                        arguments = ["serve", "--mcp"] if engine == "codegraph" else ["serve"]
+                        arguments = (["serve", "--mcp"] if engine == "codegraph" else
+                                     ["serve-explicit" if "crg-explicit" in server["args"] else "serve"])
                         self.assertEqual(result.stdout.splitlines(),
                                          [str(shims / engine), *arguments,
-                                          str(Path(directory).resolve()), "stdio payload"])
+                                          str(working.resolve()), "stdio payload"])
             self.assertTrue((installed / "skills/code-intel/../../scripts/code_intel.py").is_file())
 
     def test_install_and_upgrade_include_community_detection(self):

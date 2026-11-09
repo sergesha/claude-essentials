@@ -217,10 +217,13 @@ from pathlib import Path
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 async def run():
-    params = StdioServerParameters(command=sys.executable, args=[sys.argv[1], "serve"], env=dict(os.environ), cwd=sys.argv[2])
+    params = StdioServerParameters(command=sys.executable, args=[sys.argv[1], sys.argv[3]], env=dict(os.environ), cwd=sys.argv[4])
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write) as client:
             await client.initialize()
+            if sys.argv[3] == "serve-explicit":
+                result = await client.call_tool("query_graph_tool", {"pattern":"file_summary", "target":"source.py"})
+                assert result.isError and "repo_root" in str(result), result
             for full in (True, False):
                 result = await client.call_tool("build_or_update_graph_tool", {"repo_root":sys.argv[2], "full_rebuild":full, "postprocess":"minimal"})
                 assert not result.isError, result
@@ -231,8 +234,11 @@ async def run():
             assert "later" in str(result), result
 asyncio.run(run())
 '''
-        subprocess.run([str(CRG_PYTHON), "-B", "-c", program, str(BRIDGE), str(self.repo)],
-                       env={**os.environ, "HOME": str(self.module.HOME)},
-                       check=True, capture_output=True, text=True, timeout=60)
+        for mode in ("serve", "serve-explicit"):
+            with self.subTest(mode=mode):
+                subprocess.run([str(CRG_PYTHON), "-B", "-c", program, str(BRIDGE), str(self.repo), mode,
+                                str(PACKAGE if mode == "serve-explicit" else self.repo)],
+                               env={**os.environ, "HOME": str(self.module.HOME)},
+                               check=True, capture_output=True, text=True, timeout=60)
         self.assertEqual(self.assert_healthy()["indexed_files"], 2)
         self.assertIn("?? later.py", git(self.repo, "status", "--porcelain"))
