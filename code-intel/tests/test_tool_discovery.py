@@ -32,6 +32,10 @@ class ToolDiscoveryTests(unittest.TestCase):
         ):
             with self.subTest(engine=engine):
                 self.executable(executable)
+                if engine == "crg":
+                    interpreter = self.bin / "python"
+                    interpreter.write_text(f'#!{sys.executable}\nimport os, sys\nos.execv({str(self.bin / executable)!r}, ["code-review-graph", *sys.argv[2:]])\n')
+                    interpreter.chmod(0o755)
                 result = subprocess.run(
                     [sys.executable, "-B", str(SCRIPT), "serve", engine],
                     env=self.env, capture_output=True, text=True, check=False,

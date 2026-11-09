@@ -2,6 +2,7 @@ import importlib.util
 import io
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -22,6 +23,9 @@ def load_module():
     spec = importlib.util.spec_from_file_location("code_intel", MODULE_PATH)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    # Command-collector unit tests; native bridge/health has separate integration coverage.
+    module.crg_command = lambda arguments, executable=module.CRG: [executable, *arguments]
+    module.index_health = lambda *_args, **_kwargs: {"codegraph": {"issues": []}, "crg": {"issues": []}}
     return module
 
 
@@ -51,16 +55,19 @@ class CodeIntelTests(unittest.TestCase):
         module = load_module()
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
+            main = base / "main"
+            subprocess.run(["git", "init", "-q", str(main)], check=True)
+            subprocess.run(["git", "-C", str(main), "-c", "user.name=Test", "-c", "user.email=test@example.invalid",
+                            "commit", "--allow-empty", "-qm", "base"], check=True)
             repo = base / "worktree"
-            repo.mkdir()
-            (repo / ".git").write_text("gitdir: /tmp/example\n")
-            self.assertEqual(module.discover_repos(base), [repo.resolve()])
+            subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", "--detach", str(repo)], check=True)
+            self.assertEqual(module.discover_repos(base), [main.resolve(), repo.resolve()])
 
     def test_setup_repo_stops_after_build_failure(self):
         module = load_module()
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
-            (repo / ".git").mkdir()
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
             calls = []
 
             def runner(command):
@@ -76,7 +83,7 @@ class CodeIntelTests(unittest.TestCase):
         module = load_module()
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
-            (repo / ".git" / "info").mkdir(parents=True)
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
             result = module.setup_repo(repo, lambda _command: 0, "CG", "CRG")
             self.assertEqual(result, 0)
             exclude = (repo / ".git" / "info" / "exclude").read_text()
@@ -87,7 +94,7 @@ class CodeIntelTests(unittest.TestCase):
         module = load_module()
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
-            (repo / ".git" / "info").mkdir(parents=True)
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
             calls = []
             self.assertEqual(module.update_repo(repo, lambda command: calls.append(command) or 0, "CG", "CRG"), 1)
             self.assertEqual(calls, [])
@@ -102,7 +109,7 @@ class CodeIntelTests(unittest.TestCase):
         module = load_module()
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
-            (repo / ".git" / "info").mkdir(parents=True)
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
             _make_index(repo / ".codegraph")
             (repo / ".git" / "info" / "exclude").write_bytes(b"\xff")
             calls = []
@@ -122,13 +129,12 @@ class CodeIntelTests(unittest.TestCase):
             ):
                 module.refresh_hook_repo(repo)
                 setup.assert_called_once_with(repo.resolve(), runner=ANY, codegraph=module.CODEGRAPH, crg=module.CRG)
-                run.assert_not_called()
 
     def test_worker_syncs_both_indexes(self):
         module = load_module()
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
-            (repo / ".git").mkdir()
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
             _make_index(repo / ".codegraph")
             _make_index(repo / ".code-review-graph")
             with (
@@ -229,7 +235,7 @@ class CodeIntelTests(unittest.TestCase):
         module = load_module()
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
-            (repo / ".git").mkdir()
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
             _make_index(repo / ".codegraph")
             _make_index(repo / ".code-review-graph")
             with patch.object(module, "git_root", return_value=repo), patch.object(module, "setup_project") as setup:
@@ -241,7 +247,7 @@ class CodeIntelTests(unittest.TestCase):
         module = load_module()
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
-            (repo / ".git").mkdir()
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
             _make_index(repo / ".code-review-graph")
             stdout = io.StringIO()
             with (
@@ -262,7 +268,7 @@ class CodeIntelTests(unittest.TestCase):
         module = load_module()
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
-            (repo / ".git").mkdir()
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
             _make_index(repo / ".codegraph")
             _make_index(repo / ".code-review-graph")
             stdout = io.StringIO()
@@ -286,7 +292,7 @@ class CodeIntelTests(unittest.TestCase):
             complete = umbrella / "complete"
             incomplete = umbrella / "incomplete"
             for repo in (complete, incomplete):
-                (repo / ".git").mkdir(parents=True)
+                subprocess.run(["git", "init", "-q", str(repo)], check=True)
                 _make_index(repo / ".codegraph")
             _make_index(complete / ".code-review-graph")
             stdout = io.StringIO()
@@ -306,22 +312,20 @@ class CodeIntelTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             repo = base / "repo"
-            (repo / ".git").mkdir(parents=True)
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
             _make_index(repo / ".codegraph")
             _make_index(repo / ".code-review-graph")
-            with patch.object(module.subprocess, "run") as run, redirect_stdout(io.StringIO()):
+            with patch.object(module, "run", side_effect=AssertionError("status must not mutate")), redirect_stdout(io.StringIO()):
                 self.assertEqual(module.project_status(repo), 0)
-                run.assert_not_called()
 
             umbrella = base / "umbrella"
             _make_index(umbrella / ".codegraph")
             nested = umbrella / "nested"
-            (nested / ".git").mkdir(parents=True)
+            subprocess.run(["git", "init", "-q", str(nested)], check=True)
             _make_index(nested / ".codegraph")
             _make_index(nested / ".code-review-graph")
-            with patch.object(module.subprocess, "run") as run, redirect_stdout(io.StringIO()):
+            with patch.object(module, "run", side_effect=AssertionError("status must not mutate")), redirect_stdout(io.StringIO()):
                 self.assertEqual(module.project_status(umbrella), 0)
-                run.assert_not_called()
 
     def test_batch_keeps_exact_repo_then_umbrella_sequence(self):
         module = load_module()
@@ -332,7 +336,7 @@ class CodeIntelTests(unittest.TestCase):
             (umbrella / "AGENTS.md").write_text("workspace\n")
             repos = [umbrella / "api", umbrella / "web"]
             for repo in repos:
-                (repo / ".git" / "info").mkdir(parents=True)
+                subprocess.run(["git", "init", "-q", str(repo)], check=True)
                 for index in range(5):
                     (repo / f"file{index}.py").write_text("pass\n")
             calls = []

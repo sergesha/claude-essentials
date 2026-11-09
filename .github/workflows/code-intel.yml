@@ -39,6 +39,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+      - name: Native index integrity regressions
+        run: |
+          python3 -m pip install 'code-review-graph[communities]==2.3.9'
+          npm install --global @colbymchenry/codegraph@1.6.2
+          python3 -B -m unittest discover -s code-intel/tests -p test_index_integrity.py -v
       - name: Claude package validation
         run: |
           npm install --global @anthropic-ai/claude-code
