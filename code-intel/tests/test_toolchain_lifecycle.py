@@ -88,7 +88,7 @@ class ToolchainLifecycleTests(unittest.TestCase):
                 patch.object(module, "ensure_tools", side_effect=lambda: calls.append("tools") or error),
                 patch.object(module, "hook_status", side_effect=lambda: calls.append("indexes") or 0),
             ):
-                self.assertEqual(module.hook_start(), 0)
+                self.assertEqual(module.hook_activate(), 0)
                 self.assertEqual(calls, ["tools", "indexes"] if not error else ["tools"])
 
     def test_both_client_manifests_use_the_provisioning_session_hook(self):

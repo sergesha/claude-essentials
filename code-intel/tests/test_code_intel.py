@@ -109,37 +109,41 @@ class CodeIntelTests(unittest.TestCase):
             self.assertEqual(module.update_repo(repo, lambda command: calls.append(command) or 0, "CG", "CRG"), 1)
             self.assertEqual(calls, [])
 
-    def test_hook_update_initializes_a_missing_worktree_index(self):
+    def test_worker_initializes_a_missing_worktree_index(self):
         module = load_module()
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
             (repo / ".git").write_text("gitdir: /tmp/worktrees/example\n")
             with (
-                patch.object(module, "hook_repos", return_value={repo}),
+                patch.object(module, "HOME", repo / "home"),
+                patch.object(module, "repo_fingerprint", return_value="state"),
                 patch.object(module, "setup_project", return_value=0) as setup,
                 patch.object(module.subprocess, "run") as run,
             ):
-                with patch("sys.stdin", io.StringIO(json.dumps({"cwd": str(repo)}))):
-                    module.hook_update()
-                setup.assert_called_once_with(repo.resolve(), runner=ANY)
+                module.refresh_hook_repo(repo)
+                setup.assert_called_once_with(repo.resolve(), runner=ANY, codegraph=module.CODEGRAPH, crg=module.CRG)
                 run.assert_not_called()
 
-    def test_hook_update_syncs_both_indexes(self):
+    def test_worker_syncs_both_indexes(self):
         module = load_module()
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
             (repo / ".git").mkdir()
             _make_index(repo / ".codegraph")
             _make_index(repo / ".code-review-graph")
-            with patch.object(module, "hook_repos", return_value={repo}), patch.object(module.subprocess, "run") as run:
-                with patch("sys.stdin", io.StringIO(json.dumps({"cwd": str(repo)}))):
-                    module.hook_update()
+            with (
+                patch.object(module, "HOME", repo / "home"),
+                patch.object(module, "repo_fingerprint", return_value="state"),
+                patch.object(module, "add_local_index_excludes"),
+                patch.object(module, "run_hook_command", return_value=module.subprocess.CompletedProcess([], 0)) as run,
+            ):
+                module.refresh_hook_repo(repo)
                 self.assertEqual(run.call_count, 2)
                 commands = [call.args[0] for call in run.call_args_list]
                 self.assertTrue(any("sync" in cmd for cmd in commands))
                 self.assertTrue(any("update" in cmd for cmd in commands))
 
-    def test_hook_update_fails_open_when_crg_executable_is_missing(self):
+    def test_worker_records_missing_crg_executable(self):
         module = load_module()
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
@@ -151,9 +155,11 @@ class CodeIntelTests(unittest.TestCase):
             payload = {"cwd": str(repo), "tool_name": "Write", "tool_input": {"file_path": str(source)}}
             with (
                 patch.object(module, "CRG", str(repo / "missing-code-review-graph")),
-                patch("sys.stdin", io.StringIO(json.dumps(payload))),
+                patch.object(module, "HOME", repo / "home"),
             ):
-                self.assertEqual(module.hook_update(), 0)
+                module.refresh_hook_repo(repo)
+                receipts = list(module.indexing_cache().glob("repos/*.json"))
+                self.assertEqual(json.loads(receipts[0].read_text())["status"], "error")
 
     def test_hook_update_is_fail_open_for_non_object_payload_parts(self):
         module = load_module()
@@ -165,12 +171,12 @@ class CodeIntelTests(unittest.TestCase):
         for payload in payloads:
             with (
                 self.subTest(payload=payload),
-                patch.object(module, "hook_repos", return_value=set()),
+                patch.object(module, "queue_index_update"),
                 patch("sys.stdin", io.StringIO(json.dumps(payload))),
             ):
                 self.assertEqual(module.hook_update(), 0)
 
-    def test_hook_status_initializes_a_missing_worktree_index(self):
+    def test_hook_status_queues_a_missing_worktree_index(self):
         module = load_module()
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
@@ -186,14 +192,17 @@ class CodeIntelTests(unittest.TestCase):
             with (
                 patch.object(module, "git_root", return_value=repo.resolve()),
                 patch.object(module, "setup_project", side_effect=initialize) as setup,
+                patch.object(module, "queue_index_update", return_value=True) as queue,
                 patch("sys.stdin", io.StringIO(json.dumps({"cwd": str(repo)}))),
                 redirect_stdout(stdout),
             ):
                 self.assertEqual(module.hook_status(), 0)
-            setup.assert_called_once_with(repo.resolve(), runner=ANY)
-            self.assertEqual(stdout.getvalue(), f"Code intelligence: initialized — {repo.resolve()}\n")
+            setup.assert_not_called()
+            queue.assert_called_once_with({"cwd": str(repo.resolve()), "paths": [], "discover": False})
+            self.assertIn("automatic initialization queued", stdout.getvalue())
+            self.assertNotIn("initialized —", stdout.getvalue())
 
-    def test_prompt_hook_initializes_missing_current_worktree_before_query(self):
+    def test_prompt_hook_queues_missing_worktree_without_querying_missing_index(self):
         module = load_module()
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
@@ -206,13 +215,15 @@ class CodeIntelTests(unittest.TestCase):
             with (
                 patch.object(module, "git_root", return_value=repo.resolve()),
                 patch.object(module, "setup_project", return_value=0) as setup,
+                patch.object(module, "queue_index_update", return_value=True) as queue,
                 patch("sys.stdin", io.StringIO(payload)),
-                patch.object(module.subprocess, "run", return_value=completed) as run,
+                patch.object(module, "run_hook_command", return_value=completed) as run,
                 redirect_stdout(io.StringIO()),
             ):
                 self.assertEqual(module.hook_prompt("CG"), 0)
-            setup.assert_called_once_with(repo.resolve(), runner=ANY)
-            self.assertEqual(run.call_args.kwargs["input"], payload)
+            setup.assert_not_called()
+            run.assert_not_called()
+            queue.assert_called_once()
 
     def test_hook_status_does_not_reinitialize_an_initialized_repo(self):
         module = load_module()
@@ -226,7 +237,7 @@ class CodeIntelTests(unittest.TestCase):
                     self.assertEqual(module.hook_status(), 0)
                 setup.assert_not_called()
 
-    def test_hook_status_reports_failed_repo_initialization(self):
+    def test_hook_status_reports_failed_queue_submission(self):
         module = load_module()
         with tempfile.TemporaryDirectory() as directory:
             repo = Path(directory)
@@ -236,13 +247,14 @@ class CodeIntelTests(unittest.TestCase):
             with (
                 patch.object(module, "git_root", return_value=repo.resolve()),
                 patch.object(module, "setup_project", return_value=1) as setup,
+                patch.object(module, "queue_index_update", return_value=False),
                 patch("sys.stdin", io.StringIO(json.dumps({"cwd": str(repo)}))),
                 redirect_stdout(stdout),
             ):
                 self.assertEqual(module.hook_status(), 0)
-            setup.assert_called_once_with(repo.resolve(), runner=ANY)
+            setup.assert_not_called()
             message = stdout.getvalue()
-            self.assertIn("automatic initialization failed", message)
+            self.assertIn("automatic initialization could not be queued", message)
             self.assertIn("CodeGraph", message)
             self.assertIn(str(repo.resolve()), message)
 
@@ -341,7 +353,7 @@ class CodeIntelTests(unittest.TestCase):
         with (
             patch("sys.stdin", io.StringIO('{"prompt":"find callers","cwd":"/repo"}')),
             patch.object(module, "git_root", return_value=None),
-            patch.object(module.subprocess, "run", return_value=completed) as run,
+            patch.object(module, "run_hook_command", return_value=completed) as run,
             redirect_stdout(stdout),
         ):
             self.assertEqual(module.hook_prompt("CG"), 0)
@@ -365,7 +377,7 @@ class CodeIntelTests(unittest.TestCase):
         with (
             patch("sys.stdin", io.StringIO("{}")),
             patch.object(module, "git_root", return_value=None),
-            patch.object(module.subprocess, "run", return_value=completed),
+            patch.object(module, "run_hook_command", return_value=completed),
             redirect_stdout(stdout),
         ):
             self.assertEqual(module.hook_prompt("CG"), 0)

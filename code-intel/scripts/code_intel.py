@@ -4,15 +4,19 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -26,6 +30,7 @@ CODE_SUFFIXES = {".py", ".ts", ".js", ".tsx", ".jsx", ".go", ".rs", ".java", ".r
 AI_MARKERS = ("CLAUDE.md", "AGENTS.md", ".claude", ".codex", ".cursorrules")
 
 Runner = Callable[[list[str]], int]
+INDEX_COMMAND_TIMEOUT = 1800
 
 
 def run(command: list[str]) -> int:
@@ -34,18 +39,6 @@ def run(command: list[str]) -> int:
         return subprocess.run(command, check=False).returncode
     except FileNotFoundError:
         print(f"missing executable: {command[0]}", file=sys.stderr)
-        return 127
-
-
-def run_quiet(command: list[str]) -> int:
-    try:
-        return subprocess.run(
-            command,
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        ).returncode
-    except OSError:
         return 127
 
 
@@ -327,27 +320,23 @@ def hook_prompt(codegraph: str = CODEGRAPH) -> int:
         repo = git_root(cwd)
         if repo is not None:
             if project_index_gaps(repo, umbrella=False):
-                if not ensure_repo_indexes(repo):
-                    return 0
+                queue_index_update({"cwd": str(repo), "paths": [], "discover": False})
+                return 0
             elif _index_ready(repo / ".codegraph"):
                 try:
-                    subprocess.run(
-                        [codegraph, "sync", str(repo)],
-                        check=False,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-                except OSError:
-                    pass
+                    result = run_hook_command([codegraph, "sync", str(repo)], timeout=5)
+                    if result.returncode:
+                        raise RuntimeError(result.stderr)
+                except (OSError, RuntimeError, subprocess.SubprocessError):
+                    queue_index_update({"cwd": str(repo), "paths": [], "discover": False, "force": True})
+                    return 0
     try:
-        result = subprocess.run(
+        result = run_hook_command(
             [codegraph, "prompt-hook"],
             input=raw_payload,
-            text=True,
-            capture_output=True,
-            check=False,
+            timeout=5,
         )
-    except OSError:
+    except (OSError, subprocess.SubprocessError):
         return 0
     if result.returncode != 0 or not result.stdout:
         return 0
@@ -548,6 +537,22 @@ def ensure_tools() -> int:
 
 
 def hook_start() -> int:
+    # Include lock waits, both installers and health checks in one host budget.
+    try:
+        result = run_hook_command(
+            [sys.executable, str(Path(__file__).resolve()), "hook-activate"],
+            input=sys.stdin.read(), timeout=240,
+        )
+        if result.stdout:
+            print(result.stdout, end="")
+        if result.returncode:
+            print(f"Code Intel: startup activation failed: {(result.stderr or '')[-2000:]}")
+    except (OSError, subprocess.SubprocessError) as error:
+        print(f"Code Intel: startup activation did not complete: {error}; retry ensure-tools.")
+    return 0
+
+
+def hook_activate() -> int:
     if ensure_tools() == 0:
         return hook_status()
     return 0
@@ -562,28 +567,22 @@ def upgrade(base: Path) -> int:
 
 def git_root(path: Path) -> Path | None:
     directory = path if path.is_dir() else path.parent
-    result = subprocess.run(
-        ["git", "-C", str(directory), "rev-parse", "--show-toplevel"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    while not directory.exists() and directory != directory.parent:
+        directory = directory.parent
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(directory), "rev-parse", "--show-toplevel"],
+            check=False, capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
     return Path(result.stdout.strip()) if result.returncode == 0 else None
 
 
-def dirty(repo: Path) -> bool:
-    result = subprocess.run(
-        ["git", "-C", str(repo), "status", "--porcelain"],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    return result.returncode == 0 and bool(result.stdout.strip())
-
-
-def hook_repos(payload: dict) -> set[Path]:
+def index_request(payload: dict) -> dict:
+    """Keep path hints only; never persist shell commands or tool output."""
     if not isinstance(payload, dict):
-        return set()
+        return {}
     cwd = Path(payload.get("cwd") or os.getcwd()).expanduser().resolve()
     tool_name = str(payload.get("tool_name") or "")
     tool_input = payload.get("tool_input") or {}
@@ -592,30 +591,245 @@ def hook_repos(payload: dict) -> set[Path]:
         tool_input = {}
     if not isinstance(response, dict):
         response = {}
-    repos: set[Path] = set()
-
-    file_path = tool_input.get("file_path") or response.get("filePath")
+    paths: list[str] = []
+    file_path = tool_input.get("file_path") or tool_input.get("notebook_path") or response.get("filePath")
     if file_path:
-        root = git_root(Path(file_path).expanduser())
-        if root:
-            repos.add(root)
+        paths.append(str(file_path))
 
     if tool_name == "apply_patch":
-        patch = str(tool_input.get("command") or "")
-        for match in re.finditer(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$", patch, re.MULTILINE):
-            candidate = Path(match.group(1))
-            if not candidate.is_absolute():
-                candidate = cwd / candidate
-            root = git_root(candidate)
-            if root:
-                repos.add(root)
+        patch = str(tool_input.get("command") or tool_input.get("patch") or tool_input.get("input") or "")
+        paths.extend(re.findall(r"^\*\*\* (?:Add|Update|Delete) File: (.+)$", patch, re.MULTILINE))
+        paths.extend(re.findall(r"^\*\*\* Move to: (.+)$", patch, re.MULTILINE))
+    if not paths and tool_name != "Bash":
+        return {}
+    return {"cwd": str(cwd), "paths": sorted(set(paths)), "discover": tool_name == "Bash"}
 
-    if tool_name == "Bash":
+
+def hook_repos(request: dict) -> set[Path]:
+    """Discover in the worker, never in the foreground PostToolUse hook."""
+    cwd = Path(request["cwd"])
+    repos: set[Path] = set()
+    for name in request["paths"]:
+        path = Path(name).expanduser()
+        root = git_root(path if path.is_absolute() else cwd / path)
+        if root:
+            repos.add(root)
+    if request["discover"]:
         repos.update(discover_repos(cwd, max_depth=3))
+    if request["discover"] or not request["paths"]:
         root = git_root(cwd)
         if root:
             repos.add(root)
-    return {repo for repo in repos if dirty(repo)}
+    return repos
+
+
+def indexing_cache() -> Path:
+    return HOME / ".cache/code-intel/indexing"
+
+
+def try_lock(stream, wait: float = 0) -> bool:
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            if os.name == "nt":
+                import msvcrt
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except OSError:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.02)
+
+
+def unlock(stream) -> None:
+    if os.name == "nt":
+        import msvcrt
+        stream.seek(0)
+        msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(stream, fcntl.LOCK_UN)
+
+
+@contextmanager
+def queue_lock(cache: Path):
+    cache.mkdir(parents=True, exist_ok=True)
+    with (cache / "queue.lock").open("a+b") as lock:
+        if os.name == "nt" and not lock.tell():
+            lock.write(b"\0")
+            lock.flush()
+        if not try_lock(lock, wait=1):
+            raise TimeoutError("Code Intel indexing queue is busy")
+        try:
+            yield
+        finally:
+            unlock(lock)
+
+
+def enqueue_index_update(request: dict) -> None:
+    cache = indexing_cache()
+    content = json.dumps(request, sort_keys=True)
+    key = hashlib.sha256(content.encode()).hexdigest()
+    with queue_lock(cache):
+        atomic_write(cache / "requests" / f"{key}.json", content)
+
+
+def queue_index_update(request: dict) -> bool:
+    """Detach all stdio so the host can finish the hook immediately."""
+    try:
+        enqueue_index_update(request)
+        cache = indexing_cache()
+        with (cache / "worker.log").open("a") as log:
+            options = {"start_new_session": True} if os.name != "nt" else {
+                "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS,
+            }
+            subprocess.Popen(
+                [sys.executable, str(Path(__file__).resolve()), "hook-worker"],
+                stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                close_fds=True, **options,
+            )
+        return True
+    except (OSError, ValueError) as error:
+        print(f"Code Intel: cannot queue index update: {error}", file=sys.stderr)
+        return False
+
+
+def run_hook_command(command: list[str], *, timeout: float, input: str | None = None,
+                     capture: bool = True) -> subprocess.CompletedProcess:
+    process = subprocess.Popen(
+        command, stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+        stdout=subprocess.PIPE if capture else None,
+        stderr=subprocess.PIPE if capture else None,
+        text=True, start_new_session=os.name != "nt",
+    )
+    try:
+        stdout, stderr = process.communicate(input, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # Node/Python launchers can have children; terminate the command group.
+        if os.name != "nt":
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        else:
+            process.terminate()
+        try:
+            process.communicate(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+        finally:
+            if os.name != "nt":
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            elif process.poll() is None:
+                process.kill()
+            process.communicate()
+        raise
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+
+def repo_fingerprint(repo: Path) -> str:
+    """Cheap source inventory: HEAD, Git-visible paths and file metadata.
+
+    Unlike porcelain status this detects another edit to an already dirty file,
+    clean checkouts, untracked files, deletions and edits reverted to HEAD.
+    Index databases excluded by Git never participate.
+    """
+    paths = subprocess.run(
+        ["git", "-C", str(repo), "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+        check=True, capture_output=True, timeout=10,
+    ).stdout.split(b"\0")
+    head = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--verify", "HEAD"],
+        capture_output=True, timeout=5,
+    )
+    digest = hashlib.sha256(head.stdout)
+    digest.update(plugin_version().encode())
+    for raw in sorted(set(paths) - {b""}):
+        digest.update(raw + b"\0")
+        try:
+            stat = (repo / os.fsdecode(raw)).lstat()
+            digest.update(f"{stat.st_mode}:{stat.st_size}:{stat.st_mtime_ns}:{stat.st_ctime_ns}".encode())
+        except FileNotFoundError:
+            digest.update(b"deleted")
+    return digest.hexdigest()
+
+
+def refresh_hook_repo(repo: Path, *, force: bool = False) -> None:
+    repo = repo.resolve()
+    cache = indexing_cache()
+    receipt = cache / "repos" / (hashlib.sha256(os.fsencode(str(repo))).hexdigest() + ".json")
+    state = {"repo": str(repo), "status": "running", "started": time.time()}
+    try:
+        fingerprint = repo_fingerprint(repo)
+        try:
+            previous = load_json(receipt)
+        except (OSError, ValueError):
+            previous = {}
+        if not force and previous.get("status") == "success" and previous.get("fingerprint") == fingerprint and not project_index_gaps(repo, umbrella=False):
+            return
+        atomic_write(receipt, json.dumps(state))
+
+        def runner(command):
+            print("+", shlex.join(command), flush=True)
+            return run_hook_command(command, timeout=INDEX_COMMAND_TIMEOUT, capture=False).returncode
+
+        if project_index_gaps(repo, umbrella=False):
+            result = setup_project(repo, runner=runner, codegraph=CODEGRAPH, crg=CRG)
+        else:
+            result = update_repo(repo, runner=runner, codegraph=CODEGRAPH, crg=CRG)
+        if result:
+            raise RuntimeError(f"Indexer exited unsuccessfully ({result}); see worker.log")
+        state.update(status="success", fingerprint=fingerprint)
+        # Never acknowledge edits which arrived during the update as indexed.
+        if repo_fingerprint(repo) != fingerprint:
+            enqueue_index_update({"cwd": str(repo), "paths": [], "discover": False})
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+        state.update(status="error", error=str(error))
+        print(f"Code Intel: index update failed for {repo}: {error}", flush=True)
+    state["finished"] = time.time()
+    atomic_write(receipt, json.dumps(state))
+
+
+def hook_worker() -> int:
+    cache = indexing_cache()
+    cache.mkdir(parents=True, exist_ok=True)
+    with (cache / "worker.lock").open("a+b") as worker:
+        if os.name == "nt" and not worker.tell():
+            worker.write(b"\0")
+            worker.flush()
+        if not try_lock(worker):
+            return 0
+        try:
+            while True:
+                with queue_lock(cache):
+                    requests = []
+                    for path in sorted((cache / "requests").glob("*.json")):
+                        requests.append(load_json(path))
+                        path.unlink()
+                    if not requests:
+                        # Release while holding the queue lock: a racing enqueue
+                        # either gets drained here or starts a new worker.
+                        unlock(worker)
+                        return 0
+                repos: set[Path] = set()
+                forced: set[Path] = set()
+                for request in requests:
+                    targets = hook_repos(request)
+                    repos.update(targets)
+                    if request.get("force"):
+                        forced.update(targets)
+                for repo in sorted(repos):
+                    refresh_hook_repo(repo, force=repo in forced)
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            print(f"Code Intel: indexing worker failed: {error}", flush=True)
+            return 1
 
 
 def hook_update() -> int:
@@ -623,30 +837,9 @@ def hook_update() -> int:
         payload = json.load(sys.stdin)
     except (json.JSONDecodeError, OSError):
         return 0
-    for repo in sorted(hook_repos(payload)):
-        if project_index_gaps(repo, umbrella=False):
-            ensure_repo_indexes(repo)
-            continue
-        if _index_ready(repo / ".codegraph"):
-            try:
-                subprocess.run(
-                    [CODEGRAPH, "sync", str(repo)],
-                    check=False,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-            except OSError:
-                pass
-        if _index_ready(repo / ".code-review-graph"):
-            try:
-                subprocess.run(
-                    [CRG, "update", "--skip-flows", "--repo", str(repo)],
-                    check=False,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-            except OSError:
-                pass
+    request = index_request(payload)
+    if request:
+        queue_index_update(request)
     return 0
 
 
@@ -673,17 +866,6 @@ def project_index_gaps(project: Path, *, umbrella: bool) -> tuple[str, ...]:
         if not _index_ready(project / ".code-review-graph"):
             gaps.append("CRG")
     return tuple(gaps)
-
-
-def ensure_repo_indexes(repo: Path) -> bool:
-    """Initialize missing repository indexes without polluting hook output."""
-
-    if not project_index_gaps(repo, umbrella=False):
-        return True
-    try:
-        return setup_project(repo.resolve(), runner=run_quiet) == 0
-    except (OSError, RuntimeError, ValueError):
-        return False
 
 
 def hook_umbrella(cwd: Path) -> Path | None:
@@ -722,16 +904,20 @@ def hook_status() -> int:
     gaps = project_index_gaps(project, umbrella=umbrella is not None)
     if not gaps:
         print(f"Code intelligence: initialized — {project}")
+        receipt = indexing_cache() / "repos" / (hashlib.sha256(os.fsencode(str(project))).hexdigest() + ".json")
+        try:
+            state = load_json(receipt)
+        except (OSError, ValueError):
+            state = {}
+        if state.get("status") in ("error", "running"):
+            print(f"Code intelligence: last automatic update {'failed' if state['status'] == 'error' else 'is incomplete'}; "
+                  f"log: {indexing_cache() / 'worker.log'}")
         return 0
     if repo is not None:
-        if ensure_repo_indexes(repo):
-            gaps = project_index_gaps(repo, umbrella=False)
-            if not gaps:
-                print(f"Code intelligence: initialized — {repo}")
-                return 0
+        queued = queue_index_update({"cwd": str(repo), "paths": [], "discover": False})
         print(
-            f"Code intelligence: automatic initialization failed — {repo}; "
-            f"missing: {', '.join(project_index_gaps(repo, umbrella=False))}"
+            f"Code intelligence: automatic initialization {'queued' if queued else 'could not be queued'} — {repo}; "
+            f"missing: {', '.join(gaps)}; log: {indexing_cache() / 'worker.log'}"
         )
         return 0
     scope = (
@@ -837,8 +1023,10 @@ def parser() -> argparse.ArgumentParser:
     server.add_argument("engine", choices=("codegraph", "crg"))
 
     subcommands.add_parser("hook-update")
+    subcommands.add_parser("hook-worker")
     subcommands.add_parser("hook-status")
     subcommands.add_parser("hook-start")
+    subcommands.add_parser("hook-activate")
     subcommands.add_parser("hook-prompt")
     return result
 
@@ -868,10 +1056,14 @@ def main() -> int:
         os.execvp(command[0], command)
     if arguments.command == "hook-update":
         return hook_update()
+    if arguments.command == "hook-worker":
+        return hook_worker()
     if arguments.command == "hook-status":
         return hook_status()
     if arguments.command == "hook-start":
         return hook_start()
+    if arguments.command == "hook-activate":
+        return hook_activate()
     if arguments.command == "hook-prompt":
         return hook_prompt()
     return 2

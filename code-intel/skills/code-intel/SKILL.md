@@ -51,13 +51,18 @@ still matches. Changed or broken tools trigger provisioning again.
 Missing package managers, failed installations, or failed capability checks are
 reported; the hook remains fail-open and does not record success or initialize
 indexes on failure. Resolve the reported problem and retry `ensure-tools`.
+Session activation has a single four-minute budget covering lock waits,
+installers and verification. If it expires, startup reports the incomplete
+activation and skips index initialization; explicit `ensure-tools` remains
+available for a longer installation.
 Do not install package managers implicitly. Restart the host for MCP pickup;
 do not claim an already running MCP server reloaded until the host confirms it.
 
 When both tools are available, in a Git repository or linked worktree it
-automatically initializes both indexes when
-either is missing. The prompt and post-tool hooks provide the same repair path,
-so a worktree opened after session start is covered. Hooks remain fail-open.
+automatically queues initialization when either index is missing. The prompt
+and post-tool hooks provide the same background repair path, so a worktree
+opened after session start is covered. A queued operation is not a completed
+initialization; verify index presence with `project-status`. Hooks remain fail-open.
 
 For a non-Git umbrella, the hook only reports missing indexes. Initialize an
 umbrella with `setup-project` when setup or repair is in scope; otherwise ask
@@ -69,6 +74,25 @@ Explicit update operations never initialize. CodeGraph uses `sync` only when
 `.codegraph` exists. CRG uses `update` only when `.code-review-graph` exists.
 Plugin hooks first initialize missing indexes for the current Git repository
 or worktree, then use incremental updates on later changes.
+
+`PostToolUse` only queues path hints and returns; a detached worker performs
+discovery and indexing. Both clients share one worker and coalesce queued events.
+For shell operations it checks repositories under the command's working directory
+(depth three), including clean checkouts. A receipt compares HEAD, Git-visible
+paths and file metadata, so an unchanged dirty worktree is not indexed again.
+The first event without a successful receipt performs a catch-up update, even
+after a read-only command. Later changes in already dirty files, untracked files,
+deletions and reverts trigger another update. Changes during an update are queued
+again; failed updates never receive a success receipt.
+
+The worker stores receipts and command output in `~/.cache/code-intel/indexing/`
+(`worker.log`). It does not persist shell commands or tool responses. Each
+background indexing command has a 30-minute limit; failure or timeout is recorded
+and retried on the next event. On POSIX a timed-out command's process group is
+terminated. Missing-index initialization runs in the same worker. Prompt context
+still synchronizes CodeGraph first, with a five-second limit per command; a
+failed or slow sync queues background repair and emits no potentially stale
+prompt context. Explicit setup/update operations remain foreground commands.
 
 ## Plugin integration
 
