@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.7](https://github.com/sergesha/claude-essentials/compare/code-intel-v0.3.6...code-intel-v0.3.7) (2026-11-09)
+
+
+### Bug Fixes
+
+* **code-intel:** validate repositories and repair index integrity ([2724000](https://github.com/sergesha/claude-essentials/commit/2724000a1856426cec77f32beabdeb3026f17159))
+
 ## [0.3.6](https://github.com/sergesha/claude-essentials/compare/code-intel-v0.3.5...code-intel-v0.3.6) (2026-11-09)
 
 
