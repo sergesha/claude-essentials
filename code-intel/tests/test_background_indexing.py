@@ -6,6 +6,8 @@ import json
 import os
 from pathlib import Path
 import signal
+import sqlite3
+import hashlib
 import subprocess
 import sys
 import tempfile
@@ -35,6 +37,7 @@ class BackgroundIndexingTests(unittest.TestCase):
         shim = '''import json, os, pathlib, sys, time
 root = pathlib.Path(os.environ["TEST_INDEX_ROOT"])
 engine = pathlib.Path(sys.argv[0]).name
+import sqlite3,hashlib
 with (root / "calls.jsonl").open("a") as f:
     f.write(json.dumps([engine, *sys.argv[1:]]) + "\\n")
 if (root / "block-next").exists():
@@ -50,11 +53,24 @@ if sys.argv[1] in ("init", "build"):
     directory = repo / (".codegraph" if engine == "codegraph" else ".code-review-graph")
     directory.mkdir(exist_ok=True)
     (directory / "marker").touch()
+if engine == "codegraph":
+    repo=pathlib.Path(sys.argv[-1])
+    c=sqlite3.connect(repo / ".codegraph/codegraph.db")
+    c.execute("create table if not exists files(path text primary key, content_hash text)")
+    c.execute("delete from files")
+    for source in repo.glob("*.py"):
+        c.execute("insert into files values(?,?)",(source.name,hashlib.sha256(source.read_bytes()).hexdigest()))
+    c.commit();c.close()
 '''
         for name in ("codegraph", "code-review-graph"):
             path = self.bin / name
             path.write_text(f"#!{sys.executable}\n" + shim)
             path.chmod(0o755)
+        interpreter = self.bin / "python"
+        interpreter.write_text(f"#!{sys.executable}\n" + "import os,sys,json,pathlib\n"
+                               + "if sys.argv[2] == 'health':\n print(json.dumps({'issues': [], 'expected_files': 0, 'source_files': []})); sys.exit(0)\n"
+                               + "command=str(pathlib.Path(__file__).with_name('code-review-graph'))\nos.execv(command,[command,*sys.argv[2:]])\n")
+        interpreter.chmod(0o755)
         self.env = dict(os.environ, HOME=str(self.home), TEST_INDEX_ROOT=str(self.root),
                         PATH=str(self.bin) + os.pathsep + os.environ.get("PATH", ""))
         self.module = load_module()
@@ -80,6 +96,10 @@ if sys.argv[1] in ("init", "build"):
             for name in (".codegraph", ".code-review-graph"):
                 (repo / name).mkdir()
                 (repo / name / "marker").touch()
+        if indexed:
+            with sqlite3.connect(repo / ".codegraph/codegraph.db") as c:
+                c.execute("create table files(path text primary key, content_hash text)")
+                c.execute("insert into files values(?,?)",("example.py",hashlib.sha256((repo/"example.py").read_bytes()).hexdigest()))
         return repo
 
     def submit(self, cwd, command="pwd", **parts):

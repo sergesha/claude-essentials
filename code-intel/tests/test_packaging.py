@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -28,7 +29,8 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(codex["skills"], "./skills/")
         self.assertEqual(codex["hooks"], "./hooks/indexing.json")
         self.assertEqual(codex["mcpServers"], "./.mcp.json")
-        self.assertEqual(claude["mcpServers"], read_json(PACKAGE / ".mcp.json")["mcpServers"])
+        self.assertEqual(json.loads(json.dumps(claude["mcpServers"]).replace("CLAUDE_PLUGIN_ROOT", "PLUGIN_ROOT")),
+                         read_json(PACKAGE / ".mcp.json")["mcpServers"])
         self.assertEqual(claude["version"], read_json(REPO / ".release-please-manifest.json")["code-intel"])
         config = read_json(REPO / "release-please-config.json")["packages"]["code-intel"]
         self.assertEqual({item["path"] for item in config["extra-files"]},
@@ -64,6 +66,10 @@ class PackagingTests(unittest.TestCase):
                 shim = shims / engine
                 shim.write_text('#!/bin/sh\nprintf "%s\\n" "$0" "$@" "$PWD"\ncat\n')
                 shim.chmod(0o755)
+            (shims / "python3").symlink_to(sys.executable)
+            interpreter = shims / "python"
+            interpreter.write_text(f'#!{sys.executable}\nimport os, sys\nos.execv({str(shims / "code-review-graph")!r}, ["code-review-graph", *sys.argv[2:]])\n')
+            interpreter.chmod(0o755)
             env = dict(os.environ, HOME=str(Path(directory) / "empty home"),
                        PATH=str(shims) + os.pathsep + os.defpath)
             env.pop("CLAUDE_PLUGIN_ROOT", None)
@@ -75,7 +81,7 @@ class PackagingTests(unittest.TestCase):
                 for engine, server in servers.items():
                     with self.subTest(engine=engine, server=server):
                         result = subprocess.run(
-                            [server["command"], *server["args"]],
+                            [server["command"], *[arg.replace("${PLUGIN_ROOT}", str(installed)).replace("${CLAUDE_PLUGIN_ROOT}", str(installed)) for arg in server["args"]]],
                             cwd=directory, env=env, input="stdio payload\n",
                             text=True, capture_output=True, timeout=10,
                         )

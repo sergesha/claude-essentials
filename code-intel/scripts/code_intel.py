@@ -11,12 +11,13 @@ import re
 import shlex
 import shutil
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import time
 import tomllib
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -76,6 +77,9 @@ def discover_repos(base: Path, max_depth: int | None = None) -> list[Path]:
         directories[:] = sorted(d for d in directories if d not in EXCLUDED_DIRS)
         if ".git" in directories or ".git" in files:
             repo = Path(root).resolve()
+            if git_root(repo) != repo:
+                directories[:] = []
+                continue
             if not is_excluded(repo.relative_to(base)):
                 repos.append(repo)
             if ".git" in directories:
@@ -166,14 +170,17 @@ def add_local_index_excludes(repo: Path) -> None:
 
 def setup_repo(repo: Path, runner: Runner, codegraph: str, crg: str) -> int:
     repo = repo.resolve()
-    if runner([codegraph, "init", str(repo)]) != 0:
+    if git_root(repo) != repo:
+        print(f"[skip: invalid Git repository] {repo}", file=sys.stderr)
         return 1
     try:
         add_local_index_excludes(repo)
     except (OSError, UnicodeError, RuntimeError) as error:
         print(f"Git exclude update failed for {repo}: {error}", file=sys.stderr)
         return 1
-    if runner([crg, "build", "--repo", str(repo)]) != 0:
+    if runner([codegraph, "init", str(repo)]) != 0:
+        return 1
+    if runner(crg_command(["build", "--repo", str(repo)], crg)) != 0:
         return 1
     if runner([crg, "register", str(repo), "--alias", repo.name]) != 0:
         return 1
@@ -182,11 +189,14 @@ def setup_repo(repo: Path, runner: Runner, codegraph: str, crg: str) -> int:
 
 def update_repo(repo: Path, runner: Runner = run, codegraph: str = CODEGRAPH, crg: str = CRG) -> int:
     repo = repo.resolve()
+    if git_root(repo) != repo:
+        print(f"[skip: invalid Git repository] {repo}", file=sys.stderr)
+        return 1
     commands: list[list[str]] = []
     if (repo / ".codegraph").is_dir():
         commands.append([codegraph, "sync", str(repo)])
     if (repo / ".code-review-graph").is_dir():
-        commands.append([crg, "update", "--skip-flows", "--repo", str(repo)])
+        commands.append(crg_command(["update", "--skip-flows", "--repo", str(repo)], crg))
     if not commands:
         print(f"[skip: not initialized] {repo}", file=sys.stderr)
         return 1
@@ -196,6 +206,151 @@ def update_repo(repo: Path, runner: Runner = run, codegraph: str = CODEGRAPH, cr
         print(f"Git exclude update failed for {repo}: {error}", file=sys.stderr)
         return 1
     return sum(runner(command) != 0 for command in commands)
+
+
+def crg_command(arguments: list[str], executable: str = CRG) -> list[str]:
+    resolved = tool_executable("code-review-graph") if executable == CRG else shutil.which(executable) or executable
+    if not resolved:
+        raise RuntimeError("Missing code-review-graph on PATH")
+    python = Path(resolved).resolve().with_name("python")
+    if not python.is_file():
+        raise RuntimeError(f"Cannot locate CRG's Python next to {resolved}")
+    return [str(python), str(Path(__file__).with_name("crg_bridge.py").resolve()), *arguments]
+
+
+def index_health(repo: Path, *, integrity: bool = False) -> dict:
+    """Inspect databases read-only; directory presence is not readiness."""
+    path = repo / ".codegraph/codegraph.db"
+    cg = {"database": str(path), "indexed_files": 0, "issues": []}
+    if not path.is_file():
+        cg["issues"].append("missing database")
+    else:
+        try:
+            with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=2)) as connection:
+                if integrity:
+                    check = connection.execute("PRAGMA quick_check(1)").fetchone()[0]
+                    if check != "ok":
+                        raise sqlite3.DatabaseError(check)
+                rows = connection.execute("SELECT path, content_hash FROM files").fetchall()
+                cg["indexed_files"] = len(rows)
+                stale = []
+                for name, content_hash in rows:
+                    source = (repo / name).resolve()
+                    if not source.is_relative_to(repo) or not source.is_file():
+                        stale.append(name)
+                        continue
+                    if hashlib.sha256(source.read_bytes()).hexdigest() != content_hash:
+                        stale.append(name)
+                if stale:
+                    cg["issues"].append(f"{len(stale)} missing or stale indexed files, e.g. {stale[0]}")
+        except (sqlite3.Error, OSError) as error:
+            cg["issues"].append(f"SQLite: {error}")
+    arguments = ["health", str(repo)] + (["--integrity"] if integrity else [])
+    result = subprocess.run(crg_command(arguments), capture_output=True, text=True, timeout=60)
+    try:
+        crg = json.loads(result.stdout)
+    except ValueError:
+        crg = {"issues": [f"health check failed: {result.stderr[-1500:]}"]}
+    return {"codegraph": cg, "crg": crg}
+
+
+def sqlite_backup(source: sqlite3.Connection, target: sqlite3.Connection) -> None:
+    deadline = time.monotonic() + 30
+
+    def progress(_status, _remaining, _total):
+        if time.monotonic() >= deadline:
+            raise RuntimeError("SQLite backup exceeded 30 seconds; retry when writers are idle")
+
+    source.backup(target, pages=256, progress=progress, sleep=0.05)
+
+
+def repair_project(repo: Path, *, engine: str = "both") -> int:
+    repo = repo.expanduser().resolve()
+    if git_root(repo) != repo:
+        raise RuntimeError(f"Not a valid Git repository: {repo}")
+    cache = indexing_cache()
+    cache.mkdir(parents=True, exist_ok=True)
+    with (cache / "worker.lock").open("a+b") as lock:
+        if not try_lock(lock, wait=5):
+            raise RuntimeError("Background indexing is active; retry after it finishes")
+        backup = cache / "backups" / f"{time.time_ns()}-{hashlib.sha256(os.fsencode(str(repo))).hexdigest()[:12]}"
+        backup.mkdir(parents=True)
+        print(f"Index backup: {backup}", flush=True)
+        add_local_index_excludes(repo)
+        selected = [(name, directory) for name, directory in [("codegraph", ".codegraph"), ("crg", ".code-review-graph")]
+                    if engine in ("both", name)]
+        # Resolve prerequisites before touching a generated database.
+        build_crg = (crg_command(["build-staged", str(repo), str(backup / "staged-crg")])
+                     if engine in ("both", "crg") else None)
+        crg_directory = repo / ".code-review-graph"
+        if build_crg:
+            location = subprocess.run(crg_command(["location", str(repo)]),
+                                      capture_output=True, text=True, timeout=30, check=True)
+            crg_directory = Path(json.loads(location.stdout)["database"]).parent
+        try:
+            for name, directory in selected:
+                source = crg_directory if name == "crg" else repo / directory
+                if source.exists():
+                    if name == "crg":
+                        (backup / directory).mkdir()
+                        for filename in ("graph.db", "graph.db-wal", "graph.db-shm"):
+                            if (source / filename).is_file():
+                                shutil.copy2(source / filename, backup / directory / filename)
+                    else:
+                        shutil.copytree(source, backup / directory,
+                                        ignore=shutil.ignore_patterns("*.sock", "*.pid", "*.lock", "*-shm"))
+                    database = "codegraph.db" if name == "codegraph" else "graph.db"
+                    try:
+                        # Capture a consistent SQLite snapshot when readable;
+                        # retain raw corrupted bytes for forensic recovery too.
+                        snapshot = backup / directory / f"{database}.snapshot"
+                        with closing(sqlite3.connect((source/database).as_uri()+"?mode=ro", uri=True, timeout=2)) as old:
+                            with closing(sqlite3.connect(snapshot)) as target:
+                                sqlite_backup(old, target)
+                                check = target.execute("PRAGMA quick_check(1)").fetchone()[0]
+                                if check != "ok":
+                                    raise sqlite3.DatabaseError(check)
+                        # Keep raw DB/WAL bytes alongside the consistent snapshot.
+                    except sqlite3.Error as error:
+                        snapshot.unlink(missing_ok=True)
+                        if name == "crg" and (source / database).exists():
+                            raise RuntimeError(
+                                "CRG database is unreadable; saved its raw files. "
+                                "Stop graph clients before a native CRG corruption rebuild; "
+                                "live database files will not be removed automatically."
+                            ) from error
+                if name == "codegraph":
+                    # Native full-index owns its writer lock, verifies/stops the
+                    # matching daemon, then recreates SQLite even if corrupted.
+                    command = [CODEGRAPH, "index" if source.exists() else "init", str(repo)]
+                    if run(command):
+                        raise RuntimeError("CodeGraph rebuild failed")
+                else:
+                    if run(build_crg):
+                        raise RuntimeError("CRG staged rebuild failed")
+                    staged = backup / "staged-crg/graph.db"
+                    check = subprocess.run(crg_command(["health", str(repo), "--integrity", "--database", str(staged)]),
+                                           capture_output=True, text=True, timeout=60)
+                    if check.returncode:
+                        raise RuntimeError(f"CRG staged validation failed: {check.stdout} {check.stderr}")
+                    source.mkdir(parents=True, exist_ok=True)
+                    # Publish through SQLite, preserving the destination inode,
+                    # WAL identity and other readers' transaction snapshots.
+                    with closing(sqlite3.connect(staged)) as rebuilt:
+                        with closing(sqlite3.connect(source / "graph.db", timeout=5)) as current:
+                            sqlite_backup(rebuilt, current)
+            report = index_health(repo, integrity=True)
+            problems = {name: report[name]["issues"] for name, _ in selected if report[name]["issues"]}
+            if problems:
+                raise RuntimeError(f"Rebuilt index validation failed: {problems}")
+        except (OSError, RuntimeError, sqlite3.Error, subprocess.SubprocessError) as error:
+            # Never replace live directories or unlink another process's WAL.
+            # A staged CRG failure leaves the active DB intact; CodeGraph owns
+            # its native rebuild lifecycle. Completed engines stay repaired.
+            print(f"Repair incomplete; previous indexes retained in {backup}; {error}", file=sys.stderr)
+            return 1
+        print(json.dumps(report, indent=2))
+        return int(any(report[name]["issues"] for name in report if engine in ("both", name)))
 
 
 def update_project(
@@ -786,6 +941,12 @@ def refresh_hook_repo(repo: Path, *, force: bool = False) -> None:
             result = update_repo(repo, runner=runner, codegraph=CODEGRAPH, crg=CRG)
         if result:
             raise RuntimeError(f"Indexer exited unsuccessfully ({result}); see worker.log")
+        if repo_fingerprint(repo) != fingerprint:
+            enqueue_index_update({"cwd": str(repo), "paths": [], "discover": False})
+        health = index_health(repo)
+        problems = {name: data["issues"] for name, data in health.items() if data["issues"]}
+        if problems:
+            raise RuntimeError(f"Index validation failed: {problems}")
         state.update(status="success", fingerprint=fingerprint)
         # Never acknowledge edits which arrived during the update as indexed.
         if repo_fingerprint(repo) != fingerprint:
@@ -972,11 +1133,16 @@ def project_status(
         print(f"[missing] {project}")
         return 1
     if (project / ".git").exists():
-        checks = (("CodeGraph", project / ".codegraph"), ("CRG", project / ".code-review-graph"))
-        kind = "repo"
-    else:
-        checks = (("CodeGraph umbrella", project / ".codegraph"),)
-        kind = "umbrella"
+        if git_root(project) != project:
+            print(f"[invalid Git repository] {project}")
+            return 1
+        report = index_health(project, integrity=True)
+        print(f"[repo] {project}")
+        for name, data in report.items():
+            print(f"  {name}: {json.dumps(data)}")
+        return int(any(data["issues"] for data in report.values()))
+    checks = (("CodeGraph umbrella", project / ".codegraph"),)
+    kind = "umbrella"
     errors = 0
     print(f"[{kind}] {project}")
     for label, index in checks:
@@ -985,10 +1151,7 @@ def project_status(
         errors += not present
     if kind == "umbrella":
         for repo in discover_repos(project):
-            for label, index in (("CodeGraph", repo / ".codegraph"), ("CRG", repo / ".code-review-graph")):
-                present = index.is_dir()
-                print(f"  {repo}: {label} {'present' if present else 'missing'}")
-                errors += not present
+            errors += project_status(repo)
     return int(errors)
 
 
@@ -1018,6 +1181,10 @@ def parser() -> argparse.ArgumentParser:
 
     project_state = subcommands.add_parser("project-status")
     project_state.add_argument("path", type=Path)
+
+    repair = subcommands.add_parser("repair-project")
+    repair.add_argument("path", type=Path)
+    repair.add_argument("--engine", choices=("both", "codegraph", "crg"), default="both")
 
     server = subcommands.add_parser("serve")
     server.add_argument("engine", choices=("codegraph", "crg"))
@@ -1051,8 +1218,10 @@ def main() -> int:
         return status(arguments.base)
     if arguments.command == "project-status":
         return project_status(arguments.path)
+    if arguments.command == "repair-project":
+        return repair_project(arguments.path, engine=arguments.engine)
     if arguments.command == "serve":
-        command = [CODEGRAPH, "serve", "--mcp"] if arguments.engine == "codegraph" else [CRG, "serve"]
+        command = [CODEGRAPH, "serve", "--mcp"] if arguments.engine == "codegraph" else crg_command(["serve"])
         os.execvp(command[0], command)
     if arguments.command == "hook-update":
         return hook_update()

@@ -22,12 +22,16 @@ working directory in the target project.
 - Update every initialized index: `python3 "$CODE_INTEL" update-batch BASE`
 - Check the installation: `python3 "$CODE_INTEL" status --base BASE`
 - Check one project without changing it: `python3 "$CODE_INTEL" project-status PATH`
+- Rebuild damaged or relocated indexes: `python3 "$CODE_INTEL" repair-project PATH --engine both` (or `codegraph` / `crg`)
 
 Use `setup-batch` or `update-batch` whenever several projects are in scope. They are the only supported batch methods.
 
 ## Initialization contract
 
 `setup-batch` recursively discovers Git repositories under `BASE`, excluding `node_modules`, `.venv`, `vendor`, `.cache`, and `__pycache__`. It skips repositories with fewer than five recognized code files within depth five.
+Discovery validates each `.git` marker with Git. Invalid markers and their
+subtrees are skipped; valid linked worktrees remain eligible. Repair stale Git
+worktree pointers with `git worktree repair` before indexing them.
 
 For each eligible repository it initializes CodeGraph, builds CRG, registers CRG under the directory name, and locally excludes both generated directories through Git's `info/exclude`. A failure stops later steps for that repository; batch processing continues.
 
@@ -83,7 +87,25 @@ paths and file metadata, so an unchanged dirty worktree is not indexed again.
 The first event without a successful receipt performs a catch-up update, even
 after a read-only command. Later changes in already dirty files, untracked files,
 deletions and reverts trigger another update. Changes during an update are queued
-again; failed updates never receive a success receipt.
+again; failed updates never receive a success receipt. The worker also checks
+database contents before recording success.
+
+CRG indexing and its MCP server run through the bundled adapter in CRG's own
+Python environment. Full and incremental inventories include Git-visible
+untracked source files, while retaining CRG's language and ignore rules. This
+does not stage files or modify the installed dependency.
+
+Use `repair-project` when incremental updates cannot recover corruption or an
+index contains paths from another checkout. It requires a valid Git root and
+waits briefly for the shared worker. It saves prior generated files under the
+indexing cache's `backups/`, uses CodeGraph's native locked full rebuild, and
+validates a separately built CRG database before publishing it through SQLite.
+An incomplete repair reports failure and keeps backups; already repaired
+engines remain repaired. Do not delete live lock files, sockets or WAL files.
+Registered external CRG database locations are respected. If CRG's database is
+physically unreadable, repair saves its raw files and stops: close graph clients
+before using CRG's native corruption rebuild. Automated repair does not unlink
+a potentially live database.
 
 The worker stores receipts and command output in `~/.cache/code-intel/indexing/`
 (`worker.log`). It does not persist shell commands or tool responses. Each
@@ -123,7 +145,10 @@ preferred manager.
 Ensure both commands are on the PATH inherited by Claude Code/Codex, including
 when launched as desktop applications, then restart the host.
 `status` checks tool versions, the CRG registry, and discovered CodeGraph indexes.
-`project-status` reports index presence.
+`project-status` checks SQLite integrity and stored file paths/hashes. CRG also
+checks coverage against its current source inventory. CodeGraph and CRG have
+different ignore rules; their file counts need not match. Umbrella status checks
+its nested repositories as well as the umbrella index's presence.
 
 Both clients call `hook-prompt` for `UserPromptSubmit`. It converts CodeGraph
 context to the shared `hookSpecificOutput.additionalContext` JSON contract.
