@@ -1,0 +1,52 @@
+name: knowledge-atlas
+
+on:
+  pull_request:
+    paths:
+      - "knowledge-atlas/**"
+      - ".agents/plugins/marketplace.json"
+      - ".claude-plugin/marketplace.json"
+      - "release-please-config.json"
+      - ".release-please-manifest.json"
+      - ".github/workflows/knowledge-atlas.yml"
+  push:
+    branches: [main]
+    paths:
+      - "knowledge-atlas/**"
+      - ".agents/plugins/marketplace.json"
+      - ".claude-plugin/marketplace.json"
+      - "release-please-config.json"
+      - ".release-please-manifest.json"
+      - ".github/workflows/knowledge-atlas.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Locked Python dependencies
+        working-directory: knowledge-atlas
+        run: uv sync --locked
+      - name: Package regression tests
+        working-directory: knowledge-atlas
+        run: uv run --no-sync pytest -q
+      - name: Viewer regression tests
+        working-directory: knowledge-atlas
+        run: node --test tests/viewer_*.test.mjs
+      - name: Build distribution
+        working-directory: knowledge-atlas
+        run: uv build
+      - name: Claude plugin validation
+        run: |
+          npm install --global @anthropic-ai/claude-code
+          claude plugin validate knowledge-atlas
