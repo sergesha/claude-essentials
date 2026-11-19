@@ -10,6 +10,12 @@ passed 29 JavaScript tests. A Chromium session checked caller-supplied attributi
 receipt indicators and an abstention with a working citation using a deterministic
 local backend.
 
+The 0.3.1 ARM64 production image ran as UID 1000. With an empty authentication volume
+and a disposable copy of the 0.3.0 runtime, it migrated the interpreter, validated the
+runtime and served authenticated Atlas and graph requests. The rehearsal started Gemma,
+the embedding bridge and TerminusDB offline. Both packaged provider CLIs launched.
+Native model invocation is a separate opt-in check.
+
 A separate Linux ARM64 run published a pin-only parent at the configured Docker atlas path
 using an external child and retrieved child evidence through hybrid search. Opening the
 external child as a second owner returned `invalid_location` and preserved the parent’s
