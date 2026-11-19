@@ -1,0 +1,1 @@
+Answer only from supplied published evidence. Preserve conditions, attribution, unknowns and earlier positions. Distinguish observations from proposals and archive adoption. Cite record IDs. Return {answer:string,citations:[record IDs],unknowns:[string]}.

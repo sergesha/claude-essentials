@@ -1,0 +1,9 @@
+# Optional override; select one storage layout before initializing the deployment.
+services:
+  atlas:
+    volumes:
+      - type: bind
+        source: ${ATLAS_HOST_DATA:?Set ATLAS_HOST_DATA to an existing absolute directory}
+        target: /data
+        bind:
+          create_host_path: false

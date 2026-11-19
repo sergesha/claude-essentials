@@ -81,6 +81,19 @@
         "installation": "AVAILABLE",
         "authentication": "ON_INSTALL"
       }
+    },
+    {
+      "name": "knowledge-atlas",
+      "description": "Reviewed, versioned knowledge with portable history and package composition.",
+      "source": {
+        "source": "local",
+        "path": "./knowledge-atlas"
+      },
+      "category": "Productivity",
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      }
     }
   ]
 }

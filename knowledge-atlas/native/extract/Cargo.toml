@@ -1,0 +1,8 @@
+[package]
+name = "poc9-extract"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+utopia-extract = { git = "https://github.com/deeplethe/utopia", rev = "4fec6cb5108895288405e1ffdabae63b76579f3a" }
+serde_json = "1"

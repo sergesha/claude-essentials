@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Knowledge Atlas</title><link rel="stylesheet" href="/style.css"><script type="module" src="/app.js"></script></head>
+<body>
+<a class="skip-link" href="#workspace">Skip to workspace</a>
+<div class="app-shell">
+<aside class="sidebar" aria-label="Knowledge library">
+  <a class="brand" href="#workspace"><span class="brand-mark" aria-hidden="true">a<span>·</span></span><span>Knowledge Atlas<small>Your living library</small></span></a>
+  <div class="workspace-label"><span class="status-dot"></span> LOCAL WORKSPACE</div>
+  <div class="version-control"><label for="publication">Knowledge version</label><select id="publication"></select><p id="mode">Connecting…</p><button id="return-current" class="text-button" hidden>Return to latest version →</button></div>
+  <div class="library-heading"><h2>Pages</h2><span id="page-count" class="count">0</span></div>
+  <label class="sr-only" for="page-filter">Find a page</label><input id="page-filter" type="search" placeholder="Find a page…" autocomplete="off">
+  <nav id="pages" aria-label="Wiki pages"></nav><p id="page-empty" class="empty-note" hidden>No pages match your search.</p>
+  <button id="refresh" class="secondary sidebar-refresh">↻ Refresh library</button><div class="sidebar-bottom"><p>Private on this device.<br>Changes are reviewed before publishing.</p></div>
+</aside>
+<main id="workspace" tabindex="-1">
+  <header class="topbar"><div><span class="eyebrow">YOUR KNOWLEDGE, CONNECTED</span><h1>Explore your atlas</h1></div><span class="local-badge"><span class="status-dot"></span> Local & private</span></header>
+  <nav class="workspace-nav" aria-label="Workspace views"><button id="nav-read" aria-pressed="true">Read</button><button id="nav-ask" aria-pressed="false">Ask</button><button id="nav-graph" aria-pressed="false">Graph</button><button id="nav-history" aria-pressed="false">History</button><button id="nav-review" aria-pressed="false">Review changes</button></nav>
+  <div id="notice" role="status" aria-live="polite">Connecting to your atlas…</div>
+  <div class="content">
+    <section id="panel-read" aria-labelledby="page-title">
+      <div class="reading-header"><div><span class="eyebrow">LIBRARY / WIKI</span><h2 id="page-title">Your published knowledge</h2></div><div class="graph-actions"><button id="graph-page" class="secondary" disabled>Explore connections</button><button id="ask-page" class="secondary">Ask a question ↗</button></div></div>
+      <div id="dates" class="metadata"></div>
+      <article id="page" class="article"><div class="empty-state"><h3>Your knowledge starts here</h3><p>Choose a page from your library to start reading.</p></div></article>
+      <div class="reading-footer"><span>Something missing or unclear?</span><button id="clarify-page" class="text-button">Suggest a clarification →</button></div>
+      <details id="source-details" class="technical"><summary>Sources & publication details</summary><div id="sources"></div><p class="field-label">Exact publication identifier</p><code id="publication-id"></code><p class="field-label">Exact page identifier</p><code id="page-id"></code></details>
+    </section>
+    <section id="panel-ask" aria-labelledby="ask-title" hidden>
+      <div class="view-heading"><span class="eyebrow">ANSWERS WITH A SOURCE</span><h2 id="ask-title">Ask your knowledge</h2><p>Explore what this version knows. Every answer stays connected to its evidence.</p></div>
+      <form id="ask-form" class="question-card"><label for="question">What would you like to understand?</label><textarea id="question" required maxlength="4096" placeholder="What are the key findings, and where is the evidence still uncertain?"></textarea><div class="form-footer"><span>Uses the selected knowledge version</span><button id="ask-submit">Ask with evidence <span aria-hidden="true">↗</span></button></div></form>
+      <div class="answer-card"><div id="answer" class="answer-text"><p class="empty-note">Your answer and its sources will appear here.</p></div><div id="citations" class="citations" aria-label="Answer evidence"></div><div id="evidence" class="evidence-card" tabindex="-1" hidden></div></div>
+      <p class="help-text">Citations show the evidence used, not a guarantee that the interpretation is correct. Missing evidence and uncertainty are reported explicitly.</p>
+    </section>
+    <section id="panel-graph" aria-labelledby="graph-title" hidden>
+      <div class="view-heading"><span class="eyebrow">FOLLOW THE EVIDENCE</span><h2 id="graph-title">Explore connections</h2><p>Start with one idea. Follow a relationship, check its evidence, then decide where to go next.</p></div>
+      <form id="graph-search-form" class="graph-search"><label class="sr-only" for="graph-query">Search published records</label><input id="graph-query" type="search" required maxlength="4096" placeholder="Find a concept, page or source…"><button>Search this version</button></form>
+      <div id="graph-results" class="graph-results" aria-label="Graph search results"></div>
+      <div class="graph-toolbar"><strong id="graph-count">0 objects</strong><label><input id="graph-native" type="checkbox" checked> Reference links <span class="help-text">(dashed)</span></label><div class="graph-actions"><button id="graph-fit" class="secondary">Fit to view</button><button id="graph-clear" class="secondary">Clear</button></div></div>
+      <p id="graph-status" class="help-text" role="status" aria-live="polite"></p>
+      <div class="graph-layout"><div class="graph-map"><div id="graph-canvas" role="img" aria-label="Published knowledge graph. Use the object and connection lists below for keyboard access."></div><div id="graph-empty" class="graph-empty"><h3>A map with a starting point</h3><p>Search above, or choose “Explore connections” on a wiki page.</p></div><div class="graph-legend"><span>● Concept</span><span>▰ Wiki page</span><span>◆ Source</span><span>⬡ Claim / attribute</span><span>→ Semantic relationship</span></div></div><aside id="graph-inspector" class="graph-inspector" aria-label="Selected graph evidence" tabindex="-1"></aside></div>
+      <details class="graph-list-panel" open><summary>Objects & connections · keyboard-accessible list</summary><div class="graph-list-columns"><div><h3>Objects</h3><div id="graph-nodes"></div></div><div><h3>Connections</h3><div id="graph-edges"></div></div></div></details>
+      <details class="technical"><summary>Exact graph context & limits</summary><code id="graph-context"></code><p class="help-text">The selected publication governs graph, search and evidence. Each expansion follows one hop in either direction; arrows retain the recorded relationship direction. The view is bounded, and current graph queries read the full projection before bounding results. Unpublished proposals are not included.</p></details>
+    </section>
+    <section id="panel-history" aria-labelledby="history-title" hidden>
+      <div class="view-heading"><span class="eyebrow">KNOWLEDGE OVER TIME</span><h2 id="history-title">See what changed</h2><p>Explore saved versions and compare their knowledge. Source dates and publication dates are separate events.</p></div>
+      <div class="history-layout"><div class="timeline-card"><h3>Published versions</h3><div id="timeline"></div></div><div class="compare-card"><h3>Compare versions</h3><label for="before">From</label><select id="before"></select><p id="compare-target" class="help-text">To the selected version</p><button id="compare">Show changes →</button><p class="help-text">Exact record changes, including provenance updates. No inferred continuity between different records.</p></div></div>
+      <div id="diff" class="changes-list"><div class="empty-state"><h3>A clearer view of progress</h3><p>Choose an earlier version, then show what changed.</p></div></div>
+    </section>
+    <section id="panel-review" aria-labelledby="review-title" hidden>
+      <div class="view-heading"><span class="eyebrow">IMPROVE WITH INTENTION</span><h2 id="review-title">Review changes</h2><p>Suggest a clarification, inspect its changes, then decide. Nothing is published automatically.</p></div>
+      <div class="review-step"><span class="step-number">1</span><div><h3>Suggest a clarification</h3><p id="target" class="help-text">Select a current page or citation first.</p></div></div>
+      <form id="clarify-form" class="surface"><label for="actor">Your name</label><input id="actor" required placeholder="Name recorded with your review" autocomplete="name"><label for="clarification">What should be clarified?</label><textarea id="clarification" required maxlength="24000" placeholder="Explain the correction and include supporting evidence…"></textarea><div class="form-footer"><span>Creates a proposal for review</span><button id="propose">Propose clarification →</button></div></form>
+      <div class="review-step"><span class="step-number">2</span><div><h3>Inspect a proposal</h3><p class="help-text">Compare the proposed knowledge with the current publication.</p></div></div>
+      <div class="surface"><label for="proposal-list">Saved proposals</label><select id="proposal-list"><option value="">Choose a proposal…</option></select><div class="row"><label class="sr-only" for="candidate">Proposal identifier</label><input id="candidate" placeholder="Or paste a proposal identifier"><button id="inspect" class="secondary">Inspect changes</button></div><p id="review-summary" class="help-text">Inspect a proposal to enable a decision.</p><div id="review"></div><div id="types"></div>
+      <div class="decision-area"><label for="reason">Reason for your decision</label><input id="reason" placeholder="Explain why these changes should be accepted or rejected"><div class="form-footer"><span>Applies only to the inspected proposal</span><div class="row"><button id="reject" class="secondary danger" disabled>Reject</button><button id="accept" disabled>Accept & publish</button></div></div></div></div>
+    </section>
+    <div class="operation-area"><button id="reconcile" class="secondary" hidden>Recover pending operation</button><pre id="operation" hidden></pre></div>
+  </div>
+  <footer>Knowledge Atlas <span>·</span> Read with context. Change with confidence.</footer>
+</main>
+</div></body></html>

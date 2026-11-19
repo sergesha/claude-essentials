@@ -1,0 +1,25 @@
+services:
+  atlas:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: knowledge-atlas:local
+    platform: linux/arm64
+    init: true
+    environment:
+      KNOWLEDGE_ATLAS_CONFIG: /data/service-config.json
+    volumes:
+      - runtime:/runtime
+      - data:/data
+      - auth:/auth
+    stop_grace_period: 45s
+    healthcheck:
+      test: [CMD, /opt/knowledge-atlas/.venv/bin/python, -m, knowledge_atlas.cli, status]
+      interval: 10s
+      timeout: 5s
+      start_period: 120s
+      retries: 3
+volumes:
+  runtime:
+  data:
+  auth:

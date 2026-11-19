@@ -1,0 +1,36 @@
+[project]
+name = "knowledge-atlas"
+version = "0.2.0"
+description = "Reviewed, versioned knowledge for Codex and Claude Code"
+requires-python = ">=3.11"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = [
+    "markdown-it-py==4.0.0",
+    "mcp==1.28.1",
+    "pydantic==2.13.4",
+]
+
+[dependency-groups]
+dev = ["pytest>=8,<10"]
+
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/knowledge_atlas"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[project.scripts]
+knowledge-atlas = "knowledge_atlas.cli:main"
+
+[tool.hatch.build.targets.wheel.force-include]
+"runtime" = "knowledge_atlas/_assets/runtime"
+"native" = "knowledge_atlas/_assets/native"
+
+"docker" = "knowledge_atlas/_assets/docker"

@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "knowledge-atlas": {
+      "command": "sh",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/scripts/launch.sh"
+      ]
+    }
+  }
+}

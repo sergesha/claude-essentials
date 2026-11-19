@@ -1,0 +1,33 @@
+--- a/src/dataset/scanner.rs
++++ b/src/dataset/scanner.rs
+@@ -3016,18 +3016,19 @@
+         column: &str,
+         accum: &mut RoaringBitmap,
+     ) -> Result<bool> {
+-        let index = self
+-            .dataset
+-            .load_scalar_index(IndexCriteria::default().for_column(column).supports_fts())
+-            .await?;
+-        match index {
+-            Some(index) => match &index.fragment_bitmap {
+-                Some(fragmap) => {
+-                    *accum |= fragmap;
+-                    Ok(true)
++        // FTS searches every committed segment. Eligibility must cover the
++        // same union, rather than only the first scalar-index metadata entry.
++        let segments = load_segments(&self.dataset, column).await?;
++        match segments {
++            Some(segments) => {
++                for segment in segments {
++                    match &segment.fragment_bitmap {
++                        Some(fragmap) => *accum |= fragmap,
++                        None => return Ok(false),
++                    }
+                 }
+-                None => Ok(false),
+-            },
++                Ok(true)
++            }
+             None => Ok(false),
+         }
+     }

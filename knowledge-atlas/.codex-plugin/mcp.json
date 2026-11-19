@@ -1,0 +1,21 @@
+{
+  "mcpServers": {
+    "knowledge-atlas": {
+      "command": "sh",
+      "args": [
+        "scripts/launch.sh"
+      ],
+      "env_vars": [
+        "KNOWLEDGE_ATLAS_CONFIG",
+        "KNOWLEDGE_ATLAS_PYTHON",
+        "XDG_DATA_HOME",
+        "XDG_CACHE_HOME",
+        "KNOWLEDGE_ATLAS_DOCKER_PROJECT",
+        "DOCKER_CONTEXT",
+        "DOCKER_HOST"
+      ],
+      "startup_timeout_sec": 300,
+      "cwd": "."
+    }
+  }
+}
