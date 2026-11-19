@@ -1,0 +1,18 @@
+{
+  "terminusdb": {
+    "revision": "4c5d6c15eef59729673d456a60c09be13a40da8d",
+    "patch": "terminusdb.patch",
+    "sha256": "df6e28a586c67333d05226beb9d7be0874ca3d939ddd9ef6dd64e20dc6d77e08"
+  },
+  "vectorlink": {
+    "revision": "854c7b519e15551455ea8535e9dd6eb14c2657bf",
+    "patch": "vectorlink.patch",
+    "sha256": "93a4b1bbd68f447cdd4d35c9936d23c1da4d4a63771ec6a4bd7ca2232479834c"
+  },
+  "lance": {
+    "version": "7.0.0",
+    "crate_sha256": "3944aca86f4c78f4da04af1c2bf33e664a2826b7af72972ad200d6b9de59019f",
+    "patch": "lance-7.0.0-fts-prefilter.patch",
+    "sha256": "adf30505df09615bc473fe559f854e2ef1b30eb8f250f91a923eb4e8345bcf6f"
+  }
+}

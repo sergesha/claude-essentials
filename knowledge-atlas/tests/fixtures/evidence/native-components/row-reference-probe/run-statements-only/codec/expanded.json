@@ -1,0 +1,947 @@
+{
+  "e": [
+    [
+      "Trial T-41",
+      "trial",
+      1
+    ],
+    [
+      "Mist-A",
+      "treatment",
+      1
+    ],
+    [
+      "Sample-S",
+      "paper sample",
+      1
+    ],
+    [
+      "water-resistant pigment",
+      "pigment",
+      0
+    ],
+    [
+      "non-brittle paper",
+      "paper",
+      0
+    ],
+    [
+      "Imani",
+      "technician",
+      1
+    ],
+    [
+      "This page",
+      "page",
+      0
+    ],
+    [
+      "a candidate synthesis",
+      "synthesis",
+      0
+    ],
+    [
+      "Treatment and specimen",
+      "record element",
+      0
+    ],
+    [
+      "Specimen conditions",
+      "record element",
+      0
+    ],
+    [
+      "Technician",
+      "record element",
+      0
+    ],
+    [
+      "Curl",
+      "record element",
+      0
+    ],
+    [
+      "Stain",
+      "record element",
+      0
+    ],
+    [
+      "Room humidity",
+      "record element",
+      0
+    ],
+    [
+      "the source",
+      "source",
+      0
+    ],
+    [
+      "uncertainty about its cause",
+      "uncertainty",
+      0
+    ],
+    [
+      "Map-17",
+      "specimen",
+      1
+    ],
+    [
+      "raw.txt",
+      "record",
+      1
+    ],
+    [
+      "Map-17's blue pigment",
+      "pigment",
+      0
+    ],
+    [
+      "ST-17 report",
+      "report",
+      1
+    ],
+    [
+      "the two observations required by Daria's proposal",
+      "observations",
+      0
+    ],
+    [
+      "Daria's proposal",
+      "proposal",
+      0
+    ],
+    [
+      "a spot test confirming water-resistant pigment and non-brittle paper",
+      "spot test",
+      0
+    ],
+    [
+      "curl reduction on Sample-S",
+      "outcome",
+      0
+    ],
+    [
+      "a recorded outcome",
+      "outcome",
+      0
+    ],
+    [
+      "stronger paper",
+      "paper",
+      0
+    ],
+    [
+      "observations on Map-17",
+      "observations",
+      0
+    ],
+    [
+      "Mist-A application",
+      "application",
+      0
+    ],
+    [
+      "archive adoption",
+      "adoption",
+      0
+    ],
+    [
+      "the stain's cause",
+      "cause",
+      0
+    ],
+    [
+      "AP-17",
+      "report",
+      1
+    ],
+    [
+      "a separate, explicitly synthetic report",
+      "report",
+      0
+    ],
+    [
+      "Noor",
+      "person",
+      1
+    ],
+    [
+      "a new stain of unknown cause",
+      "stain",
+      0
+    ],
+    [
+      "strength measurement",
+      "measurement",
+      0
+    ],
+    [
+      "Board-B comparison",
+      "comparison",
+      0
+    ],
+    [
+      "Board-B",
+      "comparison specimen",
+      1
+    ],
+    [
+      "Map-17's tested location",
+      "location",
+      0
+    ],
+    [
+      "the similar observations",
+      "observations",
+      0
+    ],
+    [
+      "separate records",
+      "records",
+      0
+    ],
+    [
+      "a shared stain cause",
+      "cause",
+      0
+    ],
+    [
+      "a later retelling",
+      "retelling",
+      0
+    ],
+    [
+      "Mist-A stain causation",
+      "causation",
+      0
+    ],
+    [
+      "general effectiveness",
+      "effectiveness",
+      0
+    ],
+    [
+      "the original T-41 report",
+      "report",
+      0
+    ],
+    [
+      "an independent trial",
+      "trial",
+      0
+    ],
+    [
+      "this provenance",
+      "provenance",
+      0
+    ],
+    [
+      "this relationship",
+      "relationship",
+      0
+    ],
+    [
+      "a separate report filename",
+      "filename",
+      0
+    ],
+    [
+      "retelling text",
+      "text",
+      0
+    ],
+    [
+      "citations here",
+      "citations",
+      0
+    ],
+    [
+      "Trial T-42",
+      "trial",
+      1
+    ],
+    [
+      "methods and evidence page",
+      "page",
+      0
+    ],
+    [
+      "the limits of both trial records",
+      "limits",
+      0
+    ],
+    [
+      "that Mist-A caused the stain",
+      "claim",
+      0
+    ],
+    [
+      "that Map-17 meets the trial conditions",
+      "claim",
+      0
+    ]
+  ],
+  "s": [
+    [
+      "Trial T-41 used Mist-A on Sample-S, a separate paper sample with confirmed water-resistant pigment and non-brittle paper.",
+      "Trial T-41",
+      "used",
+      "Mist-A",
+      null,
+      {
+        "on": "Sample-S"
+      },
+      null,
+      null
+    ],
+    [
+      "Trial T-41 used Mist-A on Sample-S, a separate paper sample with confirmed water-resistant pigment and non-brittle paper.",
+      "Sample-S",
+      "with",
+      "water-resistant pigment",
+      null,
+      {
+        "status": "confirmed"
+      },
+      null,
+      null
+    ],
+    [
+      "Trial T-41 used Mist-A on Sample-S, a separate paper sample with confirmed water-resistant pigment and non-brittle paper.",
+      "Sample-S",
+      "with",
+      "non-brittle paper",
+      null,
+      null,
+      null,
+      null
+    ],
+    [
+      "Technician Imani performed the trial.[^2]",
+      "Imani",
+      "performed",
+      "Trial T-41",
+      null,
+      {
+        "title": "Technician"
+      },
+      null,
+      null
+    ],
+    [
+      "This page is a candidate synthesis for human review of a synthetic software-validation case, not conservation advice.[^1]",
+      "This page",
+      "is",
+      "a candidate synthesis",
+      null,
+      {
+        "for": "human review of a synthetic software-validation case",
+        "not": "conservation advice"
+      },
+      null,
+      null
+    ],
+    [
+      "Trial T-41 lasted 12 minutes.[^2]",
+      "Trial T-41",
+      "lasted",
+      null,
+      "12 minutes",
+      null,
+      null,
+      null
+    ],
+    [
+      "| Treatment and specimen | Mist-A on Sample-S, a separate paper sample.[^2] |",
+      "Treatment and specimen",
+      "Recorded evidence",
+      "Mist-A",
+      null,
+      {
+        "on": "Sample-S",
+        "specimen": "a separate paper sample"
+      },
+      null,
+      null
+    ],
+    [
+      "| Specimen conditions | Confirmed water-resistant pigment and non-brittle paper.[^2] |",
+      "Specimen conditions",
+      "Recorded evidence",
+      "water-resistant pigment",
+      null,
+      {
+        "status": "Confirmed"
+      },
+      null,
+      null
+    ],
+    [
+      "| Specimen conditions | Confirmed water-resistant pigment and non-brittle paper.[^2] |",
+      "Specimen conditions",
+      "Recorded evidence",
+      "non-brittle paper",
+      null,
+      {
+        "status": "Confirmed"
+      },
+      null,
+      null
+    ],
+    [
+      "| Technician | Imani.[^2] |",
+      "Technician",
+      "Recorded evidence",
+      "Imani",
+      null,
+      null,
+      null,
+      null
+    ],
+    [
+      "| Curl | Decreased after treatment.[^2] |",
+      "Curl",
+      "Recorded evidence",
+      null,
+      "Decreased",
+      null,
+      "after treatment",
+      null
+    ],
+    [
+      "| Stain | Observed; cause unknown.[^2] |",
+      "Stain",
+      "Recorded evidence",
+      null,
+      "Observed; cause unknown.",
+      null,
+      null,
+      null
+    ],
+    [
+      "| Room humidity | Not measured.[^2] |",
+      "Room humidity",
+      "Recorded evidence",
+      null,
+      "Not measured.",
+      null,
+      null,
+      null
+    ],
+    [
+      "The trial does **not** establish that Mist-A caused the stain.",
+      "Trial T-41",
+      "does **not** establish",
+      "that Mist-A caused the stain",
+      null,
+      null,
+      null,
+      null
+    ],
+    [
+      "The source preserves both the observed stain and uncertainty about its cause; room humidity was not measured.[^2]",
+      "the source",
+      "preserves",
+      "Stain",
+      null,
+      {
+        "status": "observed"
+      },
+      null,
+      null
+    ],
+    [
+      "The source preserves both the observed stain and uncertainty about its cause; room humidity was not measured.[^2]",
+      "the source",
+      "preserves",
+      "uncertainty about its cause",
+      null,
+      null,
+      null,
+      null
+    ],
+    [
+      "The source preserves both the observed stain and uncertainty about its cause; room humidity was not measured.[^2]",
+      "Room humidity",
+      "was not measured",
+      null,
+      "not measured",
+      null,
+      null,
+      null
+    ],
+    [
+      "The trial also does **not** establish that [Map-17](/wiki/entities/map-17.md) meets the trial conditions.[^2]",
+      "Trial T-41",
+      "does **not** establish",
+      "that Map-17 meets the trial conditions",
+      null,
+      null,
+      null,
+      null
+    ],
+    [
+      "The earlier raw.txt record described Map-17's blue pigment as untested.[^3]",
+      "raw.txt",
+      "described",
+      "Map-17's blue pigment",
+      null,
+      {
+        "as": "untested"
+      },
+      "earlier",
+      null
+    ],
+    [
+      "The [ST-17 report](/wiki/entities/spot-test-st-17.md) concerns Map-17 itself and reports water-resistant blue pigment and non-brittle paper at the tested location on 2026-11-10.",
+      "ST-17 report",
+      "concerns",
+      "Map-17",
+      null,
+      {
+        "itself": "itself"
+      },
+      null,
+      null
+    ],
+    [
+      "The [ST-17 report](/wiki/entities/spot-test-st-17.md) concerns Map-17 itself and reports water-resistant blue pigment and non-brittle paper at the tested location on 2026-11-10.",
+      "ST-17 report",
+      "reports",
+      "Map-17's blue pigment",
+      null,
+      {
+        "status": "water-resistant",
+        "at": "the tested location"
+      },
+      "2026-11-10",
+      null
+    ],
+    [
+      "The [ST-17 report](/wiki/entities/spot-test-st-17.md) concerns Map-17 itself and reports water-resistant blue pigment and non-brittle paper at the tested location on 2026-11-10.",
+      "ST-17 report",
+      "reports",
+      "non-brittle paper",
+      null,
+      {
+        "at": "the tested location"
+      },
+      "2026-11-10",
+      null
+    ],
+    [
+      "That evidence comes from ST-17, not from T-41.[^6]",
+      "the two observations required by Daria's proposal",
+      "comes from",
+      "ST-17 report",
+      null,
+      {
+        "not from": "Trial T-41"
+      },
+      null,
+      null
+    ],
+    [
+      "Daria's proposal requires a spot test confirming water-resistant pigment and non-brittle paper before Mist-A flattening.[^4]",
+      "Daria's proposal",
+      "requires",
+      "a spot test confirming water-resistant pigment and non-brittle paper",
+      null,
+      {
+        "mood": "requires"
+      },
+      "before Mist-A flattening",
+      null
+    ],
+    [
+      "Daria's proposal requires a spot test confirming water-resistant pigment and non-brittle paper before Mist-A flattening.[^4]",
+      "a spot test confirming water-resistant pigment and non-brittle paper",
+      "confirming",
+      "water-resistant pigment",
+      null,
+      {
+        "mood": "requires"
+      },
+      "before Mist-A flattening",
+      null
+    ],
+    [
+      "Daria's proposal requires a spot test confirming water-resistant pigment and non-brittle paper before Mist-A flattening.[^4]",
+      "a spot test confirming water-resistant pigment and non-brittle paper",
+      "confirming",
+      "non-brittle paper",
+      null,
+      {
+        "mood": "requires"
+      },
+      "before Mist-A flattening",
+      null
+    ],
+    [
+      "**Synthesis:** curl reduction on Sample-S is a recorded outcome, not proof of stronger paper or a substitute for observations on Map-17.",
+      "curl reduction on Sample-S",
+      "is",
+      "a recorded outcome",
+      null,
+      null,
+      null,
+      null
+    ],
+    [
+      "**Synthesis:** curl reduction on Sample-S is a recorded outcome, not proof of stronger paper or a substitute for observations on Map-17.",
+      "curl reduction on Sample-S",
+      "is not proof of",
+      "stronger paper",
+      null,
+      null,
+      null,
+      null
+    ],
+    [
+      "**Synthesis:** curl reduction on Sample-S is a recorded outcome, not proof of stronger paper or a substitute for observations on Map-17.",
+      "curl reduction on Sample-S",
+      "is not a substitute for",
+      "observations on Map-17",
+      null,
+      null,
+      null,
+      null
+    ],
+    [
+      "ST-17 supplies the two observations required by Daria's proposal at Map-17's tested location; it reports no Mist-A application or archive adoption.[^2][^4][^6]",
+      "ST-17 report",
+      "supplies",
+      "the two observations required by Daria's proposal",
+      null,
+      {
+        "at": "Map-17's tested location"
+      },
+      null,
+      null
+    ],
+    [
+      "ST-17 supplies the two observations required by Daria's proposal at Map-17's tested location; it reports no Mist-A application or archive adoption.[^2][^4][^6]",
+      "Daria's proposal",
+      "required",
+      "the two observations required by Daria's proposal",
+      null,
+      null,
+      null,
+      null
+    ],
+    [
+      "ST-17 supplies the two observations required by Daria's proposal at Map-17's tested location; it reports no Mist-A application or archive adoption.[^2][^4][^6]",
+      "ST-17 report",
+      "reports no",
+      "Mist-A application",
+      null,
+      null,
+      null,
+      null
+    ],
+    [
+      "ST-17 supplies the two observations required by Daria's proposal at Map-17's tested location; it reports no Mist-A application or archive adoption.[^2][^4][^6]",
+      "ST-17 report",
+      "reports no",
+      "archive adoption",
+      null,
+      null,
+      null,
+      null
+    ],
+    [
+      "ST-17 does not resolve the stain's cause or supply T-41's unmeasured room humidity.[^6]",
+      "ST-17 report",
+      "does not resolve",
+      "the stain's cause",
+      null,
+      null,
+      null,
+      null
+    ],
+    [
+      "ST-17 does not resolve the stain's cause or supply T-41's unmeasured room humidity.[^6]",
+      "ST-17 report",
+      "does not supply",
+      "Room humidity",
+      null,
+      {
+        "status": "unmeasured"
+      },
+      null,
+      null
+    ],
+    [
+      "[AP-17](/wiki/entities/application-ap-17.md) is a separate, explicitly synthetic report of Noor applying Mist-A to Map-17 only at the ST-17-tested location.",
+      "AP-17",
+      "is",
+      "a separate, explicitly synthetic report",
+      null,
+      null,
+      null,
+      null
+    ],
+    [
+      "[AP-17](/wiki/entities/application-ap-17.md) is a separate, explicitly synthetic report of Noor applying Mist-A to Map-17 only at the ST-17-tested location.",
+      "Noor",
+      "applying",
+      "Mist-A",
+      null,
+      {
+        "to": "Map-17",
+        "only at": "the ST-17-tested location",
+        "report": "AP-17"
+      },
+      null,
+      null
+    ],
+    [
+      "It reports decreased curl and a new stain of unknown cause, with humidity unmeasured and no strength measurement or Board-B comparison.[^7]",
+      "AP-17",
+      "reports",
+      "Curl",
+      null,
+      {
+        "status": "decreased",
+        "with": "humidity unmeasured"
+      },
+      null,
+      null
+    ],
+    [
+      "It reports decreased curl and a new stain of unknown cause, with humidity unmeasured and no strength measurement or Board-B comparison.[^7]",
+      "AP-17",
+      "reports",
+      "a new stain of unknown cause",
+      null,
+      {
+        "with": "humidity unmeasured"
+      },
+      null,
+      null
+    ],
+    [
+      "It reports decreased curl and a new stain of unknown cause, with humidity unmeasured and no strength measurement or Board-B comparison.[^7]",
+      "AP-17",
+      "reports no",
+      "strength measurement",
+      null,
+      null,
+      null,
+      null
+    ],
+    [
+      "It reports decreased curl and a new stain of unknown cause, with humidity unmeasured and no strength measurement or Board-B comparison.[^7]",
+      "AP-17",
+      "reports no",
+      "Board-B comparison",
+      null,
+      null,
+      null,
+      null
+    ],
+    [
+      "T-41 concerns Sample-S; AP-17 concerns Map-17's tested location.[^2][^7]",
+      "Trial T-41",
+      "concerns",
+      "Sample-S",
+      null,
+      null,
+      null,
+      null
+    ],
+    [
+      "T-41 concerns Sample-S; AP-17 concerns Map-17's tested location.[^2][^7]",
+      "AP-17",
+      "concerns",
+      "Map-17's tested location",
+      null,
+      null,
+      null,
+      null
+    ],
+    [
+      "**Synthesis:** the similar observations must remain separate records and do not establish a shared stain cause.",
+      "the similar observations",
+      "must remain",
+      "separate records",
+      null,
+      {
+        "mood": "must"
+      },
+      null,
+      null
+    ],
+    [
+      "**Synthesis:** the similar observations must remain separate records and do not establish a shared stain cause.",
+      "the similar observations",
+      "do not establish",
+      "a shared stain cause",
+      null,
+      null,
+      null,
+      null
+    ],
+    [
+      "AP-17 does not resolve T-41's unmeasured humidity or make its derived retelling independent.[^2][^5][^7]",
+      "AP-17",
+      "does not resolve",
+      "Room humidity",
+      null,
+      {
+        "status": "unmeasured"
+      },
+      null,
+      null
+    ],
+    [
+      "AP-17 does not resolve T-41's unmeasured humidity or make its derived retelling independent.[^2][^5][^7]",
+      "AP-17",
+      "does not make",
+      "a later retelling",
+      null,
+      {
+        "status": "independent"
+      },
+      null,
+      null
+    ],
+    [
+      "AP-17 itself establishes neither Mist-A stain causation nor general effectiveness.[^7]",
+      "AP-17",
+      "establishes neither",
+      "Mist-A stain causation",
+      null,
+      null,
+      null,
+      null
+    ],
+    [
+      "AP-17 itself establishes neither Mist-A stain causation nor general effectiveness.[^7]",
+      "AP-17",
+      "establishes neither",
+      "general effectiveness",
+      null,
+      null,
+      null,
+      null
+    ],
+    [
+      "A later retelling is derived from the original T-41 report and is **not an independent trial**.[^5]",
+      "a later retelling",
+      "is derived from",
+      "the original T-41 report",
+      null,
+      null,
+      null,
+      null
+    ],
+    [
+      "A later retelling is derived from the original T-41 report and is **not an independent trial**.[^5]",
+      "a later retelling",
+      "is **not",
+      "an independent trial",
+      null,
+      null,
+      null,
+      null
+    ],
+    [
+      "ST-17 does not change this provenance.[^6]",
+      "ST-17 report",
+      "does not change",
+      "this provenance",
+      null,
+      null,
+      null,
+      null
+    ],
+    [
+      "The source reports this relationship but supplies no separate report filename or retelling text; citations here refer to raw.txt.[^5]",
+      "the source",
+      "reports",
+      "this relationship",
+      null,
+      null,
+      null,
+      null
+    ],
+    [
+      "The source reports this relationship but supplies no separate report filename or retelling text; citations here refer to raw.txt.[^5]",
+      "the source",
+      "supplies no",
+      "a separate report filename",
+      null,
+      null,
+      null,
+      null
+    ],
+    [
+      "The source reports this relationship but supplies no separate report filename or retelling text; citations here refer to raw.txt.[^5]",
+      "the source",
+      "supplies no",
+      "retelling text",
+      null,
+      null,
+      null,
+      null
+    ],
+    [
+      "The source reports this relationship but supplies no separate report filename or retelling text; citations here refer to raw.txt.[^5]",
+      "citations here",
+      "refer to",
+      "raw.txt",
+      null,
+      null,
+      null,
+      null
+    ],
+    [
+      "For the separate Board-B comparison, see [Trial T-42](/wiki/entities/trial-t-42.md).",
+      "Board-B comparison",
+      "see",
+      "Trial T-42",
+      null,
+      {
+        "status": "separate"
+      },
+      null,
+      null
+    ],
+    [
+      "The [methods and evidence page](/wiki/concepts/flattening-methods-and-evidence.md) compares the limits of both trial records.",
+      "methods and evidence page",
+      "compares",
+      "the limits of both trial records",
+      null,
+      null,
+      null,
+      null
+    ]
+  ],
+  "n": [
+    [
+      "Trial T-41",
+      "T-41",
+      "T-41 concerns Sample-S; AP-17 concerns Map-17's tested location.[^2][^7]"
+    ],
+    [
+      "ST-17 report",
+      "ST-17",
+      "That evidence comes from ST-17, not from T-41.[^6]"
+    ]
+  ],
+  "t": [
+    [
+      "now",
+      "date",
+      "2026-11-10",
+      {
+        "y": 2026,
+        "m": 11,
+        "d": 10
+      },
+      null
+    ]
+  ]
+}

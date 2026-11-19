@@ -1,0 +1,183 @@
+"""Real localhost transport parity, authentication, and durable operations."""
+from dataclasses import asdict
+import json
+from pathlib import Path
+import time
+import urllib.error
+import urllib.request
+import uuid
+import pytest
+from knowledge_atlas.contracts import ActionRequest, AtlasError, ServiceContext
+
+
+@pytest.fixture
+def app(tmp_path):
+    from knowledge_atlas.http_api import create_app
+    app=create_app(ServiceContext(tmp_path/'service'))
+    app.start()
+    yield app
+    app.stop(wait=True)
+
+
+def raw(app,action,payload,headers=None):
+    request=urllib.request.Request(app.endpoint+'/v1/actions/'+action,data=json.dumps(payload).encode(),
+        headers=headers or {'Authorization':'Bearer '+app.token,'Content-Type':'application/json'})
+    with urllib.request.urlopen(request,timeout=10) as response:
+        return response.status,json.load(response)
+
+
+def test_three_interfaces_preserve_results_and_errors(app,tmp_path):
+    from knowledge_atlas.client import AtlasClient
+    from knowledge_atlas.mcp_bridge import call_tool
+    client=AtlasClient(app.context.service_root)
+    request=ActionRequest('atlas.create',request_id=str(uuid.uuid4()),payload={'path':str(tmp_path/'atlas')})
+    status,submitted=raw(app,'atlas.create',asdict(request))
+    assert status==202
+    from knowledge_atlas.api_models import Location
+    repeated=client.atlas_create(Location(path=str(tmp_path/'atlas')),request_id=request.request_id)
+    assert repeated.operation_id==submitted['operation_id']
+    deadline=time.monotonic()+15
+    while True:
+        operation=client.operation(submitted['operation_id'])
+        if operation.state not in ('queued','running'):break
+        assert time.monotonic()<deadline
+        time.sleep(.05)
+    assert operation.state=='succeeded',operation.error
+    atlas_id=operation.result.data['atlas_id']
+    request=ActionRequest('atlas.status',atlas_id=atlas_id)
+    status,http=raw(app,request.action,asdict(request))
+    python=asdict(client.call(request))
+    mcp=call_tool(client,'atlas_atlas_status',asdict(request))
+    assert status==200 and http==python==mcp
+    bad=ActionRequest('atlas.status',atlas_id='missing')
+    with pytest.raises(AtlasError) as python_error:client.call(bad)
+    mcp_error=call_tool(client,'atlas_atlas_status',asdict(bad))
+    assert python_error.value.code==mcp_error['error']['code']=='atlas_not_found'
+    assert python_error.value.status==mcp_error['error']['status']==404
+
+
+def test_unauthenticated_request_never_dispatches(app,tmp_path):
+    from knowledge_atlas.operations import database
+    payload=asdict(ActionRequest('atlas.create',request_id=str(uuid.uuid4()),payload={'path':str(tmp_path/'forbidden')}))
+    for headers,status in [({'Content-Type':'application/json'},401),
+            ({'Authorization':'Bearer '+app.token,'Host':'evil.example'},400),
+            ({'Authorization':'Bearer '+app.token,'Origin':'https://evil.example'},400)]:
+        with pytest.raises(urllib.error.HTTPError) as error:raw(app,'atlas.create',payload,headers)
+        assert error.value.code==status
+    with database(app.context) as db:assert db.execute('SELECT count(*) FROM operations').fetchone()[0]==0
+    assert not (tmp_path/'forbidden').exists()
+    assert (app.context.service_root/'token').stat().st_mode & 0o777 == 0o600
+    assert (app.context.service_root/'discovery.json').stat().st_mode & 0o777 == 0o600
+
+
+def test_schema_is_shared_with_mcp(app):
+    from knowledge_atlas.client import AtlasClient
+    from knowledge_atlas.mcp_bridge import tools_for
+    client=AtlasClient(app.context.service_root)
+    schema=client.schema()
+    tools=tools_for(client)
+    assert len(tools)==len(schema['actions'])
+    assert {tool['name'] for tool in tools}=={'atlas_'+name.replace('.','_') for name in schema['actions']}
+    assert all(tool['inputSchema']==schema['actions'][tool['name'][6:].replace('_','.')]['input'] for tool in tools)
+
+
+def test_singleton_launcher_and_version_conflict(tmp_path):
+    from knowledge_atlas.launcher import ensure_service
+    from knowledge_atlas.client import AtlasClient
+    from knowledge_atlas.locks import is_locked
+    config={'service_root':str(tmp_path/'service')}
+    first=ensure_service(config)
+    try:
+        second=ensure_service(config)
+        assert first['pid']==second['pid'] and first['endpoint']==second['endpoint']
+        client=AtlasClient(config['service_root'])
+        path=Path(config['service_root'])/'discovery.json'
+        actual=path.read_text();changed=json.loads(actual);changed['version']='999.0.0';path.write_text(json.dumps(changed))
+        try:
+            with pytest.raises(AtlasError,match='version_conflict'):ensure_service(config)
+        finally:path.write_text(actual)
+        client.stop()
+        deadline=time.monotonic()+10
+        while is_locked(Path(config['service_root'])/'service.lock'):
+            assert time.monotonic()<deadline
+            time.sleep(.05)
+    finally:
+        if is_locked(Path(config['service_root'])/'service.lock'):AtlasClient(config['service_root']).stop()
+
+
+def test_mcp_sdk_discovers_tools_and_calls_same_service(tmp_path):
+    import asyncio,sys
+    from mcp import ClientSession,StdioServerParameters
+    from mcp.client.stdio import stdio_client
+    from knowledge_atlas.launcher import ensure_service
+    from knowledge_atlas.client import AtlasClient
+    config={'service_root':str(tmp_path/'service')}
+    path=tmp_path/'config.json';path.write_text(json.dumps(config))
+    ensure_service(config)
+    async def run():
+        params=StdioServerParameters(command=sys.executable,args=['-m','knowledge_atlas.cli','mcp','--config',str(path)])
+        async with stdio_client(params) as (reader,writer):
+            async with ClientSession(reader,writer) as session:
+                await session.initialize()
+                listed=await session.list_tools()
+                assert any(t.name=='atlas_atlas_create' for t in listed.tools)
+                response=await session.call_tool('atlas_atlas_status',{'atlas_id':'missing','payload':{}})
+                assert response.isError
+                assert response.structuredContent['error']['code']=='atlas_not_found'
+                accepted=await session.call_tool('atlas_atlas_create',{'request_id':str(uuid.uuid4()),'payload':{'path':str(tmp_path/'atlas')}})
+                assert not accepted.isError, accepted.structuredContent
+                operation=accepted.structuredContent
+                while operation['state'] in ('queued','running'):
+                    await asyncio.sleep(.05)
+                    polled=await session.call_tool('atlas_operation_read',{'payload':{'operation_id':operation['operation_id']}})
+                    assert not polled.isError, polled.structuredContent
+                    operation=polled.structuredContent
+                assert operation['state']=='succeeded', operation
+    try:asyncio.run(run())
+    finally:AtlasClient(config['service_root']).stop()
+
+
+def test_schema_covers_results_and_rejects_coerced_inputs(app):
+    from knowledge_atlas.client import AtlasClient
+    client=AtlasClient(app.context.service_root)
+    outputs=client.schema()['results']
+    assert {'data','publication','evidence','canonical_effects'} <= set(outputs['ActionResult']['properties'])
+    assert 'operation_id' in outputs['OperationRecord']['properties']
+    with pytest.raises(urllib.error.HTTPError) as error:
+        raw(app,'search',{'atlas_id':'missing','payload':{'query':'x','count':True}})
+    assert error.value.code==400
+
+
+def test_stop_closes_mutation_admission(app,tmp_path,monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    from knowledge_atlas.client import AtlasClient
+    from knowledge_atlas.operations import database
+    entered=threading.Event();release=threading.Event()
+    original=app.dispatcher.stop
+    def paused_stop(*,wait=False):
+        original(wait=wait)
+        if not entered.is_set():
+            entered.set();assert release.wait(5)
+    monkeypatch.setattr(app.dispatcher,'stop',paused_stop)
+    with ThreadPoolExecutor(2) as pool:
+        stopping=pool.submit(AtlasClient(app.context.service_root).stop)
+        assert entered.wait(5)
+        request=ActionRequest('atlas.create',request_id=str(uuid.uuid4()),payload={'path':str(tmp_path/'late')})
+        mutation=pool.submit(raw,app,'atlas.create',asdict(request))
+        time.sleep(.1);release.set()
+        stopping.result(timeout=5)
+        with pytest.raises((urllib.error.HTTPError,urllib.error.URLError,ConnectionError)) as error:mutation.result(timeout=5)
+        if isinstance(error.value,urllib.error.HTTPError):assert error.value.code==409
+    with database(app.context) as db:assert db.execute('SELECT count(*) FROM operations').fetchone()[0]==0
+
+
+def test_schema_does_not_accept_discarded_fields():
+    from knowledge_atlas.api_models import parse_request
+    samples=[('candidate.decide',{'candidate':'a'*40,'decision_id':str(uuid.uuid4()),'action':'reject',
+        'actor':'Fixture','kind':'synthetic','reason':'explicit','decided_at':'2026-11-13T00:00:00Z'}),
+        ('feedback.record',{'record_id':'r','applied_publication':'a'*40,'raw_report':'{}','context':{'outcome':'ignored'},
+                            'actor':'Fixture','recorded_at':'2026-11-13T00:00:00Z'})]
+    for action,payload in samples:
+        with pytest.raises(AtlasError,match='invalid_request'):
+            parse_request(action,{'request_id':str(uuid.uuid4()),'payload':payload})

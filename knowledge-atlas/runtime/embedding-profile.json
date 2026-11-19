@@ -1,0 +1,36 @@
+{
+  "profile": {
+    "plugin_profile": {
+      "chunk_tokens": 256,
+      "dimension": 256,
+      "format": "gemma-title-quarter-max64-text-newline-code-paragraph-v1",
+      "index_algorithm": "FLAT",
+      "max_chunks": 256,
+      "model": "onnx-community/embeddinggemma-300m-ONNX",
+      "normalize": true,
+      "overlap": 32,
+      "pooling": "sentence_embedding",
+      "quantization": "q4",
+      "revision": "5090578d9565bb06545b4552f76e6bc2c93e4a66",
+      "tokenizer_sha256": "4dda02faaf32bc91031dc8c88457ac272b00c1016cc679757d1c441b248b9c47"
+    },
+    "endpoint": {
+      "model_id": "onnx-community/embeddinggemma-300m-ONNX",
+      "model_sha": "5090578d9565bb06545b4552f76e6bc2c93e4a66",
+      "quantization": "q4",
+      "output": "sentence_embedding",
+      "dimension": 768,
+      "max_input_tokens": 2048,
+      "tokenizer_sha256": "4dda02faaf32bc91031dc8c88457ac272b00c1016cc679757d1c441b248b9c47"
+    },
+    "runtime": {
+      "onnxruntime": "1.30.0",
+      "tokenizers": "0.22.2",
+      "numpy": "2.5.3"
+    },
+    "formatter_sha256": "5a8dec03db3bb1615919e5ace7d2348ad42f82ed0488692c30b568c4eb987b8e",
+    "normalization": "provider truncates raw 768D output to 256D; VectorLink performs final L2"
+  },
+  "profile_id": "58f7a75c062da9eaefa08ae62c0af6424a17cad11adbe7230fff652f53a9ceeb",
+  "model_namespace": "poc9-gemma-q4-58f7a75c062da9eaefa08ae62c0af6424a17cad11adbe7230fff652f53a9ceeb"
+}

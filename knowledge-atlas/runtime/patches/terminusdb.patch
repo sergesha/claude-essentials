@@ -1,0 +1,136 @@
+diff --git a/builtin_plugins/vectorlink.pl b/builtin_plugins/vectorlink.pl
+index b710ed6..1a384a1 100644
+--- a/builtin_plugins/vectorlink.pl
++++ b/builtin_plugins/vectorlink.pl
+@@ -258,8 +258,12 @@ embedded_unify_options(Resp, Options) :-
+     ->  Status_Var = Resp.status
+     ;   true
+     ),
+-    forall(member(header(Name, Value), Options),
+-           embedded_header_value(Resp.headers, Name, Value)).
++    maplist(embedded_unify_option(Resp.headers), Options).
++
++embedded_unify_option(Headers, header(Name, Value)) :-
++    !,
++    embedded_header_value(Headers, Name, Value).
++embedded_unify_option(_, _).
+ 
+ %% embedded_header_value(+Headers, +Name, ?Value) is semidet.
+ %
+@@ -942,9 +946,30 @@ io_search_forward(Endpoint, Domain, Search_Ref, Ancestors,
+                   Extra_Params, Response_Body, Data_Version_Header) :-
+     assert_search_backend,
+     search_auth_header(AuthHeader),
+-    build_search_url(Endpoint, Domain, Search_Ref, Ancestors, Base_URL),
+-    append_extra_params(Base_URL, Extra_Params, URL),
+-    io_forward_get(URL, AuthHeader, Response_Body, Data_Version_Header).
++    build_search_url(Endpoint, Domain, Search_Ref, [], Base_URL),
++    search_forward_payload(Extra_Params, Ancestors, Query_Params, Post_Body),
++    append_extra_params(Base_URL, Query_Params, URL),
++    io_forward_post(URL, AuthHeader, Post_Body, Response_Body, Data_Version_Header).
++
++% VectorLink POST reads arrays, ancestors and snippet only from its JSON body.
++% Keep scalar query parsing unchanged; never encode a full snapshot's IDs in URI.
++search_forward_payload(Params, Ancestors, Query_Params, Body) :-
++    partition(search_body_param, Params, Body_Params, Query_Params),
++    maplist(search_body_pair, Body_Params, Pairs),
++    dict_create(Body, json, [ancestors-Ancestors|Pairs]).
++
++search_body_param(doc_id=repeated(_)).
++search_body_param(doc_type=repeated(_)).
++search_body_param(snippet=_).
++
++search_body_pair(Key=repeated(Values), Key-Values) :- !.
++search_body_pair(snippet=Value, snippet-Boolean) :-
++    (   memberchk(Value, [true, "true"])
++    ->  Boolean = true
++    ;   memberchk(Value, [false, "false"])
++    ->  Boolean = false
++    ;   Boolean = Value
++    ).
+ 
+ io_similar_forward(Endpoint, Domain, Search_Ref, Ancestors,
+                    Extra_Params, Response_Body, Data_Version_Header) :-
+@@ -1272,6 +1297,7 @@ maybe_compact_response(false, Response_Body, _Descriptor, Response_Body).
+ nudge_commit(commit(Commit_Id), Commit_Id) :- !.
+ nudge_commit(branch(_), none).
+ 
++maybe_nudge_push(_Version, _Commit, _System_DB, _Auth, _Path, none) :- !.
+ maybe_nudge_push(none, _Commit, _System_DB, _Auth, _Path, _Branch) :- !.
+ maybe_nudge_push(Data_Version_Header, Commit, _System_DB, _Auth, Path, Branch) :- !,
+     format(string(Expected_DV), "commit:~w", [Commit]),
+@@ -1298,6 +1324,7 @@ maybe_nudge_push(Data_Version_Header, Commit, _System_DB, _Auth, Path, Branch) :
+  * commit (either at HEAD or in-flight from auto-push or a previous nudge),
+  * the nudge is skipped — no further push until the current indexing completes.
+  */
++maybe_nudge_push_async(_System_DB, _Auth, _Path, none) :- !.
+ maybe_nudge_push_async(System_DB, Auth, Path, Branch) :-
+     (   catch(
+             (   vectorlink_endpoint(Endpoint),
+@@ -1697,7 +1724,12 @@ search_handler(post, Path, Request, System_DB, Auth) :-
+                 error(search_requires_branch_descriptor(Path), _)),
+             get_dict(repository_descriptor, Descriptor, Repository_Descriptor),
+             vectorlink:descriptor_domain(Descriptor, Domain),
+-            vectorlink:resolve_search_commit(Descriptor, Search_Ref, _Commit_Uri, Ancestors),
++            vectorlink:resolve_search_commit(Descriptor, Search_Ref, _Commit_Uri, Resolved_Ancestors),
++            (   get_dict(exact_commit, Body, true),
++                Search_Ref = commit(_)
++            ->  Ancestors = []
++            ;   Ancestors = Resolved_Ancestors
++            ),
+             vectorlink:nudge_commit(Search_Ref, Nudge_Commit),
+             vectorlink:compress_flag(Search, Compress),
+             vectorlink:maybe_prefixes(Compress, Descriptor, Prefixes),
+@@ -3429,6 +3461,7 @@ test("embedded_header_value leaves the value unbound when the header is absent",
+         json{'content-type':"application/json"},
+         x_served_commit, Value).
+ 
++
+ :- end_tests(vectorlink_embedded_dispatch).
+ 
+ % ==========================================================================
+@@ -4310,6 +4343,20 @@ test("post_delete_db_hook is silent no-op when vectorlink endpoint is not set",
+ 
+ :- begin_tests(vectorlink_fronting_params).
+ 
++test("POST search preserves filters ancestors and snippet outside URI") :-
++    vectorlink:search_forward_payload(
++        [q="Mist-A",count=682,doc_id=repeated(["a","b"]),
++         doc_type=repeated(["Chunk"]),snippet="true"], ["previous"], Query, Body),
++    assertion(Query == [q="Mist-A",count=682]),
++    assertion(Body == json{doc_id:["a","b"],doc_type:["Chunk"],
++                           snippet:true,ancestors:["previous"]}).
++
++test("POST exact search retains empty ancestors and false snippet") :-
++    vectorlink:search_forward_payload([q='test',snippet=false], [], Query, Body),
++    assertion(Query == [q='test']),
++    assertion(Body == json{snippet:false,ancestors:[]}).
++
++
+ test("search q: body value overrides query value",
+      [true(Params == [q="from-body"])]) :-
+     vectorlink:search_extra_params([q='from-query'], _{q: "from-body"}, Params).
+diff --git a/src/rust/Cargo.lock b/src/rust/Cargo.lock
+index e000cd6..7ba4a6d 100644
+--- a/src/rust/Cargo.lock
++++ b/src/rust/Cargo.lock
+@@ -7037,7 +7037,6 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
+ [[package]]
+ name = "vectorlink"
+ version = "2.0.0"
+-source = "git+https://github.com/terminusdb-org/vectorlink?rev=854c7b519e15551455ea8535e9dd6eb14c2657bf#854c7b519e15551455ea8535e9dd6eb14c2657bf"
+ dependencies = [
+  "arrow-array",
+  "arrow-schema",
+diff --git a/src/rust/Cargo.toml b/src/rust/Cargo.toml
+index 353f46d..788a240 100644
+--- a/src/rust/Cargo.toml
++++ b/src/rust/Cargo.toml
+@@ -20,5 +20,5 @@ swipl = {git="https://github.com/terminusdb-org/swipl-rs"}
+ 
+ # To develop against a local vectorlink checkout instead of the pinned
+ # rev, uncomment:
+-#[patch."https://github.com/terminusdb-org/vectorlink"]
+-#vectorlink = {path="../../../vectorlink"}
++[patch."https://github.com/terminusdb-org/vectorlink"]
++vectorlink = {path="../../../vectorlink"}

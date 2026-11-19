@@ -1,0 +1,272 @@
+diff --git a/src/embed/mod.rs b/src/embed/mod.rs
+index 51d9053..974da7e 100644
+--- a/src/embed/mod.rs
++++ b/src/embed/mod.rs
+@@ -22,7 +22,8 @@ use thiserror::Error;
+ /// - `search_query: ` — for search queries (retrieval queries)
+ /// - `clustering: ` — for clustering / duplicate detection / entity resolution
+ /// - `classification: ` — for classification / categorization tasks
+-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
++#[serde(rename_all = "snake_case")]
+ pub enum EmbeddingRole {
+     Document,
+     Query,
+@@ -164,6 +165,8 @@ struct EmbedRequest {
+     input: Vec<String>,
+     #[serde(skip_serializing_if = "Option::is_none")]
+     dimensions: Option<usize>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    role: Option<EmbeddingRole>,
+ }
+ 
+ /// OpenAI-compatible embedding response.
+@@ -207,6 +210,19 @@ pub fn parse_embedding_response(
+     Ok(embeddings)
+ }
+ 
++/// Shared by provider lookups and offline cache priming. Input is already
++/// prefixed by apply_prefix; GenericHttp retains explicit role identity.
++pub fn embedding_cache_key(provider: &Provider, prefixed_text: &str, role: EmbeddingRole) -> [u8; 32] {
++    let model = provider.model_name();
++    let cache_model = if matches!(provider, Provider::GenericHttp { .. }) {
++        serde_json::to_string(&("vectorlink-generic-role-v1", model, provider.expected_dim(), role))
++            .expect("serializing embedding cache identity")
++    } else {
++        model.to_owned()
++    };
++    EmbedCache::cache_key(&cache_model, prefixed_text)
++}
++
+ /// Fetch embeddings from the provider (the single io entry point).
+ /// Applies the task prefix per role before sending.
+ ///
+@@ -227,6 +243,7 @@ pub async fn io_embed(
+     let prefixed = apply_prefix(texts, provider.model_name(), role);
+     let dim = provider.expected_dim();
+     let model = provider.model_name();
++    let generic_role = matches!(provider, Provider::GenericHttp { .. });
+ 
+     // Partition texts into cache hits and misses.
+     let mut results: Vec<Option<Vec<f32>>> = vec![None; texts.len()];
+@@ -234,7 +251,7 @@ pub async fn io_embed(
+ 
+     if let Some(cache) = cache {
+         for (i, prefixed_text) in prefixed.iter().enumerate() {
+-            let key = EmbedCache::cache_key(model, prefixed_text);
++            let key = embedding_cache_key(provider, prefixed_text, role);
+             if let Some(emb) = cache.get(&key, dim) {
+                 results[i] = Some(emb);
+             } else {
+@@ -262,6 +279,7 @@ pub async fn io_embed(
+         model: model.to_owned(),
+         input: miss_prefixed,
+         dimensions: Some(dim),
++        role: generic_role.then_some(role),
+     };
+ 
+     let response = client
+@@ -300,7 +318,7 @@ pub async fn io_embed(
+     for (miss_offset, &result_idx) in miss_indices.iter().enumerate() {
+         let emb = &embeddings[miss_offset];
+         if let Some(cache) = cache {
+-            let key = EmbedCache::cache_key(model, &prefixed[result_idx]);
++            let key = embedding_cache_key(provider, &prefixed[result_idx], role);
+             cache.put(&key, emb);
+         }
+         results[result_idx] = Some(emb.clone());
+@@ -545,6 +563,7 @@ mod tests {
+             model: "nomic-embed-text-v2-moe".to_owned(),
+             input: vec!["hello".to_owned()],
+             dimensions: Some(256),
++            role: None,
+         };
+         let json = serde_json::to_value(&req).unwrap();
+         assert_eq!(json["dimensions"], 256);
+@@ -556,6 +575,7 @@ mod tests {
+             model: "nomic-embed-text-v2-moe".to_owned(),
+             input: vec!["hello".to_owned()],
+             dimensions: None,
++            role: None,
+         };
+         let json = serde_json::to_value(&req).unwrap();
+         assert!(json.get("dimensions").is_none());
+diff --git a/src/main.rs b/src/main.rs
+index 2d3e82a..30a4c69 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -332,7 +332,7 @@ async fn prime_embed_cache(args: &[String]) -> Result<(), Box<dyn std::error::Er
+                     model,
+                     EmbeddingRole::Document,
+                 );
+-                let key = EmbedCache::cache_key(model, &prefixed[0]);
++                let key = embed::embedding_cache_key(&config.embed_provider, &prefixed[0], EmbeddingRole::Document);
+                 cache.put(&key, &embedding);
+                 total_cached += 1;
+             }
+@@ -352,7 +352,7 @@ async fn prime_embed_cache(args: &[String]) -> Result<(), Box<dyn std::error::Er
+                         model,
+                         EmbeddingRole::Clustering,
+                     );
+-                    let key = EmbedCache::cache_key(model, &prefixed[0]);
++                    let key = embed::embedding_cache_key(&config.embed_provider, &prefixed[0], EmbeddingRole::Clustering);
+                     cache.put(&key, &clust_emb);
+                     total_cached += 1;
+                 }
+diff --git a/src/store/lance/search.rs b/src/store/lance/search.rs
+index cb258a8..08f6773 100644
+--- a/src/store/lance/search.rs
++++ b/src/store/lance/search.rs
+@@ -337,6 +337,11 @@ impl LanceStore {
+             .nearest("embedding", &Float32Array::from(query.query_embedding.clone()), k)
+             .map_err(|e| StoreError::Internal(format!("vector search setup failed: {}", e)))?;
+         scanner.distance_metric(DistanceType::Cosine);
++        // PoC9's declared FLAT profile requires exact distances over the eligible
++        // snapshot, including when an ANN index already exists after restore.
++        if std::env::var("VECTORLINK_SEARCH_ALGORITHM").as_deref() == Ok("FLAT") {
++            scanner.use_index(false);
++        }
+         // ANN tuning: nprobes controls how many IVF partitions are scanned;
+         // refine re-ranks the top candidates with full-precision vectors.
+         scanner.nprobes(self.vector_index_config.nprobes);
+@@ -354,6 +359,7 @@ impl LanceStore {
+         if !query.doc_type_filter.is_empty() || !query.doc_id_filter.is_empty() {
+             if let Some(expr) = build_filter_expr(&query.doc_type_filter, &query.doc_id_filter) {
+                 scanner.filter_expr(expr);
++                scanner.prefilter(true);
+             }
+         }
+ 
+@@ -398,6 +404,7 @@ impl LanceStore {
+         if !query.doc_type_filter.is_empty() || !query.doc_id_filter.is_empty() {
+             if let Some(expr) = build_filter_expr(&query.doc_type_filter, &query.doc_id_filter) {
+                 scanner.filter_expr(expr);
++                scanner.prefilter(true);
+             }
+         }
+ 
+diff --git a/src/store/lance/tests/mod.rs b/src/store/lance/tests/mod.rs
+index c161db5..c85c342 100644
+--- a/src/store/lance/tests/mod.rs
++++ b/src/store/lance/tests/mod.rs
+@@ -11443,3 +11443,45 @@ fn rrf_fuse_tie_breaks_on_doc_id() {
+         "equal RRF scores must sort by doc id"
+     );
+ }
++
++#[tokio::test]
++async fn poc9_eligible_topk_survives_excluded_neighbours() {
++    let mut outcomes = Vec::new();
++    for mode in [SearchMode::Vector, SearchMode::Fts, SearchMode::Hybrid] {
++        let label = format!("{:?}", mode);
++        let mut ids_by_corpus = Vec::new();
++        for with_distractors in [false, true] {
++            let (store, _tmp) = make_test_store(8);
++            let domain = "admin/poc9_prefilter";
++            let mut rows = Vec::new();
++            for i in 0..if with_distractors {13} else {1} {
++                let eligible = i == 0;
++                let embedding = if eligible {vec![0.,1.,0.,0.,0.,0.,0.,0.]} else {vec![1.,0.,0.,0.,0.,0.,0.,0.]};
++                rows.push(ChunkRow {
++                    doc_id: if eligible {"allowed".into()} else {format!("excluded-{}",i)},
++                    doc_type: "Observation".into(), chunk_index:0, chunk_count:1,
++                    chunk_token_start:0, doc_token_len:20,
++                    embedding:embedding.clone(), clustering_embedding:embedding,
++                    content: if eligible {"sensor calibration context uncertainty observation conditions outcome review".into()} else {"sensor sensor sensor".into()},
++                });
++            }
++            store.io_upsert_chunks(domain,"main","fixture",&rows).await.unwrap();
++            let version=store.io_ensure_fts_index(domain,"main").await.unwrap();
++            store.io_tag_commit(domain,"main","c0",version).await.unwrap();
++            store.io_refresh_cached_dataset(domain,"main").await.unwrap();
++            let q=SearchQuery {
++                query_embedding:vec![1.,0.,0.,0.,0.,0.,0.,0.],
++                query_text:"sensor".into(),mode:mode.clone(),start:0,count:1,
++                doc_type_filter:vec![],doc_id_filter:vec!["allowed".into()],snippet:false,
++            };
++            let hits=store.io_search(domain,"main","c0",&q).await.unwrap();
++            ids_by_corpus.push(hits.iter().map(|h|h.doc_id.clone()).collect::<Vec<_>>());
++        }
++        println!("POC9 {} control={:?} distractors={:?}",label,ids_by_corpus[0],ids_by_corpus[1]);
++        outcomes.push((label,ids_by_corpus));
++    }
++    for (mode,ids) in outcomes {
++        assert_eq!(ids[0],vec!["allowed".to_string()],"{} eligible-only control",mode);
++        assert_eq!(ids[1],vec!["allowed".to_string()],"{} filter must precede top-K",mode);
++    }
++}
+diff --git a/tests/poc9_embedding_role.rs b/tests/poc9_embedding_role.rs
+new file mode 100644
+index 0000000..3cfed56
+--- /dev/null
++++ b/tests/poc9_embedding_role.rs
+@@ -0,0 +1,69 @@
++use std::sync::{Arc,Mutex};
++use axum::{Router,routing::post,extract::State,Json};
++use serde_json::{json,Value};
++use vectorlink::embed::{io_embed,Provider,EmbeddingRole,cache::EmbedCache};
++async fn fixture() -> (String,Arc<Mutex<Vec<Value>>>,tokio::task::JoinHandle<()>) {
++ let seen=Arc::new(Mutex::new(Vec::<Value>::new()));
++ async fn handler(State(seen):State<Arc<Mutex<Vec<Value>>>>,Json(body):Json<Value>)->Json<Value>{
++  let mut calls=seen.lock().unwrap();calls.push(body.clone());
++  let n=calls.len() as f32;
++  Json(json!({"data":body["input"].as_array().unwrap().iter().enumerate().map(|(i,_)|json!({"index":i,"embedding":[n,0.0]})).collect::<Vec<_>>()}))
++ }
++ let listener=tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
++ let url=format!("http://{}",listener.local_addr().unwrap());
++ let app=Router::new().route("/v1/embeddings",post(handler)).with_state(seen.clone());
++ let handle=tokio::spawn(async move {axum::serve(listener,app).await.unwrap()});
++ (url,seen,handle)
++}
++#[tokio::test]
++async fn generic_provider_receives_role_without_mutating_raw_input(){
++ let (url,seen,h)=fixture().await;let p=Provider::GenericHttp{base_url:url,model:"poc9-gemma-q4-profile-a".into(),dim:2};
++ let client=reqwest::Client::new();let text=vec!["Conditions are unknown.".into()];
++ for role in [EmbeddingRole::Document,EmbeddingRole::Query] {io_embed(&p,&text,role,&client,None).await.unwrap();}
++ let calls=seen.lock().unwrap();assert_eq!(calls[0]["role"],"document");assert_eq!(calls[1]["role"],"query");
++ assert_eq!(calls[0]["input"],json!(["Conditions are unknown."]));assert_eq!(calls[1]["input"],calls[0]["input"]);h.abort();
++}
++#[tokio::test]
++async fn generic_cache_never_reuses_document_vector_as_query(){
++ let (url,seen,h)=fixture().await;let p=Provider::GenericHttp{base_url:url,model:"poc9-gemma-q4-profile-a".into(),dim:2};
++ let temp=tempfile::tempdir().unwrap();let cache=EmbedCache::open(temp.path(),Some(100));let client=reqwest::Client::new();let text=vec!["same input".into()];
++ let doc=io_embed(&p,&text,EmbeddingRole::Document,&client,Some(&cache)).await.unwrap();
++ let query=io_embed(&p,&text,EmbeddingRole::Query,&client,Some(&cache)).await.unwrap();
++ assert_ne!(doc,query,"query must reach provider despite existing document cache");
++ assert_eq!(io_embed(&p,&text,EmbeddingRole::Query,&client,Some(&cache)).await.unwrap(),query);
++ assert_eq!(io_embed(&p,&text,EmbeddingRole::Document,&client,Some(&cache)).await.unwrap(),doc);
++ assert_eq!(seen.lock().unwrap().len(),2);h.abort();
++}
++#[tokio::test]
++async fn openai_compatible_keeps_existing_request_shape(){
++ let (url,seen,h)=fixture().await;let p=Provider::OpenAiCompatible{base_url:url,model:"test-model".into(),dim:2};
++ io_embed(&p,&["raw".into()],EmbeddingRole::Query,&reqwest::Client::new(),None).await.unwrap();
++ assert!(seen.lock().unwrap()[0].get("role").is_none());h.abort();
++}
++
++#[tokio::test]
++async fn generic_prime_cache_roundtrip_preserves_roles_without_provider(){
++ use arrow_array::{RecordBatch,RecordBatchIterator,StringArray,Float32Array,FixedSizeListArray};
++ use arrow_schema::{Schema,Field,DataType};
++ use vectorlink::store::lance::encode_domain_path;
++ let temp=tempfile::tempdir().unwrap();let domain="admin/poc9";
++ let field=Arc::new(Field::new("item",DataType::Float32,true));
++ let schema=Arc::new(Schema::new(vec![Field::new("content",DataType::Utf8,false),Field::new("embedding",DataType::FixedSizeList(field.clone(),2),false),Field::new("clustering_embedding",DataType::FixedSizeList(field.clone(),2),false)]));
++ let doc=FixedSizeListArray::new(field.clone(),2,Arc::new(Float32Array::from(vec![1.0f32,0.0])),None);
++ let cluster=FixedSizeListArray::new(field,2,Arc::new(Float32Array::from(vec![0.0f32,1.0])),None);
++ let batch=RecordBatch::try_new(schema.clone(),vec![Arc::new(StringArray::from(vec!["same input"])),Arc::new(doc),Arc::new(cluster)]).unwrap();
++ let uri=temp.path().join(format!("{}.lance",encode_domain_path(domain)));
++ lance::Dataset::write(RecordBatchIterator::new(vec![Ok(batch)],schema),uri.to_str().unwrap(),None).await.unwrap();
++ let out=std::process::Command::new(env!("CARGO_BIN_EXE_vectorlink"))
++  .args(["prime-embed-cache","--from-domain",domain,"--include-clustering"])
++  .env("VECTORLINK_DATA_DIR",temp.path()).env("VECTORLINK_EMBED_PROVIDER","generic_http")
++  .env("VECTORLINK_MODEL","poc9-gemma-q4-profile-a").env("VECTORLINK_DIM","2")
++  .env("VECTORLINK_EMBED_URL","http://127.0.0.1:9").output().unwrap();
++ assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stderr));
++ let cache=EmbedCache::open(&temp.path().join("embed_cache"),Some(100));
++ let provider=Provider::GenericHttp{base_url:"http://127.0.0.1:9".into(),model:"poc9-gemma-q4-profile-a".into(),dim:2};
++ let client=reqwest::Client::new();let texts=vec!["same input".into()];
++ assert_eq!(io_embed(&provider,&texts,EmbeddingRole::Document,&client,Some(&cache)).await.unwrap(),vec![vec![1.0,0.0]]);
++ assert_eq!(io_embed(&provider,&texts,EmbeddingRole::Clustering,&client,Some(&cache)).await.unwrap(),vec![vec![0.0,1.0]]);
++ assert!(io_embed(&provider,&texts,EmbeddingRole::Query,&client,Some(&cache)).await.is_err());
++}

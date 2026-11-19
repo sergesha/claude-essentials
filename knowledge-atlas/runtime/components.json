@@ -1,0 +1,37 @@
+{
+  "wiki_llm": {
+    "repository": "https://github.com/lucasastorian/llmwiki",
+    "revision": "aac3e6493306b7fff3b09cb181ca93918e93d0e6",
+    "source": "vendor/llmwiki"
+  },
+  "utopia_extract": {
+    "repository": "https://github.com/deeplethe/utopia",
+    "revision": "4fec6cb5108895288405e1ffdabae63b76579f3a",
+    "integration": "external Cargo dependency; no copied extractor implementation"
+  },
+  "vectorlink": {
+    "repository": "https://github.com/terminusdb-org/vectorlink",
+    "revision": "854c7b519e15551455ea8535e9dd6eb14c2657bf",
+    "required_minimum": "2.0.0",
+    "observed_source_version": "2.0.0",
+    "qualification_patches": "patches/vectorlink.patch: native prefilter and explicit role/cache; VectorLink 2.0.0 qualified"
+  },
+  "terminusdb": {
+    "revision": "4c5d6c15eef59729673d456a60c09be13a40da8d",
+    "version": "12.1.0-rc2",
+    "qualification_patches": "patches/terminusdb.patch: exact commit transport, binding preservation and local VectorLink dependency",
+    "repository": "https://github.com/terminusdb/terminusdb.git"
+  },
+  "embedding": {
+    "model": "onnx-community/embeddinggemma-300m-ONNX",
+    "revision": "5090578d9565bb06545b4552f76e6bc2c93e4a66",
+    "quantization": "q4",
+    "profile": "58f7a75c062da9eaefa08ae62c0af6424a17cad11adbe7230fff652f53a9ceeb",
+    "runtime_integration": "Pinned model/tokenizer/runtime and 256D parity verified; four retained publications rebuilt without document inference; new-query inference measured separately"
+  },
+  "lance": {
+    "version": "7.0.0",
+    "integration": "Existing VectorLink dependency; patches/lance-7.0.0-fts-prefilter.patch unions FTS segment coverage before filtering",
+    "crate_sha256": "3944aca86f4c78f4da04af1c2bf33e664a2826b7af72972ad200d6b9de59019f"
+  }
+}

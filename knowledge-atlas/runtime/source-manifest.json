@@ -1,0 +1,221 @@
+{
+  "source_revision": "0fa0b15caffd55f6e840306854ab59b8f543c408",
+  "source_project": "PoC_9_Wiki_Utopia_Knowledge_Atlas",
+  "license_note": "User-provided project source; no standalone LICENSE exists at this source revision. External native dependencies retain their own licenses and are acquired separately.",
+  "files": [
+    {
+      "source": "src/poc9/__init__.py",
+      "source_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "destination": "src/knowledge_atlas/core/__init__.py"
+    },
+    {
+      "source": "src/poc9/applicability.py",
+      "source_sha256": "7339be6f59906244b070f0357dc73a786febc37b06a59ad7407762dd7e4415f8",
+      "destination": "src/knowledge_atlas/core/applicability.py"
+    },
+    {
+      "source": "src/poc9/archive.py",
+      "source_sha256": "d1ff34f57e52eb638cc549dce49a5ab6dc892fd0d3e8e81e04bbde250110565c",
+      "destination": "src/knowledge_atlas/core/archive.py"
+    },
+    {
+      "source": "src/poc9/candidate_selection.py",
+      "source_sha256": "ad7d88d27b90ca6ace484cfae7139c9effd3f324d7037d2f3d99d68e63044aee",
+      "destination": "src/knowledge_atlas/core/candidate_selection.py"
+    },
+    {
+      "source": "src/poc9/embedding_provider.py",
+      "source_sha256": "53f614816afe48bfb7053716e1a9bc6e5c80acea1aec83153027ff84c623ddb2",
+      "destination": "src/knowledge_atlas/core/embedding_provider.py"
+    },
+    {
+      "source": "src/poc9/extract_codec.py",
+      "source_sha256": "c5e9b1352fb8147c0202472c9fcf95e8f268bbc67aca80689e40338a9d53bc34",
+      "destination": "src/knowledge_atlas/core/extract_codec.py"
+    },
+    {
+      "source": "src/poc9/extract_stage.py",
+      "source_sha256": "f1a1252734658d60565ecfb9126216e263e6c25977352ea0d2ed8fbae2a949ac",
+      "destination": "src/knowledge_atlas/core/extract_stage.py"
+    },
+    {
+      "source": "src/poc9/feedback.py",
+      "source_sha256": "aafac007ca9d8e4255221200247bb41f883e57168ac5739807cf2db0eaf82bde",
+      "destination": "src/knowledge_atlas/core/feedback.py"
+    },
+    {
+      "source": "src/poc9/git_store.py",
+      "source_sha256": "da13921aae9c0eca9707fb632d08fbc817668c640ed8d9deebcc424add82ce67",
+      "destination": "src/knowledge_atlas/core/git_store.py"
+    },
+    {
+      "source": "src/poc9/graph_stage.py",
+      "source_sha256": "bb39648a51513e8c7b5bbda767f8ea0a5d14ac67bd1cd91f57762d14fcc1e908",
+      "destination": "src/knowledge_atlas/core/graph_stage.py",
+      "adaptation": "Retain PoC9 projection and unique-statement identities. Repeated resolved statement occurrences use their retained extraction indexes to avoid colliding native alignment records; original payloads and evidence links remain intact."
+    },
+    {
+      "source": "src/poc9/ingest.py",
+      "source_sha256": "20ccd0d7d05f5726ae75bd19b690b70441080b7717f6fa3b6d80ec51eef64063",
+      "destination": "src/knowledge_atlas/core/ingest.py",
+      "adaptation": "Pass explicit removals to native Wiki; reject incompatible completed-Wiki reuse. Preserve extraction, relation and candidate orchestration."
+    },
+    {
+      "source": "src/poc9/knowledge.py",
+      "source_sha256": "b1daf39a35ef4a8333b4999230f1cc7112cf65704ad78e973cfb545dadde6301",
+      "destination": "src/knowledge_atlas/core/knowledge.py"
+    },
+    {
+      "source": "src/poc9/model_config.py",
+      "source_sha256": "48d8924f9590e9f2a3cdfd653e7ed976ffe60fdd3ea4e97116da574339791f88",
+      "destination": "src/knowledge_atlas/core/model_config.py"
+    },
+    {
+      "source": "src/poc9/native_projection.py",
+      "source_sha256": "56f2eee79ff3d31415564851cc7599c6118b41e45049503580ffe4d2c689267c",
+      "destination": "src/knowledge_atlas/core/native_projection.py"
+    },
+    {
+      "source": "src/poc9/publication.py",
+      "source_sha256": "f2b651c1119e294620050dc0b5d0260aaf8496bb95d4b236605ca2e94e4e5e4f",
+      "destination": "src/knowledge_atlas/core/publication.py"
+    },
+    {
+      "source": "src/poc9/reader.py",
+      "source_sha256": "b396056edf194da84640a9d91e587df0a150a5e97c18c40a23607b8e06ed50a7",
+      "destination": "src/knowledge_atlas/core/reader.py"
+    },
+    {
+      "source": "src/poc9/relations.py",
+      "source_sha256": "7d3ba4d82d77024091ab3472ac7fd116b7c8183c221e405eeff122dd5d4026e0",
+      "destination": "src/knowledge_atlas/core/relations.py"
+    },
+    {
+      "source": "src/poc9/vector_chunks.py",
+      "source_sha256": "85230ed83c5cddcdbe84e6f64bf379ce5853c131bf37c106522efbac11e7ae0e",
+      "destination": "src/knowledge_atlas/core/vector_chunks.py",
+      "adaptation": "Require the independently packaged qualified embedding profile before validating restored assets; execute only the packaged formatter, never archive-supplied Python. Preserve PoC9 chunk spans and identities."
+    },
+    {
+      "source": "src/poc9/vector_projection.py",
+      "source_sha256": "3ed864ada69ad04596b6b0947fc712535659183a75a098cc35cf749fe2d87a5f",
+      "destination": "src/knowledge_atlas/core/vector_projection.py"
+    },
+    {
+      "source": "src/poc9/wiki_stage.py",
+      "source_sha256": "76ec60dee3e1e432b3191c26f15144eabd2be0035441e73617ebcb51b8b03dad",
+      "destination": "src/knowledge_atlas/core/wiki_stage.py",
+      "adaptation": "Explicit lazy native runtime; stable public source metadata; explicit removals reconciled by native Wiki tools in a fresh workspace."
+    },
+    {
+      "source": "component-pins.json",
+      "source_sha256": "bccbdfec9cc870a45d1ea5f5c81b0ca132eda840f9ef9f442a3be05369c29380",
+      "destination": "runtime/components.json"
+    },
+    {
+      "source": "embedding-profile.json",
+      "source_sha256": "1e5bd74b3171530f6f32f78e3a056cd91d7722bb0bc5fd4589a0cc01fb9bc07f",
+      "destination": "runtime/embedding-profile.json"
+    },
+    {
+      "source": "evidence/gemma-runtime-artifacts.json",
+      "source_sha256": "796cfc17955a4665dd4f3d8f06f30ab1b00278ab0ee9b528c450b6884374bec1",
+      "destination": "runtime/gemma-runtime-artifacts.json"
+    },
+    {
+      "source": "patches/manifest.json",
+      "source_sha256": "706f58518b45bc502e52145078f49a05ab6949a1adf6bb92a98cec77f3dc4373",
+      "destination": "runtime/patches/manifest.json"
+    },
+    {
+      "source": "patches/terminusdb.patch",
+      "source_sha256": "df6e28a586c67333d05226beb9d7be0874ca3d939ddd9ef6dd64e20dc6d77e08",
+      "destination": "runtime/patches/terminusdb.patch"
+    },
+    {
+      "source": "patches/vectorlink.patch",
+      "source_sha256": "93a4b1bbd68f447cdd4d35c9936d23c1da4d4a63771ec6a4bd7ca2232479834c",
+      "destination": "runtime/patches/vectorlink.patch"
+    },
+    {
+      "source": "patches/lance-7.0.0-fts-prefilter.patch",
+      "source_sha256": "adf30505df09615bc473fe559f854e2ef1b30eb8f250f91a923eb4e8345bcf6f",
+      "destination": "runtime/patches/lance-7.0.0-fts-prefilter.patch"
+    },
+    {
+      "source": "extract/Cargo.toml",
+      "source_sha256": "6655aa7777d9a77c6aeb653f9131f990c18da6b09a5c6c12d8d97fbe8959b2d9",
+      "destination": "native/extract/Cargo.toml"
+    },
+    {
+      "source": "extract/Cargo.lock",
+      "source_sha256": "c2a40bb295eca109c540772c970abbc2794d2e2f014ce21b4e5feefa56744e14",
+      "destination": "native/extract/Cargo.lock"
+    },
+    {
+      "source": "extract/src/main.rs",
+      "source_sha256": "0c348a085b677e49ed443295d3fcf298f3247c01d96b8c1360e4c4e8668960ae",
+      "destination": "native/extract/src/main.rs"
+    },
+    {
+      "source_project": "claude-essentials",
+      "source_revision": "87d9b040f72e78be9905c2973d9d752dd46e52d8",
+      "source": "redis-memory-mcp/server/chunking.py",
+      "source_sha256": "5a8dec03db3bb1615919e5ace7d2348ad42f82ed0488692c30b568c4eb987b8e",
+      "destination": "runtime/chunking.py"
+    },
+    {
+      "source": "scripts/native-runtime.py",
+      "source_sha256": "20c70a671fd469c9a2db82c434f2b3c41c7de7261f0fd140e74613976cd020ff",
+      "destination": "runtime/native-runtime.py"
+    },
+    {
+      "source": "scripts/embedding-provider.py",
+      "source_sha256": "03907ef25bf862133e3de7be3c653202ea54c8a58f85f25c8ac4ba3f6ccca818",
+      "destination": "runtime/embedding-provider.py"
+    },
+    {
+      "source": "model-profiles.json",
+      "source_sha256": "96b3e164a0fcb4e06716f8bfc9284f8af742fa3510405103cd147982491cae31",
+      "destination": "runtime/model-profiles.json"
+    },
+    {
+      "source": "scripts/wiki-agent-codex.py",
+      "source_sha256": "88b556b7f59ed6eaf005861e70b9ae406287890d0650cc72b44736ccf118c97f",
+      "destination": "runtime/wiki-agent-codex.py"
+    },
+    {
+      "source": "scripts/relation-model-codex.py",
+      "source_sha256": "3e244911cae99feb7418d650cb4ca66883c16c15595bb1995800f9018cf11f1a",
+      "destination": "runtime/relation-model-codex.py"
+    },
+    {
+      "source": "scripts/wiki-agent-codex.py",
+      "source_sha256": "88b556b7f59ed6eaf005861e70b9ae406287890d0650cc72b44736ccf118c97f",
+      "destination": "runtime/wiki-instructions.txt",
+      "adaptation": "Originally extracted from the PoC9 transport; replaced with a minimal shared operational prompt for Codex and Claude that delegates authoring policy to the unchanged native Wiki guide."
+    },
+    {
+      "source": "evidence/native-components/complete-cycle/run.py",
+      "source_sha256": "e5d21bafdd93c7b96a33841ffa5ca8a378d25aaaeee199c01c1764e6abdcc9f4",
+      "destination": "runtime/grounded-instructions.txt",
+      "adaptation": "Exact grounded_answer instruction extracted for the shared optional explanation handler."
+    },
+    {
+      "source": "scripts/archive.py",
+      "source_sha256": "61acc6cfd42093c11be24bf9c8080bfa0313a243cfc35f40022552bc16d0ce3f",
+      "destination": "src/knowledge_atlas/core/archive.py",
+      "adaptation": "Extract oldest-first rebuild into callable accepting the existing native projection builder; preserve receipt comparisons and atomic derived identity mapping."
+    }
+  ],
+  "additional_sources": [
+    {
+      "source_project": "claude-essentials",
+      "source_revision": "87d9b040f72e78be9905c2973d9d752dd46e52d8",
+      "source": "redis-memory-mcp/server/embedding_service.py",
+      "source_sha256": "81f93ed59322b1cb180108a5dd5acb433859f68504348eaecdb9485adbcd18e8",
+      "destination": "runtime/gemma-service.py",
+      "adaptation": "Preserve CPU Q4 inference and HTTP contract used by PoC9; read pinned endpoint profile, require already-prepared model files, bind loopback only. No Redis dependency."
+    }
+  ]
+}

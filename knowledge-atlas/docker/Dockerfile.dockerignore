@@ -1,0 +1,11 @@
+**
+!pyproject.toml
+!uv.lock
+!README.md
+!src/**
+!runtime/**
+!native/**
+!scripts/**
+!docker/**
+**/__pycache__/**
+**/.DS_Store

@@ -1,0 +1,207 @@
+{
+  "stage": "wiki",
+  "status": "candidate",
+  "recorded_at": "2026-11-09T21:14:32.535955+00:00",
+  "accepted_at": null,
+  "sources": [
+    {
+      "id": "16a3d59a-bf97-460c-b6fa-ebc1ebf6b89a",
+      "filename": "review.txt",
+      "content": "Technician Ivo: In trial P-14, Luma produced fewer warped QL-7 brackets than Sora only with dried feedstock, a closed enclosure and ambient temperature 20-24 C. This is a conditional judgment about warping, not a strength guarantee. Reviewer Nia accepted this limited conclusion. A retelling of P-14 is not an independent trial. Independent trial P-22 used new samples and operator Ada under the same conditions and also favored Luma for warping.\nTechnician Kez: Sora is usually easier to clean; this is my attributed opinion, not an adopted lab recommendation. QL-7 parts took about 42-58 minutes in profile Z with 0.4 mm nozzle. Trial P-31 failed, but humidity was not measured and the cause is unknown. Lesson: record moisture and actual enclosure before transferring the warping judgment.\n",
+      "sha256": "43ef6a269e7c8491e8a2ff9032a09449570b154792551b0e915267bd06f23f83",
+      "source_time": null,
+      "valid_from": null,
+      "valid_to": null
+    },
+    {
+      "id": "df053956-456c-451e-b6f1-5c0d09203c80",
+      "filename": "machines.csv",
+      "content": "machine,feedstock,nozzle_mm,enclosure\nLuma,QL-7,0.4,closed\nSora,QL-7,0.6,open\n",
+      "sha256": "643a514e3df9f7ab58ffa24d852ffbd57ed2b6b641207af2e342aea16f48198f",
+      "source_time": null,
+      "valid_from": null,
+      "valid_to": null
+    },
+    {
+      "id": "8a5eb350-e2bd-4521-a7b3-4b35dc2c900f",
+      "filename": "events.json",
+      "content": "{\"events\":[{\"ambient_c\":22,\"dried\":true,\"enclosure\":\"closed\",\"id\":\"P-14\",\"machine\":\"Luma\",\"material\":\"QL-7\",\"warped\":false},{\"cause\":null,\"humidity\":null,\"id\":\"P-31\",\"machine\":\"Sora\",\"material\":\"QL-7\",\"outcome\":\"failed\"}],\"warning\":\"These synthetic observations are not manufacturing advice.\"}\n",
+      "sha256": "301cabbb7b591cd241d3a1a93d8b38833e2fa8e74b5b654c70aab09c6bdc7e94",
+      "source_time": null,
+      "valid_from": null,
+      "valid_to": null
+    }
+  ],
+  "pages": [
+    {
+      "id": "0e1886e0-3fca-4b20-a1b8-dbe92575924a",
+      "filename": "overview.md",
+      "title": "Overview",
+      "path": "/wiki/",
+      "content": "---\ntitle: Overview\ndescription: Synthetic print-lab evidence, conditional judgments and unresolved outcomes.\ndate: 2026-11-09\ntags: [overview, synthetic]\n---\n\nThis synthetic example describes Luma and Sora processing QL-7. It is a compilation of source assertions, not manufacturing advice or an independently accepted atlas conclusion.[^1][^2]\n\n## Key Findings\n\n| Topic | Source-bounded finding |\n|---|---|\n| Warping | Ivo reports that Luma did better than Sora in P-14 only with dried feedstock, a closed enclosure and 20–24 C ambient temperature; Nia is reported to have accepted that limited judgment. P-22 is described as an independent supporting trial.[^1] |\n| Strength | The warping judgment does not guarantee strength.[^1] |\n| Cleaning | Kez's preference for Sora is attributed opinion, not an adopted lab recommendation.[^1] |\n| Duration | Profile Z with a 0.4 mm nozzle is reported as approximately 42–58 minutes.[^1] |\n| Failed case | P-31 failed; humidity was not measured and its cause is unknown.[^1][^2] |\n\n## Navigation\n\n- [Luma and Sora](entities/luma-and-sora.md)\n- [Conditional warping judgment](concepts/conditional-warping.md)\n- [Trial evidence and gaps](concepts/trial-evidence.md)\n\n[^1]: review.txt\n[^2]: events.json\n",
+      "tags": [
+        "overview",
+        "synthetic"
+      ],
+      "file_type": "md",
+      "page_count": null,
+      "highlights": [],
+      "metadata": {
+        "description": "Synthetic print-lab evidence, conditional judgments and unresolved outcomes."
+      },
+      "date": "2026-11-09",
+      "content_truncated": false
+    },
+    {
+      "id": "a050448d-f8fc-4975-9597-10786717727b",
+      "filename": "conditional-warping.md",
+      "title": "Conditional warping",
+      "path": "/wiki/concepts/",
+      "content": "---\ntitle: Conditional warping\ndescription: The limited P-14/P-22 judgment and conditions on its application.\ndate: 2026-11-09\ntags: [conditions, warping]\n---\n\nTechnician Ivo reports that Luma produced fewer warped QL-7 brackets than Sora in P-14. This is conditional and concerns warping only.[^1]\n\n## Conditions and meaning\n\n| Dimension | Retained condition or limit |\n|---|---|\n| Feedstock | dried |\n| Enclosure | closed |\n| Ambient temperature | 20–24 C |\n| Compared outcome | warping |\n| Excluded inference | no strength guarantee |\n| Attribution | Ivo's report; Nia's acceptance is reported in the source |\n\nAll conditions above come from review.txt.[^1] Reported source acceptance is distinct from acceptance of this new atlas proposal.\n\n## Supporting experience\n\nThe source describes P-22 as a separate trial with new samples and operator Ada, under the same conditions, also favoring Luma for warping. A retelling of P-14 is explicitly not an independent trial.[^1] The [trial page](trial-evidence.md) separates those reports from available event rows and unknown causes.\n\n## Application limit\n\nThe source's lesson is to record moisture and the actual enclosure before transferring the warping judgment.[^1] Different machine settings in [machines.csv](../entities/luma-and-sora.md) do not silently establish those conditions for a new case.\n\n[^1]: review.txt\n",
+      "tags": [
+        "conditions",
+        "warping"
+      ],
+      "file_type": "md",
+      "page_count": null,
+      "highlights": [],
+      "metadata": {
+        "description": "The limited P-14/P-22 judgment and conditions on its application."
+      },
+      "date": "2026-11-09",
+      "content_truncated": false
+    },
+    {
+      "id": "48045be3-8caa-49c5-8b94-96b84069296c",
+      "filename": "trial-evidence.md",
+      "title": "Trial evidence",
+      "path": "/wiki/concepts/",
+      "content": "---\ntitle: Trial evidence\ndescription: Observed event fields, reported trials and missing causal evidence.\ndate: 2026-11-09\ntags: [episodes, uncertainty]\n---\n\nThe event file explicitly labels its observations synthetic and not manufacturing advice.[^1] The review supplies interpretations and an additional reported trial.[^2]\n\n## Episodes\n\n| Episode | Evidence available | Limits |\n|---|---|---|\n| P-14 | Event row: Luma, QL-7, 22 C, dried=true, enclosure=closed, warped=false.[^1] | This single row alone is not a comparative result; the comparison is Ivo's report.[^2] |\n| P-22 | Review reports new samples, operator Ada, same conditions and a result favoring Luma for warping.[^2] | No separate P-22 event row is supplied in events.json.[^1] |\n| P-31 | Event row: Sora, QL-7, outcome=failed, humidity=null, cause=null.[^1] | The review also says humidity was unmeasured and the cause unknown; failure does not establish a humidity cause.[^2] |\n\n## Unknowns and reuse\n\nDo not fill missing humidity, infer the cause of P-31, or count retellings of P-14 as independent support.[^2] The [conditional judgment](conditional-warping.md) retains its specific applicability limits. The input documents do not give event dates for these trials; ingestion time does not supply them.\n\n[^1]: events.json\n[^2]: review.txt\n",
+      "tags": [
+        "episodes",
+        "uncertainty"
+      ],
+      "file_type": "md",
+      "page_count": null,
+      "highlights": [],
+      "metadata": {
+        "description": "Observed event fields, reported trials and missing causal evidence."
+      },
+      "date": "2026-11-09",
+      "content_truncated": false
+    },
+    {
+      "id": "0e135735-10a4-45e8-a3de-85f706953c58",
+      "filename": "luma-and-sora.md",
+      "title": "Luma and Sora",
+      "path": "/wiki/entities/",
+      "content": "---\ntitle: Luma and Sora\ndescription: Machine settings and an attributed cleaning opinion.\ndate: 2026-11-09\ntags: [machines, opinion]\n---\n\nLuma and Sora are the two machines named by the synthetic source.[^1]\n\n## Recorded settings\n\n| Machine | Feedstock | Nozzle | Enclosure |\n|---|---|---|---|\n| Luma | QL-7 | 0.4 mm | closed |\n| Sora | QL-7 | 0.6 mm | open |\n\nThese are the rows in machines.csv, not evidence that every historical trial used these settings.[^1] The separate [warping judgment](../concepts/conditional-warping.md) has its own explicit conditions.[^2]\n\n## Attributed judgment\n\nKez says Sora is usually easier to clean. The source explicitly says this is Kez's opinion, not an adopted lab recommendation.[^2]\n\n## Timing\n\nThe source reports approximately 42–58 minutes for QL-7 parts using profile Z and a 0.4 mm nozzle. It does not establish an exact duration or a publication/validity date for this estimate.[^2]\n\n[^1]: machines.csv\n[^2]: review.txt\n",
+      "tags": [
+        "machines",
+        "opinion"
+      ],
+      "file_type": "md",
+      "page_count": null,
+      "highlights": [],
+      "metadata": {
+        "description": "Machine settings and an attributed cleaning opinion."
+      },
+      "date": "2026-11-09",
+      "content_truncated": false
+    }
+  ],
+  "references": [
+    {
+      "source_id": "0e1886e0-3fca-4b20-a1b8-dbe92575924a",
+      "target_id": "16a3d59a-bf97-460c-b6fa-ebc1ebf6b89a",
+      "reference_type": "cites",
+      "page": null
+    },
+    {
+      "source_id": "0e1886e0-3fca-4b20-a1b8-dbe92575924a",
+      "target_id": "8a5eb350-e2bd-4521-a7b3-4b35dc2c900f",
+      "reference_type": "cites",
+      "page": null
+    },
+    {
+      "source_id": "0e1886e0-3fca-4b20-a1b8-dbe92575924a",
+      "target_id": "0e135735-10a4-45e8-a3de-85f706953c58",
+      "reference_type": "links_to",
+      "page": null
+    },
+    {
+      "source_id": "0e1886e0-3fca-4b20-a1b8-dbe92575924a",
+      "target_id": "a050448d-f8fc-4975-9597-10786717727b",
+      "reference_type": "links_to",
+      "page": null
+    },
+    {
+      "source_id": "0e1886e0-3fca-4b20-a1b8-dbe92575924a",
+      "target_id": "48045be3-8caa-49c5-8b94-96b84069296c",
+      "reference_type": "links_to",
+      "page": null
+    },
+    {
+      "source_id": "a050448d-f8fc-4975-9597-10786717727b",
+      "target_id": "16a3d59a-bf97-460c-b6fa-ebc1ebf6b89a",
+      "reference_type": "cites",
+      "page": null
+    },
+    {
+      "source_id": "a050448d-f8fc-4975-9597-10786717727b",
+      "target_id": "48045be3-8caa-49c5-8b94-96b84069296c",
+      "reference_type": "links_to",
+      "page": null
+    },
+    {
+      "source_id": "a050448d-f8fc-4975-9597-10786717727b",
+      "target_id": "0e135735-10a4-45e8-a3de-85f706953c58",
+      "reference_type": "links_to",
+      "page": null
+    },
+    {
+      "source_id": "48045be3-8caa-49c5-8b94-96b84069296c",
+      "target_id": "8a5eb350-e2bd-4521-a7b3-4b35dc2c900f",
+      "reference_type": "cites",
+      "page": null
+    },
+    {
+      "source_id": "48045be3-8caa-49c5-8b94-96b84069296c",
+      "target_id": "16a3d59a-bf97-460c-b6fa-ebc1ebf6b89a",
+      "reference_type": "cites",
+      "page": null
+    },
+    {
+      "source_id": "48045be3-8caa-49c5-8b94-96b84069296c",
+      "target_id": "a050448d-f8fc-4975-9597-10786717727b",
+      "reference_type": "links_to",
+      "page": null
+    },
+    {
+      "source_id": "0e135735-10a4-45e8-a3de-85f706953c58",
+      "target_id": "df053956-456c-451e-b6f1-5c0d09203c80",
+      "reference_type": "cites",
+      "page": null
+    },
+    {
+      "source_id": "0e135735-10a4-45e8-a3de-85f706953c58",
+      "target_id": "16a3d59a-bf97-460c-b6fa-ebc1ebf6b89a",
+      "reference_type": "cites",
+      "page": null
+    },
+    {
+      "source_id": "0e135735-10a4-45e8-a3de-85f706953c58",
+      "target_id": "a050448d-f8fc-4975-9597-10786717727b",
+      "reference_type": "links_to",
+      "page": null
+    }
+  ],
+  "native_responses": [
+    "Created **Overview** at `/wiki/overview.md`\nTags: overview, synthetic | Date: 2026-11-09\n[View](http://localhost:3000/wikis/wiki-initial-final/wiki/overview.md)\n\nRemember to cite sources using footnotes: `[^1]: source-file.pdf, p.X`",
+    "Created **Luma and Sora** at `/wiki/entities/luma-and-sora.md`\nTags: machines, opinion | Date: 2026-11-09\n[View](http://localhost:3000/wikis/wiki-initial-final/wiki/entities/luma-and-sora.md)\n\nRemember to cite sources using footnotes: `[^1]: source-file.pdf, p.X`",
+    "Created **Conditional warping** at `/wiki/concepts/conditional-warping.md`\nTags: conditions, warping | Date: 2026-11-09\n[View](http://localhost:3000/wikis/wiki-initial-final/wiki/concepts/conditional-warping.md)\n\nRemember to cite sources using footnotes: `[^1]: source-file.pdf, p.X`",
+    "Created **Trial evidence** at `/wiki/concepts/trial-evidence.md`\nTags: episodes, uncertainty | Date: 2026-11-09\n[View](http://localhost:3000/wikis/wiki-initial-final/wiki/concepts/trial-evidence.md)\n\nRemember to cite sources using footnotes: `[^1]: source-file.pdf, p.X`"
+  ],
+  "wiki_revision": "aac3e6493306b7fff3b09cb181ca93918e93d0e6",
+  "compiler": "interactive LLM client following upstream LLM Wiki guide; generated in this session"
+}

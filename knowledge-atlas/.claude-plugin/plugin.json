@@ -1,0 +1,19 @@
+{
+  "name": "knowledge-atlas",
+  "version": "0.2.0",
+  "description": "Reviewed, versioned knowledge with portable history and package composition.",
+  "author": {
+    "name": "sergesha"
+  },
+  "homepage": "https://github.com/sergesha/claude-essentials/tree/main/knowledge-atlas",
+  "mcpServers": {
+    "knowledge-atlas": {
+      "command": "sh",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/scripts/launch.sh"
+      ]
+    }
+  },
+  "repository": "https://github.com/sergesha/claude-essentials",
+  "license": "MIT"
+}

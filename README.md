@@ -10,6 +10,7 @@ lists is versioned and released independently (see [Versioning](#versioning)).
 
 | Plugin | What it does |
 |---|---|
+| [`knowledge-atlas`](knowledge-atlas/) | Reviewed, versioned knowledge for Codex and Claude Code; local wiki, cited questions, evidence graph and portable history. |
 | [`tech-radar`](tech-radar/) | Monitor technology news with SearXNG, Redis memory, and HTML/YAML reports. Claude Code support restored at 0.5.0; Codex support tracked in #63. |
 | [`code-intel`](code-intel/skills/code-intel/SKILL.md) | Package the CodeGraph and code-review-graph setup skill, MCP servers, and indexing hooks for Claude Code and Codex. |
 | [`continuous-learning`](continuous-learning/) | Capture runtime surprises as they happen, periodically promote them into a project's own versioned skills/docs/commands. Requires a namespaced `redis-memory` connection — see its own README. |
@@ -78,3 +79,7 @@ Each plugin is its own [release-please](https://github.com/googleapis/release-pl
 tagged independently (`<plugin>-vX.Y.Z`) with its own CHANGELOG. A change to one plugin does not
 bump another's version. Config: `release-please-config.json`, state:
 `.release-please-manifest.json`.
+
+## License
+
+Project-owned code and documentation are licensed under the [MIT License](LICENSE). Third-party components retain their own licenses and notices.

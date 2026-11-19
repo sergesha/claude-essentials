@@ -60,6 +60,41 @@
         { "type": "json", "path": ".claude-plugin/plugin.json", "jsonpath": "$.version" },
         { "type": "json", "path": ".codex-plugin/plugin.json", "jsonpath": "$.version" }
       ]
+    },
+    "knowledge-atlas": {
+      "package-name": "knowledge-atlas",
+      "changelog-path": "CHANGELOG.md",
+      "initial-version": "0.2.0",
+      "extra-files": [
+        {
+          "type": "json",
+          "path": ".claude-plugin/plugin.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "json",
+          "path": ".codex-plugin/plugin.json",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "toml",
+          "path": "pyproject.toml",
+          "jsonpath": "$.project.version"
+        },
+        {
+          "type": "generic",
+          "path": "src/knowledge_atlas/__init__.py"
+        },
+        {
+          "type": "generic",
+          "path": "scripts/launch.sh"
+        },
+        {
+          "type": "toml",
+          "path": "uv.lock",
+          "jsonpath": "$.package[?(@.name.value=='knowledge-atlas')].version"
+        }
+      ]
     }
   }
 }

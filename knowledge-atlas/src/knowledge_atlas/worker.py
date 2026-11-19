@@ -1,0 +1,67 @@
+"""A child process executes one persisted attempt under service and atlas locks."""
+from dataclasses import asdict, replace
+import json
+from pathlib import Path
+import traceback
+from .contracts import ActionContext, ActionRequest, ActionResult, AtlasError, RuntimeConfig
+from .locks import FileLock, AtlasLock
+from .operations import database, encoded
+from .actions import register_handlers, register_recoveries
+
+
+def run_attempt(context, handler):
+    if context.previous_evidence is not None:
+        recover = register_recoveries(context.service).get(context.request.action)
+        if recover is None:
+            raise AtlasError('unsafe_resume', 'no canonical reconciliation is available; submit a new reviewed request', 409)
+        result = recover(context)
+        if result is not None:
+            return result
+    from .core.git_store import GitStore
+    from .core.publication import Publications
+    store = GitStore(context.atlas_path)
+    current = Publications(store).ready() if (store.root/'.git').exists() else None
+    if current != context.request.expected_publication:
+        raise AtlasError('stale_publication', 'READY changed; revalidate the request', 409)
+    return handler(context)
+
+
+def run_next(service):
+    try:
+        with FileLock(service.service_root/'writer.lock'):
+            _execute_next(service)
+    except AtlasError as error:
+        if error.code != 'busy': raise
+
+
+def _execute_next(service):
+    with database(service) as db:
+        row = db.execute("SELECT * FROM operations WHERE state='queued' ORDER BY rowid LIMIT 1").fetchone()
+    if row is None: return
+    evidence = Path(row['evidence'])
+    with FileLock(evidence/'worker.lock'):
+        with database(service) as db:
+            db.execute("UPDATE operations SET state='running' WHERE operation_id=? AND state='queued'", (row['operation_id'],))
+        frozen = json.loads(row['configuration'])
+        runtime = frozen['runtime']
+        attempt_service = replace(service, configuration=frozen['configuration'], runtime=(RuntimeConfig(
+            Path(runtime['runtime_root']), Path(runtime['manifest']) if runtime['manifest'] else None) if runtime else None))
+        context = ActionContext(attempt_service, ActionRequest(**json.loads(row['request'])), Path(row['atlas_path']), evidence,
+                                frozen['configuration'], row['operation_id'],
+                                Path(row['previous_evidence']) if row['previous_evidence'] else None)
+        try:
+            with AtlasLock(context.atlas_path):
+                handler = register_handlers(service).get(context.request.action)
+                if handler is None: raise AtlasError('unsupported_action', context.request.action, 422)
+                result = run_attempt(context, handler)
+                if not isinstance(result, ActionResult): raise TypeError('handler must return ActionResult')
+                result_json = encoded(asdict(result))
+                (evidence/'result.json').write_text(result_json)
+                with database(service) as db:
+                    db.execute("UPDATE operations SET state='succeeded',result=?,error=NULL WHERE operation_id=?", (result_json, row['operation_id']))
+        except Exception as error:
+            details = {'code':getattr(error,'code','operation_failed'), 'message':str(error), 'evidence':str(evidence)}
+            (evidence/'error.json').write_text(encoded(details))
+            (evidence/'traceback.txt').write_text(traceback.format_exc())
+            with database(service) as db:
+                db.execute("UPDATE operations SET state='failed',error=? WHERE operation_id=?", (encoded(details), row['operation_id']))

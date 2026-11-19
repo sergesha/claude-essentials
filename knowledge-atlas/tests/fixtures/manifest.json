@@ -1,0 +1,103 @@
+{
+  "source_revision": "0fa0b15caffd55f6e840306854ab59b8f543c408",
+  "purpose": "Bounded retained Git/publication, extraction-reuse and native type/provenance regressions. Fixture models and synthetic decisions are not authenticated host qualification or human acceptance.",
+  "files": [
+    {
+      "source": "evidence/wiki-initial-final.json",
+      "source_sha256": "c7b12e75945129aaca861b68fc8e1e4f7fb095fde2220e80ecd922d4074e2c31",
+      "destination": "tests/fixtures/evidence/wiki-initial-final.json"
+    },
+    {
+      "source": "evidence/extractor-output.json",
+      "source_sha256": "9d60621162538ea0425d10056dd1f19b9a0bc6d893c17ef5cc2e3daccae91020",
+      "destination": "tests/fixtures/evidence/extractor-output.json"
+    },
+    {
+      "source": "fixtures/printlab/review.txt",
+      "source_sha256": "43ef6a269e7c8491e8a2ff9032a09449570b154792551b0e915267bd06f23f83",
+      "destination": "tests/fixtures/fixtures/printlab/review.txt"
+    },
+    {
+      "source": "embedding-profile.json",
+      "source_sha256": "1e5bd74b3171530f6f32f78e3a056cd91d7722bb0bc5fd4589a0cc01fb9bc07f",
+      "destination": "tests/fixtures/embedding-profile.json"
+    },
+    {
+      "source": "tests/test_git_store.py",
+      "source_sha256": "d867e355ff197feafb420fd73456b5cadc7d25d2de6a658116d057a033dfce67",
+      "destination": "tests/test_git_store.py"
+    },
+    {
+      "source": "tests/test_publication.py",
+      "source_sha256": "15d221573a0aace329e76f11978cdb5af92d89bce43033f279abf9543af7605f",
+      "destination": "tests/test_publication.py"
+    },
+    {
+      "source": "tests/test_ingest.py",
+      "source_sha256": "5260465fc778646908168202c8a971c582a6a5f9fc547f0551ccf6ec9e4502f2",
+      "destination": "tests/test_retained_ingest.py",
+      "adaptation": "Retain EfficientIngestTests and ExactRelationIngestTests assertions; adapt imports/fixture root and require explicit native binary."
+    },
+    {
+      "source": "evidence/native-components/row-reference-probe/run-statements-only/input.json",
+      "source_sha256": "465fe0f118fce8ff9144eddad30ebaa2c2a7952f99484855938cd70a0ac14cd1",
+      "destination": "tests/fixtures/evidence/native-components/row-reference-probe/run-statements-only/input.json",
+      "adaptation": "Replace non-executed original workstation command paths with portable command names; retained extraction inputs and assertions are unchanged.",
+      "packaged_sha256": "44d2ed294ac4c103f7d972bfb9b6db54182d24e0fb8b11688d08d9a66e31d93c"
+    },
+    {
+      "source": "evidence/native-components/row-reference-probe/run-statements-only/codec/call.json",
+      "source_sha256": "8245a374af3cca013bb4ab3663a98d9e4de85f1ea0d791209f1e568b27016e6c",
+      "destination": "tests/fixtures/evidence/native-components/row-reference-probe/run-statements-only/codec/call.json"
+    },
+    {
+      "source": "evidence/native-components/row-reference-probe/run-statements-only/codec/expanded.json",
+      "source_sha256": "f7c9a60569f63e112dea7787fdb8cd0e9aa0344726e8a58481732b15e2dd6563",
+      "destination": "tests/fixtures/evidence/native-components/row-reference-probe/run-statements-only/codec/expanded.json"
+    },
+    {
+      "source": "tests/test_native_extract.py",
+      "source_sha256": "fd6be9a4eff0241f638c21b0253950e8e648046cadff8edd5cccdb047d091827",
+      "destination": "tests/test_type_decisions.py",
+      "adaptation": "Retain native extraction/admission/grouped-type/literal/context/mood/provenance test classes unchanged apart from package imports and explicit native-binary prerequisite."
+    },
+    {
+      "source": "tests/test_packages.py",
+      "source_sha256": "5111634c0426f42e9ae61ca217ad1d6dc17167003fc7b90675ba29483168e561",
+      "destination": "tests/test_retained_packages.py",
+      "adaptation": "Four deterministic PackageTests retained with unchanged assertions; imports and fixture root adapted. Native graph scenario remains final lifecycle qualification."
+    },
+    {
+      "source": "tests/test_knowledge.py",
+      "source_sha256": "d0ba2c3fe610d6a52d989e3f2dc4f7ec65178ccfe1eebb91454742ba78b9f65b",
+      "destination": "tests/test_retained_knowledge.py",
+      "adaptation": "Retained deterministic assertions; imports/fixture root adapted. Native-only knowledge methods remain final lifecycle qualification."
+    },
+    {
+      "source": "tests/test_feedback.py",
+      "source_sha256": "c570cfa8421b3d178392ce412def0f92f615eb14a093d013f43f6db64027b0d7",
+      "destination": "tests/test_retained_feedback.py",
+      "adaptation": "Retained deterministic assertions; imports/fixture root adapted. Native-only knowledge methods remain final lifecycle qualification."
+    },
+    {
+      "source": "tests/test_applicability.py",
+      "source_sha256": "512515991f077f77621e17def9f2330bdfd2f29157e0bb3dbcf35364a045964e",
+      "destination": "tests/test_retained_applicability.py",
+      "adaptation": "Retained deterministic assertions; imports/fixture root adapted. Native-only knowledge methods remain final lifecycle qualification."
+    },
+    {
+      "source": "tests/test_knowledge.py",
+      "source_sha256": "d0ba2c3fe610d6a52d989e3f2dc4f7ec65178ccfe1eebb91454742ba78b9f65b",
+      "destination": "tests/retained_semantics.py",
+      "adaptation": "Exact proposal_records function extracted as shared fixture."
+    }
+  ],
+  "additional_fixtures": [
+    {
+      "destination": "tests/fixtures/lifecycle/archive.txt",
+      "sha256": "784081c57477394e888b4957732f740ad1158f1f9d33c47585fcf924bef00c08",
+      "origin": "Synthetic distinct-domain source authored for packaged lifecycle qualification; not PoC9 evidence or human acceptance.",
+      "purpose": "Exercise stable source identity, source omission, uncertainty and independent domain updates alongside the retained printlab source."
+    }
+  ]
+}
