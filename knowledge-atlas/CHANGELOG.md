@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.0](https://github.com/sergesha/claude-essentials/compare/knowledge-atlas-v0.2.0...knowledge-atlas-v0.3.0) (2026-11-19)
+
+
+### Features
+
+* **knowledge-atlas:** add reviewed knowledge plugin for Codex and Claude Code ([d7505ef](https://github.com/sergesha/claude-essentials/commit/d7505ef7d87f1803923def97fe04e23e914049f4))
+* **knowledge-atlas:** add reviewed knowledge plugin for Codex and Claude Code ([fbea172](https://github.com/sergesha/claude-essentials/commit/fbea17249f17d73815f1aba5647fa8e2f6d44d42))
+
 ## 0.2.0
 
 Adds an authenticated localhost viewer, publication-bound wiki reads and cited
