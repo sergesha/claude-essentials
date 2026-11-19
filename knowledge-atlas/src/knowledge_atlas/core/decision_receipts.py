@@ -12,13 +12,15 @@ DECISIONS = 'refs/knowledge-atlas/decisions/'
 def decision_inventory(store, *, decision_id=None):
     selected = uuid.UUID(decision_id) if decision_id is not None else None
     pattern = DECISIONS
+    options = []
     if selected is not None:
         # Legacy ref names retain the request's original case, braces and hyphens.
         # A valid UUID has exactly 32 hex digits. Match them in order in Git so
         # unrelated decisions never require object reads or closure validation.
         pattern += '*' + '*'.join(selected.hex) + '*'
+        options.append('--ignore-case')
     entries = []
-    for line in git(store.root,'for-each-ref','--ignore-case','--format=%(refname) %(objectname)',pattern).splitlines():
+    for line in git(store.root,'for-each-ref',*options,'--format=%(refname) %(objectname)',pattern).splitlines():
         ref, oid = line.split()
         if selected is not None:
             try:

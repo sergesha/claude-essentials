@@ -3,7 +3,7 @@
 ## Patch qualification
 
 The Linux ARM64 package run used the locked Python environment and pinned Utopia extractor.
-All 258 enabled tests and 11 subtests passed. The run skipped 11 opt-in integrations.
+The versioned release-candidate run passed 266 tests and 11 subtests, with 11 opt-in integrations skipped.
 Separate native fixtures exercised Wiki reconciliation, Gemma embeddings, TerminusDB
 historical reads, crash recovery, and format-compatible archive replay. The viewer suite
 passed 29 JavaScript tests.
@@ -12,6 +12,10 @@ A separate Linux ARM64 run published a pin-only parent at the configured Docker 
 using an external child and retrieved child evidence through hybrid search. Opening the
 external child as a second owner returned `invalid_location` and preserved the parent’s
 published and graph commits.
+
+A separately exported 0.3.0 format-2 archive with mixed-case decision UUIDs restored both
+decisions. A dedicated regression preserves its original case-sensitive inventory order.
+The fresh macOS ARM64 Utopia build passed the package suite with the extractor enabled.
 
 The regression fixtures cover stale candidates, out-of-order acceptance, unsigned and
 missing decision receipts, source recording times, bounded restore, archive round trips and

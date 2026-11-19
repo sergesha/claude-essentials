@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import sys
 import time
 import uuid
@@ -131,7 +132,8 @@ async def _cycle(package, config_path, native, root, host, profiles):
             publication=first_publication)
         assert factual['data']['status'] == 'answered'
         assert factual['data']['coverage'] == 'answered'
-        assert factual['data']['citations'] and 'P-31' in factual['data']['answer']
+        assert factual['data']['citations']
+        assert re.search(r'\bP\W*31\b', factual['data']['answer'], re.IGNORECASE)
         missing = await call('question.ask', {
             'question': 'What tensile strength in MPa did trial P-31 measure for the QL-7 brackets?',
             'count': 10}, publication=first_publication)

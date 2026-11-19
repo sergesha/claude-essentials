@@ -306,3 +306,19 @@ def test_export_limits_leave_no_unrestorable_file(portable, tmp_path, monkeypatc
     with pytest.raises(ValueError, match='limit|too many'):
         archive(portable, path)
     assert not path.exists()
+
+
+def test_full_inventory_preserves_legacy_mixed_case_ref_order(portable, tmp_path):
+    store, _, _, publication, _, _ = portable
+    content = Publications(store).read(publication)['content_commit']
+    candidate = propose_records(store, content, [], actor='Fixture', method='Review', reason='Archive',
+                                recorded_at='2026-11-13T02:00:00Z', base_publication=publication)
+    ids = ['BBBBBBBB-0000-4000-8000-000000000001', 'aaaaaaaa-0000-4000-8000-000000000002']
+    for identifier in ids:
+        ctx = context_for(tmp_path, store, candidate, 'reject', publication)
+        decide_candidate(replace(ctx, request=replace(ctx.request, request_id=identifier)))
+    assert [e['receipt']['decision_id'] for e in decision_inventory(store)] == ids
+    path = tmp_path/'mixed-case.zip'
+    archive(portable, path)
+    restored = restore_atlas(path, tmp_path/'restored')
+    assert [e['receipt']['decision_id'] for e in decision_inventory(restored)] == ids
