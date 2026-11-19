@@ -3,10 +3,12 @@
 ## Patch qualification
 
 The Linux ARM64 package run used the locked Python environment and pinned Utopia extractor.
-The versioned release-candidate run passed 266 tests and 11 subtests, with 11 opt-in integrations skipped.
+The 0.3.1 run passed 267 tests and 11 subtests, with 11 opt-in integrations skipped.
 Separate native fixtures exercised Wiki reconciliation, Gemma embeddings, TerminusDB
 historical reads, crash recovery, and format-compatible archive replay. The viewer suite
-passed 29 JavaScript tests.
+passed 29 JavaScript tests. A Chromium session checked caller-supplied attribution,
+receipt indicators and an abstention with a working citation using a deterministic
+local backend.
 
 A separate Linux ARM64 run published a pin-only parent at the configured Docker atlas path
 using an external child and retrieved child evidence through hybrid search. Opening the
