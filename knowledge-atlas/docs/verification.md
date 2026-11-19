@@ -1,12 +1,32 @@
-# Verification and support limits
+# Knowledge Atlas 0.3.1 verification
 
-This is the public qualification summary for Knowledge Atlas 0.2.0. Reported
-results describe the tested builds and scenarios; they are not a guarantee of
-semantic accuracy or support for every host configuration. Runtime identities
-and original PoC adaptations are retained in `runtime/components.json`,
-`runtime/source-manifest.json`, and `tests/fixtures/manifest.json`.
+## Patch qualification
 
-## Supported and qualified targets
+The Linux ARM64 package run used the locked Python environment and pinned Utopia extractor.
+All 258 enabled tests and 11 subtests passed. The run skipped 11 opt-in integrations.
+Separate native fixtures exercised Wiki reconciliation, Gemma embeddings, TerminusDB
+historical reads, crash recovery, and format-compatible archive replay. The viewer suite
+passed 29 JavaScript tests.
+
+A separate Linux ARM64 run published a pin-only parent at the configured Docker atlas path
+using an external child and retrieved child evidence through hybrid search. Opening the
+external child as a second owner returned `invalid_location` and preserved the parent’s
+published and graph commits.
+
+The regression fixtures cover stale candidates, out-of-order acceptance, unsigned and
+missing decision receipts, source recording times, bounded restore, archive round trips and
+concurrent requests. A 61-record shared-ground fixture now evaluates in about 0.21 ms on the
+qualification host. Eight successive rejection decisions each issued 94 Git calls in that
+fixture. These timings describe its specific graph and hardware.
+
+The pinned Wiki MCP server advertised seven authoring tools during a real stdio session. The
+extraction benchmark checks navigation filtering, factual table cells and native mood
+handling. Cache misses carry reasons for subsequent runs. The cause of the zero hits in the
+original audit remains undetermined.
+
+## Earlier platform qualification
+
+The following matrix describes earlier native qualification runs. Runtime and fixture identities are retained in `runtime/components.json`, `runtime/source-manifest.json`, and `tests/fixtures/manifest.json`.
 
 | Capability | Evidence | Limits |
 | --- | --- | --- |
@@ -22,14 +42,6 @@ versions require appropriate compatibility checks. Native ARM64 Docker execution
 does not require Rosetta or an x86_64 emulation change.
 
 ## Regression and native checks
-
-Publication preparation passed **188 Python tests, 32 skipped, four subtests**,
-plus **28 JavaScript tests**. Both source distribution and wheel built successfully.
-A simulated release version bump updated all configured version-bearing files and
-passed lockfile validation without changing dependency versions. The skips are opt-in native
-integration/extractor checks, not passes. Separate configured native runs supply
-the platform/provider evidence above. These local checks do not establish a hosted
-CI result or approval to publish.
 
 From the package directory:
 

@@ -23,7 +23,7 @@ def commit_files(repo, base, files, parents, message, *, gitlinks=None):
             result = subprocess.run(['git', '-C', str(repo), *args], input=data,
                                     capture_output=True, env=env)
             if result.returncode:
-                raise ValueError(result.stderr.decode(errors='replace'))
+                raise ValueError(f'Git {args[0]} failed (exit {result.returncode})')
             return result.stdout.decode().strip()
         run('read-tree', base)
         for name, value in files.items():
@@ -37,6 +37,14 @@ def commit_files(repo, base, files, parents, message, *, gitlinks=None):
         for parent in parents:
             args += ['-p', parent]
         return run(*args, '-m', message)
+
+
+class StaleProposal(ValueError):
+    """The candidate was prepared against another publication."""
+
+
+class InvalidAcceptanceTime(ValueError):
+    """The decision cannot be placed on the recorded acceptance timeline."""
 
 
 class Publications:
@@ -55,14 +63,11 @@ class Publications:
             raise ValueError('explicit human or synthetic acceptance decision required')
         if not decision.get('actor') or not decision.get('reason'):
             raise ValueError('review actor and reason required')
-        accepted = datetime.fromisoformat(decision['accepted_at'].replace('Z', '+00:00'))
-        if accepted.tzinfo is None:
-            raise ValueError('accepted_at requires timezone')
         if 'base_publication' not in decision or self.ready() != decision['base_publication']:
             raise ValueError('stale review: revalidate against current READY')
-        if ('proposal_base_publication' in snapshot['manifest']
-                and snapshot['manifest']['proposal_base_publication'] != decision['base_publication']):
-            raise ValueError('stale proposal: rebase and review against current READY')
+        self._check_proposal_base(snapshot['manifest'], decision['base_publication'])
+        parent = self.read(decision['base_publication']) if decision['base_publication'] else None
+        self._check_acceptance_time(decision, parent)
         digest = hashlib.sha256(json.dumps(profile['profile'], sort_keys=True,
             separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
         if digest != profile['profile_id']:
@@ -78,6 +83,22 @@ class Publications:
         git(self.store.root, 'update-ref', 'refs/poc9/reviews/' + content, content)
         return content
 
+    @staticmethod
+    def _check_proposal_base(manifest, base):
+        if 'proposal_base_publication' not in manifest or manifest['proposal_base_publication'] != base:
+            raise StaleProposal('stale proposal: rebase and review against current READY')
+
+    @staticmethod
+    def _check_acceptance_time(review, parent):
+        try:
+            accepted = datetime.fromisoformat(review['accepted_at'].replace('Z', '+00:00'))
+        except (AttributeError, KeyError, ValueError) as error:
+            raise InvalidAcceptanceTime('accepted_at requires an ISO timestamp with timezone') from error
+        if accepted.tzinfo is None:
+            raise InvalidAcceptanceTime('accepted_at requires timezone')
+        if parent and accepted < datetime.fromisoformat(parent['accepted_at'].replace('Z', '+00:00')):
+            raise InvalidAcceptanceTime('accepted_at precedes the base publication')
+
     def ready(self):
         result = subprocess.run(['git', '-C', str(self.store.root), 'show-ref', '--verify', '--hash', self.ref], capture_output=True)
         if result.returncode == 1:
@@ -87,12 +108,14 @@ class Publications:
             missing = subprocess.run(['git', '-C', str(self.store.root), 'show-ref', '--verify', '--quiet', self.ref])
             if missing.returncode == 1:
                 return None
-            raise ValueError(result.stderr.decode(errors='replace'))
+            raise ValueError(f'Git show-ref failed (exit {result.returncode})')
         return result.stdout.decode().strip()
 
     def read(self, publication):
         self.store.read(publication)  # Exact OID and package closure validation.
-        return json.loads(git(self.store.root, 'show', publication + ':publication.json'))
+        receipt = json.loads(git(self.store.root, 'show', publication + ':publication.json'))
+        receipt.setdefault('acceptance_channel', 'unrecorded')
+        return receipt
 
     def publish(self, content, build_projection):
         snapshot = self.store.read(content)
@@ -100,10 +123,13 @@ class Publications:
             raise ValueError('unreviewed candidate cannot be published')
         review = json.loads(git(self.store.root, 'show', content + ':review.json'))
         previous = self.ready()
-        if previous and self.read(previous)['content_commit'] == content:
+        parent = self.read(previous) if previous else None
+        if parent and parent['content_commit'] == content:
             return previous  # Reconcile a successful CAS whose acknowledgement was lost.
         if review['base_publication'] != previous:
             raise ValueError('stale review: revalidate against current READY')
+        self._check_proposal_base(snapshot['manifest'], previous)
+        self._check_acceptance_time(review, parent)
         receipt = build_projection(content)
         if receipt.get('profile_id') != snapshot['manifest']['profile_id']:
             raise ValueError('projection profile does not match accepted content')
@@ -114,6 +140,7 @@ class Publications:
         publication = {**receipt, 'previous_publication': previous,
                        'profile_id': snapshot['manifest']['profile_id'],
                        'acceptance_kind': review['kind'], 'accepted_at': review['accepted_at'],
+                       'acceptance_channel': review.get('attribution_channel', 'unrecorded'),
                        'published_at': datetime.now().astimezone().isoformat()}
         parents = [previous, content] if previous else [content]
         result = commit_files(self.store.root, content, {'publication.json': publication}, parents,

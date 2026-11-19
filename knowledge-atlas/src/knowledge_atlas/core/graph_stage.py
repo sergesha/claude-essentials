@@ -2,6 +2,9 @@
 import base64
 import hashlib
 import json
+import os
+from pathlib import Path
+import urllib.parse
 import urllib.request
 import urllib.error
 
@@ -36,6 +39,7 @@ def _local_records(snapshot,commit):
     for source in wiki['sources']:
         k=key('source',source['filename']);native_ids[source['id']]='Record/'+k
         doc=record(k,'source',snapshot['sources'][source['filename']].decode('utf-8'),source)
+        doc['recorded_at'] = source.get('recorded_at') or wiki.get('recorded_at') or manifest['recorded_at']
         for field in ('source_time','valid_from','valid_to'):
             if source.get(field):doc[field]=source[field]
     for page in wiki['pages']:
@@ -56,7 +60,11 @@ def _local_records(snapshot,commit):
         if origin is not None and origin not in wiki_pages:raise ValueError('Unknown Wiki page origin: '+str(origin))
         links=[wiki_pages[origin]] if origin is not None else []
         k=key('statement',json.dumps(statement,sort_keys=True,ensure_ascii=False))
-        doc=record(k,'statement',quoted,statement,links)
+        qualifiers = statement.get('qualifiers') or []
+        pairs = qualifiers.items() if isinstance(qualifiers, dict) else qualifiers
+        moods = [pair[1] for pair in pairs if isinstance(pair, (tuple, list)) and len(pair) == 2 and pair[0] == 'mood']
+        payload = {**statement, 'modality': moods} if moods and extract.get('passage_version', 0) >= 1 else statement
+        doc=record(k,'statement',quoted,payload,links)
         statement_ids[index]=doc['@id']
         if bundle and relation_rows[index]['status']!='resolved':doc['status']='candidate'
         if statement['subject'] in entities:doc['subject']=entities[statement['subject']]
@@ -219,13 +227,23 @@ def record_schema(*, embed=True):
 
 
 class GraphStage:
-    def __init__(self,url,database,password='poc9-synthetic-local'):
+    def __init__(self,url,database,password=None):
         self.url=url.rstrip('/');self.database=database;self.password=password;self.trace=[]
 
     def call(self,method,path,body=None):
+        password = self.password
+        if password is None:
+            endpoint = urllib.parse.urlsplit(self.url)
+            if endpoint.scheme != 'http' or endpoint.hostname != '127.0.0.1' or endpoint.username is not None:
+                raise ValueError('the managed graph credential requires a local graph endpoint')
+            key_file = os.environ.get('KNOWLEDGE_ATLAS_GRAPH_KEY_FILE')
+            if not key_file:
+                raise ValueError('configure KNOWLEDGE_ATLAS_GRAPH_KEY_FILE for this graph')
+            password = Path(key_file).read_text().strip()
         req=urllib.request.Request(self.url+path,
             data=None if body is None else json.dumps(body,ensure_ascii=False).encode(),
-            headers={'Content-Type':'application/json','Authorization':'Basic '+base64.b64encode(('admin:'+self.password).encode()).decode()},method=method)
+            headers={'Content-Type':'application/json'},method=method)
+        req.add_unredirected_header('Authorization', 'Basic '+base64.b64encode(('admin:'+password).encode()).decode())
         try:
             with urllib.request.urlopen(req,timeout=60) as response:
                 raw=response.read().decode();headers={k.lower():v for k,v in response.headers.items()}

@@ -181,3 +181,60 @@ def test_schema_does_not_accept_discarded_fields():
     for action,payload in samples:
         with pytest.raises(AtlasError,match='invalid_request'):
             parse_request(action,{'request_id':str(uuid.uuid4()),'payload':payload})
+
+
+def test_client_rediscovers_restarted_service_and_rotated_token(tmp_path):
+    from knowledge_atlas.client import AtlasClient
+    from knowledge_atlas.http_api import create_app
+    root = tmp_path / 'service'
+    first = create_app(ServiceContext(root)).start()
+    client = AtlasClient(root)
+    try:
+        original_token = first.token
+        assert client.request('/v1/status')['endpoint'] == first.endpoint
+    finally:
+        first.stop(wait=True)
+    assert not (root / 'discovery.json').exists()
+    second = create_app(ServiceContext(root)).start()
+    try:
+        assert second.token != original_token
+        assert client.request('/v1/status')['endpoint'] == second.endpoint
+    finally:
+        second.stop(wait=True)
+
+
+def test_concurrent_status_reads_use_the_live_service(app):
+    from concurrent.futures import ThreadPoolExecutor
+    from knowledge_atlas.client import AtlasClient
+    client = AtlasClient(app.context.service_root)
+    with ThreadPoolExecutor(max_workers=32) as pool:
+        results = list(pool.map(lambda _: client.request('/v1/status'), range(64)))
+    assert all(result['endpoint'] == app.endpoint for result in results)
+
+
+def test_read_provider_error_is_explicit_over_http(app, monkeypatch):
+    from knowledge_atlas import http_api
+    from knowledge_atlas.client import AtlasClient
+    from knowledge_atlas.providers.base import ProviderError
+    def unavailable(context, request):
+        raise ProviderError('provider_unavailable', 'private provider diagnostics')
+    monkeypatch.setattr(http_api, 'invoke', unavailable)
+    with pytest.raises(AtlasError) as failure:
+        AtlasClient(app.context.service_root).call(ActionRequest(
+            'question.ask', atlas_id='fixture', payload={'question':'What is recorded?'}))
+    assert failure.value.code == 'provider_failed'
+    assert failure.value.status == 503
+    assert 'private provider diagnostics' not in str(failure.value)
+
+
+def test_status_marks_closed_http11_connections(app):
+    from http.client import HTTPConnection
+    connection = HTTPConnection('127.0.0.1', app.server.server_port)
+    try:
+        for _ in range(2):
+            connection.request('GET', '/v1/status', headers={'Authorization':'Bearer '+app.token})
+            response = connection.getresponse()
+            assert response.getheader('Connection') == 'close'
+            assert json.load(response)['endpoint'] == app.endpoint
+    finally:
+        connection.close()

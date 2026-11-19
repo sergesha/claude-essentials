@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from urllib.parse import urlsplit
 
 from .contracts import ActionRequest, ActionResult, AtlasError
 from .runtime import validate_runtime, RuntimeMismatch
@@ -19,6 +20,8 @@ def run_native(context):
         identity = validate_runtime(runtime)
     except RuntimeMismatch as error:
         raise AtlasError(error.code, str(error), 503) from error
+    if context.request.action in ('publication.build', 'publication.rebuild'):
+        claim_projection_database(context)
     context.evidence.mkdir(parents=True, exist_ok=True)
     payload = {'request':asdict(context.request), 'atlas_path':str(context.atlas_path),
                'evidence':str(context.evidence), 'configuration':context.configuration,
@@ -46,7 +49,7 @@ def execute_native(payload):
     from .core.ingest import ingest
     from .core.model_config import ConfiguredModels
     from .core.publication import Publications
-    from .core.relations import propose_resolution
+    from .core.relations import propose_resolution, TypeDecisionUnavailable
     request = ActionRequest(**payload['request'])
     evidence = Path(payload['evidence'])
     store = GitStore(payload['atlas_path'])
@@ -93,32 +96,83 @@ def execute_native(payload):
                 wiki_request = {**wiki_request, 'correction_instructions': data['instructions']}
             return await models.wiki(wiki_request)
         execution = asyncio.run(ingest(store, evidence/'native', prepared['sources'], recorded_at=recorded_at,
-            model=models, agent=wiki_agent, previous_commit=selected if 'wiki' in previous else None,
+            model=models, agent=wiki_agent, previous_commit=selected if request.expected_publication or revision or 'wiki' in previous else None,
             remove_sources=prepared['remove_sources'], model_profile=models.effective_profile('open'),
             relation_model_profile=models.effective_profile('phrase')))
         candidate = execution['candidate']['commit']
         # Initial ingests also need a durable candidate reference.
         git(store.root,'update-ref','refs/poc9/proposals/'+candidate,candidate)
     else:
-        candidate = propose_resolution(store, data['candidate'], actor=data['actor'], recorded_at=recorded_at,
-            base_publication=request.expected_publication, model=models,
-            human={key:data[key] for key in ('decision_id','action','reason','type_id') if key in data})
+        try:
+            candidate = propose_resolution(store, data['candidate'], actor=data['actor'], recorded_at=recorded_at,
+                base_publication=request.expected_publication, model=models,
+                human={key:data[key] for key in ('decision_id','action','reason','type_id') if key in data})
+        except TypeDecisionUnavailable as error:
+            raise AtlasError('type_decision_unavailable', str(error), 422) from error
     snapshot = store.read(candidate)
     return ActionResult(data={'candidate':candidate, 'status':'pending_review',
         'unresolved':[row for row in snapshot.get('relations',{}).get('relations',[]) if row['status']!='resolved']},
         publication=pubs.ready(), evidence=[str(evidence)], canonical_effects={'candidate':candidate})
 
 
-def project_native(payload, store):
-    from .core.graph_stage import GraphStage
-    from .core.native_projection import NativeProjection
-    graph = payload['configuration'].get('graph', {})
+def projection_graph(configuration):
+    graph = configuration.get('graph', {})
     if not isinstance(graph, dict) or not graph.get('url') or not graph.get('database'):
         raise AtlasError('runtime_unavailable', 'configure the prepared local graph runtime', 503)
-    from urllib.parse import urlsplit
     url = urlsplit(graph['url'])
     if url.scheme != 'http' or url.hostname != '127.0.0.1' or url.username or url.password or url.query or url.fragment:
         raise AtlasError('unsupported_configuration', 'graph runtime must use local HTTP', 422)
+    return graph
+
+
+def claim_projection_database(context):
+    from .core.git_store import GitStore, git
+    from .core.publication import Publications
+    from .operations import database
+
+    graph = projection_graph(context.configuration)
+    address = urlsplit(graph['url'])
+    endpoint = f'http://{address.hostname}:{address.port or 80}' + address.path.rstrip('/')
+    name = graph['database']
+    store = GitStore(context.atlas_path)
+    identity = json.loads(git(store.root, 'show', 'HEAD:package.json'))['package_id']
+    conflict = 'the configured graph database belongs to another atlas'
+    with database(context.service) as db:
+        db.execute('BEGIN IMMEDIATE')
+        db.execute('''CREATE TABLE IF NOT EXISTS projection_owners (
+            endpoint TEXT NOT NULL, database_name TEXT NOT NULL, atlas_id TEXT NOT NULL,
+            PRIMARY KEY (endpoint, database_name))''')
+        registered = db.execute('SELECT path FROM atlases WHERE atlas_id=?', (identity,)).fetchone()
+        if registered and Path(registered['path']) != store.base and Path(registered['path']).exists():
+            raise AtlasError('atlas_conflict', 'this UUID is already open at another existing location', 409)
+        owner = db.execute('SELECT atlas_id FROM projection_owners WHERE endpoint=? AND database_name=?',
+                           (endpoint, name)).fetchone()
+        if owner:
+            if owner['atlas_id'] != identity:
+                raise AtlasError('graph_atlas_conflict', conflict, 409)
+            return
+        # Pre-upgrade registrations may have published before a binding existed.
+        # Reads and package opens never claim a database. Restores retain the UUID.
+        for row in db.execute('SELECT path FROM atlases WHERE atlas_id<>?', (identity,)):
+            other = GitStore(row['path'])
+            if not (other.root/'.git').is_dir():
+                continue
+            pubs = Publications(other)
+            ready = pubs.ready()
+            if ready:
+                receipt = pubs.read(ready)
+                mapping = other.base/'rebuilt-projections.json'
+                if mapping.exists():
+                    receipt = json.loads(mapping.read_text()).get(ready) or receipt
+                if receipt.get('database') == name:
+                    raise AtlasError('graph_atlas_conflict', conflict, 409)
+        db.execute('INSERT INTO projection_owners VALUES (?,?,?)', (endpoint, name, identity))
+
+
+def project_native(payload, store):
+    from .core.graph_stage import GraphStage
+    from .core.native_projection import NativeProjection
+    graph = projection_graph(payload['configuration'])
     content = payload['request']['payload'].get('content')
     rebuilding = payload['request']['action'] == 'publication.rebuild'
     if not rebuilding:

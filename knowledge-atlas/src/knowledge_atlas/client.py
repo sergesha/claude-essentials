@@ -1,9 +1,11 @@
 """Typed Python HTTP client; the service retains mutation and review ownership."""
 from dataclasses import asdict
+import hmac
+import http.client
 import json
+import secrets
+import time
 from pathlib import Path
-import urllib.error
-import urllib.request
 from urllib.parse import urlsplit
 from .contracts import ActionRequest,ActionResult,OperationRecord,AtlasError
 from . import __version__
@@ -11,26 +13,80 @@ from . import api_models as models
 
 
 class AtlasClient:
-    def __init__(self,service_root):
+    def __init__(self,service_root, *, channel="python"):
+        self.channel = channel
         self.root=Path(service_root).expanduser().resolve()
-        descriptor=json.loads((self.root/'discovery.json').read_text())
-        if descriptor['version']!=__version__:raise AtlasError('version_conflict','stop the existing service before changing package version',409)
-        self.endpoint=descriptor['endpoint']
-        url=urlsplit(self.endpoint)
-        if url.scheme!='http' or url.hostname!='127.0.0.1' or not url.port or url.path or url.query or url.fragment or url.username:
-            raise AtlasError('invalid_configuration','discovery must identify local HTTP service',422)
-        self.token=(self.root/'token').read_text().strip()
+        self._discovery()
 
-    def request(self,path,body=None,*,timeout=30):
-        request=urllib.request.Request(self.endpoint+path,data=None if body is None else json.dumps(body).encode(),
-            headers={'Authorization':'Bearer '+self.token,'Content-Type':'application/json'})
+    def _discovery(self):
         try:
-            with urllib.request.urlopen(request,timeout=timeout) as response:return json.load(response)
-        except urllib.error.HTTPError as error:
-            value=json.load(error)['error']
-            raise AtlasError(value['code'],value['message'],value['status']) from error
-        except (urllib.error.URLError,OSError) as error:
-            raise AtlasError('service_unavailable','local service is unavailable',503) from error
+            descriptor = json.loads((self.root / 'discovery.json').read_text())
+            token = (self.root / 'token').read_text().strip()
+        except FileNotFoundError as error:
+            raise AtlasError('service_unavailable', 'local service is unavailable', 503) from error
+        except (OSError, ValueError) as error:
+            raise AtlasError('invalid_configuration', 'unreadable local service discovery', 422) from error
+        if not isinstance(descriptor, dict) or not isinstance(descriptor.get('endpoint'), str):
+            raise AtlasError('invalid_configuration', 'invalid local service discovery', 422)
+        if descriptor.get('version') != __version__:
+            raise AtlasError('version_conflict', 'stop the existing service before changing package version', 409)
+        endpoint = descriptor['endpoint']
+        try:
+            url = urlsplit(endpoint)
+            port = url.port
+        except ValueError as error:
+            raise AtlasError('invalid_configuration', 'invalid local service discovery', 422) from error
+        if (url.scheme != 'http' or url.hostname != '127.0.0.1' or not port
+                or url.path or url.query or url.fragment or url.username or not token):
+            raise AtlasError('invalid_configuration', 'invalid local service discovery', 422)
+        self.endpoint = endpoint
+        return url, token
+
+    def _verified_connection(self, timeout):
+        url, token = self._discovery()
+        connection = http.client.HTTPConnection(url.hostname, url.port, timeout=timeout)
+        try:
+            # Verify this socket's peer before sending credentials or atlas data.
+            # Disable automatic reconnect, including after a successful proof.
+            connection.connect()
+            connection.auto_open = False
+            nonce = secrets.token_hex(32)
+            connection.request('GET', '/v1/identity', headers={'Atlas-Challenge': nonce})
+            response = connection.getresponse()
+            expected = hmac.digest(token.encode(), (url.geturl() + '/' + nonce).encode(), 'sha256').hex()
+            if (response.status != 200 or response.read(256) != expected.encode()
+                    or connection.sock is None):
+                raise AtlasError('service_unavailable', 'local service identity could not be verified', 503)
+            return connection, token
+        except BaseException:
+            connection.close()
+            raise
+
+    def request(self, path, body=None, *, timeout=30):
+        # Only the credential-free handshake can be retried. Never replay an action.
+        for attempt in range(3):
+            try:
+                connection, token = self._verified_connection(timeout)
+                break
+            except (OSError, http.client.HTTPException) as error:
+                if attempt == 2:
+                    raise AtlasError('service_unavailable', 'local service is unavailable', 503) from error
+                time.sleep(0.05 * (2 ** attempt))
+        try:
+            data = json.dumps(body).encode() if body is not None else None
+            connection.request('GET' if data is None else 'POST', path, body=data,
+                headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json',
+                         'Connection': 'close', 'Atlas-Channel': self.channel})
+            response = connection.getresponse()
+            value = json.load(response)
+            if response.status >= 400:
+                detail = value['error']
+                raise AtlasError(detail['code'], detail['message'], detail['status'])
+            return value
+        except (OSError, http.client.HTTPException) as error:
+            raise AtlasError('service_unavailable', 'local service is unavailable', 503) from error
+        finally:
+            connection.close()
 
     def call(self,request:ActionRequest)->ActionResult|OperationRecord:
         value=self.request('/v1/actions/'+request.action,asdict(request),timeout=900 if request.action=='question.ask' else 30)

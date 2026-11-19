@@ -8,6 +8,7 @@ import json
 from .applicability import assess, instant
 from .graph_stage import GraphStage, records_for
 from .publication import Publications
+from .decision_receipts import matching_decision_receipt
 
 
 def short_id(value):
@@ -35,12 +36,18 @@ class AtlasReader:
             # This is the recorded acceptance axis, not Git/server wall time.
             # Only READY's reachable history is eligible; pending reviews are not.
             when = instant(as_known_at)
-            eligible = [(instant(receipt['accepted_at']), oid) for oid, receipt in self.chain.items()
-                        if instant(receipt['accepted_at']) <= when]
-            if not eligible:
+            selected = None
+            newer = None
+            for oid, receipt in self.chain.items():
+                accepted = instant(receipt['accepted_at'])
+                if newer is not None and accepted > newer:
+                    raise ValueError('publication history has out-of-order accepted_at timestamps')
+                if selected is None and accepted <= when:
+                    selected = oid
+                newer = accepted
+            if selected is None:
                 raise ValueError('no published slice accepted by requested time')
-            # The chain is newest-first, also resolving equal acceptance instants.
-            self.publication = max(eligible, key=lambda item: item[0])[1]
+            self.publication = selected
         if self.publication not in self.chain:
             raise ValueError('slice is not in published history')
         self.receipt = dict(self.chain[self.publication])
@@ -59,6 +66,9 @@ class AtlasReader:
                 self.receipt[field] = rebuilt[field]
         self.records = self._records(self.publication)
         self.graph = GraphStage(url, self.receipt['database'])
+
+    def matching_decision_receipt(self, publication=None):
+        return matching_decision_receipt(self.store, self.chain[publication or self.publication])
 
     def _records(self, publication):
         if publication not in self.chain:
@@ -212,6 +222,7 @@ class AtlasReader:
                     'clarification': '; '.join(questions) if questions else None,
                     'reasons': evaluation['reasons'], 'conflicts': [semantic[rid] for rid in conflicts],
                     'provenance': record['provenance'], 'assessment': evaluation,
+                    'declared_opposition': evaluation['declared_opposition'],
                     'revision_reason': record.get('reason')}
         except (RuntimeError, ValueError, OSError):
             return {**base, 'status': 'technical_error', 'result': None,
@@ -329,7 +340,9 @@ class AtlasReader:
             if record_id in self._visible(records):
                 receipt = self.chain[current]
                 result.append({'publication_commit': current, 'accepted_at': receipt['accepted_at'],
-                               'acceptance_kind': receipt['acceptance_kind'], 'record': records[record_id]})
+                               'acceptance_kind': receipt['acceptance_kind'], 'acceptance_channel': receipt['acceptance_channel'],
+                               'record': records[record_id],
+                               'matching_decision_receipt': self.matching_decision_receipt(current)})
             current = self.chain[current]['previous_publication']
         return result
 

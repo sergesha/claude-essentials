@@ -84,8 +84,8 @@ def compilation_impact(previous, fresh, previous_commit, fresh_commit):
         links = set(old_pages.get(rid, {}).get('links', [])) | set(new_pages.get(rid, {}).get('links', []))
         dependencies[rid] = {'depends_on': sorted(links)}
     changed_sources = {'Record/' + key('source', name)
-                       for name in previous['sources'].keys() | fresh['sources'].keys()
-                       if previous['sources'].get(name) != fresh['sources'].get(name)}
+                       for name in previous.get('sources', {}).keys() | fresh['sources'].keys()
+                       if previous.get('sources', {}).get(name) != fresh['sources'].get(name)}
     wiki_impact = impact(dependencies, changed_sources)
     for rid, detail in wiki_impact.items():
         detail['reason'] = 'source_revision_changed'

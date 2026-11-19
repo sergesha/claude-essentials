@@ -10,6 +10,7 @@ import sys
 
 from ..contracts import JsonObject, StageProfile
 from ..runtime import _assets
+from .. import wiki_mcp
 from .base import ProviderError
 from .config import prepare_request
 
@@ -29,6 +30,7 @@ class CodexProvider:
         adapter_bytes = adapter.read_bytes()
         if stage == 'wiki':
             adapter_bytes += (_assets() / 'wiki-instructions.txt').read_bytes()
+            adapter_bytes += Path(wiki_mcp.__file__).read_bytes()
         execution = {'cli_version': version, 'adapter_sha256': hashlib.sha256(adapter_bytes).hexdigest()}
         expected = profile.identity.get('execution_identity')
         if expected is not None and expected != execution:

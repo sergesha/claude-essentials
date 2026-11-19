@@ -8,6 +8,7 @@ services:
     init: true
     environment:
       KNOWLEDGE_ATLAS_CONFIG: /data/service-config.json
+      KNOWLEDGE_ATLAS_GRAPH_KEY_FILE: /data/graph/admin.key
     volumes:
       - runtime:/runtime
       - data:/data

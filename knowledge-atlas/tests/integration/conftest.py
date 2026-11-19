@@ -32,7 +32,7 @@ def tmp_path(request, tmp_path_factory):
 
 
 @pytest.fixture
-def native_graph(runtime_configuration, tmp_path):
+def native_graph(runtime_configuration, tmp_path, monkeypatch):
     """Launch only this test's pinned native processes; retain pytest artifacts."""
     import json
     import os
@@ -52,6 +52,7 @@ def native_graph(runtime_configuration, tmp_path):
         with socket.socket() as sock:
             sock.bind(('127.0.0.1', 0)); ports.append(sock.getsockname()[1])
     raw_port, bridge_port, graph_port = ports
+    monkeypatch.setenv('KNOWLEDGE_ATLAS_GRAPH_KEY_FILE', str(tmp_path/'graph/admin.key'))
     processes = []; logs = []
     env = {**os.environ, 'PYTHONPATH':str(package/'src'),
            'EMBED_MODEL_PATH':str(runtime/'model'), 'EMBED_PORT':str(raw_port)}

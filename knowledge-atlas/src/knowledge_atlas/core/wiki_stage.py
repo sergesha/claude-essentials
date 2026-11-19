@@ -49,6 +49,8 @@ class WikiStage:
             raise ValueError('recorded_at requires a timezone')
         previous = previous or {}
         records = {s['filename']: dict(s) for s in previous.get('sources', [])}
+        for record in records.values():
+            record.setdefault('recorded_at', previous.get('recorded_at', recorded_at))
         removed_names = list(remove_sources)
         if len(set(removed_names)) != len(removed_names) or any(name not in records for name in removed_names):
             raise ValueError('explicit removal must name distinct existing sources')
@@ -66,10 +68,12 @@ class WikiStage:
             temporal = {k:item[k] if k in item else old.get(k)
                         for k in ('source_time', 'valid_from', 'valid_to')}
             text = raw.decode('utf-8')
-            if (not old or old['content'].encode('utf-8') != raw
-                    or any(old.get(k) != v for k,v in temporal.items())):
+            changed = (not old or old['content'].encode('utf-8') != raw
+                       or any(old.get(k) != v for k,v in temporal.items()))
+            if changed:
                 changed_names.append(path.name)
             records[path.name] = {'filename':path.name, 'content':text,
+                'recorded_at':recorded_at if changed else old['recorded_at'],
                 'sha256':hashlib.sha256(raw).hexdigest(), **temporal,
                 **{key:item.get(key, old.get(key)) for key in ('source_id','name') if key in item or key in old},
                 **({'id':records[path.name]['id']} if path.name in records else {})}
@@ -138,7 +142,7 @@ class WikiStage:
             'removed_sources':removed_names,
             **({'source_removal_instruction': 'The listed removed sources are no longer current. Use native Wiki tools to reconcile the retained pages, summaries and frontmatter against the remaining sources, removing assertions and citations supported only by removed sources. Preserve independent support and uncertainty. Prior source/page versions remain in Git history; do not present removed contributions as current knowledge.'} if removed_names else {}),
             'mcp':{'command':sys.executable,
-                   'args':[str(VENDOR/'mcp/local_server.py'), '--workspace', str(workspace)],
+                   'args':[str(Path(__file__).resolve().parents[1] / 'wiki_mcp.py'), '--workspace', str(workspace)],
                    'env':{'PYTHONPATH':os.pathsep.join([str(VENDOR/'mcp'), str(VENDOR/'shared')]),
                           'LLMWIKI_USER_ID':user_id}}}
         artifacts = workspace/'.llmwiki'/'poc9'
@@ -214,7 +218,7 @@ class WikiStage:
                             'valid_from':item.get('valid_from'), 'valid_to':item.get('valid_to')}
                 doc = await native.create_document(kb_id, path.name, path.name, '/',
                     path.suffix.lstrip('.'), content, ['source'], metadata=metadata)
-                source_records.append({'id':doc['id'], 'filename':path.name, 'content':content,
+                source_records.append({'id':doc['id'], 'filename':path.name, 'content':content, 'recorded_at':recorded_at,
                                        **metadata})
             responses = []
             # Native create derives filenames from titles, not the requested path.

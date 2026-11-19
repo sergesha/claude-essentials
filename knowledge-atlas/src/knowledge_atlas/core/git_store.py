@@ -11,17 +11,18 @@ import re
 import subprocess
 import tempfile
 import uuid
+from ..atomic import write_private
 
 
 def git(repo,*args,binary=False):
     result=subprocess.run(['git','-C',str(repo),*args],capture_output=True)
     if result.returncode:
-        raise ValueError(result.stderr.decode(errors='replace').strip())
+        raise ValueError(f'Git {args[0]} failed (exit {result.returncode})')
     return result.stdout if binary else result.stdout.decode().strip()
 
 
 def _json(path,value):
-    path.write_text(json.dumps(value,ensure_ascii=False,sort_keys=True,indent=2)+'\n')
+    write_private(path,json.dumps(value,ensure_ascii=False,sort_keys=True,indent=2)+'\n')
 
 
 def _repo(path):
@@ -141,7 +142,7 @@ class GitStore:
             git(self.root,'update-index','--add','--cacheinfo','160000,'+commit+','+mount)
             modules[kind]={'package_id':identity,'commit':commit,'mount':mount,'url':url}
         manifest={'package_id':package_id,'status':'candidate','accepted_at':None,
-                  'recorded_at':recorded_at,'modules':modules}
+                  'recorded_at':recorded_at,'modules':modules,'proposal_base_publication':None}
         _json(self.root/'manifest.json',manifest)
         # Replace a previous root-level resolution when compiling new extraction.
         _json(self.root/'relations.json',relations)

@@ -68,7 +68,8 @@ def read_action(context):
                     # Full projection artifacts remain in the Git publication.
                     metadata = {key:value for key,value in reader.chain[current].items()
                                 if key not in ('vector_artifacts','native_export_excluded_ids')}
-                    history.append({'publication_commit':current, **metadata})
+                    history.append({'publication_commit':current, **metadata,
+                                    'matching_decision_receipt':reader.matching_decision_receipt(current)})
                     current = reader.chain[current]['previous_publication']
                 result = {'history':history}
         elif request.action == 'diff':

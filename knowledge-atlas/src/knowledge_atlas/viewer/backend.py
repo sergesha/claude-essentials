@@ -38,6 +38,7 @@ class MCPBackend:
         else:
             command=sys.executable;args=['-m','knowledge_atlas.cli','mcp']
             if self.config:args+=['--config',str(self.config)]
+        args += ['--channel','viewer']
         async with stdio_client(StdioServerParameters(command=command,args=args,env=dict(os.environ))) as (reader,writer):
             async with ClientSession(reader,writer,read_timeout_seconds=timedelta(seconds=900)) as session:
                 await session.initialize();self.session=session;self.ready.set()

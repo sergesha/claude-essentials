@@ -34,10 +34,20 @@ Keep atlas data and service configuration outside the plugin and runtime install
 ## Plugin service and host launch
 
 Install `uv` and Python 3.12, then install this plugin through your host's local
-marketplace workflow. Both manifests launch the bundled `scripts/launch.sh` with
-`sh`. The launcher uses the pinned `uv.lock`; dependencies live under
+marketplace workflow. Prepare the launcher once after installation or a version
+update, using the installed plugin directory:
+
+```sh
+sh /absolute/path/to/knowledge-atlas/scripts/launch.sh prepare-launcher
+```
+
+Both manifests launch the bundled `scripts/launch.sh` with
+`sh`. Preparation uses the pinned `uv.lock`. Dependencies live under
 `${XDG_CACHE_HOME:-~/.cache}/knowledge-atlas`, outside plugin code. An explicitly
 configured `KNOWLEDGE_ATLAS_PYTHON` may select an existing compatible environment.
+A checkout with dependencies installed in `.venv` or a compatible installed
+`knowledge-atlas` command on `PATH` also works. Ordinary launches
+execute the prepared interpreter directly and require no dependency installation.
 The Codex registration uses `cwd: "."` resolved by the installed plugin and a
 relative launcher path. Codex CLI 0.167.0 passed placeholder strings literally
 to `sh` during native qualification, although [OpenAI's desktop MCP packaging guide](https://developers.openai.com/plugins/deploy/desktop-only) documents `${PLUGIN_ROOT}`.
@@ -106,7 +116,13 @@ source-tree scripts.
 
 Run `runtime/native-runtime.py` with `--runtime`, a separate `--state`, `--profile`,
 `--tokenizer`, the bridge URL as `--provider`, and a free `--port`; use `init` once,
-then `serve`. Wait for HTTP 200 from `/api/v1/health` before publication/indexing.
+then `serve`. Initialization writes a private random administrator key to
+`<state>/admin.key`. Set `KNOWLEDGE_ATLAS_GRAPH_KEY_FILE` to its absolute path in
+the environment that starts the Atlas service and any direct graph clients.
+Back up this file with the graph database. On the first `serve` of a 0.3.0 state
+directory, stop existing graph writers first. The launcher changes only the
+offline database's administrator password and saves the new key before serving.
+Wait for HTTP 200 from `/api/v1/health` before publication/indexing.
 `/api/info` can respond while the embedded engine is still initializing.
 Keep the bridge cache bound to the atlas being projected; use separate component
 state/ports for another independently running atlas. Runtime preparation and

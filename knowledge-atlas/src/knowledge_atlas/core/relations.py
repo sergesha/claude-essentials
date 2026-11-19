@@ -227,6 +227,10 @@ def resolve_relations(extraction, model=None, previous=None, *, model_profile=No
     return validate_bundle(result,extraction)
 
 
+class TypeDecisionUnavailable(ValueError):
+    """The selected candidate has no pending question with this ID."""
+
+
 def human_decision(bundle, extraction, decision_id, *, action, actor, reason, type_id=None, model=None):
     """Apply an explicitly supplied human response; caller records the new Git proposal."""
     validate_bundle(bundle,extraction)
@@ -234,10 +238,10 @@ def human_decision(bundle, extraction, decision_id, *, action, actor, reason, ty
         raise ValueError('human actor, reason and accept/reuse/reject required')
     updated=copy.deepcopy(bundle)
     matches=[d for d in updated['decisions'] if d['id']==decision_id and d['extraction_digest']==digest(extraction)]
-    if len(matches)!=1:raise ValueError('one current extension decision required')
+    if len(matches)!=1:raise TypeDecisionUnavailable('one current extension decision required')
     decision=matches[0];rows=[updated['relations'][i] for i in decision['indices']]
     if not rows or any(row['status']!='needs_human' or row.get('decision_id')!=decision_id for row in rows):
-        raise ValueError('decision is not pending human response')
+        raise TypeDecisionUnavailable('decision is not pending human response')
     known={t['id'] for t in updated['catalog']}
     if action=='accept':
         proposal=decision['proposal'];type_id=proposal['id']
@@ -270,7 +274,7 @@ def propose_resolution(store, base, *, actor, recorded_at, base_publication=None
     old=store.read(base)
     previous=old.get('relations')
     if human:
-        if previous is None:raise ValueError('no pending relation decisions')
+        if previous is None:raise TypeDecisionUnavailable('no pending relation decisions')
         bundle=human_decision(previous,old['extraction'],actor=actor,model=model,**human)
     else:
         bundle=resolve_relations(old['extraction'],model=model,previous=previous)

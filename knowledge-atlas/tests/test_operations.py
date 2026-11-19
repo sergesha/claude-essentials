@@ -235,3 +235,71 @@ def test_concurrent_open_cannot_replace_existing_location(tmp_path, monkeypatch)
     with ThreadPoolExecutor(max_workers=2) as pool:
         outcomes = list(pool.map(register, (first, second)))
     assert sorted(outcomes) == ['atlas_conflict', 'registered']
+
+
+def test_mutation_uuid_aliases_preserve_legacy_operation_and_resume(tmp_path):
+    from dataclasses import asdict, replace
+    import hashlib
+    from knowledge_atlas.operations import database, encoded
+
+    service = ServiceContext(tmp_path / 'service')
+    req = request(path=str(tmp_path / 'atlas'))
+    uppercase = replace(req, request_id=req.request_id.upper())
+    operation = submit(service, uppercase)
+    assert json.loads((operation.evidence / 'input.json').read_text())['request']['request_id'] == req.request_id
+    assert submit(service, req) == operation
+    legacy = encoded(asdict(uppercase))
+    with database(service) as db:
+        db.execute('UPDATE operations SET request_id=?,request=?,digest=?,state=? WHERE operation_id=?',
+                   (uppercase.request_id, legacy, hashlib.sha256(legacy.encode()).hexdigest(), 'failed', operation.operation_id))
+    assert submit(service, req).operation_id == operation.operation_id
+    with pytest.raises(AtlasError, match='request_conflict'):
+        submit(service, replace(req, payload={'path': 'different'}))
+    with pytest.raises(AtlasError, match='request_conflict'):
+        resume(service, operation.operation_id, req.request_id)
+    key = str(uuid.uuid4())
+    resumed = resume(service, operation.operation_id, key.upper())
+    with database(service) as db:
+        db.execute('UPDATE resumes SET request_id=? WHERE request_id=?', (key.upper(), key))
+    assert resume(service, operation.operation_id, key) == resumed
+    with pytest.raises(AtlasError, match='request_conflict'):
+        submit(service, replace(req, request_id=key))
+
+
+def test_nested_atlas_rejected_before_writing_inside_existing_worktree(tmp_path):
+    from knowledge_atlas.worker import run_next
+
+    service = ServiceContext(tmp_path / 'service')
+    parent = tmp_path / 'outer'
+    operation = submit(service, request(path=str(parent)))
+    run_next(service)
+    assert inspect_operation(service, operation.operation_id).state == 'succeeded'
+    nested = parent / 'atlas' / 'nested'
+    # A second service has never registered this atlas.
+    fresh = ServiceContext(tmp_path / 'fresh')
+    with pytest.raises(AtlasError, match='nested atlas'):
+        submit(fresh, request(path=str(nested)))
+    assert not nested.exists()
+
+
+def test_bound_atlas_path_guards_reads_mutations_and_queued_workers(tmp_path):
+    from knowledge_atlas.operations import atlas_path, register_atlas
+    from knowledge_atlas.worker import run_next
+
+    service = ServiceContext(tmp_path / 'service')
+    other = tmp_path / 'other'
+    queued = submit(service, request(path=str(other)))
+    register_atlas(service, 'existing', other)
+    bound = tmp_path / 'atlas'
+    service.configuration['atlas_path'] = str(bound)
+    assert atlas_path(service, request(path=str(bound))) == bound
+    for action in ('atlas.create', 'atlas.open', 'archive.restore'):
+        with pytest.raises(AtlasError, match='bound'):
+            atlas_path(service, request(action, path=str(other)))
+    for action in ('atlas.status', 'candidate.decide'):
+        with pytest.raises(AtlasError, match='bound'):
+            atlas_path(service, ActionRequest(action, atlas_id='existing'))
+    run_next(service)
+    failed = inspect_operation(service, queued.operation_id)
+    assert failed.state == 'failed' and failed.error['code'] == 'invalid_location'
+    assert not other.exists()

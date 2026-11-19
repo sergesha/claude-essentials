@@ -3,7 +3,8 @@ from pathlib import Path
 import tempfile
 import unittest
 from knowledge_atlas.core.git_store import GitStore, git
-from knowledge_atlas.core.publication import Publications
+from knowledge_atlas.core.knowledge import propose_records
+from knowledge_atlas.core.publication import Publications, commit_files
 from knowledge_atlas.core.reader import AtlasReader
 from knowledge_atlas.core.graph_stage import records_for
 
@@ -20,10 +21,15 @@ class PublicationTests(unittest.TestCase):
         self.candidate = self.store.snapshot(self.wiki, self.extract, {}, recorded_at='2026-11-09T21:00:00Z')['commit']
         self.pub = Publications(self.store)
 
-    def review(self, base=None, actor='Synthetic reviewer A'):
-        return self.pub.review(self.candidate, {'decision': 'accept', 'actor': actor,
+    def next_candidate(self, publication):
+        return propose_records(self.store, self.pub.read(publication)['content_commit'], [],
+            actor='Fixture', method='Fixture', reason='Reviewed revision',
+            recorded_at='2026-11-10T00:00:00Z', base_publication=publication)
+
+    def review(self, base=None, actor='Synthetic reviewer A', *, candidate=None, when='2026-11-10T00:00:00Z'):
+        return self.pub.review(candidate or self.candidate, {'decision': 'accept', 'actor': actor,
             'kind': 'synthetic', 'reason': 'Lifecycle exercise only, not human practical acceptance',
-            'accepted_at': '2026-11-10T00:00:00Z', 'base_publication': base},
+            'accepted_at': when, 'base_publication': base},
             json.loads((ROOT / 'embedding-profile.json').read_text()))
 
     @staticmethod
@@ -65,7 +71,7 @@ class PublicationTests(unittest.TestCase):
         first_content = self.review()
         first = self.pub.publish(first_content, self.projection)
         self.assertEqual(self.pub.ready(), first)
-        second_content = self.review(first)
+        second_content = self.review(first, candidate=self.next_candidate(first))
         def interrupted(_):
             raise RuntimeError('projection interrupted')
         with self.assertRaisesRegex(RuntimeError, 'interrupted'):
@@ -107,7 +113,8 @@ class PublicationTests(unittest.TestCase):
         profile = json.loads((ROOT / 'embedding-profile.json').read_text())
         publications = []
         for when in ('2026-03-10T10:00:00Z', '2026-04-20T10:00:00Z'):
-            content = self.pub.review(self.candidate, {'decision': 'accept', 'actor': 'Synthetic time reviewer',
+            candidate = self.next_candidate(self.pub.ready()) if self.pub.ready() else self.candidate
+            content = self.pub.review(candidate, {'decision': 'accept', 'actor': 'Synthetic time reviewer',
                 'kind': 'synthetic', 'reason': 'Imported fixture axis, not server clock',
                 'accepted_at': when, 'base_publication': self.pub.ready()}, profile)
             publications.append(self.pub.publish(content, lambda c: {**self.projection(c), 'database': 'admin/test-only'}))
@@ -128,3 +135,68 @@ class PublicationTests(unittest.TestCase):
         allowed.remove(source)
         self.assertIsNone(old.retrieve_evidence(source))
         self.assertEqual(self.pub.ready(), publications[1])
+
+
+    def test_first_native_candidate_cannot_replace_later_ready(self):
+        import asyncio
+        from knowledge_atlas.core.ingest import ingest
+        initial = asyncio.run(ingest(self.store, Path(self.tmp.name) / 'native', [],
+            recorded_at='2026-11-09T21:00:00Z', resume_wiki=self.wiki,
+            resume_extraction={'entities': [], 'statements': []}, model=self.fail))['candidate']['commit']
+        first = self.pub.publish(self.review(candidate=initial), self.projection)
+        second = self.pub.publish(self.review(first, candidate=self.next_candidate(first)), self.projection)
+        with self.assertRaisesRegex(ValueError, 'stale proposal'):
+            self.review(second, candidate=initial)
+        self.assertEqual(self.pub.ready(), second)
+        self.assertIsNone(self.store.read(initial)['manifest']['proposal_base_publication'])
+
+    def test_legacy_unbound_candidate_requires_a_new_proposal(self):
+        manifest = self.store.read(self.candidate)['manifest']
+        manifest.pop('proposal_base_publication', None)
+        legacy = commit_files(self.store.root, self.candidate, {'manifest.json': manifest},
+                              [self.candidate], 'Fixture: legacy candidate')
+        with self.assertRaisesRegex(ValueError, 'stale proposal'):
+            self.review(candidate=legacy)
+        self.assertIsNone(self.pub.ready())
+        first = self.pub.publish(self.review(), self.projection)
+        with self.assertRaisesRegex(ValueError, 'stale proposal'):
+            self.review(first, candidate=legacy)
+        self.assertEqual(self.pub.ready(), first)
+
+    def test_channel_is_preserved_and_pre_channel_publications_remain_readable(self):
+        profile = json.loads((ROOT / 'embedding-profile.json').read_text())
+        decision = {'decision':'accept', 'actor':'Fixture', 'kind':'synthetic', 'reason':'Channel test',
+                    'attribution_channel':'mcp', 'base_publication':None, 'accepted_at':'2026-11-10T00:00:00Z'}
+        content = self.pub.review(self.candidate, decision, profile)
+        current = self.pub.publish(content, self.projection)
+        receipt = self.pub.read(current)
+        self.assertEqual(receipt['acceptance_channel'], 'mcp')
+        del receipt['acceptance_channel']
+        legacy = commit_files(self.store.root, current, {'publication.json':receipt}, [content], 'Legacy receipt')
+        self.assertEqual(self.pub.read(legacy)['acceptance_channel'], 'unrecorded')
+
+    def test_acceptance_order_compares_instants_and_rechecks_pending_content(self):
+        first = self.pub.publish(self.review(), self.projection)
+        candidate = self.next_candidate(first)
+        before = '2026-11-10T00:59:59+01:00'
+        with self.assertRaisesRegex(ValueError, 'accepted_at'):
+            self.review(first, candidate=candidate, when=before)
+        equal = self.review(first, candidate=candidate, when='2026-11-10T01:00:00+01:00')
+        review = json.loads(git(self.store.root, 'show', equal + ':review.json'))
+        legacy = commit_files(self.store.root, equal, {'review.json': {**review, 'accepted_at': before}},
+                              [equal], 'Fixture: previously reviewed out of order')
+        with self.assertRaisesRegex(ValueError, 'accepted_at'):
+            self.pub.publish(legacy, lambda _: self.fail('Must reject before building'))
+        self.assertEqual(self.pub.ready(), first)
+        receipt = lambda c: {**self.projection(c), 'database': 'admin/fixture'}
+        second = self.pub.publish(equal, receipt)
+        reader = lambda **kw: AtlasReader(self.store, 'http://unused.invalid', set, **kw)
+        self.assertEqual(reader(as_known_at='2026-11-10T00:00:00Z').publication, second)
+        old = {**self.pub.read(second), 'accepted_at': before}
+        broken = commit_files(self.store.root, second, {'publication.json': old},
+                              [first, equal], 'Fixture: pre-upgrade publication')
+        git(self.store.root, 'update-ref', self.pub.ref, broken, second)
+        with self.assertRaisesRegex(ValueError, 'accepted_at'):
+            reader(as_known_at=before)
+        self.assertEqual(reader().publication, broken)
+        self.assertEqual(reader(publication=broken).publication, broken)

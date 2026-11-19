@@ -9,6 +9,8 @@ The supported initial CPU target is ARM64 on macOS or Linux. Do not enable
 Rosetta, force x86 emulation, use privileged mode or mount the Docker socket.
 The image includes the qualified toolchain and Codex 0.167.0 / Claude 2.1.319;
 provider authentication and runtime preparation are separate from image build.
+The image runs as Ubuntu's unprivileged `ubuntu` user (UID/GID 1000).
+New named volumes inherit writable ownership from the image.
 
 From the repository root, choose one project name per atlas:
 
@@ -91,7 +93,7 @@ atlas_compose cp atlas:/data/exports/atlas.zip ./atlas.zip
 ```
 
 Canonical export/restore remains the existing Atlas API contract. Restore into
-an unused atlas path in another project; do not overwrite an existing atlas.
+`/data/atlas` in an unused project; do not overwrite an existing atlas.
 No arbitrary host directory is shared automatically.
 
 Python/HTTP callers execute inside the container, preserving loopback binding.
@@ -103,14 +105,17 @@ atlas_compose exec -T atlas /opt/knowledge-atlas/.venv/bin/python -c 'from pathl
 
 Other local HTTP programs inside the container obtain the endpoint from
 `/data/service/discovery.json` and bearer token from the owner-only
-`/data/service/token` file as described in [the API](../docs/api.md). Do not print
+`/data/service/token` file. Verify the service on the same connection before sending
+the token, following [the local API handshake](../docs/api.md#shared-http-python-and-mcp-interfaces). Do not print
 or place the token in a URL. There is no host-facing HTTP port in this recipe.
 
 ## Browse and review locally
 
-After the atlas exists, launch the [viewer](../docs/viewer.md) from the host:
+After the atlas exists, prepare the host viewer dependencies once, then launch
+the [viewer](../docs/viewer.md) from the host:
 
 ```sh
+sh /absolute/path/to/knowledge-atlas/scripts/launch.sh prepare-launcher
 sh /absolute/path/to/knowledge-atlas/scripts/launch.sh view --atlas /data/atlas --docker-project atlas
 ```
 
@@ -177,13 +182,38 @@ container layer, but is not a backup and is not automatically disposable.
 
 Only verified derived indexes and temporary files are disposable. Do not equate
 re-running Wiki/Utopia/LLM extraction with restoring the same accepted version.
-The prepared Python environment can reference an interpreter under
-`/auth/.local/share/uv/python`; retain that dependency alongside `/runtime`.
-Preserving only a runtime volume does not prove that it is independently usable.
+The image supplies the pinned Python interpreter under `/opt/uv/python`.
+Runtime packages remain in `/runtime/python`. Replacing the provider login
+volume no longer removes the runtime interpreter; retain that volume for login
+state. The graph's administrator key lives in `/data/graph/admin.key`. Keep it
+private and include it in a full backup of graph state.
+
+### Upgrading a 0.3.0 deployment
+
+Drain accepted operations, stop all writers, and back up the persistent volumes
+and any bind mounts. Build the new image using the existing project name.
+Earlier images wrote root-owned files. For the original named-volume layout,
+transfer ownership once, while the deployment is stopped:
+
+```sh
+atlas_compose stop
+atlas_compose build
+atlas_compose run --rm --no-deps --user 0 atlas exec find /runtime /data /auth -xdev -uid 0 -exec chown -h 1000:1000 '{}' +
+atlas_compose up -d --wait --wait-timeout 150
+```
+
+For bind mounts, give UID 1000 access to the intended host paths through their
+host ownership or ACLs before starting. Include separately mounted atlas paths.
+Startup rebinds the old virtual environment to the identical Python build in
+the image, validates the runtime, and rotates the legacy database's admin
+password offline. Existing publications, indexes, provider login, and native
+packages stay on their original volumes. Confirm that status returns the
+expected READY and that an exact historical publication is readable before
+retiring the backup.
 
 For a **new deployment**, choose either override below. Keep the same Compose
 project name and the same override on subsequent management commands. Required
-host directories must already exist. No mounts expose arbitrary host paths.
+host directories must already exist and be writable by UID 1000. No mounts expose arbitrary host paths.
 
 **All application data on the host**, including Git, TerminusDB and operation
 state; runtime and authentication remain in their named volumes:
@@ -235,7 +265,6 @@ its mounted contents. Drain operations and stop all writers before filesystem
 copying; do not copy a live database directory as a purported consistent backup.
 Use an archive tool that preserves hidden files, ownership and permissions; keep
 credential-bearing backups private and outside Docker's storage. Preserve the
-runtime too when avoiding rebuilds or retaining its interpreter dependency is
-required. Restore into an isolated deployment and verify before replacing the
+runtime too when avoiding rebuilds is required. Restore into an isolated deployment and verify before replacing the
 original. These instructions do not claim a full stopped-state restore has been
 qualified; canonical export/restore evidence is documented separately.

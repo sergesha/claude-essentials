@@ -66,6 +66,10 @@ def test_stale_accept_preserves_winner(tmp_path, candidate, monkeypatch):
     with pytest.raises(AtlasError,match='stale_publication'):
         decide_candidate(context_for(tmp_path,store,oid,'accept'))
     assert Publications(store).ready()==current
+    with pytest.raises(AtlasError) as stale:
+        decide_candidate(context_for(tmp_path,store,oid,'accept',current))
+    assert stale.value.code == 'stale_proposal' and stale.value.status == 409
+    assert Publications(store).ready()==current
 
 
 def test_lost_ack_resume_reuses_decision(tmp_path, candidate, monkeypatch):
@@ -90,7 +94,10 @@ def test_failed_projection_keeps_previous_ready(tmp_path, candidate, monkeypatch
     first=decide_candidate(context_for(tmp_path,store,oid,'accept'))
     def failed(*_): raise RuntimeError('controlled projection failure')
     monkeypatch.setattr(decisions,'build_projection',failed)
-    second=decide_candidate(context_for(tmp_path,store,oid,'accept',first.publication))
+    from knowledge_atlas.core.knowledge import propose_records
+    revision = propose_records(store, first.data['accepted_content'], [], actor='Fixture', method='Fixture',
+        reason='New revision', recorded_at='2026-11-13T01:00:00Z', base_publication=first.publication)
+    second=decide_candidate(context_for(tmp_path,store,revision,'accept',first.publication))
     assert second.data['accepted_content']
     assert second.data['status']=='accepted_pending_publication'
     assert second.data['publication_error']
@@ -178,3 +185,115 @@ def test_operation_can_resume_accepted_pending_publication(tmp_path, candidate, 
     assert finished.result.data['accepted_content'] == original_content
     assert finished.result.data['decision_commit'] == pending.result.data['decision_commit']
     assert finished.attempt == 2
+
+
+def test_decisions_skip_unrelated_closure_validation_and_match_selected_publication(tmp_path, candidate, monkeypatch):
+    from knowledge_atlas.actions import decisions
+    from knowledge_atlas.actions.atlas import atlas_status
+    from knowledge_atlas.actions.reads import read_action
+    from knowledge_atlas.core.git_store import GitStore
+    store, oid = candidate
+    git(store.root, 'update-ref', 'refs/poc9/proposals/'+oid, oid)
+    previous = decide_candidate(context_for(tmp_path,store,oid))
+    reject_oid = previous.data['decision_commit']
+    real_read = GitStore.read
+    def targeted_read(self, commit):
+        assert commit != reject_oid, 'unrelated decision was fully revalidated'
+        return real_read(self, commit)
+    context = context_for(tmp_path,store,oid,'accept')
+    with monkeypatch.context() as local:
+        local.setattr(GitStore, 'read', targeted_read)
+        local.setattr(decisions,'build_projection',lambda ctx,c:{**projection(c), 'database':'admin/fixture'})
+        accepted = decide_candidate(context)
+    assert accepted.publication
+    status = atlas_status(context).data
+    assert status['candidate_statuses'][oid] == 'accepted'
+    assert status['matching_decision_receipt'] is True
+    history_context = replace(context, request=ActionRequest('history'))
+    assert read_action(history_context).data['history'][0]['matching_decision_receipt'] is True
+    git(store.root,'update-ref','-d', decisions.DECISIONS + context.request.request_id)
+    assert atlas_status(context).data['matching_decision_receipt'] is False
+    assert read_action(history_context).data['history'][0]['matching_decision_receipt'] is False
+
+
+def test_new_decision_can_reconsider_rejection_on_the_same_base(tmp_path, candidate, monkeypatch):
+    from knowledge_atlas.actions.decisions import decision_inventory
+    store, oid = candidate
+    rejected = decide_candidate(context_for(tmp_path, store, oid))
+    accepted = context_for(tmp_path, store, oid, 'accept')
+    accepted = replace(accepted, configuration={'attribution_channel':'viewer'})
+    monkeypatch.setattr('knowledge_atlas.actions.decisions.build_projection', lambda ctx, content: projection(content))
+    published = decide_candidate(accepted)
+    assert rejected.data['status'] == 'rejected'
+    assert published.data['status'] == 'published'
+    assert Publications(store).read(published.publication)['acceptance_channel'] == 'viewer'
+    assert {entry['receipt']['action'] for entry in decision_inventory(store)} == {'reject','accept'}
+
+
+@pytest.mark.parametrize(('spelling','first_channel','action'), [
+    ('uppercase', None, 'accept'), ('compact', None, 'reject'), ('canonical', 'http', 'reject')])
+def test_git_only_decision_replay_preserves_uuid_channel_and_effect(tmp_path, candidate, monkeypatch,
+                                                                    spelling, first_channel, action):
+    from knowledge_atlas.actions import decisions
+    from knowledge_atlas.operations import register_atlas, submit, inspect_operation
+    from knowledge_atlas.worker import run_next
+    store, oid = candidate
+    ctx = context_for(tmp_path,store,oid,action)
+    atlas_id = store.read(oid)['manifest']['package_id']
+    uid = uuid.UUID('abcd7890-e25a-4a4f-9016-928b61f0bead')
+    old_id = {'uppercase':str(uid).upper(), 'compact':uid.hex, 'canonical':str(uid)}[spelling]
+    old_request = replace(ctx.request, atlas_id=atlas_id, request_id=old_id)
+    config = {'attribution_channel':first_channel} if first_channel else {}
+    monkeypatch.setattr(decisions,'build_projection',lambda ctx,c:projection(c))
+    original = decide_candidate(replace(ctx,request=old_request,configuration=config))
+    receipt = original.data['decision']
+    assert receipt['decision_id'] == old_id
+    old_refs = git(store.root,'for-each-ref','--format=%(refname) %(objectname)',decisions.DECISIONS)
+
+    def with_empty_service(name, request):
+        service = ServiceContext(tmp_path/name, configuration={'attribution_channel':'mcp'})
+        register_atlas(service, atlas_id, store.base)
+        queued = submit(service, request)
+        run_next(service)
+        return inspect_operation(service, queued.operation_id)
+
+    replay_request = replace(old_request, request_id=str(uid))
+    replay = with_empty_service('restored', replay_request)
+    assert replay.error is None and replay.result.data['decision_commit'] == original.data['decision_commit']
+    assert replay.result.data['decision'] == receipt
+    assert replay.result.publication == original.publication
+    changed = replace(replay_request, payload={**replay_request.payload, 'reason':'Changed reason'})
+    assert with_empty_service('changed', changed).error['code'] == 'request_conflict'
+    digest_only = replace(replay_request, valid_at='2026-11-12T00:00:00Z')
+    assert with_empty_service('changed-selection', digest_only).error['code'] == 'request_conflict'
+    assert git(store.root,'for-each-ref','--format=%(refname) %(objectname)',decisions.DECISIONS) == old_refs
+
+
+def test_recovery_from_legacy_accepted_effect_preserves_attribution(tmp_path, candidate, monkeypatch):
+    from knowledge_atlas.actions import decisions
+    store, oid = candidate
+    ctx = context_for(tmp_path,store,oid,'accept')
+    ctx = replace(ctx,request=replace(ctx.request,request_id=ctx.request.request_id.upper()))
+    monkeypatch.setattr(decisions,'build_projection',lambda ctx,c:projection(c))
+    original = decide_candidate(ctx)
+    git(store.root,'update-ref','-d', decisions.DECISIONS + ctx.request.request_id)
+    retry = replace(ctx,request=replace(ctx.request,request_id=ctx.request.request_id.lower()),
+                    configuration={'attribution_channel':'mcp'},previous_evidence=ctx.evidence)
+    replay = reconcile_decision(retry)
+    assert replay is not None and replay.data['decision'] == original.data['decision']
+    assert replay.data['accepted_content'] == original.data['accepted_content']
+
+
+def test_distinct_legacy_receipts_with_equivalent_uuids_require_inspection(tmp_path, candidate):
+    from knowledge_atlas.actions import decisions
+    from knowledge_atlas.core.publication import commit_files
+    store, oid = candidate
+    ctx = context_for(tmp_path, store, oid)
+    original = decide_candidate(ctx)
+    alias = '{' + ctx.request.request_id.replace('-', '').upper() + '}'
+    receipt = {**original.data['decision'], 'decision_id':alias}
+    alias_oid = commit_files(store.root, oid, {'atlas-decision.json':receipt}, [oid], 'Legacy duplicate receipt')
+    git(store.root, 'update-ref', decisions.DECISIONS + alias, alias_oid)
+    with pytest.raises(AtlasError) as conflict:
+        decide_candidate(ctx)
+    assert conflict.value.code == 'request_conflict'

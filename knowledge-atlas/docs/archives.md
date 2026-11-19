@@ -3,7 +3,13 @@
 `archive.export` writes a new ZIP at payload `path`, using the registered atlas
 and its current `expected_publication`. `archive.restore` takes payload `archive`
 and an unused destination `path`. Both are durable worker operations. Submission
-retains a private copy of restore input bytes in attempt evidence.
+retains a private copy of restore input bytes in attempt evidence. Use a regular
+file with a single hard link outside service and atlas directories, for example `/data/exports/atlas.zip`
+in Docker. Keep the compressed file within 512 MiB. The restore limits are
+1,024 ZIP entries, 512 KiB of central directory metadata, 256 MiB per member,
+8 MiB for `archive.json`, and 1 GiB across all expanded members including the
+manifest. Each filename must occur once, and the hash inventory must match the
+package bundles and runtime assets. Export checks the same limits before making the destination file visible.
 
 Format 2 extends PoC9's Git bundles and hashed runtime assets with a versioned
 inventory of canonical acceptance, rejection and revision receipts. Receipt
