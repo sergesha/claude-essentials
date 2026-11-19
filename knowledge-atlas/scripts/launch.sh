@@ -10,6 +10,6 @@ if [ -n "${KNOWLEDGE_ATLAS_PYTHON:-}" ]; then
   exec "$KNOWLEDGE_ATLAS_PYTHON" -m knowledge_atlas.cli "$@"
 fi
 atlas_cache_root=${XDG_CACHE_HOME:-$HOME/.cache}/knowledge-atlas
-atlas_plugin_version="0.2.0" # x-release-please-version
+atlas_plugin_version="0.3.0" # x-release-please-version
 export UV_PROJECT_ENVIRONMENT="$atlas_cache_root/python-$atlas_plugin_version"
 exec uv run --project "$atlas_plugin_root" --locked --no-dev --python 3.12 python -m knowledge_atlas.cli "$@"

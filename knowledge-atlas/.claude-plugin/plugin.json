@@ -1,6 +1,6 @@
 {
   "name": "knowledge-atlas",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Reviewed, versioned knowledge with portable history and package composition.",
   "author": {
     "name": "sergesha"
