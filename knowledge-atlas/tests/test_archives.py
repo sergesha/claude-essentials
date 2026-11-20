@@ -174,3 +174,151 @@ def test_submitted_restore_freezes_archive_bytes(portable,tmp_path):
     path.write_bytes(b'changed after submission')
     assert (operation.evidence/'archive.zip').read_bytes()==original
     assert submit(service,request).operation_id==operation.operation_id
+
+
+@pytest.mark.parametrize('limit,value,match', [
+    ('MAX_ARCHIVE_ENTRIES', 1, 'directory'),
+    ('MAX_DIRECTORY_BYTES', 32, 'directory'),
+    ('MAX_MANIFEST_BYTES', 3, 'size limit'),
+    ('MAX_MEMBER_BYTES', 80, 'size limit'),
+    ('MAX_EXPANDED_BYTES', 140, 'size limit'),
+])
+def test_archive_inventory_limits(tmp_path, monkeypatch, limit, value, match):
+    from knowledge_atlas.core import archive as codec
+
+    path = tmp_path / 'fixture.zip'
+    content = b'ordinary fixture text' * 5
+    manifest = {'format': 1, 'sha256': {'notes.txt': hashlib.sha256(content).hexdigest()}}
+    with zipfile.ZipFile(path, 'w') as output:
+        output.writestr('notes.txt', content)
+        output.writestr('archive.json', json.dumps(manifest))
+    monkeypatch.setattr(codec, limit, value)
+    with pytest.raises(ValueError, match=match):
+        restore_atlas(path, tmp_path / 'restored')
+    assert not (tmp_path / 'restored').exists()
+
+
+@pytest.mark.parametrize('extra', ['archive.json', 'notes.txt', 'other.txt'])
+def test_archive_inventory_requires_unique_exact_names(tmp_path, extra):
+    path = tmp_path / 'fixture.zip'
+    with zipfile.ZipFile(path, 'w') as output:
+        output.writestr('archive.json', json.dumps({'format': 1, 'sha256': {'notes.txt': ''}}))
+        output.writestr('notes.txt', 'ordinary fixture')
+        if extra in ('archive.json', 'notes.txt'):
+            with pytest.warns(UserWarning, match='Duplicate'):
+                output.writestr(extra, '')
+        else:
+            output.writestr(extra, '')
+    with pytest.raises(ValueError, match='duplicate|inventory mismatch'):
+        restore_atlas(path, tmp_path / 'restored')
+    assert not (tmp_path / 'restored').exists()
+
+
+def test_copy_limit_applies_as_bytes_arrive(monkeypatch):
+    import io
+    from knowledge_atlas.core import archive as codec
+
+    monkeypatch.setattr(codec, 'COPY_CHUNK_BYTES', 3)
+    target = io.BytesIO()
+    with pytest.raises(ValueError, match='byte limit'):
+        codec.copy_bounded(io.BytesIO(b'abcdefg'), target, 6)
+    assert target.getvalue() == b'abcdef'
+
+
+@pytest.mark.parametrize('kind', ['service', 'alias', 'hardlink', 'atlas', 'directory', 'size'])
+def test_restore_refuses_unsuitable_inputs_without_attempt(tmp_path, monkeypatch, kind):
+    from knowledge_atlas.contracts import ActionRequest, AtlasError, ServiceContext
+    from knowledge_atlas.core import archive as codec
+    from knowledge_atlas.operations import database, register_atlas, submit
+
+    service = ServiceContext(tmp_path / 'service')
+    atlas = tmp_path / 'registered'
+    atlas.mkdir()
+    register_atlas(service, 'fixture', atlas)
+    path = tmp_path / 'notes'
+    if kind == 'directory':
+        path.mkdir()
+    elif kind == 'service':
+        path = service.service_root / 'private-notes'
+        path.write_text('fixture')
+    elif kind in ('alias', 'hardlink'):
+        original = service.service_root / 'private-notes'
+        original.write_text('fixture')
+        if kind == 'alias':
+            path.symlink_to(original)
+        else:
+            path.hardlink_to(original)
+    elif kind == 'atlas':
+        path = atlas / 'notes'
+        path.write_text('fixture')
+    else:
+        path.write_text('fixture')
+        monkeypatch.setattr(codec, 'MAX_ARCHIVE_BYTES', 3)
+    req = ActionRequest('archive.restore', request_id=str(uuid.uuid4()),
+                        payload={'archive': str(path), 'path': str(tmp_path / 'restored')})
+    with pytest.raises(AtlasError) as error:
+        submit(service, req)
+    assert error.value.code == 'invalid_archive'
+    with database(service) as db:
+        assert db.execute('SELECT count(*) FROM operations').fetchone()[0] == 0
+    assert list((service.service_root / 'attempts').iterdir()) == []
+
+
+def test_concurrent_restore_stages_outside_transaction(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    import sqlite3
+    from threading import Barrier
+    from knowledge_atlas import operations
+    from knowledge_atlas.contracts import ActionRequest, ServiceContext
+
+    source = tmp_path / 'exports' / 'fixture.zip'
+    source.parent.mkdir()
+    source.write_bytes(b'ordinary staged bytes')
+    service = ServiceContext(tmp_path / 'service')
+    with operations.database(service):
+        pass
+    request = ActionRequest('archive.restore', request_id=str(uuid.uuid4()),
+                            payload={'archive': str(source), 'path': str(tmp_path / 'restored')})
+    stage = operations._stage_archive
+    together = Barrier(2)
+
+    def check(service, req, evidence):
+        together.wait(timeout=5)
+        with sqlite3.connect(service.service_root / 'operations.sqlite3', timeout=1) as other:
+            other.execute('BEGIN IMMEDIATE')
+        stage(service, req, evidence)
+
+    monkeypatch.setattr(operations, '_stage_archive', check)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first, second = pool.map(lambda _: operations.submit(service, request), range(2))
+    assert first.operation_id == second.operation_id
+    assert list((service.service_root / 'attempts').iterdir()) == [first.evidence.parent]
+    assert (first.evidence / 'archive.zip').read_bytes() == source.read_bytes()
+
+
+@pytest.mark.parametrize('limit', ['MAX_ARCHIVE_BYTES', 'MAX_ARCHIVE_ENTRIES', 'MAX_MEMBER_BYTES',
+                                   'MAX_EXPANDED_BYTES', 'MAX_MANIFEST_BYTES', 'MAX_DIRECTORY_BYTES'])
+def test_export_limits_leave_no_unrestorable_file(portable, tmp_path, monkeypatch, limit):
+    from knowledge_atlas.core import archive as codec
+
+    monkeypatch.setattr(codec, limit, 1)
+    path = tmp_path / 'export.zip'
+    with pytest.raises(ValueError, match='limit|too many'):
+        archive(portable, path)
+    assert not path.exists()
+
+
+def test_full_inventory_preserves_legacy_mixed_case_ref_order(portable, tmp_path):
+    store, _, _, publication, _, _ = portable
+    content = Publications(store).read(publication)['content_commit']
+    candidate = propose_records(store, content, [], actor='Fixture', method='Review', reason='Archive',
+                                recorded_at='2026-11-13T02:00:00Z', base_publication=publication)
+    ids = ['BBBBBBBB-0000-4000-8000-000000000001', 'aaaaaaaa-0000-4000-8000-000000000002']
+    for identifier in ids:
+        ctx = context_for(tmp_path, store, candidate, 'reject', publication)
+        decide_candidate(replace(ctx, request=replace(ctx.request, request_id=identifier)))
+    assert [e['receipt']['decision_id'] for e in decision_inventory(store)] == ids
+    path = tmp_path/'mixed-case.zip'
+    archive(portable, path)
+    restored = restore_atlas(path, tmp_path/'restored')
+    assert [e['receipt']['decision_id'] for e in decision_inventory(restored)] == ids

@@ -81,3 +81,19 @@ def test_claude_wiki_retains_native_mcp_and_completion(tmp_path, monkeypatch):
     assert 'source-a' in invocation['input']
     assert '/runtime/python' not in invocation['input']
     assert '--bare' not in args
+
+
+def test_wiki_mcp_advertises_only_registered_authoring_handlers():
+    import asyncio
+    from mcp.server.fastmcp import FastMCP
+    from knowledge_atlas.wiki_mcp import WIKI_TOOLS, restrict_tools
+
+    server = FastMCP('fixture')
+    for name in (*WIKI_TOOLS, 'administrative_fixture'):
+        server.add_tool(lambda: 'fixture result', name=name)
+
+    async def inventory():
+        await restrict_tools(server)
+        return [tool.name for tool in await server.list_tools()]
+
+    assert set(asyncio.run(inventory())) == set(WIKI_TOOLS)

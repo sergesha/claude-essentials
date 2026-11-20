@@ -8,11 +8,9 @@ import subprocess
 
 from ..contracts import JsonObject, StageProfile
 from ..runtime import _assets
+from .. import wiki_mcp
 from .base import ProviderError
 from .config import prepare_request
-
-WIKI_TOOLS = ('guide', 'search', 'read', 'create', 'edit', 'append', 'lint')
-
 
 class ClaudeProvider:
     def __init__(self, executable: str = 'claude'):
@@ -28,6 +26,7 @@ class ClaudeProvider:
         adapter = Path(__file__).read_bytes()
         if stage == 'wiki':
             adapter += (_assets() / 'wiki-instructions.txt').read_bytes()
+            adapter += Path(wiki_mcp.__file__).read_bytes()
         execution = {'cli_version': version, 'adapter_sha256': hashlib.sha256(adapter).hexdigest()}
         expected = profile.identity.get('execution_identity')
         if expected is not None and expected != execution:
@@ -56,7 +55,7 @@ class ClaudeProvider:
         native_messages = prepared.get('messages')
         if stage == 'wiki':
             mcp['mcpServers']['wiki'] = {key: prepared['mcp'][key] for key in ('command', 'args', 'env') if key in prepared['mcp']}
-            command += ['--allowedTools', ','.join('mcp__wiki__' + name for name in WIKI_TOOLS)]
+            command += ['--allowedTools', ','.join('mcp__wiki__' + name for name in wiki_mcp.WIKI_TOOLS)]
             prompt = (_assets() / 'wiki-instructions.txt').read_text() + json.dumps(
                 {key: value for key, value in prepared.items() if key not in {'mcp', 'workspace'}}, ensure_ascii=False)
             command += ['--json-schema', json.dumps({'type':'object','properties':

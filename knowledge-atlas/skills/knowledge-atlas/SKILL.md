@@ -36,7 +36,10 @@ atlas/publication selectors exposed by the schema.
    provenance, unknown conditions and conflicts. Ranking scores are retrieval
    scores. Technical failure is not absence of knowledge. Use `as_known_at`
    for acceptance history and `valid_at` for applicability; unknown validity
-   stays unknown.
+   stays unknown. Apply structured knowledge entries from reviewed revisions,
+   feedback or composed packages. A `retrieval_only` source, wiki page or
+   extracted statement can supply evidence. When answering questions, report
+   partial or insufficient coverage even if retrieval returned citations.
 
 ## Follow-up actions
 

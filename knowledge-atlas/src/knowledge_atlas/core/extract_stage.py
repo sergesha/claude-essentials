@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
+from .extraction_passage import extraction_passage
 from .extract_codec import CODEC_VERSION, COLLECTIONS, prepare_update_request, expand_statement_references
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -70,17 +71,15 @@ def extract_wiki(wiki, model, *, previous=None, previous_wiki=None, model_profil
     binary=Path(os.environ.get('POC9_EXTRACT_BIN',str(ROOT/'extract/target/debug/poc9-extract')))
     contract={'model_profile':copy.deepcopy(model_profile),
               'native_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),
-              'codec_version':CODEC_VERSION}
+              'codec_version':CODEC_VERSION, 'passage_version':1}
     def digest(value):
         return hashlib.sha256(json.dumps(value,sort_keys=True,ensure_ascii=False,separators=(',',':')).encode()).hexdigest()
-    retained={}
-    if model_profile is not None:
-        for trace in (previous or {}).get('model_calls',[]):
-            if (trace.get('filename') and isinstance(trace.get('native_response'),str)
-                    and trace.get('cache_contract')==contract and not trace.get('error')):
-                retained[trace['filename']]=trace
+    previous_calls = {trace['filename']: trace for trace in (previous or {}).get('model_calls', [])
+                      if trace.get('filename')}
     jobs=[]
-    for filename,text in wiki.items():
+    previous_passages = {name: extraction_passage(text) for name, text in (previous_wiki or {}).items()}
+    for filename,markdown in wiki.items():
+        text = extraction_passage(markdown)
         request={'operation':'open','messages':native('prepare',{'filename':filename,'text':text})}
         key=digest({'filename':filename,'request':request,**contract})
         jobs.append((filename,text,request,key))
@@ -90,19 +89,29 @@ def extract_wiki(wiki, model, *, previous=None, previous_wiki=None, model_profil
         trace={'page_request':copy.deepcopy(page_request),'filename':filename,'cache_key':key,
                'cache_contract':copy.deepcopy(contract),'reused':False,'mode':'full'}
         try:
-            old=retained.get(filename);parsed=None;baseline=None
-            if old:
+            old=previous_calls.get(filename);parsed=None;baseline=None
+            if model_profile is None:
+                trace['cache_reason'] = 'reuse_disabled'
+            elif old is None:
+                trace['cache_reason'] = 'no_previous_page'
+            elif old.get('cache_contract') != contract:
+                trace['cache_reason'] = 'contract_changed'
+            elif old.get('error') or not isinstance(old.get('native_response'), str):
+                trace['cache_reason'] = 'previous_response_unavailable'
+            else:
+                trace['cache_reason'] = 'previous_response_incomplete'
                 try:
                     candidate=native('parse',old['native_response'])
                     if candidate['skipped']==0 and not candidate['truncated']:
+                        trace['cache_reason'] = 'page_request_changed'
                         if old.get('cache_key')==key and old.get('page_request')==page_request:
                             parsed=candidate
                             for field in ('request','request_sha256','response','native_response'):
                                 trace[field]=copy.deepcopy(old[field])
-                            trace.update(reused=True,reused_from=key,mode='reused')
-                        elif filename in (previous_wiki or {}) and previous_wiki[filename]!=text:
+                            trace.update(reused=True,reused_from=key,mode='reused',cache_reason='exact_match')
+                        elif filename in previous_passages and previous_passages[filename]!=text:
                             old_request={'operation':'open','messages':native('prepare',{
-                                'filename':filename,'text':previous_wiki[filename]})}
+                                'filename':filename,'text':previous_passages[filename]})}
                             if (old.get('page_request')==old_request and old.get('cache_key')==
                                     digest({'filename':filename,'request':old_request,**contract})):
                                 raw=json.loads(old['native_response'])
@@ -111,11 +120,12 @@ def extract_wiki(wiki, model, *, previous=None, previous_wiki=None, model_profil
                                                 all(isinstance(r,list) for r in raw[k]) for k in COLLECTIONS)):
                                     baseline=raw
                 except (ValueError,RuntimeError,OSError,KeyError):
-                    parsed=None;baseline=None  # Unusable previous result is a miss.
+                    parsed=None;baseline=None
+                    trace['cache_reason'] = 'previous_response_unusable'
             if parsed is None:
                 request=page_request
                 if baseline is not None:
-                    request=prepare_update_request(page_request,previous_wiki[filename],text,baseline)
+                    request=prepare_update_request(page_request,previous_passages[filename],text,baseline)
                     trace['mode']='statement_refs'
                 trace['request']=copy.deepcopy(request);trace['request_sha256']=digest(request)
                 reply=model(request);trace['response']=copy.deepcopy(reply)
@@ -134,7 +144,7 @@ def extract_wiki(wiki, model, *, previous=None, previous_wiki=None, model_profil
             trace['elapsed_seconds']=time.monotonic()-started
         return filename,parsed,trace
 
-    result={'entities':[],'statements':[],'names':[],'time':[],'skipped':0,'truncated':False,'model_calls':[]}
+    result={'passage_version':1,'entities':[],'statements':[],'names':[],'time':[],'skipped':0,'truncated':False,'model_calls':[]}
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         completed=list(pool.map(process,jobs))
     for filename,parsed,trace in completed:

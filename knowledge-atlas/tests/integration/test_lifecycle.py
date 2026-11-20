@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import re
 import sys
 import time
 import uuid
@@ -126,6 +127,19 @@ async def _cycle(package, config_path, native, root, host, profiles):
                 candidate=typed['data']['candidate']
         first=await accept(candidate);first_publication=ready
         first_content=first['data']['accepted_content']
+        factual = await call('question.ask', {
+            'question': 'Which trial failed when humidity was not measured?', 'count': 10},
+            publication=first_publication)
+        assert factual['data']['status'] == 'answered'
+        assert factual['data']['coverage'] == 'answered'
+        assert factual['data']['citations']
+        assert re.search(r'\bP\W*31\b', factual['data']['answer'], re.IGNORECASE)
+        missing = await call('question.ask', {
+            'question': 'What tensile strength in MPa did trial P-31 measure for the QL-7 brackets?',
+            'count': 10}, publication=first_publication)
+        assert missing['data']['bounds']['retrieved'] > 0
+        assert missing['data']['status'] == 'insufficient_evidence'
+        assert missing['data']['coverage'] == 'insufficient'
         # Adapt only the source locator of the retained PoC9 semantic fixture.
         import runpy
         records_factory=runpy.run_path(str(package/'tests/retained_semantics.py'))['proposal_records']

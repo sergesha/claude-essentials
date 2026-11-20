@@ -50,3 +50,25 @@ jobs:
         run: |
           npm install --global @anthropic-ai/claude-code
           claude plugin validate knowledge-atlas
+
+  native-extractor:
+    runs-on: ubuntu-24.04-arm
+    defaults:
+      run:
+        working-directory: knowledge-atlas
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: Install the qualified Rust toolchain
+        run: rustup toolchain install 1.99.1 --profile minimal
+      - name: Build pinned Utopia wrapper
+        run: cargo +1.99.1 build --locked --manifest-path native/extract/Cargo.toml
+      - name: Exercise native extraction, update and type decisions
+        run: |
+          export POC9_EXTRACT_BIN="$PWD/native/extract/target/debug/poc9-extract"
+          test -x "$POC9_EXTRACT_BIN"
+          uv sync --locked
+          uv run --no-sync pytest -q tests/test_retained_ingest.py tests/test_type_decisions.py

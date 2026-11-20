@@ -18,6 +18,8 @@ def main() -> int:
     for name in ('serve','mcp','status','stop'):
         command = commands.add_parser(name)
         command.add_argument('--config', type=Path)
+        if name == 'mcp':
+            command.add_argument('--channel', choices=('mcp','viewer'), default='mcp')
     view = commands.add_parser('view')
     view.add_argument('--atlas',required=True)
     view.add_argument('--config',type=Path)
@@ -40,7 +42,7 @@ def main() -> int:
                 import asyncio
                 from .mcp_bridge import serve
                 ensure_service(config)
-                asyncio.run(serve(AtlasClient(service_context(config).service_root)))
+                asyncio.run(serve(AtlasClient(service_context(config).service_root, channel=args.channel)))
             else:
                 client = AtlasClient(service_context(config).service_root)
                 print(json.dumps(client.stop() if args.command == 'stop' else client.request('/v1/status')))

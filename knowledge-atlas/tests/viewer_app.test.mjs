@@ -113,3 +113,14 @@ test('late graph wiki navigation does not leave the new publication panel',async
  a.run("selected='old';showPanel('graph');");const pending=a.run("graph.onOpenPage('Record/old')");a.run("selected='new';viewEpoch++;showPanel('history');");finish();await pending;
  assert.equal(a.elements.get('panel-history').hidden,false);
 });
+
+test('acceptance attribution identifies the channel and unsigned receipt separately',()=>{
+ const a=app(async()=>response({}));
+ const label=a.run("attribution({acceptance_kind:'human',acceptance_channel:'viewer',matching_decision_receipt:true})");
+ assert.match(label,/human \(caller-supplied\)/);
+ assert.match(label,/Channel: viewer/);
+ assert.match(label,/Matching decision receipt present/);
+ const old=a.run("attribution({acceptance_kind:'synthetic'})");
+ assert.match(old,/unrecorded/);
+ assert.match(old,/No matching decision receipt/);
+});

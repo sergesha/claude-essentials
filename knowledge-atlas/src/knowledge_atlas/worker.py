@@ -5,7 +5,7 @@ from pathlib import Path
 import traceback
 from .contracts import ActionContext, ActionRequest, ActionResult, AtlasError, RuntimeConfig
 from .locks import FileLock, AtlasLock
-from .operations import database, encoded
+from .operations import database, encoded, validate_atlas_path
 from .actions import register_handlers, register_recoveries
 
 
@@ -22,6 +22,12 @@ def run_attempt(context, handler):
     store = GitStore(context.atlas_path)
     current = Publications(store).ready() if (store.root/'.git').exists() else None
     if current != context.request.expected_publication:
+        if context.request.action in ('candidate.decide', 'candidate.revise'):
+            # A restored Git receipt can outlive both its operation database and its base READY.
+            from .actions.decisions import replay_recorded_decision
+            replay = replay_recorded_decision(context)
+            if replay is not None:
+                return replay
         raise AtlasError('stale_publication', 'READY changed; revalidate the request', 409)
     return handler(context)
 
@@ -50,6 +56,7 @@ def _execute_next(service):
                                 frozen['configuration'], row['operation_id'],
                                 Path(row['previous_evidence']) if row['previous_evidence'] else None)
         try:
+            validate_atlas_path(service, context.atlas_path)
             with AtlasLock(context.atlas_path):
                 handler = register_handlers(service).get(context.request.action)
                 if handler is None: raise AtlasError('unsupported_action', context.request.action, 422)

@@ -73,7 +73,7 @@ async def ingest(store, evidence, sources, *, recorded_at, model, agent=None,
                 retained=json.loads((Path(resume_workspace).parent/'execution.json').read_text())
                 if retained['previous_commit']!=previous_commit:
                     raise ValueError('resume selected Git content differs from retained stage')
-            wiki=await WikiStage(resume_workspace or evidence/'workspace').run_agent(sources,agent,recorded_at=recorded_at,previous=previous['wiki'] if previous else None,resume=bool(resume_workspace),remove_sources=remove_sources)
+            wiki=await WikiStage(resume_workspace or evidence/'workspace').run_agent(sources,agent,recorded_at=recorded_at,previous=previous.get('wiki') if previous else None,resume=bool(resume_workspace),remove_sources=remove_sources)
         if not wiki.get('pages'):raise ValueError('completed Wiki must contain pages')
         save('wiki',wiki);execution['stages']['wiki_seconds']=time.monotonic()-begin
         begin=time.monotonic()
@@ -83,7 +83,7 @@ async def ingest(store, evidence, sources, *, recorded_at, model, agent=None,
         extraction=copy.deepcopy(resume_extraction) if resume_extraction is not None else extract_wiki(
             wiki_pages(wiki),tracked,
             previous=previous.get('extraction') if previous else None,
-            previous_wiki=wiki_pages(previous['wiki']) if previous else None,
+            previous_wiki=wiki_pages(previous['wiki']) if previous and 'wiki' in previous else None,
             model_profile=model_profile,max_workers=extract_workers)
         save('extraction',extraction);execution['stages']['extract_seconds']=time.monotonic()-begin
         begin=time.monotonic()

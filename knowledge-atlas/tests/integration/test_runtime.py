@@ -94,7 +94,14 @@ def _check_native_projection(native_graph, tmp_path):
     published = []
     for day in (13,14):
         if day == 14: wiki['pages'][0]['content'] += '\nQualification update: inspection remains required.\n'
-        candidate = store.snapshot(wiki, extraction, {}, recorded_at=f'2026-11-{day}T00:00:00Z')['commit']
+        recorded_at = f'2026-11-{day}T00:00:00Z'
+        if published:
+            from knowledge_atlas.core.feedback import revise_compilation
+            candidate = revise_compilation(store, published[-1][1], [], wiki, extraction, {},
+                actor='Fixture', method='Native qualification', reason='Changed page',
+                recorded_at=recorded_at, base_publication=published[-1][0])
+        else:
+            candidate = store.snapshot(wiki, extraction, {}, recorded_at=recorded_at)['commit']
         content = pubs.review(candidate, {'decision':'accept','kind':'synthetic','actor':'Runtime qualification',
             'reason':'Retained PoC9 fixture, technical qualification only',
             'accepted_at':f'2026-11-{day}T01:00:00Z', 'base_publication':pubs.ready()}, profile)

@@ -52,6 +52,8 @@ expansion with `depth` (0–10, default 1) and `limit` (1–1000, default 100). 
 carry actual relation roles, paths, selected publication and explicit truncation;
 absence is not proven by a bounded result.
 
+Only structured knowledge entries from reviewed `knowledge.revise` or `feedback.record` proposals, including entries imported through package composition, qualify for deterministic assessment. Source, wiki and extracted statement or relation records remain available as evidence. Applying one returns `retrieval_only`. The `declared_opposition` field reports visible inbound and outbound declarations with their statuses. The `conflicts` field identifies conflicts established in the supplied context.
+
 Application requires `record_id` and an object `context`. It returns deterministic
 conditions, grounds, independent episodes, conflicts, unknowns and reasons. Statuses
 include `supported`, `conditional`, `insufficient`, `inapplicable`, `conflict`,
@@ -88,11 +90,17 @@ unchanged until and after the new publication is created.
 
 ## Shared HTTP, Python and MCP interfaces
 
-The service binds `127.0.0.1` on an available port. Read the endpoint from
-`SERVICE_ROOT/discovery.json` and the bearer token from `SERVICE_ROOT/token`;
-both files are owner-only. Every HTTP route requires `Authorization: Bearer TOKEN`.
-Tokens belong in headers, never URLs, source documents or archives. Browser
-Origins are rejected and CORS is not enabled.
+The local service binds `127.0.0.1` on an available port. Read the current endpoint from
+`SERVICE_ROOT/discovery.json` and token from `SERVICE_ROOT/token`. Both files are owner-only.
+The token rotates on service start. The Python client handles discovery and service verification.
+
+Custom clients first open an HTTP/1.1 connection to the discovered loopback endpoint and
+send a credential-free `GET /v1/identity` with an `Atlas-Challenge` header containing
+32 random bytes encoded as lowercase hexadecimal. Verify the 200 response body equals the
+lowercase hex HMAC-SHA256 of the UTF-8 string `<endpoint>/<challenge>`, keyed by the
+token text with surrounding whitespace removed. On that same open connection,
+send the action with `Authorization: Bearer TOKEN`. Repeat discovery and verification
+when reconnecting. Keep tokens private. The service rejects browser origins.
 
 - `GET /v1/schema`: generated action-specific request models.
 - `POST /v1/actions/ACTION`: JSON request; 202 for durable mutation, 200 for read.
@@ -152,3 +160,21 @@ Publication-level `history` returns timeline metadata and publication/content co
 It omits raw `vector_artifacts` and `native_export_excluded_ids` from the response;
 those projection payloads remain intact in the Git-owned publication receipt.
 Record-specific history is unchanged.
+
+
+### Review and answer metadata
+
+Publication history and the selected wiki expose the caller-supplied acceptance kind and
+channel. Older publications report an unrecorded channel. The `matching_decision_receipt`
+field indicates whether a retained decision agrees with the publication. A missing receipt
+is valid for pre-receipt history. An unsigned matching receipt establishes internal
+consistency.
+
+`question.ask` returns `coverage` as `answered`, `partial` or `insufficient`. Insufficient
+coverage returns `status: insufficient_evidence` even when retrieval found records.
+Synchronous provider failures return HTTP 503 with `provider_failed`.
+
+`atlas.status.candidate_statuses` maps candidate commits to review status. Rejection and
+subsequent acceptance are distinct retained decisions. A stale candidate must be regenerated
+against the current publication. New acceptances preserve chronological ordering along the
+publication chain.

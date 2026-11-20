@@ -11,7 +11,7 @@ from .git_store import git
 from .graph_stage import records_for, record_schema
 from .vector_projection import chunk_schema
 from .vector_chunks import chunks_for
-from .embedding_provider import raw_vectors
+from .embedding_provider import initialize_cache, raw_vectors
 
 
 def canonical_record(record):
@@ -43,6 +43,7 @@ class NativeProjection:
             path = Path(tmp) / 'profile.json'
             path.write_text(json.dumps(profile))
             chunks = chunks_for(records, path, self.tokenizer, self.formatter)
+        initialize_cache(self.cache)
         g = self.graph
         try:
             g.call('GET', '/api/document/' + g.database + '?graph_type=schema&as_list=true')

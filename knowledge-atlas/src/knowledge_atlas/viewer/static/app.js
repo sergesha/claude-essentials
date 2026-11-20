@@ -73,6 +73,11 @@ async function loadPage(id){
  for(const b of $('pages').children){b.classList.toggle('selected',b.dataset.id===id);b.setAttribute('aria-current',String(b.dataset.id===id));}
  return true;
 }
+function attribution(data){
+ const kind=data.acceptance_kind==='synthetic'?'Synthetic demo acceptance':(data.acceptance_kind||'Unknown acceptance');
+ const receipt=data.matching_decision_receipt?'Matching decision receipt present':'No matching decision receipt';
+ return kind+' (caller-supplied) · Channel: '+(data.acceptance_channel||'unrecorded')+' · '+receipt;
+}
 async function loadPublication(){
  const epoch=++viewEpoch;graph.reset(selected);$('graph-page').disabled=true;resetReview();text('publication-id',selected||'No published version');for(const entry of $('timeline').children)entry.setAttribute('aria-current',String(entry.dataset.publication===selected));target(null);$('answer').replaceChildren();$('citations').replaceChildren();$('evidence').hidden=true;
  text('mode',selected===ready?'Latest version · changes can be proposed':'Earlier version · read only');$('return-current').hidden=!ready||selected===ready;text('compare-target','To: '+(versionNames.get(selected)||'selected version'));text('answer','Ask a question to explore this version.');text('diff','Choose an earlier version to compare.');
@@ -80,7 +85,7 @@ async function loadPublication(){
  if(!selected){text('page','No accepted publication yet. Import and review sources through your agent.');return;}
  const publication=selected,result=await read('wiki.pages');if(publication!==selected||epoch!==viewEpoch)return;
  const data=result.data;$('dates').replaceChildren();
- for(const value of ['Imported '+date(data.recorded_at),'Published '+date(data.accepted_at),data.acceptance_kind==='synthetic'?'Synthetic demo acceptance':(data.acceptance_kind||'Unknown acceptance')])$('dates').append(node('span',value));
+ for(const value of ['Imported '+date(data.recorded_at),'Published '+date(data.accepted_at),attribution(data)])$('dates').append(node('span',value));
  $('sources').replaceChildren();for(const source of data.sources||[]){$('sources').append(node('p',(source.name||'Source')+' · Source date: '+date(source.source_time)+' · Imported: '+date(source.recorded_at)),details('Source provenance',source));}
  pageNames=new Map(data.pages.map(page=>[page.id,page.title]));pageLinks=new Map();for(const page of data.pages){if(pageLinks.has(page.path))pageLinks.set(page.path,null);else pageLinks.set(page.path,page.id);}text('page-count',String(data.pages.length));
  for(const page of data.pages){const b=button(page.title,async()=>{await loadPage(page.id);showPanel('read');});b.dataset.id=page.id;$('pages').append(b);}
@@ -98,13 +103,13 @@ async function refresh(){
  versionNames=new Map();
  for(const [index,entry] of history.entries()){const oid=entry.publication_commit;const label='Version '+(history.length-index)+(oid===freshReady?' · Latest':'')+' · '+date(entry.accepted_at);versionNames.set(oid,label);
   chooseOption($('publication'),oid,label);chooseOption($('before'),oid,label);
-  const b=button(label+'\n'+(entry.acceptance_kind==='synthetic'?'Synthetic demo acceptance':entry.acceptance_kind||'Unknown acceptance'),async()=>{selected=oid;$('publication').value=oid;await loadPublication();showPanel('read',true);});b.dataset.publication=oid;b.setAttribute('aria-current',String(oid===selected));$('timeline').append(b);}
+  const b=button(label+'\n'+attribution(entry),async()=>{selected=oid;$('publication').value=oid;await loadPublication();showPanel('read',true);});b.dataset.publication=oid;b.setAttribute('aria-current',String(oid===selected));$('timeline').append(b);}
 
  selected=history.some(x=>x.publication_commit===previous)?previous:ready;$('publication').value=selected||'';
  if(history.length>1)$('before').value=history[1].publication_commit;
  await loadPublication();
  const candidates=status.data.candidates||[];$('proposal-list').replaceChildren();chooseOption($('proposal-list'),'','Choose a saved proposal…');
- for(const [index,candidate] of candidates.entries())chooseOption($('proposal-list'),candidate,'Proposal '+(index+1)+' · '+candidate.slice(0,8));
+ for(const [index,candidate] of candidates.entries())chooseOption($('proposal-list'),candidate,'Proposal '+(index+1)+' · '+candidate.slice(0,8)+' · '+(status.data.candidate_statuses?.[candidate]||'status unavailable'));
  if(!$('candidate').value&&candidates.length)$('candidate').value=candidates.at(-1);
  $('proposal-list').value=candidates.includes($('candidate').value)?$('candidate').value:'';
 }
@@ -175,14 +180,14 @@ $('compare').onclick=handle(async()=>{const publication=selected,epoch=viewEpoch
 $('ask-form').onsubmit=handle(async()=>{
  const publication=selected,epoch=viewEpoch;if(!publication)throw new Error('Choose a published version before asking a question.');notice('Finding evidence and preparing your answer…');$('ask-submit').disabled=true;$('ask-form').setAttribute('aria-busy','true');text('ask-submit','Preparing answer…');
  let result;try{result=await read('question.ask',{question:$('question').value,count:5});}finally{$('ask-submit').disabled=false;$('ask-form').setAttribute('aria-busy','false');text('ask-submit','Ask with evidence ↗');}if(publication!==selected||epoch!==viewEpoch)return;
- text('answer',result.data.answer+'\n\nUnknowns: '+(result.data.unknowns.join('; ')||'None reported')+'\nEvidence truncated: '+result.data.bounds.truncated);
+ text('answer',(result.data.status==='insufficient_evidence'?'Insufficient evidence\n':result.data.coverage==='partial'?'Partial answer\n':'')+result.data.answer+'\n\nUnknowns: '+(result.data.unknowns.join('; ')||'None reported')+'\nEvidence truncated: '+result.data.bounds.truncated);
  $('citations').replaceChildren();
  for(const [index,id] of result.data.citations.entries())$('citations').append(button('Source '+(index+1),async()=>{
   if(publication!==selected||epoch!==viewEpoch)return;
   const result=await send('evidence.read',{payload:{record_id:id},publication});
   if(publication!==selected||epoch!==viewEpoch)return;
   $('evidence').replaceChildren(node('h3','Source '+(index+1)),node('div',recordText(result.data.record||result.data),'change-text'),details('Complete evidence & provenance',result.data),button('Show in graph',async()=>{if(publication!==selected||epoch!==viewEpoch)return;showPanel('graph',true);await graph.open(id);}));$('evidence').hidden=false;target(id);$('evidence').focus();
- }));notice('Answer grounded in '+(versionNames.get(result.publication)||'the selected version')+'.');
+ }));notice((result.data.status==='insufficient_evidence'?'Insufficient evidence in ':'Answer grounded in ')+(versionNames.get(result.publication)||'the selected version')+'.');
 });
 $('clarify-form').onsubmit=handle(async()=>{
  if(!targetId)throw new Error('Select a page or evidence record.');

@@ -153,3 +153,8 @@ release is qualified for the small demonstration atlases, not large-scale graph
 traversal. Graph comparison overlays and arbitrary pathfinding are deferred.
 Cytoscape.js 3.35.0 is bundled locally with its MIT license; no CDN or additional
 service is needed.
+
+The version timeline labels acceptance kind and channel as caller-supplied. Older
+versions can have an unrecorded channel. Each version identifies whether a
+matching decision receipt exists. The question panel identifies partial answers
+and insufficient evidence separately.

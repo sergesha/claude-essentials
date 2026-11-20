@@ -3,14 +3,20 @@ from dataclasses import asdict, replace
 from datetime import datetime
 import hashlib
 import json
+import uuid
 
 from ..contracts import ActionRequest, ActionResult, AtlasError
 from ..core.git_store import GitStore, git
-from ..core.publication import Publications, commit_files
+from ..core.publication import Publications, StaleProposal, InvalidAcceptanceTime, commit_files
 from ..core.knowledge import propose_records
+from ..core.decision_receipts import DECISIONS, review_inventory
 from ..runtime import _assets
 
-DECISIONS = 'refs/knowledge-atlas/decisions/'
+
+
+def _request_digest(request, decision_id):
+    body = {**asdict(request), 'request_id':decision_id}
+    return hashlib.sha256(json.dumps(body,sort_keys=True,ensure_ascii=False,separators=(',',':')).encode()).hexdigest()
 
 
 def _binding(context, action):
@@ -27,31 +33,45 @@ def _binding(context, action):
         if datetime.fromisoformat(data['decided_at'].replace('Z','+00:00')).tzinfo is None: raise ValueError()
     except ValueError as error:
         raise AtlasError('invalid_request','decided_at requires a timezone') from error
-    digest = hashlib.sha256(json.dumps(asdict(request),sort_keys=True,ensure_ascii=False,separators=(',',':')).encode()).hexdigest()
+    digest = _request_digest(request, request.request_id)
     return {'schema_version':1,'decision_id':request.request_id,'request_sha256':digest,
             'candidate':data['candidate'],'base_publication':request.expected_publication,'action':action,
+            **({'attribution_channel':context.configuration['attribution_channel']}
+               if 'attribution_channel' in context.configuration else {}),
             **{key:data[key] for key in ('actor','kind','reason','decided_at')}}
 
 
-def decision_inventory(store):
+def decision_inventory(store, *, decision_id=None):
     from ..core.decision_receipts import decision_inventory as canonical_inventory
     try:
-        return canonical_inventory(store)
+        return canonical_inventory(store, decision_id=decision_id)
     except ValueError as error:
         raise AtlasError('invalid_decision',str(error),422) from error
 
 
-def _existing(store, binding):
-    matches = [entry for entry in decision_inventory(store) if entry['receipt']['decision_id']==binding['decision_id']]
-    if not matches: return None
-    entry=matches[0]
-    if any(entry['receipt'].get(key)!=value for key,value in binding.items()):
+def _check_replay(request, binding, recorded):
+    # The channel describes the original arrival. The request digest covers
+    # every client-supplied field, using the spelling retained by older Git refs.
+    digest = (binding['request_sha256'] if binding['decision_id'] == recorded['decision_id']
+              else _request_digest(request, recorded['decision_id']))
+    if (digest != recorded.get('request_sha256') or any(
+            recorded.get(key) != value for key, value in binding.items()
+            if key not in ('decision_id', 'request_sha256', 'attribution_channel'))):
         raise AtlasError('request_conflict','canonical decision ID already has another basis',409)
+
+
+def _existing(store, binding, request):
+    matches = decision_inventory(store, decision_id=binding['decision_id'])
+    if not matches: return None
+    if len(matches) != 1:
+        raise AtlasError('request_conflict', 'legacy decision UUID has multiple receipts', 409)
+    entry = matches[0]
+    _check_replay(request, binding, entry['receipt'])
     return entry
 
 
-def _write_receipt(store, binding, **effects):
-    previous = _existing(store,binding)
+def _write_receipt(store, binding, request, **effects):
+    previous = _existing(store, binding, request)
     if previous is not None: return previous
     receipt={**binding,**effects}
     parents=list(dict.fromkeys(oid for oid in (binding['candidate'],binding['base_publication'],
@@ -87,7 +107,8 @@ def _result(context, entry):
     effects={'decision':entry['commit']}
     if receipt['action']=='accept':
         content=receipt['accepted_content']; data['accepted_content']=content; effects['accepted_content']=content
-        publication=_published_content(pubs,content)
+        if pubs.ready() != receipt['base_publication']:
+            publication=_published_content(pubs,content)
         try:
             if publication is None: publication=pubs.publish(content,lambda oid:build_projection(context,oid))
             data['status']='published'; effects['publication']=publication
@@ -113,40 +134,62 @@ def decide_candidate(context):
         raise AtlasError('invalid_request', 'candidate.decide accepts only accept or reject')
     binding=_binding(context,context.request.payload.get('action'))
     store=GitStore(context.atlas_path)
-    existing=_existing(store,binding)
+    existing=_existing(store,binding,context.request)
     if existing is not None: return _result(context,existing)
     _check_base(store,binding)
     effects={}
     if binding['action']=='accept':
-        recovered=_accepted_effect(store,binding)
-        if recovered is None:
+        recovered=_accepted_effect(store,binding,context.request)
+        if recovered is not None:
+            content, binding = recovered
+        else:
             decision={**binding,'decision':'accept','candidate_commit':binding['candidate'],'accepted_at':binding['decided_at']}
             profile=json.loads((_assets()/'embedding-profile.json').read_text())
-            recovered=Publications(store).review(binding['candidate'],decision,profile)
-        effects['accepted_content']=recovered
-    return _result(context,_write_receipt(store,binding,**effects))
+            try:
+                content=Publications(store).review(binding['candidate'],decision,profile)
+            except StaleProposal as error:
+                raise AtlasError('stale_proposal', str(error), 409) from error
+            except InvalidAcceptanceTime as error:
+                raise AtlasError('invalid_acceptance_time', str(error), 422) from error
+        effects['accepted_content']=content
+    return _result(context,_write_receipt(store,binding,context.request,**effects))
 
 
-def _accepted_effect(store,binding):
-    matches=[]
-    for oid in git(store.root,'for-each-ref','--format=%(objectname)','refs/poc9/reviews/').splitlines():
-        review=json.loads(git(store.root,'show',oid+':review.json'))
-        if review.get('decision_id')==binding['decision_id']:
-            if review.get('request_sha256')!=binding['request_sha256']:
-                raise AtlasError('request_conflict','accepted decision basis differs',409)
-            matches.append(oid)
-    if len(set(matches))>1: raise AtlasError('ambiguous_decision','multiple accepted effects require inspection',409)
+def _accepted_effect(store, binding, request):
+    matches = []
+    selected = uuid.UUID(binding['decision_id'])
+    for oid, review in review_inventory(store):
+        try:
+            if uuid.UUID(review.get('decision_id', '')) != selected:
+                continue
+        except (ValueError, TypeError, AttributeError):
+            continue  # Standalone historical reviews need no service decision UUID.
+        _check_replay(request, binding, review)
+        original = {key:review[key] for key in binding if key != 'attribution_channel'}
+        if 'attribution_channel' in review:
+            original['attribution_channel'] = review['attribution_channel']
+        matches.append((oid, original))
+    if len(matches)>1: raise AtlasError('ambiguous_decision','multiple accepted effects require inspection',409)
     return matches[0] if matches else None
+
+
+def replay_recorded_decision(context):
+    action = 'revise' if context.request.action == 'candidate.revise' else context.request.payload.get('action')
+    binding = _binding(context, action)
+    entry = _existing(GitStore(context.atlas_path), binding, context.request)
+    return _result(context, entry) if entry is not None else None
 
 
 def reconcile_decision(context):
     action='revise' if context.request.action=='candidate.revise' else context.request.payload.get('action')
     binding=_binding(context,action); store=GitStore(context.atlas_path)
-    entry=_existing(store,binding)
+    entry=_existing(store,binding,context.request)
     if entry is not None: return _result(context,entry)
     if action=='accept':
-        accepted=_accepted_effect(store,binding)
-        if accepted is not None: return _result(context,_write_receipt(store,binding,accepted_content=accepted))
+        recovered = _accepted_effect(store, binding, context.request)
+        if recovered is not None:
+            accepted, original = recovered
+            return _result(context, _write_receipt(store, original, context.request, accepted_content=accepted))
     if action=='revise':
         raise AtlasError('unsafe_resume','no canonical revision receipt; inspect retained work before a new request',409)
     return None
@@ -154,7 +197,7 @@ def reconcile_decision(context):
 
 def revise_candidate(context):
     binding=_binding(context,'revise'); store=GitStore(context.atlas_path)
-    existing=_existing(store,binding)
+    existing=_existing(store,binding,context.request)
     if existing is not None: return _result(context,existing)
     _check_base(store,binding)
     data=context.request.payload
@@ -166,7 +209,7 @@ def revise_candidate(context):
     else:
         from ..native_pipeline import run_native
         revised=run_native(context).data['candidate']
-    return _result(context,_write_receipt(store,binding,revised_candidate=revised))
+    return _result(context,_write_receipt(store,binding,context.request,revised_candidate=revised))
 
 
 def _json_snapshot(value):

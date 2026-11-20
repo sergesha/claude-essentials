@@ -31,7 +31,7 @@ class StageProfile:
 class AtlasError(RuntimeError):
     def __init__(self, code: str, message: str, status: int = 400):
         self.code, self.status = code, status
-        super().__init__(f'{code}: {message}')
+        super().__init__(message if message.startswith(code + ': ') else f'{code}: {message}')
 
 
 @dataclass(frozen=True)

@@ -51,6 +51,7 @@ class NativeSourceTests(unittest.TestCase):
                 self.assertIn('Dry cleaning', second['pages'][0]['content'])
                 self.assertIn('Wet cleaning', first['pages'][0]['content'])
                 self.assertEqual(second['sources'][0]['id'], first['sources'][1]['id'])
+                self.assertEqual(second['sources'][0]['recorded_at'], first['recorded_at'])
                 self.assertFalse((root/'update/first.txt').exists())
                 valid_ids = {d['id'] for d in second['pages'] + second['sources']}
                 self.assertTrue(all(edge['source_id'] in valid_ids and edge['target_id'] in valid_ids for edge in second['references']))
@@ -100,6 +101,8 @@ class NativeSourceTests(unittest.TestCase):
             self.assertEqual(result.data['status'],'pending_review')
             self.assertEqual({row['source_id'] for row in saved['wiki']['sources']}, {'one','two'})
             self.assertEqual(len(saved['sources']),2)
+            self.assertIsNone(saved['manifest']['proposal_base_publication'])
+            self.assertTrue(all(row['recorded_at'] == saved['wiki']['recorded_at'] for row in saved['wiki']['sources']))
             self.assertEqual(saved['manifest']['status'],'candidate')
             self.assertIsNone(Publications(store).ready())
             self.assertEqual(len(saved['extraction']['model_calls']),1)

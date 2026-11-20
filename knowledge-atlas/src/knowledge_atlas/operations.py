@@ -1,15 +1,21 @@
 """SQLite owns execution only. Handlers retain all canonical knowledge in Git."""
 from contextlib import contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import hashlib
 import json
 import multiprocessing
 from pathlib import Path
+import shutil
 import sqlite3
 import uuid
 
 from .contracts import ActionRequest, ActionResult, AtlasError, OperationRecord, ServiceContext
 from .locks import is_locked
+
+
+# Python's uuid.UUID also accepts legacy upper-case, compact, braced and URN
+# spellings. Index their equivalence without rewriting immutable request evidence.
+_UUID_KEY = "replace(trim(replace(replace(lower(request_id),'urn:',''),'uuid:',''),'{}'),'-','')"
 
 
 @contextmanager
@@ -19,7 +25,7 @@ def database(context):
     connection = sqlite3.connect(root / 'operations.sqlite3', timeout=10)
     connection.row_factory = sqlite3.Row
     try:
-        connection.executescript('''
+        connection.executescript(f'''
             CREATE TABLE IF NOT EXISTS atlases (atlas_id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE);
             CREATE TABLE IF NOT EXISTS operations (
                 operation_id TEXT PRIMARY KEY, request_id TEXT NOT NULL UNIQUE, digest TEXT NOT NULL,
@@ -27,6 +33,8 @@ def database(context):
                 state TEXT NOT NULL, attempt INTEGER NOT NULL, evidence TEXT NOT NULL,
                 previous_evidence TEXT, result TEXT, error TEXT);
             CREATE TABLE IF NOT EXISTS resumes (request_id TEXT PRIMARY KEY, operation_id TEXT NOT NULL);
+            CREATE INDEX IF NOT EXISTS operation_uuid ON operations ({_UUID_KEY});
+            CREATE INDEX IF NOT EXISTS resume_uuid ON resumes ({_UUID_KEY});
         ''')
         yield connection
         connection.commit()
@@ -44,20 +52,39 @@ def encoded(value):
         raise AtlasError('invalid_request', 'finite JSON values required') from error
 
 
+def _inside_atlas(path):
+    return any((parent / 'atlas' / '.git').exists() and (parent / 'atlas' / 'package.json').is_file()
+               for parent in path.parents)
+
+
+def _registered_roots(context):
+    with database(context) as db:
+        return [Path(row['path']) for row in db.execute('SELECT path FROM atlases')]
+
+
+def validate_atlas_path(context, path):
+    path = Path(path).resolve()
+    bound = context.configuration.get('atlas_path')
+    if bound is not None and (not isinstance(bound, str) or not bound or path != Path(bound).expanduser().resolve()):
+        raise AtlasError('invalid_location', 'this deployment is bound to a different atlas path', 422)
+    if path.is_relative_to(Path(__file__).resolve().parents[2]) or path.is_relative_to(context.service_root):
+        raise AtlasError('invalid_location', 'atlas data must live outside the plugin and service')
+    if _inside_atlas(path) or any(root in path.parents for root in _registered_roots(context)):
+        raise AtlasError('invalid_location', 'nested atlas paths are unsupported', 422)
+    return path
+
+
 def atlas_path(context, request):
     if request.action in ('atlas.create', 'atlas.open', 'archive.restore'):
         value = request.payload.get('path')
         if not isinstance(value, str) or not value:
             raise AtlasError('invalid_request', 'external atlas path required')
-        path = Path(value).expanduser().resolve()
-        if path.is_relative_to(Path(__file__).resolve().parents[2]):
-            raise AtlasError('invalid_location', 'atlas data must live outside the plugin')
-        return path
+        return validate_atlas_path(context, Path(value).expanduser())
     with database(context) as db:
         row = db.execute('SELECT path FROM atlases WHERE atlas_id=?', (request.atlas_id,)).fetchone()
     if row is None:
         raise AtlasError('atlas_not_found', 'open the atlas first', 404)
-    return Path(row['path'])
+    return validate_atlas_path(context, Path(row['path']))
 
 
 def register_atlas(context, atlas_id, path):
@@ -81,19 +108,94 @@ def _row(db, identifier):
     return row
 
 
+def _request_owner(db, request_id):
+    compact = uuid.UUID(request_id).hex
+    owners = db.execute(f"""
+        SELECT operation_id, 'operation' AS kind FROM operations WHERE {_UUID_KEY}=?
+        UNION ALL
+        SELECT operation_id, 'resume' AS kind FROM resumes WHERE {_UUID_KEY}=?
+        LIMIT 2
+    """, (compact, compact)).fetchall()
+    if len(owners) > 1:
+        raise AtlasError('request_conflict', 'legacy request UUID has multiple owners', 409)
+    return owners[0] if owners else None
+
+
+def _existing_submission(db, request, request_json, digest):
+    owner = _request_owner(db, request.request_id)
+    if owner is None:
+        return None
+    if owner['kind'] != 'operation':
+        raise AtlasError('request_conflict', 'request_id belongs to a resume', 409)
+    row = _row(db, owner['operation_id'])
+    if row['digest'] != digest:
+        # The legacy digest includes the original spelling of the UUID.
+        stored = json.loads(row['request'])
+        stored['request_id'] = request.request_id
+        if encoded(stored) != request_json:
+            raise AtlasError('request_conflict', 'request_id already has another payload', 409)
+    return _record(row)
+
+
+def _inside_private_root(source, roots):
+    if any(source.is_relative_to(root) for root in roots):
+        return True
+    # On case-insensitive filesystems a different spelling can name the same
+    # directory. Compare the directory identities as well as normalized paths.
+    private = set()
+    for root in roots:
+        try:
+            info = root.stat()
+        except FileNotFoundError:
+            continue
+        private.add((info.st_dev, info.st_ino))
+    for parent in source.parents:
+        info = parent.stat()
+        if (info.st_dev, info.st_ino) in private:
+            return True
+    return False
+
+
+def external_archive_path(context, value):
+    if not isinstance(value, str) or not value:
+        raise AtlasError('invalid_request', 'archive input path required')
+    try:
+        source = Path(value).expanduser().resolve(strict=True)
+    except (ValueError, OSError, RuntimeError) as error:
+        raise AtlasError('invalid_archive', 'archive input path is unavailable', 422) from error
+    roots = [context.service_root, *_registered_roots(context)]
+    bound = context.configuration.get('atlas_path')
+    if bound:
+        roots.append(Path(bound).expanduser().resolve())
+    if _inside_atlas(source) or _inside_private_root(source, roots):
+        raise AtlasError('invalid_archive', 'archive input must be outside service and atlas data', 422)
+    return source
+
+
+def _stage_archive(context, request, evidence):
+    from .core import archive
+
+    source = external_archive_path(context, request.payload.get('archive'))
+    try:
+        with archive.regular_archive(source) as stream, (evidence / 'archive.zip').open('xb') as output:
+            archive.copy_bounded(stream, output, archive.MAX_ARCHIVE_BYTES)
+    except (ValueError, OSError) as error:
+        raise AtlasError('invalid_archive', 'restore requires a regular file within the archive limit', 422) from error
+
+
 def submit(context: ServiceContext, request: ActionRequest) -> OperationRecord:
     if request.request_id is None:
         raise AtlasError('invalid_request', 'mutations require request_id')
     from .actions import register_handlers
     if request.action not in register_handlers(context):
         raise AtlasError('unsupported_action', request.action, 422)
+    request = replace(request, request_id=str(uuid.UUID(request.request_id)))
     request_json = encoded(asdict(request))
     digest = hashlib.sha256(request_json.encode()).hexdigest()
     with database(context) as db:
-        existing = db.execute('SELECT * FROM operations WHERE request_id=?', (request.request_id,)).fetchone()
-        if existing:
-            if existing['digest'] != digest: raise AtlasError('request_conflict', 'request_id already has another payload', 409)
-            return _record(existing)
+        existing = _existing_submission(db, request, request_json, digest)
+        if existing is not None:
+            return existing
     path = atlas_path(context, request)
     configuration = encoded({'configuration': context.configuration, 'runtime':
         {'runtime_root': str(context.runtime.runtime_root.expanduser().resolve()),
@@ -101,29 +203,33 @@ def submit(context: ServiceContext, request: ActionRequest) -> OperationRecord:
         if context.runtime else None})
     identifier = str(uuid.uuid4())
     evidence = context.service_root / 'attempts' / identifier / '1'
-    with database(context) as db:
-        db.execute('BEGIN IMMEDIATE')
-        # Concurrent submissions can have passed the first read together.
-        existing = db.execute('SELECT * FROM operations WHERE request_id=?', (request.request_id,)).fetchone()
-        if existing:
-            if existing['digest'] != digest: raise AtlasError('request_conflict', 'request_id already has another payload', 409)
-            return _record(existing)
-        if db.execute('SELECT 1 FROM resumes WHERE request_id=?', (request.request_id,)).fetchone():
-            raise AtlasError('request_conflict', 'request_id belongs to a resume', 409)
-        evidence.mkdir(parents=True, exist_ok=False)
+    evidence.mkdir(parents=True, exist_ok=False)
+    committed = False
+    try:
         if request.action == 'archive.restore':
-            import shutil
-            archive = request.payload.get('archive')
-            if not isinstance(archive, str) or not archive:
-                raise AtlasError('invalid_request', 'archive input path required')
             try:
-                shutil.copyfile(Path(archive).expanduser().resolve(), evidence/'archive.zip')
-            except OSError as error:
-                raise AtlasError('invalid_archive', str(error), 422) from error
+                _stage_archive(context, request, evidence)
+            except AtlasError:
+                # Another caller might have finished while our input disappeared.
+                with database(context) as db:
+                    existing = _existing_submission(db, request, request_json, digest)
+                if existing is not None:
+                    return existing
+                raise
         (evidence / 'input.json').write_text(encoded({'request':json.loads(request_json), **json.loads(configuration)}))
-        db.execute('INSERT INTO operations VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
-                   (identifier, request.request_id, digest, request_json, configuration, str(path), 'queued', 1, str(evidence), None, None, None))
-        return _record(_row(db, identifier))
+        with database(context) as db:
+            db.execute('BEGIN IMMEDIATE')
+            existing = _existing_submission(db, request, request_json, digest)
+            if existing is not None:
+                return existing
+            db.execute('INSERT INTO operations VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+                       (identifier, request.request_id, digest, request_json, configuration, str(path), 'queued', 1, str(evidence), None, None, None))
+            result = _record(_row(db, identifier))
+        committed = True
+        return result
+    finally:
+        if not committed:
+            shutil.rmtree(evidence.parent)
 
 
 def inspect_operation(context, operation_id):
@@ -141,15 +247,15 @@ def resume(context, operation_id, request_id):
     if request_id is None:
         raise AtlasError('invalid_request', 'resume requires a fresh request UUID')
     ActionRequest('operation.resume', request_id=request_id)
+    request_id = str(uuid.UUID(request_id))
     inspect_operation(context, operation_id)
     with database(context) as db:
         db.execute('BEGIN IMMEDIATE')
-        previous = db.execute('SELECT operation_id FROM resumes WHERE request_id=?', (request_id,)).fetchone()
-        if previous:
-            if previous['operation_id'] != operation_id: raise AtlasError('request_conflict', 'resume UUID reused', 409)
+        owner = _request_owner(db, request_id)
+        if owner is not None:
+            if owner['kind'] != 'resume' or owner['operation_id'] != operation_id:
+                raise AtlasError('request_conflict', 'request UUID reused', 409)
             return _record(_row(db, operation_id))
-        if db.execute('SELECT 1 FROM operations WHERE request_id=?', (request_id,)).fetchone():
-            raise AtlasError('request_conflict', 'request UUID reused', 409)
         row = _row(db, operation_id)
         pending_publication = (row['state'] == 'succeeded'
             and json.loads(row['request'])['action'] == 'candidate.decide'

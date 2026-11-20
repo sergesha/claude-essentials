@@ -1,12 +1,44 @@
-# Verification and support limits
+# Knowledge Atlas 0.3.1 verification
 
-This is the public qualification summary for Knowledge Atlas 0.2.0. Reported
-results describe the tested builds and scenarios; they are not a guarantee of
-semantic accuracy or support for every host configuration. Runtime identities
-and original PoC adaptations are retained in `runtime/components.json`,
-`runtime/source-manifest.json`, and `tests/fixtures/manifest.json`.
+## Patch qualification
 
-## Supported and qualified targets
+The Linux ARM64 package run used the locked Python environment and pinned Utopia extractor.
+The 0.3.1 run passed 267 tests and 11 subtests, with 11 opt-in integrations skipped.
+Separate native fixtures exercised Wiki reconciliation, Gemma embeddings, TerminusDB
+historical reads, crash recovery, and format-compatible archive replay. The viewer suite
+passed 29 JavaScript tests. A Chromium session checked caller-supplied attribution,
+receipt indicators and an abstention with a working citation using a deterministic
+local backend.
+
+The 0.3.1 ARM64 production image ran as UID 1000. With an empty authentication volume
+and a disposable copy of the 0.3.0 runtime, it migrated the interpreter, validated the
+runtime and served authenticated Atlas and graph requests. The rehearsal started Gemma,
+the embedding bridge and TerminusDB offline. Both packaged provider CLIs launched.
+Native model invocation is a separate opt-in check.
+
+A separate Linux ARM64 run published a pin-only parent at the configured Docker atlas path
+using an external child and retrieved child evidence through hybrid search. Opening the
+external child as a second owner returned `invalid_location` and preserved the parent’s
+published and graph commits.
+
+A separately exported 0.3.0 format-2 archive with mixed-case decision UUIDs restored both
+decisions. A dedicated regression preserves its original case-sensitive inventory order.
+The fresh macOS ARM64 Utopia build passed the package suite with the extractor enabled.
+
+The regression fixtures cover stale candidates, out-of-order acceptance, unsigned and
+missing decision receipts, source recording times, bounded restore, archive round trips and
+concurrent requests. A 61-record shared-ground fixture now evaluates in about 0.21 ms on the
+qualification host. Eight successive rejection decisions each issued 94 Git calls in that
+fixture. These timings describe its specific graph and hardware.
+
+The pinned Wiki MCP server advertised seven authoring tools during a real stdio session. The
+extraction benchmark checks navigation filtering, factual table cells and native mood
+handling. Cache misses carry reasons for subsequent runs. The cause of the zero hits in the
+original audit remains undetermined.
+
+## Earlier platform qualification
+
+The following matrix describes earlier native qualification runs. Runtime and fixture identities are retained in `runtime/components.json`, `runtime/source-manifest.json`, and `tests/fixtures/manifest.json`.
 
 | Capability | Evidence | Limits |
 | --- | --- | --- |
@@ -22,14 +54,6 @@ versions require appropriate compatibility checks. Native ARM64 Docker execution
 does not require Rosetta or an x86_64 emulation change.
 
 ## Regression and native checks
-
-Publication preparation passed **188 Python tests, 32 skipped, four subtests**,
-plus **28 JavaScript tests**. Both source distribution and wheel built successfully.
-A simulated release version bump updated all configured version-bearing files and
-passed lockfile validation without changing dependency versions. The skips are opt-in native
-integration/extractor checks, not passes. Separate configured native runs supply
-the platform/provider evidence above. These local checks do not establish a hosted
-CI result or approval to publish.
 
 From the package directory:
 

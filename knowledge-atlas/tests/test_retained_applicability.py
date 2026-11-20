@@ -166,3 +166,37 @@ class ApplicabilityTests(unittest.TestCase):
         self.assertIn('withdrawn_record', assess(self.records, 'lesson', self.context)['reasons'])
         del self.records['gap']
         self.assertIn('required_ground_unavailable', assess(self.records, 'lesson', self.context)['reasons'])
+
+
+def test_shared_grounds_have_linear_evaluations_and_cycles_remain_path_sensitive():
+    class Counted(dict):
+        reads = 0
+        def __getitem__(self, key):
+            self.reads += 1
+            return super().__getitem__(key)
+    records = Counted()
+    def accepted(*groups):
+        return {'status': 'accepted', 'support_sets': list(groups)}
+    records['leaf'] = accepted()
+    last = 'leaf'
+    for depth in range(10):
+        left, right, top = (f'{depth}-{side}' for side in ('left', 'right', 'top'))
+        records[left] = accepted([last])
+        records[right] = accepted([last])
+        records[top] = accepted([left, right])
+        last = top
+    assert assess(records, last, {})['status'] == 'supported'
+    assert records.reads < 10 * len(records)
+    cycle = {'root': accepted(['a'], ['b']), 'a': accepted(['b'], ['leaf']),
+             'b': accepted(['a']), 'leaf': accepted()}
+    assert assess(cycle, 'root', {})['usable_support_sets'] == [0, 1]
+
+
+def test_declared_opposition_includes_visible_inbound_and_conditional_outbound():
+    records = {'rule': {'status':'accepted','conditions':{'dry':True},'conflicts_with':['out','hidden']},
+               'out': {'status':'withdrawn'}, 'in': {'status':'accepted','conflicts_with':['rule']}}
+    result = assess(records, 'rule', {})
+    assert result['status'] == 'conditional' and result['conflicts'] == []
+    assert result['declared_opposition'] == [
+        {'id':'in', 'direction':'inbound', 'status':'supported'},
+        {'id':'out', 'direction':'outbound', 'status':'withdrawn'}]

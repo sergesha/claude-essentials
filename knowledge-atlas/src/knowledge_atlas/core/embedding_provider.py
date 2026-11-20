@@ -40,6 +40,16 @@ def raw_vectors(response, count):
     return response
 
 
+def initialize_cache(cache):
+    cache = Path(cache)
+    cache.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(cache / 'vectors.sqlite3') as db:
+        db.execute('CREATE TABLE IF NOT EXISTS vectors (key TEXT PRIMARY KEY, artifact TEXT NOT NULL)')
+        db.execute('CREATE TABLE IF NOT EXISTS vector_integrity (key TEXT PRIMARY KEY, sha256 TEXT NOT NULL)')
+        db.execute('SELECT key, artifact FROM vectors LIMIT 0')
+        db.execute('SELECT key, sha256 FROM vector_integrity LIMIT 0')
+
+
 class EmbeddingProvider:
     def __init__(self, profile_path, cache, endpoint):
         self.profile = json.loads(Path(profile_path).read_text())
@@ -48,10 +58,7 @@ class EmbeddingProvider:
             raise ValueError('embedding profile digest mismatch')
         self.endpoint = endpoint.rstrip('/')
         self.cache = Path(cache)
-        self.cache.mkdir(parents=True, exist_ok=True)
-        with self.connect() as db:
-            db.execute('CREATE TABLE IF NOT EXISTS vectors (key TEXT PRIMARY KEY, artifact TEXT NOT NULL)')
-            db.execute('CREATE TABLE IF NOT EXISTS vector_integrity (key TEXT PRIMARY KEY, sha256 TEXT NOT NULL)')
+        initialize_cache(self.cache)
         self.stats = {'inference_calls': 0, 'cache_hits': 0, 'inference_seconds': 0.0}
 
     def connect(self):

@@ -27,7 +27,7 @@ request UUID and expected READY. The UUID is the durable decision ID.
 Decisions live in immutable `refs/knowledge-atlas/decisions/<UUID>` commits with
 `atlas-decision.json`. Each receipt retains the candidate tree and package closure;
 its parents keep the candidate, reviewed base and accepted/revised result reachable.
-Rejection records a reason without withdrawing any previously accepted knowledge.
+Rejection records a decision against that candidate. A fresh decision UUID can subsequently accept it while its base remains current. Both receipts remain in history.
 Inspection survives loss of the service database. Caller-supplied attribution is
 recorded as supplied; a `human` flag is not proof of human identity.
 
@@ -40,7 +40,7 @@ and accepted content before attempting projection. A lost acknowledgement after
 publication resolves to the existing publication, including when later history has
 advanced. No duplicate acceptance or automatic model retry is implied.
 
-A stale reviewed base is rejected; callers must inspect changes and revalidate.
+Each new candidate records its base publication, including an explicit null for the first candidate. Regenerate and inspect a pre-upgrade candidate that lacks this binding. A stale base returns `stale_proposal` or `stale_publication`. Backdated acceptances return `invalid_acceptance_time`. Earlier source versions that lack a per-source recording time use the retained Wiki compilation time where available.
 `candidate.revise` creates a new candidate with attributed receipt, using either
 `entries` for explicit structured changes, or `sources`, `remove_source_ids` and/or
 `instructions` through the retained native Wiki/Utopia path. It also requires actor,

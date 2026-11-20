@@ -43,3 +43,14 @@ def test_unique_statement_keeps_retained_poc9_relation_identity():
     statement=next(r for r in records if r['kind']=='statement')
     relation=next(r for r in records if r['kind']=='relation')
     assert relation['@id']=='Record/'+key('relation',statement['@id'])
+
+
+def test_source_recording_time_survives_later_decisions():
+    data = snapshot(0)
+    data['wiki']['recorded_at'] = '2026-11-12T00:00:00Z'
+    data['wiki']['sources'] = [
+        {'id':'one', 'filename':'one.txt', 'recorded_at':'2026-11-11T00:00:00Z'},
+        {'id':'legacy', 'filename':'legacy.txt'}]
+    data['sources'] = {'one.txt': b'one', 'legacy.txt': b'legacy'}
+    times = {r['text']: r['recorded_at'] for r in records_for(data,'a'*40) if r['kind']=='source'}
+    assert times == {'one':'2026-11-11T00:00:00Z','legacy':'2026-11-12T00:00:00Z'}

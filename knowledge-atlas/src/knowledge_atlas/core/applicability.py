@@ -6,6 +6,7 @@ intervals are [from, to); null time remains unknown. Acceptance time is not vali
 time. Episode IDs deduplicate evidence, never become confidence probabilities.
 """
 from datetime import datetime, timezone
+from graphlib import CycleError, TopologicalSorter
 
 
 def instant(value):
@@ -24,7 +25,32 @@ def assess(records, record_id, context, *, valid_at=None):
                 'reasons': list(reasons), 'conflicts': sorted(set(conflicts)),
                 'missing_grounds': sorted(set(missing_grounds))}
 
+    # A ground whose reachable dependencies are acyclic is independent of the
+    # traversal path. Keep cycle-dependent evaluations on their original path.
+    order = TopologicalSorter()
+    for rid, record in records.items():
+        dependencies = {child for group in record.get('support_sets', []) for child in group}
+        dependencies.update(record.get('conflicts_with', []))
+        order.add(rid, *dependencies)
+    try:
+        order.prepare()
+    except CycleError:
+        pass  # get_ready still drains the components independent of cycles.
+    acyclic = set()
+    while batch := order.get_ready():
+        acyclic.update(batch)
+        order.done(*batch)
+    cached = {}
+
     def visit(rid, path):
+        if rid in cached:
+            return cached[rid]
+        evaluation = with_conflicts(rid, path)
+        if rid in acyclic:
+            cached[rid] = evaluation
+        return evaluation
+
+    def with_conflicts(rid, path):
         evaluation=evaluate(rid,path)
         if evaluation['status']=='supported':
             # Check each attributed opposing position on its own grounds;
@@ -108,7 +134,18 @@ def assess(records, record_id, context, *, valid_at=None):
                       reasons=['no_usable_support_set', *reasons],
                       missing_grounds=[rid for group in evaluations for r in group for rid in r['missing_grounds']])
 
-    return visit(record_id, set())
+    evaluated = visit(record_id, set())
+    outbound = set(records.get(record_id, {}).get('conflicts_with', []))
+    opposition = []
+    for other, entry in sorted(records.items()):
+        directions = []
+        if record_id in entry.get('conflicts_with', []):
+            directions.append('inbound')
+        if other in outbound:
+            directions.append('outbound')
+        for direction in directions:
+            opposition.append({'id': other, 'direction': direction, 'status': evaluate(other, set())['status']})
+    return {**evaluated, 'declared_opposition': opposition}
 
 
 def inspect_episodes(records, record_ids):

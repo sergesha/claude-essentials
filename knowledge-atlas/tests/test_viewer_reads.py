@@ -13,7 +13,9 @@ def test_pages_use_selected_publication_after_ready_advances(published):
     store, first, content, *_ = published
     original=store.read(content)
     wiki=original['wiki']; wiki['pages'][0]['content']='Changed later page.'
-    candidate=store.snapshot(wiki,original['extraction'],{},recorded_at='2026-11-14T00:00:00Z')['commit']
+    from knowledge_atlas.core.feedback import revise_compilation
+    candidate=revise_compilation(store,content,[],wiki,original['extraction'],{},actor='Fixture',
+        method='Fixture',reason='Changed page',recorded_at='2026-11-14T00:00:00Z',base_publication=first)
     from knowledge_atlas.runtime import _assets
     accepted=Publications(store).review(candidate,{'decision':'accept','actor':'Test','kind':'synthetic',
         'reason':'new version','accepted_at':'2026-11-14T01:00:00Z','base_publication':first},
@@ -50,7 +52,7 @@ def test_question_citations_are_bound_to_supplied_selected_evidence(published,mo
         def __call__(self,request):
             assert request['publication']==published[1]
             assert request['evidence'][0]['record_id']==rid
-            return {'answer':'A bounded answer.','citations':['Record/foreign' if foreign else rid],'unknowns':[]}
+            return {'coverage':'answered','answer':'A bounded answer.','citations':['Record/foreign' if foreign else rid],'unknowns':[]}
     monkeypatch.setattr(model_config,'ConfiguredModels',Model)
     if foreign:
         with pytest.raises(AtlasError) as error:read_action(read_context(published,'question.ask',{'question':'What is supported?'}))
@@ -83,7 +85,7 @@ def test_question_marks_truncated_evidence_and_preserves_bound(published,monkeyp
         def __call__(self,request):
             assert request['truncated'] is True
             assert sum(len(x['text'])+len(x['payload']) for x in request['evidence'])<=48000
-            return {'answer':'Partial evidence only.','citations':[rid],'unknowns':['Evidence was truncated.']}
+            return {'coverage':'partial','answer':'Partial evidence only.','citations':[rid],'unknowns':['Evidence was truncated.']}
     monkeypatch.setattr(model_config,'ConfiguredModels',Model)
     result=read_action(read_context(published,'question.ask',{'question':'What is known?'}))
     assert result.data['bounds']['truncated'] is True
@@ -107,3 +109,15 @@ def test_composed_pages_retain_distinct_canonical_ids(published,tmp_path):
     for page in pages:
         result=read_action(read_context(published,'wiki.read',{'page_id':page['id']},publication=selected))
         assert result.publication==selected and result.data['page']['id']==page['id']
+
+def test_retrieved_evidence_can_still_be_insufficient(published, monkeypatch):
+    from knowledge_atlas.core import model_config
+    rid = published[3]
+    monkeypatch.setattr(AtlasReader, 'search', lambda self, *a, **k: {
+        'hits': [{'record': self.records[rid]}]})
+    monkeypatch.setattr(model_config, 'ConfiguredModels', lambda **k: lambda request: {
+        'coverage': 'insufficient', 'answer': 'The publication does not cover this.',
+        'unknowns': ['Material strength'], 'citations': [rid]})
+    result = read_action(read_context(published, 'question.ask', {'question': 'Material strength?'}))
+    assert result.data['status'] == 'insufficient_evidence'
+    assert result.data['citations'] == [rid]
