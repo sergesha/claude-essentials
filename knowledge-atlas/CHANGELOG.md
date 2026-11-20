@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.3.1](https://github.com/sergesha/claude-essentials/compare/knowledge-atlas-v0.3.0...knowledge-atlas-v0.3.1) (2026-11-20)
+
+
+### Bug Fixes
+
+* **knowledge-atlas:** preserve legacy archive decision order during replay ([c52131f](https://github.com/sergesha/claude-essentials/commit/c52131fbdb868b00a5965585d4732ccc78ac388c))
+* **knowledge-atlas:** repair audit findings across publication, archives and local interfaces ([6afc69f](https://github.com/sergesha/claude-essentials/commit/6afc69f8e5da90b9818803fa91bc7d1a11eecead))
+* **knowledge-atlas:** repair publication, restore and local service reliability ([f477149](https://github.com/sergesha/claude-essentials/commit/f477149741c575c1eab129c21359b70482da6cab))
+
 ## [0.3.0](https://github.com/sergesha/claude-essentials/compare/knowledge-atlas-v0.2.0...knowledge-atlas-v0.3.0) (2026-11-19)
 
 
