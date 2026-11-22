@@ -6,7 +6,6 @@ intervals are [from, to); null time remains unknown. Acceptance time is not vali
 time. Episode IDs deduplicate evidence, never become confidence probabilities.
 """
 from datetime import datetime, timezone
-from graphlib import CycleError, TopologicalSorter
 
 
 def instant(value):
@@ -18,6 +17,49 @@ def instant(value):
     return parsed
 
 
+def _dependency_components(records):
+    """Find strongly connected components of visible support and opposition edges."""
+    outgoing = {}
+    incoming = {rid: [] for rid in records}
+    for rid, record in records.items():
+        children = {child for group in record.get('support_sets', []) for child in group}
+        children.update(record.get('conflicts_with', []))
+        outgoing[rid] = [child for child in children if child in records]
+        for child in outgoing[rid]:
+            incoming[child].append(rid)
+
+    # Kosaraju's two iterative searches also handle long, unrelated chains.
+    seen = set()
+    finished = []
+    for root in records:
+        if root in seen:
+            continue
+        stack = [(root, False)]
+        while stack:
+            rid, expanded = stack.pop()
+            if expanded:
+                finished.append(rid)
+            elif rid not in seen:
+                seen.add(rid)
+                stack.append((rid, True))
+                stack.extend((child, False) for child in outgoing[rid] if child not in seen)
+
+    components = {}
+    for root in reversed(finished):
+        if root in components:
+            continue
+        members = {root}
+        components[root] = members
+        pending = [root]
+        while pending:
+            for parent in incoming[pending.pop()]:
+                if parent not in components:
+                    members.add(parent)
+                    components[parent] = members
+                    pending.append(parent)
+    return components
+
+
 def assess(records, record_id, context, *, valid_at=None):
     def result(status, *, missing=(), episodes=(), usable=(), reasons=(), conflicts=(), missing_grounds=()):
         return {'status': status, 'missing_conditions': sorted(set(missing)),
@@ -25,30 +67,18 @@ def assess(records, record_id, context, *, valid_at=None):
                 'reasons': list(reasons), 'conflicts': sorted(set(conflicts)),
                 'missing_grounds': sorted(set(missing_grounds))}
 
-    # A ground whose reachable dependencies are acyclic is independent of the
-    # traversal path. Keep cycle-dependent evaluations on their original path.
-    order = TopologicalSorter()
-    for rid, record in records.items():
-        dependencies = {child for group in record.get('support_sets', []) for child in group}
-        dependencies.update(record.get('conflicts_with', []))
-        order.add(rid, *dependencies)
-    try:
-        order.prepare()
-    except CycleError:
-        pass  # get_ready still drains the components independent of cycles.
-    acyclic = set()
-    while batch := order.get_ready():
-        acyclic.update(batch)
-        order.done(*batch)
+    components = _dependency_components(records)
     cached = {}
 
     def visit(rid, path):
-        if rid in cached:
-            return cached[rid]
-        evaluation = with_conflicts(rid, path)
-        if rid in acyclic:
-            cached[rid] = evaluation
-        return evaluation
+        # Only ancestors in the same component can be reached again. On entry
+        # from another component the result is independent of the incoming path.
+        component = components.get(rid)
+        if component is not None and not component.isdisjoint(path):
+            return with_conflicts(rid, path)
+        if rid not in cached:
+            cached[rid] = with_conflicts(rid, frozenset())
+        return cached[rid]
 
     def with_conflicts(rid, path):
         evaluation=evaluate(rid,path)

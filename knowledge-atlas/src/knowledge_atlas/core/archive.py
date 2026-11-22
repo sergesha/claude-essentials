@@ -84,6 +84,27 @@ def _check_zip_directory(stream):
         raise ValueError('ZIP directory exceeds archive limits')
 
 
+def freeze_restore_input(source, destination, size):
+    """Copy a size-limited external stream and recognize its frozen ZIP inventory."""
+    # Python's ZIP recognition seeks through the trailing end record and its
+    # optional 65,535-byte comment. Only give it bounded bytes from a live file.
+    trailer_window = 22 + 65_535
+    source.seek(max(0, size - trailer_window))
+    if not zipfile.is_zipfile(io.BytesIO(source.read(trailer_window))):
+        raise ValueError('missing ZIP directory')
+    source.seek(0)
+    with destination.open('x+b') as output:
+        if copy_bounded(source, output, size) != size:
+            raise ValueError('archive size changed during submission')
+        _check_zip_directory(output)
+        try:
+            with zipfile.ZipFile(output) as package:
+                if 'archive.json' not in package.namelist():
+                    raise ValueError('missing archive manifest')
+        except (zipfile.BadZipFile, NotImplementedError) as error:
+            raise ValueError('invalid ZIP inventory') from error
+
+
 def _read_members(archive, work):
     with regular_archive(Path(archive).resolve()) as stream:
         _check_zip_directory(stream)

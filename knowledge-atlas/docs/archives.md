@@ -5,7 +5,15 @@ and its current `expected_publication`. `archive.restore` takes payload `archive
 and an unused destination `path`. Both are durable worker operations. Submission
 retains a private copy of restore input bytes in attempt evidence. Use a regular
 file with a single hard link outside service and atlas directories, for example `/data/exports/atlas.zip`
-in Docker. Keep the compressed file within 512 MiB. The restore limits are
+in Docker. Keep the compressed file within 512 MiB. The service checks the ZIP
+directory and requires an `archive.json` entry before accepting a restore. Queued,
+running and interrupted restores share a 1 GiB staging budget. When the budget
+is full, submission returns HTTP 507 (`archive_staging_full`). A worker deletes
+its private input after success or failure and retains the operation record,
+diagnostics and caller's original file. At startup and during admission, the
+service reclaims copies left by terminal attempts and abandoned submissions.
+
+The restore limits are
 1,024 ZIP entries, 512 KiB of central directory metadata, 256 MiB per member,
 8 MiB for `archive.json`, and 1 GiB across all expanded members including the
 manifest. Each filename must occur once, and the hash inventory must match the
@@ -34,8 +42,13 @@ cannot authorize its own Python formatter by supplying a matching hash.
 A rebuild failure retains the restored canonical files and failed attempt
 evidence. The destination is never overwritten. Correct missing prerequisites
 and restore the same archive into another unused destination. Automatic replay
-of an interrupted restore is deliberately unavailable: inspect the canonical
-result before starting a fresh operation.
+of an interrupted restore requires a registered recovery handler. The standard
+service returns HTTP 409 (`unsafe_resume`) and preserves the original attempt
+and staged input. Inspect the canonical result before starting a fresh restore.
+If interrupted inputs fill the staging budget,
+confirm the operation is interrupted, preserve a copy of the input outside
+the service, and remove only that operation's staged `archive.zip` before
+submitting the fresh restore.
 
 The prepared runtime must have the pinned tokenizer, formatter, native graph
 and embedding bridge configured against this restored atlas's vector cache.

@@ -7,7 +7,7 @@ establish that a statement is applicable to the caller's case.
 import json
 from .applicability import assess, instant
 from .graph_stage import GraphStage, records_for
-from .publication import Publications
+from .publication import Publications, acceptance_instant
 from .decision_receipts import matching_decision_receipt
 
 
@@ -32,19 +32,19 @@ class AtlasReader:
             receipt = self.pubs.read(current)
             self.chain[current] = receipt
             current = receipt['previous_publication']
-        if as_known_at is not None:
-            # This is the recorded acceptance axis, not Git/server wall time.
-            # Only READY's reachable history is eligible; pending reviews are not.
-            when = instant(as_known_at)
-            selected = None
-            newer = None
-            for oid, receipt in self.chain.items():
-                accepted = instant(receipt['accepted_at'])
-                if newer is not None and accepted > newer:
-                    raise ValueError('publication history has out-of-order accepted_at timestamps')
-                if selected is None and accepted <= when:
-                    selected = oid
-                newer = accepted
+        when = instant(as_known_at) if as_known_at is not None else None
+        selected = None
+        visible_from = None
+        for oid, receipt in reversed(self.chain.items()):
+            # A child incorporates its ancestors and cannot be visible earlier.
+            accepted = acceptance_instant(receipt)
+            visible_from = max(visible_from, accepted) if visible_from is not None else accepted
+            receipt.pop('effective_accepted_at', None)  # Derived from the chain at read time.
+            if visible_from != instant(receipt['accepted_at']):
+                receipt['effective_accepted_at'] = visible_from.isoformat()
+            if when is not None and visible_from <= when:
+                selected = oid
+        if when is not None:
             if selected is None:
                 raise ValueError('no published slice accepted by requested time')
             self.publication = selected
@@ -339,10 +339,12 @@ class AtlasReader:
             records = self._records(current)
             if record_id in self._visible(records):
                 receipt = self.chain[current]
-                result.append({'publication_commit': current, 'accepted_at': receipt['accepted_at'],
-                               'acceptance_kind': receipt['acceptance_kind'], 'acceptance_channel': receipt['acceptance_channel'],
-                               'record': records[record_id],
-                               'matching_decision_receipt': self.matching_decision_receipt(current)})
+                entry = {'publication_commit': current, 'accepted_at': receipt['accepted_at'],
+                         'acceptance_kind': receipt['acceptance_kind'], 'acceptance_channel': receipt['acceptance_channel'],
+                         'record': records[record_id], 'matching_decision_receipt': self.matching_decision_receipt(current)}
+                if 'effective_accepted_at' in receipt:
+                    entry['effective_accepted_at'] = receipt['effective_accepted_at']
+                result.append(entry)
             current = self.chain[current]['previous_publication']
         return result
 

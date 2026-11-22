@@ -85,7 +85,9 @@ async function loadPublication(){
  if(!selected){text('page','No accepted publication yet. Import and review sources through your agent.');return;}
  const publication=selected,result=await read('wiki.pages');if(publication!==selected||epoch!==viewEpoch)return;
  const data=result.data;$('dates').replaceChildren();
- for(const value of ['Imported '+date(data.recorded_at),'Published '+date(data.accepted_at),attribution(data)])$('dates').append(node('span',value));
+ const dates=['Imported '+date(data.recorded_at),'Accepted '+date(data.effective_accepted_at||data.accepted_at)];
+ if(data.effective_accepted_at)dates.push('Caller-recorded acceptance '+date(data.accepted_at));
+ for(const value of [...dates,attribution(data)])$('dates').append(node('span',value));
  $('sources').replaceChildren();for(const source of data.sources||[]){$('sources').append(node('p',(source.name||'Source')+' · Source date: '+date(source.source_time)+' · Imported: '+date(source.recorded_at)),details('Source provenance',source));}
  pageNames=new Map(data.pages.map(page=>[page.id,page.title]));pageLinks=new Map();for(const page of data.pages){if(pageLinks.has(page.path))pageLinks.set(page.path,null);else pageLinks.set(page.path,page.id);}text('page-count',String(data.pages.length));
  for(const page of data.pages){const b=button(page.title,async()=>{await loadPage(page.id);showPanel('read');});b.dataset.id=page.id;$('pages').append(b);}
@@ -101,7 +103,7 @@ async function refresh(){
  if(epoch!==viewEpoch)return;ready=freshReady;
  $('publication').replaceChildren();$('before').replaceChildren();$('timeline').replaceChildren();
  versionNames=new Map();
- for(const [index,entry] of history.entries()){const oid=entry.publication_commit;const label='Version '+(history.length-index)+(oid===freshReady?' · Latest':'')+' · '+date(entry.accepted_at);versionNames.set(oid,label);
+ for(const [index,entry] of history.entries()){const oid=entry.publication_commit;const label='Version '+(history.length-index)+(oid===freshReady?' · Latest':'')+' · '+date(entry.effective_accepted_at||entry.accepted_at);versionNames.set(oid,label);
   chooseOption($('publication'),oid,label);chooseOption($('before'),oid,label);
   const b=button(label+'\n'+attribution(entry),async()=>{selected=oid;$('publication').value=oid;await loadPublication();showPanel('read',true);});b.dataset.publication=oid;b.setAttribute('aria-current',String(oid===selected));$('timeline').append(b);}
 

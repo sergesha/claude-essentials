@@ -13,6 +13,37 @@ from knowledge_atlas.core.reader import AtlasReader
 ROOT = Path(__file__).parent/'fixtures'
 
 
+def test_revision_support_propagates_once_across_shared_grounds():
+    from knowledge_atlas.core.knowledge import _unchanged_support
+
+    class Group(list):
+        visits = 0
+
+        def __iter__(self):
+            Group.visits += 1
+            return super().__iter__()
+
+    def active(*groups):
+        return {'state': 'active', 'support_sets': [Group(group) for group in groups]}
+
+    records = {'trial': active(), 'withdrawn': {'state': 'withdrawn'}, 'changed': active(),
+               'loop': active(['grounded']), 'grounded': active(['loop'], ['trial', 'trial']),
+               'closed': active(['closed']), 'missing': active(['absent']), 'empty': active([]),
+               'requires_both': active(['trial', 'withdrawn']),
+               'blocked': {**active(['trial']), 'depends_on': ['affected']}}
+    supported = {'trial', 'loop', 'grounded'}
+    previous = 'grounded'
+    for level in range(12):
+        left, right, both = (f'{level}-{side}' for side in ('left', 'right', 'both'))
+        records[left] = active([previous])
+        records[right] = active([previous])
+        records[both] = active([left, right])
+        supported.update([left, right, both])
+        previous = both
+    assert _unchanged_support(records, {'changed'}, {'affected'}) == supported
+    assert Group.visits <= sum(len(record.get('support_sets', [])) for record in records.values())
+
+
 def proposal_records(snapshot):
     source = snapshot['sources']['review.txt'].decode()
     quote = source.split('\n')[0]
