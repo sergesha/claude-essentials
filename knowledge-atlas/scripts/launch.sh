@@ -11,7 +11,7 @@ esac
 export PYTHONPATH="$atlas_plugin_root/src${PYTHONPATH:+:$PYTHONPATH}"
 if [ "$#" -eq 0 ]; then set -- mcp; fi
 atlas_cache_root=${XDG_CACHE_HOME:-$HOME/.cache}/knowledge-atlas
-atlas_plugin_version="0.3.1" # x-release-please-version
+atlas_plugin_version="0.3.2" # x-release-please-version
 export UV_PROJECT_ENVIRONMENT="$atlas_cache_root/python-$atlas_plugin_version"
 if [ "${1:-}" = prepare-launcher ]; then
   exec uv sync --project "$atlas_plugin_root" --locked --no-dev --python 3.12
