@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/sergesha/claude-essentials/compare/knowledge-atlas-v0.3.1...knowledge-atlas-v0.3.2) (2026-11-22)
+
+
+### Bug Fixes
+
+* **knowledge-atlas:** recover publication history, bound restore staging and reuse shared evidence ([#148](https://github.com/sergesha/claude-essentials/issues/148)) ([fa7aeaa](https://github.com/sergesha/claude-essentials/commit/fa7aeaa35b94bfd2d783e4d425e7d1536c259c9c))
+
 ## [0.3.1](https://github.com/sergesha/claude-essentials/compare/knowledge-atlas-v0.3.0...knowledge-atlas-v0.3.1) (2026-11-20)
 
 
