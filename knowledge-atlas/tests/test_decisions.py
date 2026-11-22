@@ -1,5 +1,6 @@
 """Canonical decision receipts extend retained PoC acceptance/publication behavior."""
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import uuid
@@ -54,6 +55,32 @@ def test_receipt_tree_has_valid_package_closure(tmp_path, candidate):
     assert store.read(receipt)['manifest']['package_id']==store.read(oid)['manifest']['package_id']
     git(store.root,'merge-base','--is-ancestor',oid,receipt)
     assert store.closure(receipt)
+
+
+def test_future_decision_and_preupgrade_pending_replay(tmp_path, candidate, monkeypatch):
+    from knowledge_atlas.actions import decisions
+    store, oid = candidate
+    context = context_for(tmp_path, store, oid, 'accept')
+    payload = {**context.request.payload, 'decided_at': (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()}
+    context = replace(context, request=replace(context.request, payload=payload))
+    with pytest.raises(AtlasError) as error:
+        decide_candidate(context)
+    assert (error.value.code, error.value.status) == ('invalid_acceptance_time', 422)
+    assert not git(store.root, 'for-each-ref', 'refs/knowledge-atlas/decisions/')
+
+    def unavailable(*_):
+        raise RuntimeError('fixture projection unavailable')
+
+    with monkeypatch.context() as old:
+        old.setattr(Publications, '_check_acceptance_time', staticmethod(lambda *_: None))
+        old.setattr(decisions, 'build_projection', unavailable)
+        pending = decide_candidate(context)
+    assert pending.data['status'] == 'accepted_pending_publication'
+    monkeypatch.setattr(decisions, 'build_projection', lambda *_: pytest.fail('unexpected projection'))
+    replay = decide_candidate(context)
+    assert replay.data['publication_error']['code'] == 'invalid_acceptance_time'
+    assert replay.data['decision_commit'] == pending.data['decision_commit']
+    assert Publications(store).ready() is None
 
 
 def test_stale_accept_preserves_winner(tmp_path, candidate, monkeypatch):

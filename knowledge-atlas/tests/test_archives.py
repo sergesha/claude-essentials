@@ -163,9 +163,11 @@ def test_restore_registers_only_after_rebuild(portable,tmp_path,monkeypatch):
     assert Publications(GitStore(tmp_path/'unbuilt')).ready()==portable[3]
 
 
-def test_submitted_restore_freezes_archive_bytes(portable,tmp_path):
-    from knowledge_atlas.contracts import ActionRequest,ServiceContext
-    from knowledge_atlas.operations import submit
+def test_submitted_restore_freezes_archive_bytes(portable,tmp_path,monkeypatch):
+    from knowledge_atlas.actions import archives
+    from knowledge_atlas.contracts import ActionRequest,ActionResult,ServiceContext
+    from knowledge_atlas.operations import database,inspect_operation,resume,submit
+    from knowledge_atlas.worker import run_next
     path=tmp_path/'atlas.zip';archive(portable,path)
     original=path.read_bytes()
     request=ActionRequest('archive.restore',request_id=str(uuid.uuid4()),payload={'archive':str(path),'path':str(tmp_path/'restore')})
@@ -174,6 +176,21 @@ def test_submitted_restore_freezes_archive_bytes(portable,tmp_path):
     path.write_bytes(b'changed after submission')
     assert (operation.evidence/'archive.zip').read_bytes()==original
     assert submit(service,request).operation_id==operation.operation_id
+    monkeypatch.setattr(archives, 'rebuild_restored', lambda ctx: ActionResult(data={'ready': portable[3]}))
+    # An explicit recovery handler can authorize replay when canonical installation
+    # never started. Replay must consume the original frozen bytes.
+    with database(service) as db:
+        db.execute("UPDATE operations SET state='interrupted' WHERE operation_id=?", (operation.operation_id,))
+    def reconcile(ctx):
+        assert not ctx.atlas_path.exists()
+        assert (ctx.previous_evidence / 'archive.zip').read_bytes() == original
+        return None
+    service.recoveries['archive.restore'] = reconcile
+    resume(service, operation.operation_id, str(uuid.uuid4()))
+    run_next(service)
+    assert inspect_operation(service, operation.operation_id).state == 'succeeded'
+    assert not (operation.evidence / 'archive.zip').exists()
+    assert path.read_bytes() == b'changed after submission'
 
 
 @pytest.mark.parametrize('limit,value,match', [
@@ -198,18 +215,20 @@ def test_archive_inventory_limits(tmp_path, monkeypatch, limit, value, match):
     assert not (tmp_path / 'restored').exists()
 
 
-@pytest.mark.parametrize('extra', ['archive.json', 'notes.txt', 'other.txt'])
-def test_archive_inventory_requires_unique_exact_names(tmp_path, extra):
+@pytest.mark.parametrize('extra', ['archive.json', 'tokenizer.json', 'other.txt'])
+def test_archive_inventory_requires_unique_exact_names(portable, tmp_path, extra):
     path = tmp_path / 'fixture.zip'
-    with zipfile.ZipFile(path, 'w') as output:
-        output.writestr('archive.json', json.dumps({'format': 1, 'sha256': {'notes.txt': ''}}))
-        output.writestr('notes.txt', 'ordinary fixture')
-        if extra in ('archive.json', 'notes.txt'):
+    archive(portable, path)
+    with zipfile.ZipFile(path, 'a') as output:
+        if extra in output.namelist():
+            content = output.read(extra)
             with pytest.warns(UserWarning, match='Duplicate'):
-                output.writestr(extra, '')
+                output.writestr(extra, content)
+            expected = 'duplicate archive member'
         else:
-            output.writestr(extra, '')
-    with pytest.raises(ValueError, match='duplicate|inventory mismatch'):
+            output.writestr(extra, 'ordinary fixture')
+            expected = 'inventory mismatch'
+    with pytest.raises(ValueError, match=expected):
         restore_atlas(path, tmp_path / 'restored')
     assert not (tmp_path / 'restored').exists()
 
@@ -225,7 +244,7 @@ def test_copy_limit_applies_as_bytes_arrive(monkeypatch):
     assert target.getvalue() == b'abcdef'
 
 
-@pytest.mark.parametrize('kind', ['service', 'alias', 'hardlink', 'atlas', 'directory', 'size'])
+@pytest.mark.parametrize('kind', ['service', 'alias', 'hardlink', 'atlas', 'directory', 'size', 'plain', 'zip_without_manifest'])
 def test_restore_refuses_unsuitable_inputs_without_attempt(tmp_path, monkeypatch, kind):
     from knowledge_atlas.contracts import ActionRequest, AtlasError, ServiceContext
     from knowledge_atlas.core import archive as codec
@@ -251,9 +270,13 @@ def test_restore_refuses_unsuitable_inputs_without_attempt(tmp_path, monkeypatch
     elif kind == 'atlas':
         path = atlas / 'notes'
         path.write_text('fixture')
+    elif kind == 'zip_without_manifest':
+        with zipfile.ZipFile(path, 'w') as package:
+            package.writestr('notes.txt', 'ordinary file')
     else:
         path.write_text('fixture')
-        monkeypatch.setattr(codec, 'MAX_ARCHIVE_BYTES', 3)
+        if kind == 'size':
+            monkeypatch.setattr(codec, 'MAX_ARCHIVE_BYTES', 3)
     req = ActionRequest('archive.restore', request_id=str(uuid.uuid4()),
                         payload={'archive': str(path), 'path': str(tmp_path / 'restored')})
     with pytest.raises(AtlasError) as error:
@@ -273,7 +296,8 @@ def test_concurrent_restore_stages_outside_transaction(tmp_path, monkeypatch):
 
     source = tmp_path / 'exports' / 'fixture.zip'
     source.parent.mkdir()
-    source.write_bytes(b'ordinary staged bytes')
+    with zipfile.ZipFile(source, 'w') as package:
+        package.writestr('archive.json', '{}')
     service = ServiceContext(tmp_path / 'service')
     with operations.database(service):
         pass
@@ -283,17 +307,119 @@ def test_concurrent_restore_stages_outside_transaction(tmp_path, monkeypatch):
     together = Barrier(2)
 
     def check(service, req, evidence):
-        together.wait(timeout=5)
         with sqlite3.connect(service.service_root / 'operations.sqlite3', timeout=1) as other:
             other.execute('BEGIN IMMEDIATE')
         stage(service, req, evidence)
 
     monkeypatch.setattr(operations, '_stage_archive', check)
+    def concurrent_submit(_):
+        together.wait(timeout=5)
+        return operations.submit(service, request)
+
     with ThreadPoolExecutor(max_workers=2) as pool:
-        first, second = pool.map(lambda _: operations.submit(service, request), range(2))
+        first, second = pool.map(concurrent_submit, range(2))
     assert first.operation_id == second.operation_id
     assert list((service.service_root / 'attempts').iterdir()) == [first.evidence.parent]
     assert (first.evidence / 'archive.zip').read_bytes() == source.read_bytes()
+
+
+def test_restore_staging_quota_and_terminal_cleanup(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    from knowledge_atlas import operations
+    from knowledge_atlas.contracts import ActionRequest, AtlasError, ServiceContext
+    from knowledge_atlas.worker import run_next
+
+    path = tmp_path / 'incomplete.zip'
+    with zipfile.ZipFile(path, 'w') as package:
+        package.writestr('archive.json', '{}')
+    service = ServiceContext(tmp_path / 'service')
+    requests = [ActionRequest('archive.restore', request_id=str(uuid.uuid4()),
+                              payload={'archive': str(path), 'path': str(tmp_path / str(i))})
+                for i in range(2)]
+    monkeypatch.setattr(operations, 'MAX_STAGED_ARCHIVE_BYTES', path.stat().st_size)
+    barrier = Barrier(2)
+
+    def submit(request):
+        barrier.wait(timeout=5)
+        try:
+            return operations.submit(service, request)
+        except AtlasError as error:
+            assert error.code == 'archive_staging_full'
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(submit, requests))
+    assert results.count(None) == 1
+    failed = next(result for result in results if result)
+    run_next(service)
+    assert operations.inspect_operation(service, failed.operation_id).error['code'] == 'invalid_archive'
+    assert not (failed.evidence / 'archive.zip').exists()
+    assert (failed.evidence / 'error.json').is_file()
+    assert operations.submit(service, requests[results.index(None)]).state == 'queued'
+
+
+def test_unsupported_restore_resume_preserves_input(tmp_path):
+    from knowledge_atlas import operations
+    from knowledge_atlas.contracts import ActionRequest, AtlasError, ServiceContext
+    from knowledge_atlas.worker import run_next
+
+    path = tmp_path / 'fixture.zip'
+    with zipfile.ZipFile(path, 'w') as package:
+        package.writestr('archive.json', '{}')
+    service = ServiceContext(tmp_path / 'service')
+    request = ActionRequest('archive.restore', request_id=str(uuid.uuid4()),
+                            payload={'archive': str(path), 'path': str(tmp_path / 'restored')})
+    operation = operations.submit(service, request)
+    with operations.database(service) as db:
+        db.execute("UPDATE operations SET state='running' WHERE operation_id=?", (operation.operation_id,))
+    resume_id = str(uuid.uuid4())
+    with pytest.raises(AtlasError) as rejected:
+        operations.resume(service, operation.operation_id, resume_id)
+    assert (rejected.value.code, rejected.value.status) == ('unsafe_resume', 409)
+    record = operations.inspect_operation(service, operation.operation_id)
+    assert (record.state, record.attempt) == ('interrupted', 1)
+    assert not (record.evidence.parent / '2').exists()
+    assert (record.evidence / 'archive.zip').read_bytes() == path.read_bytes()
+
+    # Simulate a resume that an older deployment already queued.
+    service.recoveries['archive.restore'] = lambda ctx: None
+    operations.resume(service, operation.operation_id, resume_id)
+    service.recoveries.clear()
+    run_next(service)
+    assert operations.inspect_operation(service, operation.operation_id).state == 'interrupted'
+    assert (record.evidence / 'archive.zip').read_bytes() == path.read_bytes()
+
+
+def test_restore_reconciles_retained_inputs_on_start(tmp_path):
+    from knowledge_atlas import operations
+    from knowledge_atlas.contracts import ActionRequest, ServiceContext
+
+    path = tmp_path / 'fixture.zip'
+    with zipfile.ZipFile(path, 'w') as package:
+        package.writestr('archive.json', '{}')
+    service = ServiceContext(tmp_path / 'service')
+    states = ('interrupted', 'succeeded', 'failed')
+    inputs = []
+    for state in states:
+        request = ActionRequest('archive.restore', request_id=str(uuid.uuid4()),
+                                payload={'archive': str(path), 'path': str(tmp_path / state)})
+        record = operations.submit(service, request)
+        inputs.append(record.evidence / 'archive.zip')
+        with operations.database(service) as db:
+            db.execute('UPDATE operations SET state=? WHERE operation_id=?', (state, record.operation_id))
+    for retained in inputs:
+        retained.write_bytes(path.read_bytes())  # Simulate v0.3.1 retention.
+    orphan = service.service_root / 'attempts' / str(uuid.uuid4()) / '1' / 'archive.zip'
+    orphan.parent.mkdir(parents=True)
+    orphan.write_bytes(path.read_bytes())
+
+    dispatcher = operations.Dispatcher(service)
+    dispatcher.start()
+    dispatcher.stop()
+    assert [staged.exists() for staged in inputs] == [True, False, False]
+    assert not orphan.exists()
+    assert path.is_file()
 
 
 @pytest.mark.parametrize('limit', ['MAX_ARCHIVE_BYTES', 'MAX_ARCHIVE_ENTRIES', 'MAX_MEMBER_BYTES',

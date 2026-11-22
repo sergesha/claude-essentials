@@ -168,13 +168,16 @@ class ApplicabilityTests(unittest.TestCase):
         self.assertIn('required_ground_unavailable', assess(self.records, 'lesson', self.context)['reasons'])
 
 
+class CountedRecords(dict):
+    reads = 0
+
+    def __getitem__(self, key):
+        self.reads += 1
+        return super().__getitem__(key)
+
+
 def test_shared_grounds_have_linear_evaluations_and_cycles_remain_path_sensitive():
-    class Counted(dict):
-        reads = 0
-        def __getitem__(self, key):
-            self.reads += 1
-            return super().__getitem__(key)
-    records = Counted()
+    records = CountedRecords()
     def accepted(*groups):
         return {'status': 'accepted', 'support_sets': list(groups)}
     records['leaf'] = accepted()
@@ -200,3 +203,45 @@ def test_declared_opposition_includes_visible_inbound_and_conditional_outbound()
     assert result['declared_opposition'] == [
         {'id':'in', 'direction':'inbound', 'status':'supported'},
         {'id':'out', 'direction':'outbound', 'status':'withdrawn'}]
+
+
+def test_shared_grounds_above_cycle_reuse_completed_evaluations():
+    def lesson(*alternatives):
+        return {'kind': 'lesson', 'status': 'accepted', 'support_sets': list(alternatives)}
+
+    records = CountedRecords({
+        'observation': {'kind': 'episode', 'status': 'accepted', 'episode_id': 'trial-one'},
+        'a': lesson(['b'], ['observation']),
+        'b': lesson(['a']),
+        'shared': lesson(['a'], ['b']),
+    })
+    last = 'shared'
+    for level in range(8):
+        left, right, top = (f'{level}-{side}' for side in ('left', 'right', 'top'))
+        records[left] = lesson([last])
+        records[right] = lesson([last])
+        records[top] = lesson([left, right])
+        last = top
+
+    result = assess(records, last, {})
+    assert result['status'] == 'supported'
+    assert result['independent_episodes'] == ['trial-one']
+    assert records.reads < 10 * len(records)
+    assert assess(records, 'shared', {})['usable_support_sets'] == [0, 1]
+
+
+def test_opposing_position_dependent_on_the_active_ground_cannot_disqualify_it():
+    records = {
+        'observation': {'kind': 'episode', 'status': 'accepted', 'episode_id': 'trial-one',
+                        'conflicts_with': ['counterclaim']},
+        'lesson': {'kind': 'lesson', 'status': 'accepted', 'support_sets': [['observation']]},
+        'counterclaim': {'kind': 'judgment', 'status': 'accepted', 'support_sets': [['lesson']]},
+        'summary': {'kind': 'lesson', 'status': 'accepted',
+                    'support_sets': [['observation'], ['lesson']]},
+    }
+    for order in ([['observation'], ['lesson']], [['lesson'], ['observation']]):
+        records['summary']['support_sets'] = order
+        result = assess(records, 'summary', {})
+        assert result['status'] == 'supported'
+        assert result['usable_support_sets'] == [0, 1]
+        assert result['independent_episodes'] == ['trial-one']

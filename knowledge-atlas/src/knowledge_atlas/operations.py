@@ -1,9 +1,11 @@
 """SQLite owns execution only. Handlers retain all canonical knowledge in Git."""
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, replace
+import fcntl
 import hashlib
 import json
 import multiprocessing
+import os
 from pathlib import Path
 import shutil
 import sqlite3
@@ -172,15 +174,65 @@ def external_archive_path(context, value):
     return source
 
 
+MAX_STAGED_ARCHIVE_BYTES = 1024**3
+
+
+@contextmanager
+def _archive_staging_lock(context):
+    # Keep file copies outside SQLite transactions while serializing admission
+    # and orphan cleanup across all service processes.
+    with (context.service_root / 'archive-staging.lock').open('a+b') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def _retained_archive_bytes(context):
+    """Called under the staging lock. Reconcile v0.3.1 copies and abandoned admissions."""
+    total = 0
+    with database(context) as db:
+        for path in (context.service_root / 'attempts').glob('*/1/archive.zip'):
+            attempt = path.parent
+            operation = attempt.parent
+            if attempt.is_symlink() or operation.is_symlink():
+                continue
+            try:
+                identifier = str(uuid.UUID(operation.name))
+            except ValueError:
+                continue
+            if identifier != operation.name:
+                continue
+            row = db.execute('SELECT state, request FROM operations WHERE operation_id=?', (identifier,)).fetchone()
+            if row and json.loads(row['request'])['action'] != 'archive.restore':
+                continue
+            if row is None or row['state'] in ('succeeded', 'failed'):
+                path.unlink(missing_ok=True)
+            else:
+                try:
+                    total += path.lstat().st_size
+                except FileNotFoundError:
+                    pass  # The worker may have just finished and discarded the input.
+    return total
+
+
+def staged_restore_input(evidence):
+    """All attempts of a restore share the input frozen by its first submission."""
+    return evidence.parent / '1' / 'archive.zip'
+
+
 def _stage_archive(context, request, evidence):
     from .core import archive
 
     source = external_archive_path(context, request.payload.get('archive'))
     try:
-        with archive.regular_archive(source) as stream, (evidence / 'archive.zip').open('xb') as output:
-            archive.copy_bounded(stream, output, archive.MAX_ARCHIVE_BYTES)
+        with archive.regular_archive(source) as stream:
+            size = os.fstat(stream.fileno()).st_size
+            if size > archive.MAX_ARCHIVE_BYTES:
+                raise ValueError('archive exceeds byte limit')
+            if size + _retained_archive_bytes(context) > MAX_STAGED_ARCHIVE_BYTES:
+                raise AtlasError('archive_staging_full', 'restore staging capacity is full', 507)
+            archive.freeze_restore_input(stream, staged_restore_input(evidence), size)
     except (ValueError, OSError) as error:
-        raise AtlasError('invalid_archive', 'restore requires a regular file within the archive limit', 422) from error
+        raise AtlasError('invalid_archive', 'restore requires a bounded archive with an archive.json manifest', 422) from error
 
 
 def submit(context: ServiceContext, request: ActionRequest) -> OperationRecord:
@@ -201,21 +253,24 @@ def submit(context: ServiceContext, request: ActionRequest) -> OperationRecord:
         {'runtime_root': str(context.runtime.runtime_root.expanduser().resolve()),
          'manifest': str(context.runtime.manifest.expanduser().resolve()) if context.runtime.manifest else None}
         if context.runtime else None})
+    staging = _archive_staging_lock(context) if request.action == 'archive.restore' else nullcontext()
+    with staging:
+        if request.action == 'archive.restore':
+            with database(context) as db:
+                existing = _existing_submission(db, request, request_json, digest)
+                if existing is not None:
+                    return existing
+        return _persist_submission(context, request, request_json, digest, path, configuration)
+
+
+def _persist_submission(context, request, request_json, digest, path, configuration):
     identifier = str(uuid.uuid4())
     evidence = context.service_root / 'attempts' / identifier / '1'
     evidence.mkdir(parents=True, exist_ok=False)
     committed = False
     try:
         if request.action == 'archive.restore':
-            try:
-                _stage_archive(context, request, evidence)
-            except AtlasError:
-                # Another caller might have finished while our input disappeared.
-                with database(context) as db:
-                    existing = _existing_submission(db, request, request_json, digest)
-                if existing is not None:
-                    return existing
-                raise
+            _stage_archive(context, request, evidence)
         (evidence / 'input.json').write_text(encoded({'request':json.loads(request_json), **json.loads(configuration)}))
         with database(context) as db:
             db.execute('BEGIN IMMEDIATE')
@@ -246,6 +301,7 @@ def inspect_operation(context, operation_id):
 def resume(context, operation_id, request_id):
     if request_id is None:
         raise AtlasError('invalid_request', 'resume requires a fresh request UUID')
+    from .actions import register_recoveries
     ActionRequest('operation.resume', request_id=request_id)
     request_id = str(uuid.UUID(request_id))
     inspect_operation(context, operation_id)
@@ -257,16 +313,20 @@ def resume(context, operation_id, request_id):
                 raise AtlasError('request_conflict', 'request UUID reused', 409)
             return _record(_row(db, operation_id))
         row = _row(db, operation_id)
+        request = json.loads(row['request'])
+        action = request['action']
         pending_publication = (row['state'] == 'succeeded'
-            and json.loads(row['request'])['action'] == 'candidate.decide'
+            and action == 'candidate.decide'
             and row['result'] is not None
             and json.loads(row['result']).get('data', {}).get('status') == 'accepted_pending_publication')
         if (row['state'] not in ('failed', 'interrupted') and not pending_publication) or is_locked(Path(row['evidence']) / 'worker.lock'):
             raise AtlasError('busy', 'resume requires an inactive failed, interrupted or publication-pending operation', 409)
+        if action == 'archive.restore' and register_recoveries(context).get(action) is None:
+            raise AtlasError('unsafe_resume', 'inspect the restore and submit a new request for an unused destination', 409)
         attempt = row['attempt'] + 1
         evidence = context.service_root / 'attempts' / operation_id / str(attempt)
         evidence.mkdir(parents=True, exist_ok=False)
-        (evidence / 'input.json').write_text(encoded({'request':json.loads(row['request']), **json.loads(row['configuration'])}))
+        (evidence / 'input.json').write_text(encoded({'request':request, **json.loads(row['configuration'])}))
         db.execute('INSERT INTO resumes VALUES (?,?)', (request_id, operation_id))
         db.execute("UPDATE operations SET state='queued',attempt=?,previous_evidence=evidence,evidence=?,result=NULL,error=NULL WHERE operation_id=?", (attempt, str(evidence), operation_id))
         return _record(_row(db, operation_id))
@@ -292,6 +352,9 @@ class Dispatcher:
     def start(self):
         import threading
         if self.thread is not None and self.thread.is_alive(): return
+        if (self.context.service_root / 'attempts').exists():
+            with _archive_staging_lock(self.context):
+                _retained_archive_bytes(self.context)
         self.stopping.clear()
         self.thread = threading.Thread(target=self._loop, name='atlas-dispatcher', daemon=True)
         self.thread.start()

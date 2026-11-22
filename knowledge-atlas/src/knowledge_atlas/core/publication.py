@@ -3,7 +3,7 @@
 The caller supplies the explicit review decision. Synthetic exercises are stored
 as synthetic; this module does not authenticate a human or evaluate truth.
 """
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -45,6 +45,29 @@ class StaleProposal(ValueError):
 
 class InvalidAcceptanceTime(ValueError):
     """The decision cannot be placed on the recorded acceptance timeline."""
+    code = 'invalid_acceptance_time'
+
+
+MAX_ACCEPTANCE_CLOCK_SKEW = timedelta(minutes=5)
+
+
+def _timestamp(value):
+    try:
+        timestamp = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except (AttributeError, TypeError, ValueError) as error:
+        raise InvalidAcceptanceTime('acceptance timeline requires an ISO timestamp with timezone') from error
+    if timestamp.tzinfo is None:
+        raise InvalidAcceptanceTime('acceptance timeline requires a timezone')
+    return timestamp
+
+
+def acceptance_instant(receipt):
+    """Use the immutable publication clock to recover an implausibly future legacy claim."""
+    accepted = _timestamp(receipt['accepted_at'])
+    published = _timestamp(receipt['published_at'])
+    if accepted - published > MAX_ACCEPTANCE_CLOCK_SKEW:
+        return published
+    return accepted
 
 
 class Publications:
@@ -67,7 +90,7 @@ class Publications:
             raise ValueError('stale review: revalidate against current READY')
         self._check_proposal_base(snapshot['manifest'], decision['base_publication'])
         parent = self.read(decision['base_publication']) if decision['base_publication'] else None
-        self._check_acceptance_time(decision, parent)
+        self._check_acceptance_time(decision, self._effective_base_time(decision['base_publication'], parent))
         digest = hashlib.sha256(json.dumps(profile['profile'], sort_keys=True,
             separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()
         if digest != profile['profile_id']:
@@ -89,15 +112,31 @@ class Publications:
             raise StaleProposal('stale proposal: rebase and review against current READY')
 
     @staticmethod
-    def _check_acceptance_time(review, parent):
-        try:
-            accepted = datetime.fromisoformat(review['accepted_at'].replace('Z', '+00:00'))
-        except (AttributeError, KeyError, ValueError) as error:
-            raise InvalidAcceptanceTime('accepted_at requires an ISO timestamp with timezone') from error
-        if accepted.tzinfo is None:
-            raise InvalidAcceptanceTime('accepted_at requires timezone')
-        if parent and accepted < datetime.fromisoformat(parent['accepted_at'].replace('Z', '+00:00')):
+    def _check_acceptance_time(review, base_time):
+        accepted = _timestamp(review.get('accepted_at'))
+        if accepted - datetime.now(timezone.utc) > MAX_ACCEPTANCE_CLOCK_SKEW:
+            raise InvalidAcceptanceTime('accepted_at is more than five minutes in the future')
+        if base_time is not None and accepted < base_time:
             raise InvalidAcceptanceTime('accepted_at precedes the base publication')
+
+    def _effective_base_time(self, oid, parent):
+        """Derive the ancestry cutoff, reusing a local result only for its exact Git OID."""
+        if parent is None:
+            return None
+        try:
+            cached_oid, cached_value = git(self.store.root, 'config', '--local', '--get', 'atlas.acceptanceCutoff').split()
+            cached_time = _timestamp(cached_value)
+        except ValueError:
+            cached_oid = None
+        latest = None
+        while parent:
+            accepted = acceptance_instant(parent)
+            latest = max(latest, accepted) if latest is not None else accepted
+            if oid == cached_oid:
+                return max(latest, cached_time)
+            oid = parent['previous_publication']
+            parent = self.read(oid) if oid else None
+        return latest
 
     def ready(self):
         result = subprocess.run(['git', '-C', str(self.store.root), 'show-ref', '--verify', '--hash', self.ref], capture_output=True)
@@ -112,16 +151,43 @@ class Publications:
         return result.stdout.decode().strip()
 
     def read(self, publication):
-        self.store.read(publication)  # Exact OID and package closure validation.
+        snapshot = self.store.read(publication)
         receipt = json.loads(git(self.store.root, 'show', publication + ':publication.json'))
+        parents = git(self.store.root, 'show', '-s', '--format=%P', publication).split()
+        content = receipt['content_commit']
+        previous = receipt['previous_publication']
+        if parents != ([previous, content] if previous else [content]):
+            raise ValueError('publication does not reference its accepted content and previous publication')
+        manifest = json.loads(git(self.store.root, 'show', content + ':manifest.json'))
+        if snapshot['manifest'] != manifest:
+            raise ValueError('publication requires accepted content')
+        review = self._accepted_review(content, manifest)
+        if (review['base_publication'] != previous
+                or review['kind'] != receipt['acceptance_kind']
+                or ('acceptance_channel' in receipt and
+                    receipt['acceptance_channel'] != review.get('attribution_channel', 'unrecorded'))
+                or review['accepted_at'] != receipt['accepted_at']
+                or receipt['profile_id'] != manifest['profile_id']):
+            raise ValueError('publication metadata disagrees with accepted content')
         receipt.setdefault('acceptance_channel', 'unrecorded')
         return receipt
+
+    def _accepted_review(self, content, manifest):
+        if manifest.get('status') != 'accepted':
+            raise ValueError('publication requires accepted content')
+        review = json.loads(git(self.store.root, 'show', content + ':review.json'))
+        if (not isinstance(review, dict) or review.get('decision') != 'accept'
+                or manifest.get('acceptance') != review or review.get('accepted_at') != manifest.get('accepted_at')):
+            raise ValueError('accepted_at or review metadata disagrees with accepted content')
+        if git(self.store.root, 'show', '-s', '--format=%P', content).split() != [review.get('candidate_commit')]:
+            raise ValueError('accepted content does not descend directly from the reviewed candidate')
+        return review
 
     def publish(self, content, build_projection):
         snapshot = self.store.read(content)
         if snapshot['manifest']['status'] != 'accepted':
             raise ValueError('unreviewed candidate cannot be published')
-        review = json.loads(git(self.store.root, 'show', content + ':review.json'))
+        review = self._accepted_review(content, snapshot['manifest'])
         previous = self.ready()
         parent = self.read(previous) if previous else None
         if parent and parent['content_commit'] == content:
@@ -129,7 +195,8 @@ class Publications:
         if review['base_publication'] != previous:
             raise ValueError('stale review: revalidate against current READY')
         self._check_proposal_base(snapshot['manifest'], previous)
-        self._check_acceptance_time(review, parent)
+        base_time = self._effective_base_time(previous, parent)
+        self._check_acceptance_time(review, base_time)
         receipt = build_projection(content)
         if receipt.get('profile_id') != snapshot['manifest']['profile_id']:
             raise ValueError('projection profile does not match accepted content')
@@ -153,4 +220,13 @@ class Publications:
             if current and self.read(current)['content_commit'] == content:
                 return current
             raise ValueError('stale publication: READY changed; semantic revalidation required') from error
+        cutoff = acceptance_instant(publication)
+        if base_time is not None:
+            cutoff = max(cutoff, base_time)
+        # This optional cache belongs to the local repository. Portable archives
+        # carry the immutable evidence used to reconstruct it after restore.
+        try:
+            git(self.store.root, 'config', '--local', 'atlas.acceptanceCutoff', result + ' ' + cutoff.isoformat())
+        except ValueError:
+            pass  # READY has already advanced. A cache miss only costs a history walk.
         return result

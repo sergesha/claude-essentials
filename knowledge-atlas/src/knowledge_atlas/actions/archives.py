@@ -6,7 +6,7 @@ from ..contracts import ActionResult, AtlasError
 from ..core.archive import export_atlas, restore_atlas
 from ..core.git_store import GitStore, git
 from ..core.publication import Publications
-from ..operations import external_archive_path, register_atlas
+from ..operations import external_archive_path, register_atlas, staged_restore_input
 from ..native_pipeline import run_native
 from ..runtime import validate_runtime
 
@@ -42,7 +42,7 @@ def restore_archive(context):
     if context.atlas_path.exists():
         raise AtlasError('destination_exists', 'restore requires an unused destination', 409)
     try:
-        source = context.evidence/'archive.zip' if context.operation_id else external_archive_path(context.service, archive)
+        source = staged_restore_input(context.evidence) if context.operation_id else external_archive_path(context.service, archive)
         store = restore_atlas(source, context.atlas_path)
     except (ValueError, KeyError, OSError) as error:
         raise AtlasError('invalid_archive', str(error), 422) from error

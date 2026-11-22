@@ -5,7 +5,7 @@ from pathlib import Path
 import traceback
 from .contracts import ActionContext, ActionRequest, ActionResult, AtlasError, RuntimeConfig
 from .locks import FileLock, AtlasLock
-from .operations import database, encoded, validate_atlas_path
+from .operations import database, encoded, staged_restore_input, validate_atlas_path
 from .actions import register_handlers, register_recoveries
 
 
@@ -70,5 +70,16 @@ def _execute_next(service):
             details = {'code':getattr(error,'code','operation_failed'), 'message':str(error), 'evidence':str(evidence)}
             (evidence/'error.json').write_text(encoded(details))
             (evidence/'traceback.txt').write_text(traceback.format_exc())
+            # A previous service version could already have queued an unsupported
+            # restore resume. Its original bytes are still needed for inspection.
+            interrupted = (context.request.action == 'archive.restore' and context.previous_evidence is not None
+                           and details['code'] == 'unsafe_resume')
             with database(service) as db:
-                db.execute("UPDATE operations SET state='failed',error=? WHERE operation_id=?", (encoded(details), row['operation_id']))
+                db.execute("UPDATE operations SET state=?,error=? WHERE operation_id=?",
+                           ('interrupted' if interrupted else 'failed', encoded(details), row['operation_id']))
+            if interrupted:
+                return
+        # The state is durable before discarding bytes. An interrupted attempt
+        # retains its original evidence until an operator reconciles the restore.
+        if context.request.action == 'archive.restore':
+            staged_restore_input(evidence).unlink(missing_ok=True)

@@ -159,7 +159,6 @@ read. Raw question/model evidence remains in the private service data directory.
 Publication-level `history` returns timeline metadata and publication/content commit identifiers.
 It omits raw `vector_artifacts` and `native_export_excluded_ids` from the response;
 those projection payloads remain intact in the Git-owned publication receipt.
-Record-specific history is unchanged.
 
 
 ### Review and answer metadata
@@ -168,7 +167,11 @@ Publication history and the selected wiki expose the caller-supplied acceptance 
 channel. Older publications report an unrecorded channel. The `matching_decision_receipt`
 field indicates whether a retained decision agrees with the publication. A missing receipt
 is valid for pre-receipt history. An unsigned matching receipt establishes internal
-consistency.
+consistency. Before serving a publication, the reader checks that its Git parents
+identify the previous publication and the reviewed content. It also checks that
+the accepted content descends directly from the candidate named in the review
+and that the publication metadata agrees with that review. A publication that points to a
+pending candidate fails this check, including during archive restore.
 
 `question.ask` returns `coverage` as `answered`, `partial` or `insufficient`. Insufficient
 coverage returns `status: insufficient_evidence` even when retrieval found records.
@@ -177,4 +180,17 @@ Synchronous provider failures return HTTP 503 with `provider_failed`.
 `atlas.status.candidate_statuses` maps candidate commits to review status. Rejection and
 subsequent acceptance are distinct retained decisions. A stale candidate must be regenerated
 against the current publication. New acceptances preserve chronological ordering along the
-publication chain.
+publication chain. Acceptance checks run both when recording a review and before building
+its projection. A timestamp more than five minutes ahead of the service clock returns
+`invalid_acceptance_time`. For `candidate.decide` with action `accept`, this timestamp
+comes from `decided_at`.
+
+On older history, `as_known_at` selects the latest publication whose entire chain was
+eligible by the requested instant. If a legacy acceptance was more than five minutes
+ahead of its own `published_at`, selection uses that publication time. If a child was
+accepted earlier than an ancestor, it becomes visible with that ancestor. History and
+`wiki.pages` preserve the caller's `accepted_at` and include `effective_accepted_at`
+when the two instants differ.
+New reviews and pending publications must meet the base publication's effective
+cutoff. The service derives it from Git history and caches it locally for the
+exact publication ID. A restored atlas can reconstruct it from the archive.

@@ -41,6 +41,13 @@ publication resolves to the existing publication, including when later history h
 advanced. No duplicate acceptance or automatic model retry is implied.
 
 Each new candidate records its base publication, including an explicit null for the first candidate. Regenerate and inspect a pre-upgrade candidate that lacks this binding. A stale base returns `stale_proposal` or `stale_publication`. Backdated acceptances return `invalid_acceptance_time`. Earlier source versions that lack a per-source recording time use the retained Wiki compilation time where available.
+If an older release accepted a far-future date, submit the next review against the
+current READY with the correct current time. The service uses the old publication's
+own `published_at` as its acceptance time when the claimed date exceeded that clock by
+more than five minutes. The original Git receipt and publication ID remain available.
+For a future-dated review still pending publication, issue a fresh acceptance with
+the corrected time against the current base.
+
 `candidate.revise` creates a new candidate with attributed receipt, using either
 `entries` for explicit structured changes, or `sources`, `remove_source_ids` and/or
 `instructions` through the retained native Wiki/Utopia path. It also requires actor,

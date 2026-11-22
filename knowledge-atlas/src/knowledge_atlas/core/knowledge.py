@@ -7,6 +7,43 @@ from .graph_stage import records_for
 from .publication import Publications, commit_files
 
 
+def _unchanged_support(records, changed, affected):
+    """Find records with a finite proof based entirely on unchanged grounds."""
+    supported = set()
+    waiting = {}
+    remaining = {}
+    for rid, record in records.items():
+        if rid in changed or record.get('state') != 'active':
+            continue
+        if any(dep in changed or dep in affected for dep in record.get('depends_on', [])):
+            continue
+        alternatives = record.get('support_sets', [])
+        if not alternatives:
+            supported.add(rid)
+        for index, group in enumerate(alternatives):
+            # Empty alternatives cannot establish a record. A missing ground
+            # will never be marked supported, so its alternative stays pending.
+            if group:
+                grounds = set(group)
+                alternative = (rid, index)
+                remaining[alternative] = len(grounds)
+                for child in grounds:
+                    waiting.setdefault(child, []).append(alternative)
+
+    pending = list(supported)
+    while pending:
+        child = pending.pop()
+        for alternative in waiting.get(child, ()):
+            rid, _ = alternative
+            if rid in supported:
+                continue
+            remaining[alternative] -= 1
+            if remaining[alternative] == 0:
+                supported.add(rid)
+                pending.append(rid)
+    return supported
+
+
 def propose_records(store, base, entries, *, actor, method, reason, recorded_at, base_publication=None):
     if not actor or not method or not reason:
         raise ValueError('proposal author, method and reason required')
@@ -72,18 +109,7 @@ def propose_records(store, base, entries, *, actor, method, reason, recorded_at,
     for rid, detail in affected.items():
         if rid not in invalidated:
             detail.update(status='reevaluate', reason='required_ground_added')
-    def unchanged_support(rid, path):
-        if rid not in retained or rid in seen or rid in path:
-            return False
-        entry = retained[rid]
-        if entry.get('state') != 'active':
-            return False
-        if any(dep in seen or dep in affected for dep in entry.get('depends_on', [])):
-            return False
-        groups = entry.get('support_sets', [])
-        return not groups or any(group and all(unchanged_support(child, path | {rid}) for child in group)
-                                 for group in groups)
-    preserved = {rid for rid in affected if unchanged_support(rid, set())}
+    preserved = _unchanged_support(retained, seen, affected) if invalidated else set()
     for rid, detail in affected.items():
         if rid not in seen and retained[rid].get('state') != 'withdrawn':
             retained[rid]['impact'] = detail
