@@ -1,8 +1,10 @@
 """Deployment boundary checks; native components are qualified separately."""
+from contextlib import ExitStack
 import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import pytest
@@ -42,6 +44,69 @@ def test_plugin_mcp_launchers_request_no_compose_default():
         assert 'project' not in manifest.get('userConfig', {})
         for stale in ('KNOWLEDGE_ATLAS_DEFAULT_PROJECT', 'KNOWLEDGE_ATLAS_DOCKER_PROJECT'):
             assert stale not in server.get('env', {})
+
+
+def test_installed_codex_launcher_reports_legacy_docker_selector(tmp_path):
+    installed = tmp_path / 'installed'
+    for path in ('.codex-plugin/mcp.json', 'scripts/launch.sh'):
+        target = installed / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(PACKAGE / path, target)
+    shutil.copytree(PACKAGE / 'src', installed / 'src', ignore=shutil.ignore_patterns('__pycache__'))
+
+    manifest = json.loads((installed / '.codex-plugin/mcp.json').read_text())
+    server = manifest['mcpServers']['knowledge-atlas']
+    supplied = {
+        'KNOWLEDGE_ATLAS_DOCKER_PROJECT': 'previous-compose-deployment',
+        'KNOWLEDGE_ATLAS_PYTHON': sys.executable,
+        'XDG_DATA_HOME': str(tmp_path / 'data'),
+        'XDG_CONFIG_HOME': str(tmp_path / 'config'),
+    }
+    # Codex clears the child environment and forwards its defaults plus env_vars.
+    env = {'PATH': os.defpath, 'HOME': str(tmp_path),
+           **{name: supplied[name] for name in server['env_vars'] if name in supplied}}
+    result = subprocess.run([server['command'], *server['args']], cwd=installed / server['cwd'],
+                            env=env, input='', capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ''
+    assert 'KNOWLEDGE_ATLAS_DOCKER_PROJECT' in result.stderr
+    assert 'atlas.connect' in result.stderr and 'payload.container_name' in result.stderr
+    assert 'previous-compose-deployment' not in result.stderr
+    assert not (tmp_path / 'data').exists()
+
+
+def test_legacy_compose_stop_dispatches_to_neither_service(tmp_path):
+    from knowledge_atlas.contracts import ServiceContext
+    from knowledge_atlas.http_api import create_app
+
+    native_data = tmp_path / 'native'
+    native_root = native_data / 'knowledge-atlas' / 'service'
+    container_root = tmp_path / 'container-service'
+    container_config = tmp_path / 'container.json'
+    container_config.write_text(json.dumps({'service_root': str(container_root)}))
+    docker = tmp_path / 'docker'
+    docker.write_text(f'#!{sys.executable}\n'
+                      'import os, sys\n'
+                      'os.execv(sys.executable, [sys.executable, "-m", "knowledge_atlas.cli", "stop", '
+                      f'"--config", {str(container_config)!r}])\n')
+    docker.chmod(0o755)
+    env = {'HOME': str(tmp_path), 'PATH': str(tmp_path) + os.pathsep + os.defpath,
+           'XDG_DATA_HOME': str(native_data), 'KNOWLEDGE_ATLAS_PYTHON': sys.executable,
+           'KNOWLEDGE_ATLAS_DOCKER_PROJECT': 'previous-compose-deployment'}
+
+    with ExitStack() as cleanup:
+        native = create_app(ServiceContext(native_root)).start()
+        cleanup.callback(native.stop, wait=True)
+        container = create_app(ServiceContext(container_root)).start()
+        cleanup.callback(container.stop, wait=True)
+        result = subprocess.run(['sh', str(PACKAGE / 'scripts/launch.sh'), 'stop'], env=env,
+                                capture_output=True, text=True, timeout=10)
+        assert not native.stopping, 'legacy stop reached the default native service'
+        assert not container.stopping, 'legacy stop reached the Docker service'
+        assert result.returncode != 0
+        assert result.stdout == ''
+        assert 'KNOWLEDGE_ATLAS_DOCKER_PROJECT' in result.stderr
+        assert 'docker stop' in result.stderr and 'stop --config' in result.stderr
 
 
 def test_start_refuses_unprepared_runtime_without_creating_atlas(tmp_path, monkeypatch):

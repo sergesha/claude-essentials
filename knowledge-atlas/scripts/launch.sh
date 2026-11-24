@@ -1,5 +1,12 @@
 #!/bin/sh
 set -eu
+if [ "${1:-}" = stop ] && [ -n "${KNOWLEDGE_ATLAS_DOCKER_PROJECT:-}" ]; then
+  printf '%s\n' \
+    'KNOWLEDGE_ATLAS_DOCKER_PROJECT no longer selects a deployment.' \
+    'For Docker, run docker stop with the exact container name.' \
+    'For native, unset KNOWLEDGE_ATLAS_DOCKER_PROJECT and run this launcher with stop --config PATH.' >&2
+  exit 1
+fi
 atlas_plugin_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 export PYTHONPATH="$atlas_plugin_root/src${PYTHONPATH:+:$PYTHONPATH}"
 if [ "$#" -eq 0 ]; then set -- mcp; fi

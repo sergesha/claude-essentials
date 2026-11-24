@@ -62,6 +62,10 @@ These include the Claude Code plugin's old `project` setting,
 are left in place. Use the exact running container name on each new Docker
 connection.
 
+The launcher rejects `stop` while `KNOWLEDGE_ATLAS_DOCKER_PROJECT` is set to a
+nonempty value. For Docker, run `docker stop EXACT_CONTAINER_NAME`. For native,
+unset the old variable and run `sh scripts/launch.sh stop --config SERVICE_JSON`.
+
 For a native service, set `KNOWLEDGE_ATLAS_CONFIG` to an external service JSON
 file. Both hosts use the same service configuration:
 
