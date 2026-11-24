@@ -35,7 +35,7 @@ def projection_receipt(store, publication, receipt):
 
 
 class AtlasReader:
-    def __init__(self, store, url, policy, publication=None, *, as_known_at=None):
+    def __init__(self, store, url, policy, publication=None, *, as_known_at=None, verify_database=None):
         if publication is not None and as_known_at is not None:
             raise ValueError('choose publication or as_known_at, not both')
         self.store, self.pubs, self.policy = store, Publications(store), policy
@@ -70,8 +70,11 @@ class AtlasReader:
         if self.publication not in self.chain:
             raise ValueError('slice is not in published history')
         self.receipt = projection_receipt(store, self.publication, self.chain[self.publication])
+        database_name = self.receipt['database']
+        if verify_database is not None:
+            verify_database(database_name)
         self.records = self._records(self.publication)
-        self.graph = GraphStage(url, self.receipt['database'])
+        self.graph = GraphStage(url, database_name)
 
     def matching_decision_receipt(self, publication=None):
         return matching_decision_receipt(self.store, self.chain[publication or self.publication])

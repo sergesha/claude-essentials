@@ -107,12 +107,14 @@ def graph_endpoint(url):
     return f'http://{address.hostname}:{address.port or 80}' + address.path.rstrip('/')
 
 
-def verify_graph_owner(db, endpoint, database_name, atlas_id):
+def verify_graph_owner(db, endpoint, database_name, atlas_id, *, require_owner=False):
     reserved = db.execute('SELECT atlas_id FROM atlases WHERE graph_database=?', (database_name,)).fetchone()
     owner = db.execute('SELECT atlas_id FROM projection_owners WHERE endpoint=? AND database_name=?',
                        (endpoint, database_name)).fetchone()
     if any(row is not None and row['atlas_id'] != atlas_id for row in (reserved, owner)):
         raise AtlasError('graph_atlas_conflict', 'the graph database belongs to another atlas', 409)
+    if require_owner and reserved is None and owner is None:
+        raise AtlasError('graph_atlas_conflict', 'the selected graph database has no verified project owner', 409)
 
 
 def _legacy_database(db, store, atlas_id):

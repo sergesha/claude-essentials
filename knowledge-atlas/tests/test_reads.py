@@ -120,3 +120,87 @@ def test_publication_history_does_not_transport_embedding_payloads(published, mo
     assert loaded
     assert all(len(value['vector_artifacts']['vectors']) == 100_000 for value in loaded)
     assert all(len(value['native_export_excluded_ids']) == 10_000 for value in loaded)
+
+
+
+@pytest.fixture
+def registered_history(published):
+    from knowledge_atlas.operations import register_atlas
+
+    store, first, content, _, service, _ = published
+    pubs = Publications(store)
+    atlas_id = store.read(content)['manifest']['package_id']
+    binding = register_atlas(service, atlas_id, store.base)
+    candidate = propose_records(store, content, [], actor='Fixture', method='Explicit retained fixture',
+        reason='Advance READY', recorded_at='2026-11-14T00:00:00Z', base_publication=first)
+    profile = json.loads((_assets() / 'embedding-profile.json').read_text())
+    accepted = pubs.review(candidate, {'decision': 'accept', 'actor': 'Fixture', 'kind': 'synthetic',
+        'reason': 'Advance READY', 'accepted_at': '2026-11-14T01:00:00Z', 'base_publication': first}, profile)
+    ready = pubs.publish(accepted, lambda oid: {
+        **projection(oid), 'graph_commit': oid, 'search_checkpoint': oid, 'database': binding.graph_database})
+    return binding, ready
+
+
+def set_rebuilt_database(store, publication, name):
+    receipt = Publications(store).read(publication)
+    (store.base / 'rebuilt-projections.json').write_text(
+        json.dumps({publication: {**receipt, 'database': name}}))
+
+
+@pytest.mark.parametrize(('selection', 'owner'), [('ready', 'foreign'), ('historical', 'foreign'),
+                                                 ('historical', 'unverified')])
+def test_selected_read_rejects_foreign_or_unverified_graph(published, registered_history,
+                                                          selection, owner, monkeypatch):
+    from knowledge_atlas.http_api import invoke
+    from knowledge_atlas.operations import register_atlas
+
+    store, first, _, _, service, docs = published
+    binding, ready = registered_history
+    database = 'admin/unverified'
+    if owner == 'foreign':
+        other = GitStore(store.base.with_name('other'))
+        identity = other.read(snapshot(other))['manifest']['package_id']
+        database = register_atlas(service, identity, other.base).graph_database
+    selected = first if selection == 'historical' else ready
+    set_rebuilt_database(store, selected, database)
+
+    queried = []
+
+    def documents(graph, commit):
+        queried.append((graph.database, commit))
+        return docs
+
+    monkeypatch.setattr(GraphStage, 'documents', documents)
+    request = ActionRequest('search', atlas_id=binding.atlas_id,
+                            publication=selected if selection == 'historical' else None,
+                            payload={'query': 'warping', 'mode': 'vector'})
+    with pytest.raises(AtlasError) as failure:
+        invoke(service, request)
+    assert (failure.value.code, failure.value.status, queried) == ('graph_atlas_conflict', 409, [])
+
+
+def test_historical_read_retains_project_owned_graph(published, registered_history, monkeypatch):
+    from knowledge_atlas.http_api import invoke
+    from knowledge_atlas.operations import database
+
+    store, first, content, lesson, service, docs = published
+    binding, ready = registered_history
+    old_database = 'admin/retained'
+    set_rebuilt_database(store, first, old_database)
+    with database(service) as db:
+        db.execute('INSERT INTO projection_owners VALUES (?,?,?)',
+                   ('http://127.0.0.1:1', old_database, binding.atlas_id))
+
+    queried = []
+
+    def documents(graph, commit):
+        queried.append((graph.database, commit))
+        return docs
+
+    monkeypatch.setattr(GraphStage, 'documents', documents)
+    status, result = invoke(service, ActionRequest('knowledge.apply', atlas_id=binding.atlas_id,
+        publication=first, payload={'record_id': lesson, 'context': {}}))
+    assert status == 200
+    assert result.publication == first != ready
+    assert result.data['status'] == 'conditional'
+    assert queried == [(old_database, content)]

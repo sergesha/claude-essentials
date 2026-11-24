@@ -4,6 +4,8 @@ from urllib.parse import urlsplit
 from ..contracts import ActionRequest, ActionResult, AtlasError
 from ..core.git_store import GitStore
 from ..core.reader import AtlasReader
+from ..operations import database
+from ..project_registry import graph_endpoint, verify_graph_owner
 
 
 def selected_reader(context):
@@ -14,10 +16,18 @@ def selected_reader(context):
         parsed = urlsplit(url)
         if parsed.scheme != 'http' or parsed.hostname != '127.0.0.1' or parsed.username or parsed.password:
             raise AtlasError('unsupported_configuration', 'graph runtime must use local HTTP', 422)
+    def verify_database(database_name):
+        if context.project_binding is None:
+            return
+        endpoint = graph_endpoint(url) if url else None
+        with database(context.service) as db:
+            verify_graph_owner(db, endpoint, database_name, context.project_binding.atlas_id,
+                               require_owner=bool(url))
+
     try:
         allowed = set()
         reader = AtlasReader(store, url, lambda: allowed, context.request.publication,
-                             as_known_at=context.request.as_known_at)
+                             as_known_at=context.request.as_known_at, verify_database=verify_database)
         # The local owner can read retained history. Eligibility below narrows
         # retrieval, without erasing older provenance from the access policy.
         for publication in reader.chain:

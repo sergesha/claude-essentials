@@ -9,6 +9,8 @@ import os
 from pathlib import Path
 import shutil
 import sqlite3
+import sys
+import tempfile
 import uuid
 
 from .contracts import ActionRequest, ActionResult, AtlasError, OperationRecord, ServiceContext
@@ -114,10 +116,56 @@ def _binding_evidence(binding):
     return {**asdict(binding), 'path': str(binding.path)}
 
 
+def _case_insensitive_directory(path):
+    if sys.platform == 'darwin':
+        # Darwin's _PC_CASE_SENSITIVE is not exported in Python's pathconf_names.
+        try:
+            case_sensitive = os.pathconf(path, 11)
+        except OSError:
+            pass
+        else:
+            if case_sensitive in (0, 1):
+                return case_sensitive == 0
+    # Probe only a prospective case alias on filesystems without this query.
+    # The temporary entry is a sibling of the missing path, never its destination.
+    with tempfile.NamedTemporaryFile(dir=path, prefix='.atlas-case-') as probe:
+        name = Path(probe.name)
+        alias = name.with_name(name.name.swapcase())
+        return alias.exists() and alias.samefile(name)
+
+
+def _same_create_destination(path, registered_path):
+    if path == registered_path:
+        return True
+    if str(path).casefold() != str(registered_path).casefold():
+        return False
+    # Resolve the actual identity at the closest existing level. Separate
+    # directories or mounts can have different case lookup behavior.
+    for candidate, registered in zip((path, *path.parents), (registered_path, *registered_path.parents)):
+        candidate_exists, registered_exists = candidate.exists(), registered.exists()
+        if not (candidate_exists or registered_exists):
+            continue
+        if not (candidate_exists and registered_exists and candidate.samefile(registered)):
+            return False
+        if path.relative_to(candidate) == registered_path.relative_to(registered):
+            return True
+        return candidate.is_dir() and _case_insensitive_directory(candidate)
+    return False
+
+
+def _verify_create_destination(db, path):
+    for row in db.execute('SELECT path FROM atlases'):
+        if _same_create_destination(path, Path(row['path'])):
+            raise AtlasError('atlas_conflict', 'the create destination is reserved for a registered atlas', 409)
+
+
 def operation_project(service, request, path, frozen):
     if request.action in PATH_ACTIONS:
         if validate_atlas_path(service, path) != path:
             raise AtlasError('atlas_conflict', 'the queued destination path changed', 409)
+        if request.action == 'atlas.create':
+            with database(service) as db:
+                _verify_create_destination(db, path)
         return None
     try:
         binding = resolve_project(service, request.atlas_id)
@@ -320,6 +368,8 @@ def _persist_submission(context, request, request_json, digest, path, configurat
             existing = _existing_submission(db, request, request_json, digest)
             if existing is not None:
                 return existing
+            if request.action == 'atlas.create':
+                _verify_create_destination(db, path)
             db.execute('INSERT INTO operations VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
                        (identifier, request.request_id, digest, request_json, configuration, str(path), 'queued', 1, str(evidence), None, None, None))
             result = _record(_row(db, identifier))

@@ -428,3 +428,86 @@ def test_queued_destination_symlink_cannot_redirect_worker_lock(tmp_path):
     assert failed.state == 'failed'
     assert failed.error['code'] == 'atlas_conflict'
     assert list(foreign_parent.iterdir()) == []
+
+
+
+def test_create_rejects_unavailable_registered_destination(tmp_path):
+    from knowledge_atlas.project_registry import list_projects
+    from test_project_registry import create_project
+
+    service = ServiceContext(tmp_path / 'service')
+    destination = tmp_path / 'atlas'
+    create_project(service, destination)
+    original = list_projects(service)
+    attempts = set((service.service_root / 'attempts').iterdir())
+    destination.rename(tmp_path / 'moved')
+
+    with pytest.raises(AtlasError) as failure:
+        submit(service, request(path=str(destination)))
+
+    assert (failure.value.code, failure.value.status) == ('atlas_conflict', 409)
+    assert not destination.exists()
+    assert list_projects(service) == original
+    assert set((service.service_root / 'attempts').iterdir()) == attempts
+
+
+def test_queued_create_rechecks_registered_destination_under_lock(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    from knowledge_atlas import worker
+    from knowledge_atlas.core.git_store import GitStore
+    from knowledge_atlas.operations import register_atlas
+    from knowledge_atlas.project_registry import list_projects, repository_identity
+    from test_packages import snapshot
+
+    service = ServiceContext(tmp_path / 'service')
+    destination = tmp_path / 'atlas'
+    queued = submit(service, request(path=str(destination)))
+    moved = tmp_path / 'moved'
+    registrations = []
+
+    @contextmanager
+    def register_before_worker_check(path):
+        with AtlasLock(path):
+            store = GitStore(path)
+            identity = store.read(snapshot(store))['manifest']['package_id']
+            registrations.append(register_atlas(service, identity, path))
+            path.rename(moved)
+            yield
+
+    monkeypatch.setattr(worker, 'AtlasLock', register_before_worker_check)
+    worker.run_next(service)
+
+    failed = inspect_operation(service, queued.operation_id)
+    assert failed.state == 'failed' and failed.error['code'] == 'atlas_conflict'
+    assert not destination.exists()
+    assert list_projects(service) == registrations
+    assert repository_identity(moved) == registrations[0].atlas_id
+
+
+
+def test_create_reservation_respects_destination_filesystem_case(tmp_path):
+    from knowledge_atlas.project_registry import list_projects
+    from knowledge_atlas.worker import run_next
+    from test_project_registry import create_project
+
+    service = ServiceContext(tmp_path / 'service')
+    reserved = tmp_path / 'atlas'
+    alternate = tmp_path / 'ATLAS'
+    identity = create_project(service, reserved)
+    aliases_on_disk = alternate.exists() and alternate.samefile(reserved)
+    reserved.rename(tmp_path / 'moved')
+    assert not alternate.exists()
+
+    if aliases_on_disk:
+        with pytest.raises(AtlasError) as failure:
+            submit(service, request(path=str(alternate)))
+        assert (failure.value.code, failure.value.status) == ('atlas_conflict', 409)
+        assert not alternate.exists()
+        assert [row.atlas_id for row in list_projects(service)] == [identity]
+    else:
+        operation = submit(service, request(path=str(alternate)))
+        run_next(service)
+        created = inspect_operation(service, operation.operation_id)
+        assert created.state == 'succeeded', created.error
+        assert created.result.data['atlas_id'] != identity
+        assert alternate.exists() and not reserved.exists()
