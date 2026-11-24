@@ -14,13 +14,7 @@ export class MutationQueue {
     this.projects.set(atlasId,{action,body:{
       atlas_id:atlasId,payload:structuredClone(payload),request_id:this.uuid(),expected_publication:publication,
     }});
-    try{
-      return await this.reconcile(atlasId);
-    }catch(error){
-      // Busy and transport errors can be retried using the original request.
-      if(error.status>=400&&error.status<500&&error.code!=='busy')this.finish(atlasId);
-      throw error;
-    }
+    return this.reconcile(atlasId);
   }
 
   async reconcile(atlasId){
@@ -28,13 +22,19 @@ export class MutationQueue {
     if(!pending)throw new Error('No pending request.');
     if(pending.result)return pending.result;
     if(!pending.inFlight){
-      pending.inFlight=Promise.resolve().then(()=>pending.operation_id
-        ?this.send('operation.read',{atlas_id:atlasId,payload:{operation_id:pending.operation_id}})
+      const operationId=pending.operation_id;
+      pending.inFlight=Promise.resolve().then(()=>operationId
+        ?this.send('operation.read',{atlas_id:atlasId,payload:{operation_id:operationId}})
         :this.send(pending.action,pending.body)
       ).then(result=>{
         if(result.operation_id)pending.operation_id=result.operation_id;
         if(!['queued','running'].includes(result.state))pending.result=result;
         return result;
+      }).catch(error=>{
+        // Polling failures leave admitted work available for recovery.
+        const rejected=error.status>=400&&error.status<500&&error.code!=='busy';
+        if(!operationId&&rejected&&this.get(atlasId)===pending)this.finish(atlasId);
+        throw error;
       }).finally(()=>{pending.inFlight=null;});
     }
     return pending.inFlight;

@@ -5,7 +5,7 @@ const token=location.hash.slice(1);history.replaceState(null,'',location.pathnam
 let selected=null,ready=null,pageId=null,targetId=null,inspected=null;
 let project={atlasId:null,generation:0};
 let viewEpoch=0,pageEpoch=0,inspectEpoch=0;
-let sentFields=new WeakMap();
+let fieldBaselines=new WeakMap();
 const isCurrent=scope=>scope.atlasId===project.atlasId&&scope.generation===project.generation;
 let pageNames=new Map(),versionNames=new Map(),pageLinks=new Map();
 const text=(id,value)=>{$(id).textContent=typeof value==='string'?value:JSON.stringify(value,null,2);};
@@ -109,10 +109,15 @@ function setAskBusy(busy){
  text('ask-submit',busy?'Preparing answer…':'Ask with evidence ↗');
 }
 function draftFields(){
- return [$('actor'),$('clarification'),$('reason'),$('question'),...$('types').querySelectorAll('input')];
+ return [$('actor'),$('clarification'),$('reason'),$('question'),$('candidate'),...$('types').querySelectorAll('input')];
+}
+function setCandidate(value){
+ const field=$('candidate');
+ field.value=value;
+ fieldBaselines.set(field,value);
 }
 function hasDraft(){
- return draftFields().some(field=>field.value.trim()&&field.value!==sentFields.get(field));
+ return draftFields().some(field=>field.value.trim()&&field.value!==fieldBaselines.get(field));
 }
 function resetProjectView(){
  selected=ready=pageId=null;
@@ -120,7 +125,7 @@ function resetProjectView(){
  pageNames=new Map();versionNames=new Map();pageLinks=new Map();
  for(const id of ['actor','clarification','reason','question','candidate','page-filter'])$(id).value='';
  for(const id of ['publication','before','timeline','proposal-list','dates','sources','pages','review','types','citations','evidence','diff'])$(id).replaceChildren();
- sentFields=new WeakMap();
+ fieldBaselines=new WeakMap();
  target(null);resetReview();graph.reset(null);setAskBusy(false);filterPages();
  $('graph-page').disabled=true;$('propose').disabled=true;$('compare').disabled=true;
  $('return-current').hidden=true;$('evidence').hidden=true;$('source-details').open=false;
@@ -206,7 +211,7 @@ async function refresh(){
  if(!await loaded||!isCurrent(scope)||publicationEpoch!==viewEpoch)return;
  const candidates=status.data.candidates||[];$('proposal-list').replaceChildren();chooseOption($('proposal-list'),'','Choose a saved proposal…');
  for(const [index,candidate] of candidates.entries())chooseOption($('proposal-list'),candidate,'Proposal '+(index+1)+' · '+candidate.slice(0,8)+' · '+(status.data.candidate_statuses?.[candidate]||'status unavailable'));
- if(!$('candidate').value&&candidates.length)$('candidate').value=candidates.at(-1);
+ if(!$('candidate').value&&candidates.length)setCandidate(candidates.at(-1));
  $('proposal-list').value=candidates.includes($('candidate').value)?$('candidate').value:'';
 }
 async function inspect(candidate){
@@ -218,7 +223,7 @@ async function inspect(candidate){
   if(isCurrent(scope))throw new Error('Publication changed. Inspect again against the refreshed current version.');
   return;
  }
- inspected={candidate,base:result.publication};$('candidate').value=candidate;$('proposal-list').value=candidate;
+ inspected={candidate,base:result.publication};setCandidate(candidate);$('proposal-list').value=candidate;
  showPanel('review');const box=$('review');renderChanges(box,wikiChanges(result.data.before,result.data.snapshot),'wiki');
  text('review-summary',(result.data.unresolved?.length||0)+' unresolved assertions · '+(result.data.type_questions?.length||0)+' type questions. Review these uncertainties before accepting.');
  box.append(details('Complete before snapshot & evidence',result.data.before),details('Complete proposed snapshot & evidence',result.data.snapshot),details('Unresolved assertions & decisions',{unresolved:result.data.unresolved,decisions:result.data.decisions}));
@@ -275,13 +280,13 @@ async function mutate(action,payload,fields=[]){
  if(!ready||selected!==ready)throw new Error('Historical publications are read-only.');
  if(queue.get(scope.atlasId))throw new Error('Reconcile the pending operation before another decision.');
  const expected=inspected?.base??ready;
- const previous=fields.map(field=>sentFields.get(field));
- for(const field of fields)sentFields.set(field,field.value);
+ const previous=fields.map(field=>fieldBaselines.get(field));
+ for(const field of fields)fieldBaselines.set(field,field.value);
  try{
   await followOperation(queue.begin(scope.atlasId,action,payload,expected),scope);
  }catch(error){
   if(isCurrent(scope)&&!queue.get(scope.atlasId)&&error.status>=400&&error.status<500){
-   for(const [index,field] of fields.entries())sentFields.set(field,previous[index]);
+   for(const [index,field] of fields.entries())fieldBaselines.set(field,previous[index]);
    resetReview();
   }
   throw error;
@@ -294,7 +299,7 @@ $('graph-page').onclick=handle(async()=>{if(!pageId||!selected)return;showPanel(
 $('ask-page').onclick=()=>{showPanel('ask');$('question').focus();};
 $('clarify-page').onclick=()=>{showPanel('review');$('clarification').focus();};
 $('return-current').onclick=handle(async()=>{selected=ready;$('publication').value=ready;await loadPublication();});
-$('proposal-list').onchange=()=>{$('candidate').value=$('proposal-list').value;resetReview();};
+$('proposal-list').onchange=()=>{setCandidate($('proposal-list').value);resetReview();};
 $('candidate').oninput=resetReview;
 $('refresh').onclick=handle(refresh);
 $('publication').onchange=handle(async()=>{selected=$('publication').value;await loadPublication();});
@@ -309,7 +314,7 @@ $('ask-form').onsubmit=handle(async()=>{
  const active=()=>isCurrent(scope)&&publication===selected&&epoch===viewEpoch;
  if(!publication)throw new Error('Choose a published version before asking a question.');
  notice('Finding evidence and preparing your answer…');setAskBusy(true);
- const question=$('question');sentFields.set(question,question.value);
+ const question=$('question');fieldBaselines.set(question,question.value);
  let result;
  try{result=await read('question.ask',{question:question.value,count:5},scope);}
  finally{if(active())setAskBusy(false);}

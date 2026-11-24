@@ -38,3 +38,36 @@ test('pending operations are isolated by project and preserve identity on retry'
  assert.equal(queue.get('project-a').operation_id,'operation-a');
  assert.equal(queue.get('project-b'),undefined);
 });
+
+test('a busy submission replay retains its original request for another recovery',async()=>{
+ const calls=[];
+ const queue=new MutationQueue(async(action,body)=>{
+  calls.push({action,body:structuredClone(body)});
+  if(calls.length===1)throw Error('Connection lost');
+  if(calls.length===2)throw Object.assign(Error('Busy'),{code:'busy',status:409});
+  return {operation_id:'existing-operation',state:'running'};
+ },()=> 'original-request');
+ await assert.rejects(queue.begin('atlas','candidate.decide',{candidate:'A'},'base'),/Connection lost/);
+ await assert.rejects(queue.reconcile('atlas'),/Busy/);
+ assert.equal((await queue.reconcile('atlas')).operation_id,'existing-operation');
+ assert.deepEqual(calls[1],calls[0]);
+ assert.deepEqual(calls[2],calls[0]);
+});
+
+test('a polling rejection preserves the admitted operation for recovery',async()=>{
+ const polls=[];
+ const queue=new MutationQueue(async(action,body)=>{
+  if(action==='operation.read'){
+   polls.push(body);
+   if(polls.length===1)throw Object.assign(Error('Operation not found'),{code:'operation_not_found',status:404});
+  }
+  return {operation_id:'admitted-operation',state:'running'};
+ },()=> 'original-request');
+ await queue.begin('atlas','candidate.decide',{candidate:'A'},'base');
+ await assert.rejects(queue.reconcile('atlas'),/Operation not found/);
+ assert.equal((await queue.reconcile('atlas')).operation_id,'admitted-operation');
+ assert.deepEqual(polls,[
+  {atlas_id:'atlas',payload:{operation_id:'admitted-operation'}},
+  {atlas_id:'atlas',payload:{operation_id:'admitted-operation'}},
+ ]);
+});

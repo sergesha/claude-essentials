@@ -357,3 +357,70 @@ test('two browser contexts open different projects independently',async()=>{
  second.displayed(atlasA,aReady,aPage);
  assert.equal(second.calls.some(call=>call.body.atlas_id===atlasB),false);
 });
+
+test('discard confirmation protects a manually entered proposal identifier',async()=>{
+ const confirmations=[];
+ const a=atlasFixture({confirm:message=>{confirmations.push(message);return confirmations.length===2;}});
+ await turn();
+ assert.equal(a.get('candidate').value,'proposal-a');
+ await a.select(atlasB);
+ a.displayed(atlasB,bReady,bPage);
+ await a.select(atlasA);
+ assert.equal(confirmations.length,0);
+ a.get('candidate').value='Unsent proposal identifier';
+ a.get('candidate').oninput();
+ await a.select(atlasB);
+ a.displayed(atlasA,aReady,aPage);
+ assert.equal(a.get('candidate').value,'Unsent proposal identifier');
+ assert.equal(confirmations.length,1);
+ await a.select(atlasB);
+ a.displayed(atlasB,bReady,bPage);
+ assert.equal(a.get('candidate').value,'proposal-b');
+ assert.equal(confirmations.length,2);
+});
+
+test('a definitive replay rejection after switching projects allows a fresh decision',async()=>{
+ const newReady='d'.repeat(40);
+ let advanced=false,submissions=0;
+ const a=atlasFixture({onRequest:(action,body)=>{
+  if(action==='knowledge.revise'){
+   submissions++;
+   if(submissions===1)return response({error:{message:'Connection lost'}},503);
+   if(submissions===2)return response({error:{code:'stale_publication',message:'Publication changed'}},409);
+   return response({operation_id:'new-operation',state:'succeeded',result:{data:{status:'published'}}});
+  }
+  if(advanced&&body.atlas_id===atlasA){
+   if(action==='atlas.status')return response({publication:newReady,data:{candidates:['proposal-a']}});
+   if(action==='history')return response({publication:newReady,data:{history:[{publication_commit:newReady}]}});
+  }
+ }});
+ await turn();
+ a.get('actor').value='Reviewer';
+ a.get('clarification').value='Original evidence correction';
+ await a.get('clarify-form').onsubmit();
+ await a.select(atlasB);
+ a.displayed(atlasB,bReady,bPage);
+ assert.equal(a.get('reconcile').hidden,true);
+ advanced=true;
+ await a.select(atlasA);
+ a.displayed(atlasA,newReady,aPage);
+ assert.equal(a.get('reconcile').hidden,false);
+ await a.get('reconcile').onclick();
+ assert.match(a.get('notice').textContent,/publication changed/i);
+ const mutations=()=>a.calls.filter(call=>call.action==='knowledge.revise').map(call=>call.body);
+ const [first,replay]=mutations();
+ assert.deepEqual(replay,first);
+ assert.equal(first.atlas_id,atlasA);
+ assert.equal(first.expected_publication,aReady);
+ assert.equal(a.get('reconcile').hidden,true);
+
+ a.get('actor').value='Reviewer';
+ a.get('clarification').value='New correction against the updated publication';
+ await a.get('clarify-form').onsubmit();
+ const fresh=mutations()[2];
+ assert.equal(fresh.atlas_id,atlasA);
+ assert.notEqual(fresh.request_id,first.request_id);
+ assert.equal(fresh.expected_publication,newReady);
+ assert.equal(fresh.payload.instructions,'New correction against the updated publication');
+ a.displayed(atlasA,newReady,aPage);
+});
