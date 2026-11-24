@@ -16,23 +16,33 @@ def deployment():
     spec.loader.exec_module(module)
     return module
 
-def test_docker_launcher_preserves_arguments_and_does_not_run_native(tmp_path):
-    fake = tmp_path / 'docker'
-    capture = tmp_path / 'argv.json'
-    fake.write_text('#!' + sys.executable + '\nimport json,os,sys\njson.dump(sys.argv[1:],open(os.environ["CAPTURE"],"w"))\n')
-    fake.chmod(0o755)
-    server = json.loads((PACKAGE/'.codex-plugin/mcp.json').read_text())['mcpServers']['knowledge-atlas']
-    supplied = {'KNOWLEDGE_ATLAS_DOCKER_PROJECT': 'atlas-test', 'KNOWLEDGE_ATLAS_PYTHON': '/not-a-python'}
-    forwarded = {key: supplied[key] for key in server['env_vars'] if key in supplied}
-    base_env = {key:value for key,value in os.environ.items() if key not in supplied}
-    result = subprocess.run(['sh', str(PACKAGE/'scripts/launch.sh'), 'status', '--config', '/data/a b.json'],
-        env={**base_env, 'PATH': str(tmp_path)+os.pathsep+os.environ['PATH'], 'CAPTURE': str(capture), **forwarded},
-        capture_output=True, text=True)
+def test_launcher_ignores_removed_compose_default(tmp_path):
+    docker = tmp_path / 'docker'
+    capture = tmp_path / 'docker-called'
+    docker.write_text(f'#!/bin/sh\ntouch "{capture}"\nexit 1\n')
+    docker.chmod(0o755)
+    fake_python = tmp_path / 'python'
+    fake_python.write_text('#!' + sys.executable + '\nimport json,sys\nprint(json.dumps(sys.argv[1:]))\n')
+    fake_python.chmod(0o755)
+    env = {**os.environ, 'PATH': str(tmp_path) + os.pathsep + os.environ['PATH'],
+           'KNOWLEDGE_ATLAS_DOCKER_PROJECT': 'atlas-test', 'KNOWLEDGE_ATLAS_PYTHON': str(fake_python)}
+    result = subprocess.run(['sh', str(PACKAGE / 'scripts/launch.sh'),
+                             'status', '--config', '/data/a b.json'],
+                            env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
-    args = json.loads(capture.read_text())
-    assert args[:5] == ['compose', '-p', 'atlas-test', '-f', str(PACKAGE/'docker/compose.yaml')]
-    assert args[5:] == ['exec', '-T', 'atlas', '/opt/knowledge-atlas/.venv/bin/python',
-                       '-m', 'knowledge_atlas.cli', 'status', '--config', '/data/a b.json']
+    assert json.loads(result.stdout) == ['-m', 'knowledge_atlas.cli', 'status', '--config', '/data/a b.json']
+    assert not capture.exists()
+
+
+def test_plugin_mcp_launchers_request_no_compose_default():
+    for name in ('.mcp.json', '.claude-plugin/mcp.json', '.claude-plugin/plugin.json', '.codex-plugin/mcp.json'):
+        manifest = json.loads((PACKAGE / name).read_text())
+        server = manifest['mcpServers']['knowledge-atlas']
+        assert server['args'][-1] == 'mcp'
+        assert 'project' not in manifest.get('userConfig', {})
+        for stale in ('KNOWLEDGE_ATLAS_DEFAULT_PROJECT', 'KNOWLEDGE_ATLAS_DOCKER_PROJECT'):
+            assert stale not in server.get('env', {})
+
 
 def test_start_refuses_unprepared_runtime_without_creating_atlas(tmp_path, monkeypatch):
     module = deployment()

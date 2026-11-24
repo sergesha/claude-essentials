@@ -13,10 +13,19 @@ from . import api_models as models
 
 
 class AtlasClient:
-    def __init__(self,service_root, *, channel="python"):
+    def __init__(self,service_root, *, channel="python", pin_identity=False):
         self.channel = channel
         self.root=Path(service_root).expanduser().resolve()
-        self._discovery()
+        discovery = self._discovery()
+        self._pinned_discovery = discovery if pin_identity else None
+
+    def verify_ready(self) -> str:
+        status = self.request('/v1/status', timeout=3)
+        if not isinstance(status, dict) or status.get('endpoint') != self.endpoint:
+            raise AtlasError('service_unavailable', 'local service did not report its verified endpoint', 503)
+        if status.get('version') != __version__:
+            raise AtlasError('version_conflict', 'stop the existing service before changing package version', 409)
+        return status['version']
 
     def _discovery(self):
         try:
@@ -43,7 +52,8 @@ class AtlasClient:
         return url, token
 
     def _verified_connection(self, timeout):
-        url, token = self._discovery()
+        # MCP sessions retain the discovery identity they verified at binding.
+        url, token = self._pinned_discovery or self._discovery()
         connection = http.client.HTTPConnection(url.hostname, url.port, timeout=timeout)
         try:
             # Verify this socket's peer before sending credentials or atlas data.

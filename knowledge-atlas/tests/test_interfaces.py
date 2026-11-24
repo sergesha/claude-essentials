@@ -95,13 +95,14 @@ def test_schema_is_shared_with_mcp(app):
     client=AtlasClient(app.context.service_root)
     schema=client.schema()
     tools=tools_for()
-    assert len(tools)==len(schema['actions'])
-    assert {tool['name'] for tool in tools}=={'atlas_'+name.replace('.','_') for name in schema['actions']}
-    assert all(tool['inputSchema']==schema['actions'][tool['name'][6:].replace('_','.')]['input']
-               for tool in tools if tool['name'] != 'atlas_atlas_open')
-    open_schema = next(tool['inputSchema'] for tool in tools if tool['name'] == 'atlas_atlas_open')
-    assert open_schema.get('required') == ['atlas_id']
-    assert 'project' in open_schema['$defs']['ProjectLocation']['properties']
+    domain_tools = {tool['name']: tool for tool in tools if tool['name'] != 'atlas_atlas_connect'}
+    assert set(domain_tools) == {'atlas_' + name.replace('.', '_') for name in schema['actions']}
+    for name, action in schema['actions'].items():
+        assert domain_tools['atlas_' + name.replace('.', '_')]['inputSchema'] == action['input']
+    assert 'atlas.connect' not in schema['actions']
+    connect = next(tool['inputSchema'] for tool in tools if tool['name'] == 'atlas_atlas_connect')
+    assert connect['required'] == ['payload']
+    assert set(connect['$defs']['ContainerLocation']['properties']) == {'container_name'}
 
 
 def test_mcp_opens_registered_uuid_without_configured_path(app, tmp_path):
@@ -122,74 +123,89 @@ def test_mcp_opens_registered_uuid_without_configured_path(app, tmp_path):
     assert call_tool(session, 'atlas_atlas_open', {'atlas_id': identity})['data']['atlas_id'] == identity
 
 
-def test_mcp_project_routing_is_per_session_and_switches_only_on_success(monkeypatch):
-    from knowledge_atlas import mcp_bridge
-    from knowledge_atlas.contracts import ActionResult
-    called = []
-    class Remote:
-        def __init__(self, project, channel):
-            self.project = project
+def test_native_list_without_docker(tmp_path, monkeypatch):
+    import os
+    from knowledge_atlas.client import AtlasClient
+    from knowledge_atlas.mcp_bridge import SessionClient, call_tool
 
-        def call(self, request):
-            called.append((self.project, request.action, request.payload))
-            if self.project == 'offline':
-                raise AtlasError('backend_unavailable', 'service unavailable', 503)
-            return ActionResult(data={'project':self.project})
-
-        def close(self):
-            pass
-    monkeypatch.setattr(mcp_bridge, 'ComposeClient', Remote)
-    session = mcp_bridge.SessionClient(None, 'mcp', 'initial')
-    def call(name, args):
-        return mcp_bridge.call_tool(session, 'atlas_atlas_'+name, args)
-    selection = {'atlas_id': str(uuid.uuid4())}
-    assert call('open', selection)['data']['project'] == 'initial'
-    assert call('open', {**selection, 'payload':{'project':'fde-knowledge-atlas'}})['data']['project'] == 'fde-knowledge-atlas'
-    assert called[-1] == ('fde-knowledge-atlas', 'atlas.open', {})
-    assert call('open', {**selection, 'payload':{'project':'offline'}})['error']['code'] == 'backend_unavailable'
-    assert call('open', selection)['data']['project'] == 'fde-knowledge-atlas'
-    assert call('status', selection)['data']['project'] == 'fde-knowledge-atlas'
-    assert call('open', {**selection, 'payload':{'project':'bad name'}})['error']['code'] == 'invalid_request'
-    assert mcp_bridge.SessionClient(None, 'mcp').project is None
+    root = tmp_path / 'native-service'
+    config = tmp_path / 'native.json'
+    config.write_text(json.dumps({'service_root': str(root)}))
+    docker = tmp_path / 'docker'
+    called = tmp_path / 'docker-called'
+    docker.write_text(f'#!/bin/sh\ntouch "{called}"\nexit 1\n')
+    docker.chmod(0o755)
+    monkeypatch.setenv('PATH', str(tmp_path) + os.pathsep + os.environ['PATH'])
+    monkeypatch.setenv('KNOWLEDGE_ATLAS_DEFAULT_PROJECT', 'saved-deployment')
+    session = SessionClient(config, 'mcp')
+    assert not root.exists()
+    try:
+        assert call_tool(session, 'atlas_atlas_list', None)['data'] == {'projects': []}
+        response = call_tool(session, 'atlas_atlas_connect', {'payload': {'container_name': 'other'}})
+        assert response['error']['status'] == 409
+        assert 'new MCP connection' in response['error']['message']
+        assert not called.exists()
+    finally:
+        if (root / 'discovery.json').exists():
+            AtlasClient(root).stop()
+        session.close()
 
 
+def test_removed_compose_settings_are_actionable(tmp_path, monkeypatch, capsys):
+    import sys
+    from knowledge_atlas import cli, mcp_bridge
 
-def test_selected_compose_transport_forwards_open_uuid(monkeypatch):
-    import subprocess
-    from knowledge_atlas import compose_client
-
-    class Backend:
-        def __init__(self, **_):
-            pass
-
-        def call(self, action, body):
-            assert action == 'atlas.open'
-            assert body['atlas_id'] == identity
-            assert body['payload'] == {}
-            return {'data': {'atlas_id': identity}}
-
-    identity = str(uuid.uuid4())
-    monkeypatch.setattr(compose_client, 'MCPBackend', Backend)
-    def unexpected_probe(*_, **__):
-        pytest.fail('UUID open tried to probe a container path')
-
-    monkeypatch.setattr(subprocess, 'run', unexpected_probe)
-    remote = compose_client.ComposeClient('existing', 'mcp')
-    assert remote.call(ActionRequest('atlas.open', atlas_id=identity)).data['atlas_id'] == identity
-
-
-def test_mcp_saved_instance_matches_claude_plugin_setting(tmp_path, monkeypatch):
-    from knowledge_atlas.mcp_bridge import default_project
-    monkeypatch.delenv('KNOWLEDGE_ATLAS_DEFAULT_PROJECT', raising=False)
-    monkeypatch.delenv('KNOWLEDGE_ATLAS_DOCKER_PROJECT', raising=False)
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path))
-    assert default_project() is None
-    settings = tmp_path/'knowledge-atlas/mcp.json'
-    settings.parent.mkdir()
-    settings.write_text('{"project":"saved"}')
-    assert default_project() == 'saved'
-    monkeypatch.setenv('KNOWLEDGE_ATLAS_DEFAULT_PROJECT', 'configured-in-claude')
-    assert default_project() == 'configured-in-claude'
+    monkeypatch.setenv('KNOWLEDGE_ATLAS_DEFAULT_PROJECT', 'saved-in-claude')
+    monkeypatch.setenv('KNOWLEDGE_ATLAS_DOCKER_PROJECT', 'saved-in-env')
+    saved = tmp_path / 'knowledge-atlas/mcp.json'
+    saved.parent.mkdir()
+    stale_settings = '{"project":"saved-on-disk"}'
+    saved.write_text(stale_settings)
+
+    async def run(client):
+        arguments = {'atlas_id': str(uuid.uuid4()), 'payload': {'project': 'saved-on-disk'}}
+        response = mcp_bridge.call_tool(client, 'atlas_atlas_open', arguments)
+        assert response['error']['code'] == 'invalid_request'
+        assert 'atlas.connect' in response['error']['message']
+        assert 'container_name' in response['error']['message']
+
+    monkeypatch.setattr(mcp_bridge, 'serve', run)
+    monkeypatch.setattr(sys, 'argv', ['knowledge-atlas', 'mcp'])
+    assert cli.main() == 0
+    captured = capsys.readouterr()
+    assert not captured.out
+    assert 'KNOWLEDGE_ATLAS_DEFAULT_PROJECT' in captured.err
+    assert 'KNOWLEDGE_ATLAS_DOCKER_PROJECT' in captured.err
+    assert 'mcp.json' in captured.err
+    assert 'atlas.connect' in captured.err and 'container_name' in captured.err
+    assert saved.read_text() == stale_settings
+
+
+def test_native_mcp_session_does_not_follow_rewritten_discovery(app, tmp_path):
+    from knowledge_atlas.client import AtlasClient
+    from knowledge_atlas.http_api import create_app
+    from knowledge_atlas.mcp_bridge import SessionClient, call_tool
+
+    other = create_app(ServiceContext(tmp_path / 'other'))
+    other.start()
+    config = tmp_path / 'config.json'
+    config.write_text(json.dumps({'service_root': str(app.context.service_root)}))
+    session = SessionClient(config, 'mcp')
+    try:
+        assert call_tool(session, 'atlas_atlas_list', None)['data'] == {'projects': []}
+        operation = AtlasClient(other.context.service_root).call(ActionRequest(
+            'atlas.create', request_id=str(uuid.uuid4()), payload={'path': str(tmp_path / 'other-atlas')}))
+        assert operation.operation_id
+        discovery = app.context.service_root / 'discovery.json'
+        token = app.context.service_root / 'token'
+        discovery.write_bytes((other.context.service_root / 'discovery.json').read_bytes())
+        token.write_bytes((other.context.service_root / 'token').read_bytes())
+        poll = call_tool(session, 'atlas_operation_read', {'payload': {'operation_id': operation.operation_id}})
+        assert poll['error']['code'] == 'operation_not_found'
+    finally:
+        session.close()
+        other.stop(wait=True)
 
 
 def test_singleton_launcher_and_version_conflict(tmp_path):
@@ -235,7 +251,7 @@ def test_mcp_sdk_discovers_tools_and_calls_same_service(tmp_path):
     ensure_service(config)
     async def run():
         params=StdioServerParameters(command=sys.executable,args=['-m','knowledge_atlas.cli','mcp','--config',str(path)])
-        async with stdio_client(params) as (reader,writer):
+        async with stdio_client(params, errlog=sys.__stderr__) as (reader,writer):
             async with ClientSession(reader,writer) as session:
                 await session.initialize()
                 listed=await session.list_tools()

@@ -2,6 +2,26 @@
 
 The shared handler registry is the domain boundary. HTTP, MCP and Python clients use the same implemented backend; these examples describe action requests.
 
+## Connecting MCP to a service
+
+To use Docker, call `atlas_atlas_connect` first on a fresh MCP connection:
+
+```json
+{"payload":{"container_name":"atlas-atlas-1"}}
+```
+
+Use the exact name of an already running Atlas container as listed by
+`docker ps --format '{{.Names}}'`. The call verifies the authenticated Atlas API
+and matches the container's Atlas version to the plugin. It returns the full
+pinned Docker ID in `data.container_id` and the Atlas version in `data.version`.
+Start the deployment separately. If the container is replaced, open a new MCP
+connection and attach again. Use a separate MCP connection for each service, and
+poll operations on the connection that submitted them.
+
+For native use, call `atlas_atlas_list` without arguments. The first domain call
+starts or attaches to the configured native service and binds that connection.
+Python and HTTP callers address the service directly.
+
 ## Selecting a project
 
 Call `atlas.list` on the service you want to use. Send `{}` to the HTTP action,

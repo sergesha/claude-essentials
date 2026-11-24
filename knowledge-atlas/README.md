@@ -49,6 +49,15 @@ external configuration, and restart the host to use it. Keep credentials and
 knowledge data outside the plugin. For later updates, use the repository's
 [plugin update procedure](../docs/plugin-updates.md).
 
+## Connect and select a project
+
+For an existing Docker deployment, call `atlas_atlas_connect` with
+`{"payload":{"container_name":"EXACT_CONTAINER_NAME"}}` on a fresh MCP connection.
+For native use, call `atlas_atlas_list` without arguments to attach on demand.
+List registered projects with `atlas_atlas_list` and verify a project with
+`atlas_atlas_open` and `{"atlas_id":"REGISTERED_PROJECT_UUID"}`. Supply that UUID
+on project calls. Connect separately to use another service.
+
 ## Development
 
 Use Python 3.12.14 and `uv sync --locked`, then `uv run pytest`. Native checks are

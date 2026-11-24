@@ -50,12 +50,17 @@ relative launcher path. Codex CLI 0.167.0 passed placeholder strings literally
 to `sh` during native qualification, although [OpenAI's desktop MCP packaging guide](https://developers.openai.com/plugins/deploy/desktop-only) documents `${PLUGIN_ROOT}`.
 Claude uses `${CLAUDE_PLUGIN_ROOT}`.
 
-For a running Docker deployment, pass `payload.project` to `atlas.open` on
-the first call of a new connection. You can optionally set a default. Claude
-Code exposes `project` in the plugin settings. Codex reads
-`{"project":"my-atlas"}` from `~/.config/knowledge-atlas/mcp.json` (under
-`$XDG_CONFIG_HOME` when set). Installation and startup leave this optional file
-for the user to create. See the [Docker guide](../docker/README.md#use-the-installed-plugin).
+For Docker, call `atlas_atlas_connect` with the exact running Docker container
+name in `payload.container_name` on a fresh MCP connection. List its registered
+projects with `atlas_atlas_list` without arguments, then open a project with its
+`atlas_id` UUID. See the [Docker guide](../docker/README.md#use-the-installed-plugin).
+
+Remove obsolete Compose defaults from your host configuration when upgrading.
+These include the Claude Code plugin's old `project` setting,
+`KNOWLEDGE_ATLAS_DEFAULT_PROJECT`, `KNOWLEDGE_ATLAS_DOCKER_PROJECT` and
+`${XDG_CONFIG_HOME:-~/.config}/knowledge-atlas/mcp.json`. Existing settings files
+are left in place. Use the exact running container name on each new Docker
+connection.
 
 For a native service, set `KNOWLEDGE_ATLAS_CONFIG` to an external service JSON
 file. Both hosts use the same service configuration:
@@ -83,7 +88,8 @@ knowledge-atlas status --config /absolute/path/to/service.json
 knowledge-atlas stop --config /absolute/path/to/service.json
 ```
 
-`mcp` starts or attaches on demand and reserves stdout for MCP. `serve` runs in
+A native domain call starts or attaches to the service on demand. `mcp` reserves
+stdout for MCP. `serve` runs in
 the foreground. Without a configuration file, metadata-only service data defaults
 to `${XDG_DATA_HOME:-~/.local/share}/knowledge-atlas/service`; native processing
 still requires explicit prepared runtime configuration. Shutdown returns busy

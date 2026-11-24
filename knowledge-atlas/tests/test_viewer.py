@@ -65,7 +65,7 @@ def test_viewer_resolves_explicit_native_path_to_uuid(tmp_path):
     path = tmp_path / 'notes'
     identity = create_project(ServiceContext(tmp_path / 'service'), path)
     backend = object.__new__(MCPBackend)
-    backend.docker_project = None
+    backend.container_id = None
 
     def call(action, request):
         assert action == 'atlas.open'
@@ -85,10 +85,10 @@ def test_viewer_resolves_docker_path_inside_selected_container(monkeypatch):
 
     identity = str(uuid.uuid4())
     backend = object.__new__(viewer_backend.MCPBackend)
-    backend.docker_project = 'existing'
+    backend.container_id = 'a' * 64
 
     def run(argv, **_):
-        assert argv[:4] == ['docker', 'compose', '-p', 'existing']
+        assert argv[:4] == ['docker', 'exec', '-i', 'a' * 64]
         assert argv[-1] == '/data/atlas'
         return SimpleNamespace(stdout=identity + '\n')
 
@@ -109,10 +109,10 @@ def test_docker_view_command_runs_on_host(tmp_path):
     capture=tmp_path/'arguments'
     fake.write_text('#!'+sys.executable+'\nimport sys\nfrom pathlib import Path\nPath('+repr(str(capture))+').write_text(" ".join(sys.argv[1:]))\n')
     fake.chmod(0o755)
-    result=subprocess.run(['sh',str(Path(__file__).parents[1]/'scripts/launch.sh'),'view','--atlas','/data/atlas'],
-        env={**os.environ,'KNOWLEDGE_ATLAS_DOCKER_PROJECT':'viewer-test-missing','KNOWLEDGE_ATLAS_PYTHON':str(fake)},capture_output=True,text=True)
+    result=subprocess.run(['sh',str(Path(__file__).parents[1]/'scripts/launch.sh'),'view','--atlas','/data/atlas','--container-name','atlas-test'],
+        env={**os.environ,'KNOWLEDGE_ATLAS_PYTHON':str(fake)},capture_output=True,text=True)
     assert result.returncode==0,result.stderr
-    assert capture.read_text()=='-m knowledge_atlas.cli view --atlas /data/atlas'
+    assert capture.read_text()=='-m knowledge_atlas.cli view --atlas /data/atlas --container-name atlas-test'
 
 
 def test_viewer_cannot_read_unrelated_operation(viewer):

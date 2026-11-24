@@ -66,24 +66,26 @@ atlas_compose exec -T atlas /opt/knowledge-atlas/.venv/bin/python -m knowledge_a
 
 ## Use the installed plugin
 
-Open a running project from the installed MCP plugin:
+Get your running Docker container's exact name:
 
-```json
-{"payload":{"project":"my-atlas"}}
+```sh
+docker ps --format '{{.Names}}'
 ```
 
-Send this to `atlas_atlas_open`. The MCP bridge selects the project's running
-`atlas` service and opens the path configured inside it. Pass the returned
-`atlas_id` to tools such as `atlas_atlas_status` on that connection. Reopen
-the same atlas by calling `atlas_atlas_open` without arguments. A failed project
-switch keeps the prior selection. When the MCP reconnects, select the project
-again unless you configured a default.
+Call `atlas_atlas_connect` first on a fresh MCP connection, substituting that
+name for `atlas-atlas-1`:
 
-To choose a default project at installation in Claude Code, set the plugin's
-`project` setting. In Codex, put `{"project":"my-atlas"}` in
-`~/.config/knowledge-atlas/mcp.json` (or under `$XDG_CONFIG_HOME`). The next
-MCP connection can open the atlas without arguments on its first call.
-The existing `KNOWLEDGE_ATLAS_DOCKER_PROJECT` setting is also supported.
+```json
+{"payload":{"container_name":"atlas-atlas-1"}}
+```
+
+The call checks the authenticated API and matching version and returns the
+pinned container ID and Atlas version. Start the container with the deployment
+commands above. Call `atlas_atlas_list` without arguments to see registered
+projects, then verify a project with `atlas_atlas_open` and
+`{"atlas_id":"REGISTERED_PROJECT_UUID"}`. Pass that UUID to tools such as
+`atlas_atlas_status`. Use another MCP connection for another service or a
+replacement container.
 
 Create or restore the atlas at **`/data/atlas`**. This deployment binds its
 embedding cache to that atlas. Use another Compose project for another atlas.
@@ -121,7 +123,7 @@ the [viewer](../docs/viewer.md) from the host:
 
 ```sh
 sh /absolute/path/to/knowledge-atlas/scripts/launch.sh prepare-launcher
-sh /absolute/path/to/knowledge-atlas/scripts/launch.sh view --atlas /data/atlas --docker-project atlas
+sh /absolute/path/to/knowledge-atlas/scripts/launch.sh view --atlas /data/atlas --container-name atlas-atlas-1
 ```
 
 Open the full localhost URL printed by that command. Browser pages and questions

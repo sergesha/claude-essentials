@@ -4,10 +4,10 @@ The viewer reads the same accepted publications used by Codex, Claude Code and
 Python clients. It provides wiki browsing, exact publication comparisons,
 evidence-cited questions, and clarification → inspect → explicit accept.
 
-For a running Docker deployment named `atlas`, launch on the **host**:
+For a running Docker container named `atlas-atlas-1`, launch on the **host**:
 
 ```sh
-sh /absolute/path/to/knowledge-atlas/scripts/launch.sh view --atlas /data/atlas --docker-project atlas
+sh /absolute/path/to/knowledge-atlas/scripts/launch.sh view --atlas /data/atlas --container-name atlas-atlas-1
 ```
 
 For native deployment:
@@ -17,7 +17,7 @@ knowledge-atlas view --atlas /absolute/path/to/atlas --config /absolute/path/to/
 ```
 
 An installed Python wheel also supports the Docker command:
-`knowledge-atlas view --atlas /data/atlas --docker-project atlas`.
+`knowledge-atlas view --atlas /data/atlas --container-name atlas-atlas-1`.
 The `--atlas` argument accepts a registered project UUID or an explicit repository path. With Docker, the viewer resolves the path inside the selected container.
 The host needs Python/uv for the viewer and Docker CLI for Docker attachment.
 The backend stays in its container; no container ports are published.

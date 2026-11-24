@@ -1,13 +1,6 @@
 #!/bin/sh
 set -eu
 atlas_plugin_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-case ${1:-mcp} in
-  mcp|view|prepare-launcher) ;;
-  *)
-    if [ -n "${KNOWLEDGE_ATLAS_DOCKER_PROJECT:-}" ]; then
-      exec sh "$atlas_plugin_root/scripts/docker-launch.sh" "$@"
-    fi ;;
-esac
 export PYTHONPATH="$atlas_plugin_root/src${PYTHONPATH:+:$PYTHONPATH}"
 if [ "$#" -eq 0 ]; then set -- mcp; fi
 atlas_cache_root=${XDG_CACHE_HOME:-$HOME/.cache}/knowledge-atlas
@@ -39,9 +32,6 @@ if [ "$1" = mcp ]; then
   if command -v uv >/dev/null 2>&1; then
     prepare_launcher
     exec "$atlas_python" -m knowledge_atlas.cli "$@"
-  fi
-  if [ -n "${KNOWLEDGE_ATLAS_DOCKER_PROJECT:-}" ]; then
-    exec sh "$atlas_plugin_root/scripts/docker-launch.sh" "$@"
   fi
   echo "Knowledge Atlas needs uv on PATH for its first MCP launch." >&2
   exit 1

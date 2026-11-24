@@ -1,125 +1,187 @@
 """Official MCP SDK stdio bridge over the same authenticated HTTP client."""
-from dataclasses import asdict, replace
+from dataclasses import asdict
 import json
 import os
 from pathlib import Path
+import sys
 from threading import Lock
-from pydantic import Field, ValidationError, create_model
+from typing import Literal
+
+from . import __version__
 from .api_models import MODELS, Payload, parse_request
 from .client import AtlasClient
-from .compose_client import ComposeClient
-from .contracts import AtlasError
+from .container_client import ContainerClient, resolve_container
+from .contracts import ActionResult, AtlasError
 from .launcher import ensure_service, load_config, service_context
+from .viewer.backend import SERVICE_STATUS_TOOL
 
 
-class InstanceSettings(Payload):
-    project: str | None = Field(default=None, pattern=r'^[a-z0-9][a-z0-9_-]*$',
-                                description='Compose project to use for this MCP connection')
+class ContainerLocation(Payload):
+    container_name: str
 
 
-class ProjectLocation(InstanceSettings):
-    pass
+class ConnectRequest(Payload):
+    action: Literal['atlas.connect'] = 'atlas.connect'
+    payload: ContainerLocation
 
 
-def default_project():
-    project = os.getenv('KNOWLEDGE_ATLAS_DEFAULT_PROJECT') or os.getenv('KNOWLEDGE_ATLAS_DOCKER_PROJECT')
+MCP_MODELS = {**MODELS, 'atlas.connect': ConnectRequest}
+
+
+def warn_removed_compose_settings():
     settings = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home()/'.config')/'knowledge-atlas/mcp.json'
+    stale = [name for name in ('KNOWLEDGE_ATLAS_DEFAULT_PROJECT', 'KNOWLEDGE_ATLAS_DOCKER_PROJECT')
+             if os.environ.get(name)]
     try:
-        if project:
-            return InstanceSettings(project=project).project
-        return InstanceSettings.model_validate_json(settings.read_text()).project
-    except FileNotFoundError:
-        return None
-    except (OSError, ValidationError) as error:
-        raise AtlasError('invalid_configuration', 'invalid Knowledge Atlas MCP instance settings') from error
-
-
-MCP_MODELS = {**MODELS, 'atlas.open': create_model('OpenProjectRequest', __base__=MODELS['atlas.open'],
-              payload=(ProjectLocation, Field(default_factory=ProjectLocation)))}
+        if settings.is_file():
+            stale.append(str(settings))
+    except OSError:
+        pass
+    if stale:
+        print('Knowledge Atlas ignores the removed Compose settings ' + ', '.join(stale)
+              + '. For Docker, use atlas.connect with payload.container_name on a new MCP connection.',
+              file=sys.stderr)
 
 
 class SessionClient:
-    def __init__(self, config_path, channel, project=None):
+    def __init__(self, config_path, channel, *, attach_existing=False):
         self.config_path = config_path
         self.channel = channel
-        self.project = project
-        self.local = None
-        self.connections = {}
+        self.attach_existing = attach_existing
+        self._client = None
+        self._container_name = None
+        self._closed = False
         self.lock = Lock()
 
-    def _local(self):
-        if self.local is None:
-            config = load_config(self.config_path)
-            context = service_context(config)
+    def _open_local(self):
+        config = load_config(self.config_path)
+        context = service_context(config)
+        if not self.attach_existing:
             ensure_service(config)
-            self.local = AtlasClient(context.service_root, channel=self.channel)
-        return self.local
+        client = AtlasClient(context.service_root, channel=self.channel, pin_identity=True)
+        version = client.verify_ready()
+        self._client = client
+        return version
+
+    def _connect(self, request):
+        if self.attach_existing:
+            raise AtlasError('unsupported_action', 'atlas.connect is only available on the host MCP connection', 422)
+        if (set(request.payload) != {'container_name'}
+                or not isinstance(request.payload['container_name'], str)):
+            raise AtlasError('invalid_request', 'atlas.connect requires payload.container_name')
+        name = request.payload['container_name']
+        if self._client is None:
+            client = ContainerClient(name, self.channel)
+            self._client = client
+            version = client.version
+        else:
+            version = self._repeat_connect(name)
+        self._container_name = name
+        return ActionResult(data={'container_id': self._client.container_id, 'version': version})
+
+    def _repeat_connect(self, name):
+        conflict = AtlasError('service_already_bound', 'use a new MCP connection for another service', 409)
+        if self._container_name is None:
+            raise conflict
+        try:
+            target_id = resolve_container(name)
+        except AtlasError as error:
+            if name == self._container_name or error.code == 'invalid_request':
+                raise
+            raise conflict from error
+        if target_id != self._client.container_id:
+            if name == self._container_name:
+                raise AtlasError('backend_unavailable',
+                                 'the container name now refers to a different ID. Use a new MCP connection.', 503)
+            raise conflict
+        return self._client.verify_ready()
 
     def call(self, request):
-        selected = None
-        if request.action == 'atlas.open' and 'project' in request.payload:
-            payload = dict(request.payload)
-            selected = payload.pop('project')
-            request = replace(request, payload=payload)
         with self.lock:
-            project = selected or self.project
-            if project is None:
-                client = self._local()
-            elif project in self.connections:
-                client = self.connections[project]
-            else:
-                client = ComposeClient(project, self.channel)
-                self.connections[project] = client
-        try:
-            result = client.call(request)
-        except AtlasError as error:
-            if project and error.code == 'backend_unavailable':
-                with self.lock:
-                    if self.connections.get(project) is client:
-                        del self.connections[project]
-                        client.close()
-            raise
-        if selected is not None:
-            with self.lock:
-                self.project = selected
-        return result
+            if self._closed:
+                raise AtlasError('backend_unavailable', 'MCP connection is closed', 503)
+            if request.action == 'atlas.connect':
+                return self._connect(request)
+            if self._client is None:
+                self._open_local()
+            client = self._client
+        return client.call(request)
+
+    def attached_status(self):
+        with self.lock:
+            if self._closed:
+                raise AtlasError('backend_unavailable', 'MCP connection is closed', 503)
+            version = self._open_local() if self._client is None else self._client.verify_ready()
+        return ActionResult(data={'version': version})
 
     def close(self):
-        for client in self.connections.values():
-            client.close()
+        with self.lock:
+            if self._closed:
+                return
+            self._closed = True
+            if self._container_name is not None:
+                self._client.close()
 
 
-def tools_for():
-    open_description = 'Verify a registered project by its atlas_id UUID.'
-    return [{'name':'atlas_'+name.replace('.','_'),
-             'description':open_description if name == 'atlas.open' else 'Knowledge Atlas '+name,
-             'inputSchema':model.model_json_schema()} for name,model in MCP_MODELS.items()]
+def tools_for(*, attach_existing=False):
+    descriptions = {
+        'atlas.connect': 'Attach this MCP connection to an already running exact Docker container name.',
+        'atlas.open': 'Verify a registered project by its atlas_id UUID.',
+    }
+    tools = [
+        {'name': 'atlas_' + name.replace('.', '_'),
+         'description': descriptions.get(name, 'Knowledge Atlas ' + name),
+         'inputSchema': model.model_json_schema()}
+        for name, model in (MODELS if attach_existing else MCP_MODELS).items()
+    ]
+    if attach_existing:
+        tools.append({'name': SERVICE_STATUS_TOOL, 'description': 'Verify the authenticated Atlas API.',
+                      'inputSchema': Payload.model_json_schema()})
+    return tools
 
 
-def call_tool(client,name,arguments):
+def call_tool(client, name, arguments, *, attach_existing=False):
     try:
-        action=next((a for a in MCP_MODELS if 'atlas_'+a.replace('.','_')==name),None)
-        if action is None:raise AtlasError('unsupported_action',name,422)
-        request=parse_request(action,arguments if arguments is not None else {}, models=MCP_MODELS)
-        return json.loads(json.dumps(asdict(client.call(request)),default=str))
-    except AtlasError as error:return {'error':{'code':error.code,'message':str(error),'status':error.status}}
+        if attach_existing and name == SERVICE_STATUS_TOOL:
+            if arguments:
+                raise AtlasError('invalid_request', 'service status does not accept arguments')
+            result = client.attached_status()
+        else:
+            models = MODELS if attach_existing else MCP_MODELS
+            action = next((action for action in models if 'atlas_' + action.replace('.', '_') == name), None)
+            if action is None:
+                raise AtlasError('unsupported_action', name, 422)
+            body = arguments if arguments is not None else {}
+            payload = body.get('payload') if isinstance(body, dict) else None
+            if isinstance(payload, dict) and 'project' in payload:
+                raise AtlasError('invalid_request', 'payload.project was removed. For Docker, call atlas.connect'
+                                 ' with payload.container_name, then open a registered atlas_id UUID.')
+            result = client.call(parse_request(action, body, models=models))
+        return json.loads(json.dumps(asdict(result), default=str))
+    except AtlasError as error:
+        return {'error': {'code': error.code, 'message': str(error), 'status': error.status}}
 
 
 async def serve(client):
     import asyncio
     from mcp.server.lowlevel import Server
     from mcp.server.stdio import stdio_server
-    from mcp.types import Tool,TextContent,CallToolResult
-    server=Server('knowledge-atlas')
+    from mcp.types import Tool, TextContent, CallToolResult
+
+    server = Server('knowledge-atlas', version=__version__)
+
     @server.list_tools()
-    async def list_tools():return [Tool(**item) for item in tools_for()]
+    async def list_tools():
+        return [Tool(**item) for item in tools_for(attach_existing=client.attach_existing)]
+
     @server.call_tool(validate_input=False)
-    async def invoke(name,arguments):
-        result=await asyncio.to_thread(call_tool,client,name,arguments)
-        return CallToolResult(content=[TextContent(type='text',text=json.dumps(result))],
-                              structuredContent=result,isError=result.get('error') is not None)
+    async def invoke(name, arguments):
+        result = await asyncio.to_thread(call_tool, client, name, arguments, attach_existing=client.attach_existing)
+        return CallToolResult(content=[TextContent(type='text', text=json.dumps(result))],
+                              structuredContent=result, isError=result.get('error') is not None)
+
     try:
-        async with stdio_server() as (reader,writer):
-            await server.run(reader,writer,server.create_initialization_options())
+        async with stdio_server() as (reader, writer):
+            await server.run(reader, writer, server.create_initialization_options())
     finally:
         await asyncio.to_thread(client.close)
