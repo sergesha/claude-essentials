@@ -75,10 +75,73 @@ def test_schema_is_shared_with_mcp(app):
     from knowledge_atlas.mcp_bridge import tools_for
     client=AtlasClient(app.context.service_root)
     schema=client.schema()
-    tools=tools_for(client)
+    tools=tools_for()
     assert len(tools)==len(schema['actions'])
     assert {tool['name'] for tool in tools}=={'atlas_'+name.replace('.','_') for name in schema['actions']}
-    assert all(tool['inputSchema']==schema['actions'][tool['name'][6:].replace('_','.')]['input'] for tool in tools)
+    assert all(tool['inputSchema']==schema['actions'][tool['name'][6:].replace('_','.')]['input']
+               for tool in tools if tool['name'] != 'atlas_atlas_open')
+    open_schema = next(tool['inputSchema'] for tool in tools if tool['name'] == 'atlas_atlas_open')
+    assert 'payload' not in open_schema.get('required', [])
+    assert 'project' in open_schema['$defs']['ProjectLocation']['properties']
+
+
+def test_open_uses_bound_atlas_without_payload(app, tmp_path):
+    from knowledge_atlas.client import AtlasClient
+    client = AtlasClient(app.context.service_root)
+    path = tmp_path/'bound'
+    app.context.configuration['atlas_path'] = str(path)
+    created = client.call(ActionRequest('atlas.create', request_id=str(uuid.uuid4()), payload={'path':str(path)}))
+    deadline = time.monotonic() + 15
+    while (record := client.operation(created.operation_id)).state in ('queued', 'running'):
+        assert time.monotonic() < deadline
+        time.sleep(.05)
+    assert record.state == 'succeeded', record.error
+    identity = record.result.data['atlas_id']
+    assert client.request('/v1/actions/atlas.open', {})['data']['atlas_id'] == identity
+    assert client.atlas_open().data['path'] == str(path)
+
+
+def test_mcp_project_routing_is_per_session_and_switches_only_on_success(monkeypatch):
+    from knowledge_atlas import mcp_bridge
+    from knowledge_atlas.contracts import ActionResult
+    called = []
+    class Remote:
+        def __init__(self, project, channel):
+            self.project = project
+
+        def call(self, request):
+            called.append((self.project, request.action, request.payload))
+            if self.project == 'offline':
+                raise AtlasError('backend_unavailable', 'service unavailable', 503)
+            return ActionResult(data={'project':self.project})
+
+        def close(self):
+            pass
+    monkeypatch.setattr(mcp_bridge, 'ComposeClient', Remote)
+    session = mcp_bridge.SessionClient(None, 'mcp', 'initial')
+    def call(name, args):
+        return mcp_bridge.call_tool(session, 'atlas_atlas_'+name, args)
+    assert call('open', {})['data']['project'] == 'initial'
+    assert call('open', {'payload':{'project':'fde-knowledge-atlas'}})['data']['project'] == 'fde-knowledge-atlas'
+    assert called[-1] == ('fde-knowledge-atlas', 'atlas.open', {})
+    assert call('open', {'payload':{'project':'offline'}})['error']['code'] == 'backend_unavailable'
+    assert call('status', {'atlas_id':'test'})['data']['project'] == 'fde-knowledge-atlas'
+    assert call('open', {'payload':{'project':'bad name'}})['error']['code'] == 'invalid_request'
+    assert mcp_bridge.SessionClient(None, 'mcp').project is None
+
+
+def test_mcp_saved_instance_matches_claude_plugin_setting(tmp_path, monkeypatch):
+    from knowledge_atlas.mcp_bridge import default_project
+    monkeypatch.delenv('KNOWLEDGE_ATLAS_DEFAULT_PROJECT', raising=False)
+    monkeypatch.delenv('KNOWLEDGE_ATLAS_DOCKER_PROJECT', raising=False)
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path))
+    assert default_project() is None
+    settings = tmp_path/'knowledge-atlas/mcp.json'
+    settings.parent.mkdir()
+    settings.write_text('{"project":"saved"}')
+    assert default_project() == 'saved'
+    monkeypatch.setenv('KNOWLEDGE_ATLAS_DEFAULT_PROJECT', 'configured-in-claude')
+    assert default_project() == 'configured-in-claude'
 
 
 def test_singleton_launcher_and_version_conflict(tmp_path):

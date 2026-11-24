@@ -34,27 +34,29 @@ Keep atlas data and service configuration outside the plugin and runtime install
 ## Plugin service and host launch
 
 Install `uv` and Python 3.12, then install this plugin through your host's local
-marketplace workflow. Prepare the launcher once after installation or a version
-update, using the installed plugin directory:
+marketplace workflow. Claude Code and Codex start the bundled `scripts/launch.sh`
+automatically. On the first MCP connection the script uses `uv sync --locked`
+to install the dependencies from `uv.lock` in a version-specific environment
+under `${XDG_CACHE_HOME:-~/.cache}/knowledge-atlas`. Later connections reuse
+that environment. An interrupted setup is retried on the next connection.
+The first connection after a version update prepares that version's environment.
 
-```sh
-sh /absolute/path/to/knowledge-atlas/scripts/launch.sh prepare-launcher
-```
-
-Both manifests launch the bundled `scripts/launch.sh` with
-`sh`. Preparation uses the pinned `uv.lock`. Dependencies live under
-`${XDG_CACHE_HOME:-~/.cache}/knowledge-atlas`, outside plugin code. An explicitly
-configured `KNOWLEDGE_ATLAS_PYTHON` may select an existing compatible environment.
-A checkout with dependencies installed in `.venv` or a compatible installed
-`knowledge-atlas` command on `PATH` also works. Ordinary launches
-execute the prepared interpreter directly and require no dependency installation.
+An explicitly configured `KNOWLEDGE_ATLAS_PYTHON`, a checkout with its own
+`.venv`, or a compatible `knowledge-atlas` command on `PATH` can also provide
+the interpreter. To prepare the dependencies ahead of time, run
+`sh scripts/launch.sh prepare-launcher` from the installed plugin directory.
 The Codex registration uses `cwd: "."` resolved by the installed plugin and a
 relative launcher path. Codex CLI 0.167.0 passed placeholder strings literally
 to `sh` during native qualification, although [OpenAI's desktop MCP packaging guide](https://developers.openai.com/plugins/deploy/desktop-only) documents `${PLUGIN_ROOT}`.
 Claude uses `${CLAUDE_PLUGIN_ROOT}`.
 
-Set `KNOWLEDGE_ATLAS_CONFIG` to an external service JSON file before starting the
-host. Both hosts use the same file to attach to one service:
+For a running Docker deployment, choose a project using `atlas.open` or save
+an instance default. Claude Code exposes `project` in the plugin settings;
+Codex reads `{"project":"my-atlas"}` from `~/.config/knowledge-atlas/mcp.json`
+(under `$XDG_CONFIG_HOME` when set). See the [Docker guide](../docker/README.md#use-the-installed-plugin).
+
+For a native service, set `KNOWLEDGE_ATLAS_CONFIG` to an external service JSON
+file. Both hosts use the same service configuration:
 
 ```json
 {

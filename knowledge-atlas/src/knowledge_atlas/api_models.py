@@ -1,6 +1,6 @@
 """One typed model catalogue for HTTP validation, MCP schemas and Python calls."""
 from typing import Any, Literal
-from pydantic import BaseModel, ConfigDict, ValidationError, create_model, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, create_model, TypeAdapter
 from .contracts import ActionRequest, ActionResult, OperationRecord, AtlasError
 
 
@@ -10,6 +10,10 @@ class Payload(BaseModel):
 
 class Location(Payload):
     path: str
+
+
+class OpenLocation(Payload):
+    path: str | None = None
 
 
 class Source(Payload):
@@ -137,7 +141,7 @@ class Operation(Payload):
     operation_id: str
 
 
-PAYLOADS = {'wiki.pages':Payload,'wiki.read':WikiPage,'question.ask':Question,'atlas.create':Location,'atlas.open':Location,'atlas.status':Payload,
+PAYLOADS = {'wiki.pages':Payload,'wiki.read':WikiPage,'question.ask':Question,'atlas.create':Location,'atlas.open':OpenLocation,'atlas.status':Payload,
     'packages.inspect':Payload,'packages.pin':Pin,'sources.submit':Sources,'candidate.inspect':Candidate,
     'candidate.decide':Decision,'candidate.revise':Revision,'type.decide':TypeDecision,'search':Search,
     'evidence.read':Evidence,'knowledge.apply':Application,'feedback.record':Feedback,
@@ -146,13 +150,14 @@ PAYLOADS = {'wiki.pages':Payload,'wiki.read':WikiPage,'question.ask':Question,'a
 MODELS = {name:create_model(name.replace('.','_')+'Request', __config__=ConfigDict(extra='forbid',strict=True),
     action=(Literal[name],name), atlas_id=(str|None,None), request_id=(str|None,None),
     expected_publication=(str|None,None), publication=(str|None,None), as_known_at=(str|None,None),
-    valid_at=(str|None,None), payload=(payload, ...)) for name,payload in PAYLOADS.items()}
+    valid_at=(str|None,None), payload=(payload, ... if any(f.is_required() for f in payload.model_fields.values())
+                                      else Field(default_factory=payload))) for name,payload in PAYLOADS.items()}
 
 
-def parse_request(action, body):
-    if action not in MODELS:raise AtlasError('unsupported_action',action,422)
+def parse_request(action, body, *, models=MODELS):
+    if action not in models:raise AtlasError('unsupported_action',action,422)
     try:
-        model=MODELS[action].model_validate(body)
+        model=models[action].model_validate(body)
         value=model.model_dump(exclude_unset=True)
         value['action']=action
         return ActionRequest(**value)

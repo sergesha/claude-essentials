@@ -2,6 +2,18 @@
 
 The shared handler registry is the domain boundary. HTTP, MCP and Python clients use the same implemented backend; these examples describe action requests.
 
+## Opening an instance
+
+Call the MCP tool `atlas_atlas_open` without arguments to open the atlas bound to
+the default instance. To select a running Compose project in this connection, send
+`{"payload":{"project":"my-atlas"}}`. The returned `data.atlas_id` identifies
+the atlas for subsequent tools. Switch projects with another successful open.
+For example, `atlas_atlas_status` accepts `{"atlas_id":"<returned ID>"}`.
+
+`project` is an MCP connection setting. Direct HTTP clients already address a
+specific service. A bound service accepts an empty request body object for
+`atlas.open`. An unbound local service requires `payload.path`.
+
 ## Source ingestion and update
 
 `sources.submit` takes the atlas UUID, a fresh request UUID, `expected_publication` and this payload:
