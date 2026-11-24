@@ -447,3 +447,39 @@ def test_start_refuses_hidden_registered_legacy_mount(tmp_path, monkeypatch, mou
     binding, = list_projects(service_context(config))
     assert (binding.atlas_id, binding.graph_database) == (identity, 'admin/atlas')
     assert Publications(GitStore(path)).ready() == ready
+
+
+@pytest.mark.parametrize('origin', ['ordinary', 'adopted'])
+@pytest.mark.parametrize('mount', ['missing', 'different-repository'])
+def test_restart_serves_other_projects_after_completed_binding(tmp_path, monkeypatch, origin, mount):
+    from knowledge_atlas.contracts import ActionRequest, AtlasError, ServiceContext
+    from knowledge_atlas.http_api import invoke
+    from knowledge_atlas.launcher import service_context
+    from knowledge_atlas.project_registry import list_projects
+    from test_project_registry import create_project, legacy_publication
+
+    data = tmp_path / 'data'
+    data.mkdir()
+    path = data / 'atlas'
+    if origin == 'adopted':
+        identity, _, _ = legacy_publication(path)
+    config, _ = startup_config(tmp_path, monkeypatch)
+    service = service_context(config)
+    if origin == 'ordinary':
+        identity = create_project(service, path)
+    other = create_project(service, data / 'second')
+    before = list_projects(service)
+    binding = next(project for project in before if project.atlas_id == identity)
+    assert (binding.graph_database == 'admin/atlas') == (origin == 'adopted')
+    path.rename(tmp_path / 'original-mount')
+    if mount == 'different-repository':
+        create_project(ServiceContext(tmp_path / 'other-service'), path)
+
+    config, _ = startup_config(tmp_path, monkeypatch)
+    service = service_context(config)
+    assert list_projects(service) == before
+    projects = invoke(service, ActionRequest('atlas.list'))[1].data['projects']
+    assert {p['atlas_id']: p['status'] for p in projects} == {identity: 'unavailable', other: 'unpublished'}
+    assert invoke(service, ActionRequest('atlas.open', atlas_id=other))[1].data['atlas_id'] == other
+    with pytest.raises(AtlasError, match='atlas_conflict'):
+        invoke(service, ActionRequest('atlas.open', atlas_id=identity))

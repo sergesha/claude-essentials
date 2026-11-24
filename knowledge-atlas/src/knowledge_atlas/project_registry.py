@@ -234,12 +234,18 @@ def _save_binding(db, binding):
 def adopt_existing_atlas(service: ServiceContext, path: Path, graph_database: str) -> ProjectBinding | None:
     """Adopt the former deployment location before starting its dispatcher."""
     from .core.embedding_provider import merge_verified_cache
-    from .operations import _registered_roots, validate_atlas_path
+    from .operations import database, validate_atlas_path
 
-    location = Path(path).absolute()
+    path = Path(path)
+    location = path.parent.resolve() / path.name
+    with database(service) as db:
+        registered = {Path(row['path']): row for row in db.execute('SELECT * FROM atlases')}
+    registration = registered.get(location)
+    if registration is not None and registration['graph_database'] is not None:
+        # Adoption is complete. Project selection checks the live repository independently.
+        return _registry_binding(registration)
     path = validate_atlas_path(service, location)
-    registered = _registered_roots(service)
-    if location in registered and location != path:
+    if registration is not None and location != path:
         raise AtlasError('atlas_conflict', 'the registered legacy location resolves to another path', 409)
     if path not in registered and not (GitStore(path).root / '.git').exists():
         if not path.exists():
