@@ -12,7 +12,7 @@ export class GraphExplorer{
     this.$('graph-clear').onclick=()=>this.reset(this.model.publication);
   }
   node(tag,text,className){const n=this.document.createElement(tag);if(text!==undefined)n.textContent=text;if(className)n.className=className;return n;}
-  button(text,fn){const n=this.node('button',text,'secondary');n.onclick=async event=>{const epoch=this.generation;try{await fn();if(epoch===this.generation&&event?.detail===0&&n.closest?.('#graph-nodes, #graph-edges'))this.$('graph-inspector').focus();}catch(error){if(epoch===this.generation)this.message('Action unavailable: '+error.message);}};return n;}
+  button(text,fn){const n=this.node('button',text,'secondary'),epoch=this.generation;n.onclick=async event=>{if(epoch!==this.generation)return;try{await fn();if(epoch===this.generation&&event?.detail===0&&n.closest?.('#graph-nodes, #graph-edges'))this.$('graph-inspector').focus();}catch(error){if(epoch===this.generation)this.message('Action unavailable: '+error.message);}};return n;}
   details(title,value){const n=this.node('details',undefined,'technical');n.append(this.node('summary',title),this.node('pre',JSON.stringify(value,null,2)));return n;}
   message(text){this.$('graph-status').textContent=text;}
   reset(publication){

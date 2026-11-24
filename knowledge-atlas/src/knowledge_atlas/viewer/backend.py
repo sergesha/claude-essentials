@@ -147,13 +147,17 @@ class MCPBackend:
                     raise AtlasError('backend_unavailable', 'cannot resolve the atlas path in the selected container', 503) from error
             else:
                 identity = repository_identity(Path(selection).expanduser())
+        self.verify_atlas(identity)
+        return identity
+
+    def verify_atlas(self, identity):
         response = self.call('atlas.open', {'atlas_id': identity})
         if 'error' in response:
             error = response['error']
             raise AtlasError(error['code'], error['message'], error['status'])
         if response.get('data', {}).get('atlas_id') != identity:
             raise AtlasError('backend_unavailable', 'service returned a different atlas identity', 503)
-        return identity
+        return response
 
     def close(self):
         self.stopped.set()

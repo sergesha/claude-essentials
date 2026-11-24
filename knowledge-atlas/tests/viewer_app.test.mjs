@@ -5,11 +5,11 @@ import vm from 'node:vm';
 import {GraphExplorer} from '../src/knowledge_atlas/viewer/static/graph.mjs';
 import {MutationQueue} from '../src/knowledge_atlas/viewer/static/requests.mjs';
 const source=readFileSync(new URL('../src/knowledge_atlas/viewer/static/app.js',import.meta.url),'utf8').replace(/^import .*\n/gm,'');
-function app(fetch){
+function app(fetch,{hash='',confirm=()=>true}={}){
  const elements=new Map();
  function element(){return {value:'',textContent:'',attributes:{},setAttribute(k,v){this.attributes[k]=String(v);},focus(){this.focused=true;},hidden:false,children:[],dataset:{},classList:{toggle(){}},replaceChildren(){this.children=[];},append(...items){this.children.push(...items);},querySelectorAll(){return [];}};}
  const document={getElementById(id){if(!elements.has(id))elements.set(id,element());return elements.get(id);},createElement:element};
- const context=vm.createContext({MutationQueue,GraphExplorer,document,fetch,location:{hash:'',pathname:'/'},history:{replaceState(){}},window:{addEventListener(){}},structuredClone,crypto:{randomUUID:()=> 'test-request'},setTimeout:fn=>{fn();},console});
+ const context=vm.createContext({MutationQueue,GraphExplorer,document,fetch,location:{hash,pathname:'/'},history:{replaceState(){}},window:{addEventListener(){},confirm},structuredClone,crypto:{randomUUID:()=> 'test-request'},setTimeout:fn=>{fn();},console});
  vm.runInContext(source,context);document.getElementById("evidence").hidden=true;return {context,elements,run:code=>vm.runInContext(code,context)};
 }
 const response=(data,status=200)=>({ok:status===200,status,json:async()=>data});
@@ -17,7 +17,7 @@ test('admitted mutation retains reconciliation when operation polling is busy',a
  const a=app(async(url)=>url.endsWith('operation.read')?response({error:{code:'busy',message:'busy'}},409):response({operation_id:'admitted',state:'running'}));
  a.run("selected=ready='publication';");
  await assert.rejects(a.run("mutate('candidate.decide',{candidate:'candidate',action:'accept'})"));
- assert.equal(a.run('queue.pending?.operation_id'),'admitted');
+ assert.equal(a.run('queue.get(project.atlasId)?.operation_id'),'admitted');
 });
 test('refresh cannot silently move a historical question to READY',async()=>{
  let historyStarted;const started=new Promise(resolve=>historyStarted=resolve);let asked;
@@ -26,7 +26,7 @@ test('refresh cannot silently move a historical question to READY',async()=>{
   if(url.endsWith('history')){historyStarted();return new Promise(()=>{});}
   if(url.endsWith('question.ask')){asked=JSON.parse(options.body).publication;return response({});}
  });
- a.run("selected='historical';ready='old-ready';refresh();");await started;
+ a.run("project={atlasId:'atlas',generation:1};selected='historical';ready='old-ready';refresh();");await started;
  await a.run("read('question.ask',{question:'What was known?'})");
  assert.equal(asked,'historical');
 });
@@ -123,4 +123,237 @@ test('acceptance attribution identifies the channel and unsigned receipt separat
  const old=a.run("attribution({acceptance_kind:'synthetic'})");
  assert.match(old,/unrecorded/);
  assert.match(old,/No matching decision receipt/);
+});
+
+const atlasA='10000000-0000-4000-8000-000000000001';
+const atlasB='10000000-0000-4000-8000-000000000002';
+const aReady='a'.repeat(40),aOld='c'.repeat(40),bReady='b'.repeat(40);
+const aPage='Record/20000000-0000-4000-8000-000000000001';
+const oldPage='Record/20000000-0000-4000-8000-000000000002';
+const bPage='Record/20000000-0000-4000-8000-000000000003';
+const turn=()=>new Promise(resolve=>setImmediate(resolve));
+function deferred(){
+ let resolve;
+ const promise=new Promise(done=>{resolve=done;});
+ return {promise,resolve};
+}
+function atlasFixture({bPublication=bReady,confirm,onRequest}={}){
+ const calls=[];
+ const a=app(async(url,options)=>{
+  const action=url.slice('/api/'.length),body=JSON.parse(options.body),id=body.atlas_id;
+  calls.push({action,body});
+  const override=onRequest?.(action,body);
+  if(override!==undefined)return override;
+  if(action==='atlas.list')return response({launch_atlas_id:atlasA,data:{projects:[
+   {atlas_id:atlasA,name:'Notes',publication:aReady,status:'ready'},
+   {atlas_id:atlasB,name:'Notes',publication:bPublication,status:bPublication?'ready':'unpublished'},
+  ]}});
+  if(![atlasA,atlasB].includes(id))return response({error:{message:'Project UUID required'}},400);
+  const ready=id===atlasA?aReady:bPublication;
+  const publication=body.publication??ready;
+  const page=publication===aOld?oldPage:id===atlasA?aPage:bPage;
+  const data={
+   'atlas.open':{atlas_id:id,path:'/fixture/notes'},
+   'atlas.status':{candidates:id===atlasA?['proposal-a']:['proposal-b']},
+   history:{history:(id===atlasA?[aReady,aOld]:[bReady]).map(publication_commit=>({publication_commit}))},
+   'wiki.pages':{pages:[{id:page,title:'Page '+page,path:'/wiki/page.md'}],sources:[{name:'Source '+id}]},
+   'wiki.read':{page:{id:page,title:'Page '+page,html:'<p>'+page+'</p>'}},
+   search:{hits:[{record:{'@id':page,kind:'wiki',text:page}}]},
+   'question.ask':{answer:'Answer '+id,unknowns:[],bounds:{truncated:false},citations:[page]},
+  }[action];
+  if(!data)throw Error('Unexpected viewer request '+action);
+  return response({publication,data});
+ },{hash:'#test-token',confirm});
+ const get=id=>a.elements.get(id);
+ const select=id=>{get('atlas-project').value=id;return get('atlas-project').onchange();};
+ const displayed=(id,publication,page)=>{
+  assert.equal(get('atlas-project')?.value,id);
+  assert.equal(get('publication-id').textContent,publication??'No published version');
+  assert.equal(get('page-id').textContent,page??'');
+ };
+ return {...a,get,select,displayed,calls};
+}
+
+test('same-name projects show their UUIDs and switch from historical A to B READY',async()=>{
+ const a=atlasFixture();
+ await turn();
+ a.displayed(atlasA,aReady,aPage);
+ assert.deepEqual(a.get('atlas-project').children.map(option=>option.textContent),[
+  'Choose a project…','Notes · '+atlasA,'Notes · '+atlasB,
+ ]);
+ a.get('publication').value=aOld;await a.get('publication').onchange();
+ a.displayed(atlasA,aOld,oldPage);
+ a.get('page-filter').value='old filter';a.get('page-filter').oninput();
+ a.get('graph-query').value='old search';
+ await a.select(atlasB);
+ a.displayed(atlasB,bReady,bPage);
+ assert.equal(a.get('page-filter').value,'');
+ assert.equal(a.get('graph-query').value,'');
+ assert.equal(a.get('return-current').hidden,true);
+ assert.equal(a.get('candidate').value,'proposal-b');
+ assert.equal(a.get('timeline').children.length,1);
+ assert.equal(a.get('sources').children[0].textContent.startsWith('Source '+atlasB),true);
+ assert.equal(a.get('panel-read').hidden,false);
+ assert.deepEqual(a.calls.filter(call=>call.body.atlas_id===atlasB).map(call=>call.action),[
+  'atlas.open','atlas.status','history','wiki.pages','wiki.read',
+ ]);
+});
+
+test('switching to an unpublished project clears previously displayed records and controls',async()=>{
+ const a=atlasFixture({bPublication:null});
+ await turn();
+ await a.select(atlasB);
+ a.displayed(atlasB,null,null);
+ assert.equal(a.get('timeline').children.length,0);
+ assert.equal(a.get('sources').children.length,0);
+ assert.equal(a.get('pages').children.length,0);
+ assert.equal(a.get('graph-page').disabled,true);
+ assert.equal(a.get('propose').disabled,true);
+ assert.match(a.get('page').textContent,/No accepted publication/);
+ assert.equal(a.calls.some(call=>call.action==='wiki.read'&&call.body.atlas_id===atlasB),false);
+});
+
+test('a rejected or mismatched project verification preserves the current view',async()=>{
+ for(const rejection of [response({error:{message:'Project unavailable'}},404),response({data:{atlas_id:atlasA}})]){
+  const a=atlasFixture({onRequest:(action,body)=>action==='atlas.open'&&body.atlas_id===atlasB?rejection:undefined});
+  await turn();
+  a.get('publication').value=aOld;await a.get('publication').onchange();
+  a.get('clarification').value='Unsent correction';
+  a.get('nav-history').onclick();
+  await a.select(atlasB);
+  a.displayed(atlasA,aOld,oldPage);
+  assert.equal(a.get('clarification').value,'Unsent correction');
+  assert.equal(a.get('panel-history').hidden,false);
+  assert.match(a.get('notice').textContent,/project/i);
+  assert.equal(a.calls.some(call=>call.action==='atlas.status'&&call.body.atlas_id===atlasB),false);
+ }
+});
+
+test('cancel preserves unsent form text, then confirmation clears it during the switch',async()=>{
+ const confirmations=[];
+ const a=atlasFixture({confirm:message=>{confirmations.push(message);return confirmations.length===2;}});
+ await turn();
+ a.get('clarification').value='Unsent correction';
+ a.get('reason').value='Unsent decision';
+ a.get('question').value='Unsent question';
+ a.get('actor').value='Reviewer';
+ a.get('nav-review').onclick();
+ const previousNotice=a.get('notice').textContent;
+ await a.select(atlasB);
+ a.displayed(atlasA,aReady,aPage);
+ assert.equal(a.get('clarification').value,'Unsent correction');
+ assert.equal(a.get('reason').value,'Unsent decision');
+ assert.equal(a.get('question').value,'Unsent question');
+ assert.equal(a.get('actor').value,'Reviewer');
+ assert.equal(a.get('notice').textContent,previousNotice);
+ assert.equal(a.get('panel-review').hidden,false);
+ await a.select(atlasB);
+ a.displayed(atlasB,bReady,bPage);
+ assert.equal(confirmations.length,2);
+ assert.match(confirmations[0],/discard/i);
+ for(const id of ['clarification','reason','question','actor'])assert.equal(a.get(id).value,'');
+});
+
+for(const returnToA of [false,true])test('late work from A cannot affect '+(returnToA?'a new A generation':'B'),async()=>{
+ const delayed=Object.fromEntries(['atlas.status','wiki.read','question.ask','search'].map(action=>[action,deferred()]));
+ let delaying=false;
+ const a=atlasFixture({onRequest:(action,body)=>delaying&&body.atlas_id===atlasA?delayed[action]?.promise:undefined});
+ await turn();
+ delaying=true;
+ const refresh=a.get('refresh').onclick();
+ const page=a.get('pages').children[0].onclick();
+ a.get('question').value='Submitted old question';
+ const ask=a.get('ask-form').onsubmit();
+ a.get('graph-query').value='Old search';
+ const search=a.get('graph-search-form').onsubmit({preventDefault(){}});
+ delaying=false;
+ await a.select(atlasB);
+ if(returnToA)await a.select(atlasA);
+ const currentAtlas=returnToA?atlasA:atlasB;
+ const newAsk=deferred();
+ const current=returnToA?aReady:bReady,shown=returnToA?aPage:bPage;
+ // Hold a new question in flight so the old finally block cannot reset its controls.
+ const currentFetch=a.context.fetch;
+ a.context.fetch=(url,options)=>url.endsWith('question.ask')?newAsk.promise:currentFetch(url,options);
+ a.get('question').value='Current question';
+ const newQuestion=a.get('ask-form').onsubmit();
+ a.get('nav-history').onclick();
+ const notice=a.get('notice').textContent;
+ const graphStatus=a.get('graph-status').textContent;
+ const answer=a.get('answer').textContent;
+ delayed['atlas.status'].resolve(response({publication:'obsolete',data:{candidates:['obsolete proposal']}}));
+ delayed['wiki.read'].resolve(response({data:{page:{id:oldPage,title:'Stale page',html:'<p>'+oldPage+'</p>'}}}));
+ delayed['question.ask'].resolve(returnToA
+  ?response({error:{message:'Stale question failure'}},503)
+  :response({publication:aReady,data:{answer:'Stale answer',unknowns:[],bounds:{truncated:false},citations:[oldPage]}}));
+ delayed.search.resolve(response({publication:aReady,data:{hits:[{record:{'@id':oldPage,kind:'wiki',text:'Stale record'}}]}}));
+ await Promise.all([refresh,page,ask,search]);
+ a.displayed(currentAtlas,current,shown);
+ assert.equal(a.get('panel-history').hidden,false);
+ assert.equal(a.get('notice').textContent,notice);
+ assert.equal(a.get('answer').textContent,answer);
+ assert.equal(a.get('citations').children.length,0);
+ assert.equal(a.get('ask-submit').disabled,true);
+ assert.equal(a.get('ask-form').attributes['aria-busy'],'true');
+ assert.equal(a.get('graph-status').textContent,graphStatus);
+ assert.equal(a.get('graph-results').children.length,0);
+ assert.equal(a.calls.some(call=>call.action==='history'&&call.body.publication==='obsolete'),false);
+ newAsk.resolve(response({publication:current,data:{answer:'Current answer',unknowns:[],bounds:{truncated:false},citations:[shown]}}));
+ await newQuestion;
+ assert.match(a.get('answer').textContent,/Current answer/);
+ assert.equal(a.get('ask-submit').disabled,false);
+});
+
+for(const uncertain of [false,true])test((uncertain?'uncertain':'admitted')+' A mutation retains its identity while B is open',async()=>{
+ const first=deferred();
+ let submitted=0;
+ const a=atlasFixture({onRequest:(action)=>{
+  if(action==='knowledge.revise'){
+   submitted++;
+   return submitted===1?first.promise:response({operation_id:'operation-a',state:'succeeded',result:{data:{status:'published'}}});
+  }
+  if(action==='operation.read')return response({operation_id:'operation-a',state:'succeeded',result:{data:{status:'published'}}});
+ }});
+ await turn();
+ a.get('actor').value='Reviewer';
+ a.get('clarification').value='Original evidence correction';
+ const submitting=a.get('clarify-form').onsubmit();
+ await a.select(atlasB);
+ a.displayed(atlasB,bReady,bPage);
+ const bNotice=a.get('notice').textContent;
+ first.resolve(uncertain?response({error:{message:'Connection lost'}},503):response({operation_id:'operation-a',state:'running'}));
+ await submitting;
+ assert.equal(a.get('notice').textContent,bNotice);
+ assert.equal(a.get('reconcile').hidden,true);
+ assert.equal(a.get('operation').hidden,true);
+ assert.equal(a.calls.some(call=>call.action==='operation.read'&&call.body.atlas_id===atlasB),false);
+ await a.select(atlasA);
+ a.displayed(atlasA,aReady,aPage);
+ assert.equal(a.get('reconcile').hidden,false);
+ await a.get('reconcile').onclick();
+ const mutations=a.calls.filter(call=>call.action==='knowledge.revise');
+ assert.equal(mutations.length,uncertain?2:1);
+ const original=mutations[0].body;
+ assert.equal(original.atlas_id,atlasA);
+ assert.match(original.request_id,/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+ assert.equal(original.expected_publication,aReady);
+ assert.equal(original.payload.record_id,aPage);
+ assert.equal(original.payload.instructions,'Original evidence correction');
+ if(uncertain)assert.deepEqual(mutations[1].body,original);
+ else assert.deepEqual(a.calls.filter(call=>call.action==='operation.read').map(call=>call.body),[
+  {atlas_id:atlasA,payload:{operation_id:'operation-a'}},
+ ]);
+ a.displayed(atlasA,aReady,aPage);
+ assert.equal(a.get('reconcile').hidden,true);
+});
+
+test('two browser contexts open different projects independently',async()=>{
+ const first=atlasFixture(),second=atlasFixture();
+ await turn();
+ await first.select(atlasB);
+ first.displayed(atlasB,bReady,bPage);
+ second.displayed(atlasA,aReady,aPage);
+ await second.get('refresh').onclick();
+ second.displayed(atlasA,aReady,aPage);
+ assert.equal(second.calls.some(call=>call.body.atlas_id===atlasB),false);
 });

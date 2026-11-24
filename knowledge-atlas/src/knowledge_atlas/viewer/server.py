@@ -1,4 +1,4 @@
-"""A single-atlas browser boundary; backend credentials never reach the browser."""
+"""A single-service browser boundary; backend credentials never reach the browser."""
 import hmac
 import json
 import re
@@ -6,11 +6,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import secrets
 import threading
+from uuid import UUID
 from markdown_it import MarkdownIt
 from ..api_models import parse_request
 from ..contracts import AtlasError
 
 READS={'search','atlas.status','wiki.pages','wiki.read','question.ask','history','diff','evidence.read','candidate.inspect','operation.read'}
+CHOOSER={'atlas.list','atlas.open'}
 MUTATIONS={'knowledge.revise','candidate.revise','candidate.decide','type.decide'}
 ASSETS=Path(__file__).with_name('static')
 
@@ -27,10 +29,10 @@ class ViewerServer(ThreadingHTTPServer):
     request_queue_size=16
 
     def __init__(self,backend,atlas_id,port=0):
-        self.backend=backend;self.atlas_id=atlas_id
+        self.backend=backend;self.launch_atlas_id=atlas_id
         self.token=secrets.token_urlsafe(32)
         self.slots=threading.BoundedSemaphore(4)
-        self.operation_ids=set()
+        self.operation_projects={}
         super().__init__(('127.0.0.1',port),Handler)
         self.origin='http://127.0.0.1:'+str(self.server_address[1])
 
@@ -82,31 +84,51 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self.boundary(True)
             action=self.path.removeprefix('/api/')
-            if self.path!='/api/'+action or action not in READS|MUTATIONS:
+            if self.path!='/api/'+action or action not in READS|MUTATIONS|CHOOSER:
                 raise AtlasError('not_found','Action not available in viewer',404)
             if self.headers.get_content_type()!='application/json' or self.headers.get('Transfer-Encoding'):
                 raise AtlasError('invalid_request','Bounded JSON body required',400)
             size=int(self.headers.get('Content-Length','0'))
             if not 0<size<=1024*1024:raise AtlasError('invalid_request','Body exceeds viewer limit',413)
             body=json.loads(self.rfile.read(size))
-            if not isinstance(body,dict) or set(body)-{'payload','publication','request_id','expected_publication'}:
+            if not isinstance(body,dict) or set(body)-{'atlas_id','payload','publication','request_id','expected_publication'}:
                 raise AtlasError('invalid_request','Unexpected viewer request fields',400)
+            if action=='atlas.list':
+                if body:raise AtlasError('invalid_request','Project listing takes no arguments',400)
+                atlas_id=None
+            else:
+                value=body.get('atlas_id')
+                if not isinstance(value,str):raise AtlasError('invalid_request','A project UUID is required',400)
+                try:
+                    atlas_id=str(UUID(value))
+                except ValueError as error:
+                    raise AtlasError('invalid_request','A project UUID is required',400) from error
+                if action=='atlas.open' and set(body)!={'atlas_id'}:
+                    raise AtlasError('invalid_request','Project selection takes only a project UUID',400)
+                body['atlas_id']=atlas_id
             if action in MUTATIONS and body.get('publication'):
                 if body['publication']!=body.get('expected_publication'):
                     raise AtlasError('stale_publication','Historical views are read-only',409)
-            request={**body,'atlas_id':self.server.atlas_id}
-            parse_request(action,request)
-            if action=='operation.read' and body['payload'].get('operation_id') not in self.server.operation_ids:
-                raise AtlasError('operation_not_found','Operation does not belong to this viewer session',404)
+            request=parse_request(action,body)
+            if action=='operation.read':
+                owner=self.server.operation_projects.get(request.payload['operation_id'])
+                if owner!=atlas_id:
+                    raise AtlasError('operation_not_found','Operation does not belong to this viewer project',404)
             acquired=self.server.slots.acquire(blocking=False)
             if not acquired:raise AtlasError('busy','Viewer is processing other requests',409)
-            result=self.server.backend.call(action,request)
+            if action=='atlas.open':
+                result=self.server.backend.verify_atlas(atlas_id)
+            else:
+                result=self.server.backend.call(action,body)
             if isinstance(result,dict) and result.get('error'):
                 error=result['error'];raise AtlasError(error['code'],error['message'],error.get('status',503))
+            if action=='atlas.list':
+                result={**result,'launch_atlas_id':self.server.launch_atlas_id}
             if action in MUTATIONS and result.get('operation_id'):
-                self.server.operation_ids.add(result['operation_id'])
+                self.server.operation_projects.setdefault(result['operation_id'],atlas_id)
             if action=='atlas.status':
-                self.server.operation_ids.update(row['operation_id'] for row in result.get('data',{}).get('active_operations',[]))
+                for row in result.get('data',{}).get('active_operations',[]):
+                    self.server.operation_projects.setdefault(row['operation_id'],atlas_id)
             if action=='wiki.read':
                 page=result['data']['page'];page['html']=render_markdown(page['content'])
             self.reply(200,result)

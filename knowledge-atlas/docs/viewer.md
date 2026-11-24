@@ -29,6 +29,16 @@ address bar and keeps it only in memory. Reloading requires reopening the full
 launch URL; restarting the viewer invalidates the old secret. Do not share it.
 Stop the viewer with Ctrl+C; its backend atlas data remains intact.
 
+## Switch projects
+
+The viewer starts at the project supplied with `--atlas`. Use **Project** in the
+sidebar to switch between registered projects in the same service. Each option
+shows the project name and UUID. A verified switch opens the project's latest
+accepted publication (READY), or shows the unpublished state if it has none.
+The viewer clears the previous page, version, searches, and review selection.
+If you have unsent form text, confirm before discarding it or cancel to keep
+working in the current project.
+
 ## Explore and compare
 
 Use the sidebar to select a knowledge version and find a page. **Read** is the default view; **Ask**, **Graph**, **History** and **Review changes** each have a dedicated screen. The page filter searches titles without changing the selected version. Select a page to return to reading.
@@ -70,12 +80,13 @@ base. Published knowledge remains unchanged until explicit acceptance/publicatio
 Accepted-but-not-published results remain visible as failures to publish; use the
 agent's existing operation-resume workflow after inspecting the cause.
 
-If a response is lost, keep the tab open and choose **Recover pending operation**.
-The viewer retains the same request ID and payload, recovers the existing operation
-and does not submit a new deliberate decision. It blocks a second mutation while
-one outcome remains uncertain. Do not refresh a tab with a pending decision;
-if the tab was lost, inspect atlas/operation state through your agent before
-submitting another intent.
+Submitted background work continues in its original project while you browse
+another project. Switch back and choose **Recover pending operation** to check a
+pending result or recover from a lost response. The viewer retains the original
+request ID, payload, and publication precondition, and blocks a second mutation
+in that project until the pending outcome is reconciled. Keep the tab open
+while a decision is pending. If the tab was lost, inspect the original project's
+operation state through your agent before submitting another decision.
 
 ## Scope
 
