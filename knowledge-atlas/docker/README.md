@@ -66,19 +66,22 @@ atlas_compose exec -T atlas /opt/knowledge-atlas/.venv/bin/python -m knowledge_a
 
 ## Use the installed plugin
 
-Set the project name in the environment of the native host before launching it:
+Open a running project from the installed MCP plugin:
 
-```sh
-export KNOWLEDGE_ATLAS_DOCKER_PROJECT=atlas
-codex   # or: claude
+```json
+{"payload":{"project":"my-atlas"}}
 ```
 
-The installed Knowledge Atlas plugin's existing launcher then calls
-`docker compose exec -T` and the same Python MCP entry point inside the running
-service. It preserves protocol stdout; component logs stay under `/data/logs`.
-Docker is required only when this option is set. Unset it to use native launch.
-The container must already be healthy; an absent/stopped project produces a
-Docker error rather than creating an unconfigured service implicitly.
+Send this to `atlas_atlas_open`. The MCP bridge selects the project's running
+`atlas` service and opens the path configured inside it. Subsequent tools on that
+connection use the selected project. Reopen it by calling `atlas_atlas_open`
+without arguments. A failed switch returns an error and keeps the prior selection.
+
+To choose a default project at installation in Claude Code, set the plugin's
+`project` setting. In Codex, put `{"project":"my-atlas"}` in
+`~/.config/knowledge-atlas/mcp.json` (or under `$XDG_CONFIG_HOME`). The next
+MCP connection can open the atlas without arguments on its first call.
+The existing `KNOWLEDGE_ATLAS_DOCKER_PROJECT` setting is also supported.
 
 Create or restore the atlas at **`/data/atlas`**. This deployment binds its
 embedding cache to that atlas. Use another Compose project for another atlas.

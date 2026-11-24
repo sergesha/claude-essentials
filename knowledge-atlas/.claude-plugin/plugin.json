@@ -6,12 +6,23 @@
     "name": "sergesha"
   },
   "homepage": "https://github.com/sergesha/claude-essentials/tree/main/knowledge-atlas",
+  "userConfig": {
+    "project": {
+      "type": "string",
+      "title": "Default Compose project",
+      "description": "Existing Knowledge Atlas Compose project to open by default. You can also choose a project in atlas.open.",
+      "default": ""
+    }
+  },
   "mcpServers": {
     "knowledge-atlas": {
       "command": "sh",
       "args": [
         "${CLAUDE_PLUGIN_ROOT}/scripts/launch.sh"
-      ]
+      ],
+      "env": {
+        "KNOWLEDGE_ATLAS_DEFAULT_PROJECT": "${user_config.project}"
+      }
     }
   },
   "repository": "https://github.com/sergesha/claude-essentials",

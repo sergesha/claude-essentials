@@ -8,12 +8,14 @@ description: Use when working with Knowledge Atlas sources, candidate or type re
 Use the installed `knowledge-atlas` MCP tools. Discover their current input
 schemas first. Tool names are `atlas_` plus the action with dots replaced by
 underscores: `candidate.inspect` is `atlas_candidate_inspect`; `atlas.status`
-is `atlas_atlas_status`. Every call uses a `payload` object plus the common
-atlas/publication selectors exposed by the schema.
+is `atlas_atlas_status`. Omit `payload` for calls with no payload fields.
 
 ## Operate
 
-1. Open/create the external atlas and retain its returned `atlas_id`. Read its
+1. Open the configured atlas with `atlas_atlas_open` without arguments. When the
+   user names a Compose project, pass `{"payload":{"project":"PROJECT"}}` on open;
+   subsequent tools use that project on this connection. Use an explicit path
+   for an unbound local service. Retain the returned `atlas_id`. Read its
    current READY publication before preparing a mutation. Keep the user's
    source IDs stable; omitted sources remain, explicit removals are versioned.
 2. Submit with a fresh request UUID and the reviewed `expected_publication`.

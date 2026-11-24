@@ -79,6 +79,10 @@ def validate_atlas_path(context, path):
 def atlas_path(context, request):
     if request.action in ('atlas.create', 'atlas.open', 'archive.restore'):
         value = request.payload.get('path')
+        if request.action == 'atlas.open' and value is None:
+            value = context.configuration.get('atlas_path')
+            if not value:
+                raise AtlasError('invalid_request', 'this service has no configured atlas_path; supply a path to open')
         if not isinstance(value, str) or not value:
             raise AtlasError('invalid_request', 'external atlas path required')
         return validate_atlas_path(context, Path(value).expanduser())

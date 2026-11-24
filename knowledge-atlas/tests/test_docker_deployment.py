@@ -90,7 +90,7 @@ def test_upgrade_rebinds_existing_venv_without_auth_volume(tmp_path):
     assert marker.read_text() == 'retained'
 
 
-def test_missing_native_launcher_requires_explicit_preparation(tmp_path):
+def test_mcp_launcher_retries_failed_setup_and_reuses_ready_environment(tmp_path):
     root = tmp_path / 'installed'
     (root / 'scripts').mkdir(parents=True)
     launcher = root / 'scripts/launch.sh'
@@ -98,25 +98,34 @@ def test_missing_native_launcher_requires_explicit_preparation(tmp_path):
     bins = tmp_path / 'bin'
     bins.mkdir()
     uv = bins / 'uv'
-    uv.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$CAPTURE"\n')
+    uv.write_text("""#!/bin/sh
+echo setup >> "$CAPTURE"
+printf '%s\\n' "$@" > "$CAPTURE.args"
+mkdir -p "$UV_PROJECT_ENVIRONMENT/bin"
+ln -sf "$TEST_PYTHON" "$UV_PROJECT_ENVIRONMENT/bin/python"
+echo "Installing dependencies"
+exit "${UV_TEST_EXIT:-0}"
+""")
     uv.chmod(0o755)
     capture = tmp_path / 'calls'
     env = {
         'HOME': str(tmp_path), 'PATH': str(bins) + os.pathsep + os.defpath,
-        'CAPTURE': str(capture),
+        'CAPTURE': str(capture), 'TEST_PYTHON': sys.executable,
     }
-    result = subprocess.run(['sh', launcher], env=env, capture_output=True, text=True)
-    assert result.returncode != 0
-    assert 'prepare-launcher' in result.stderr
-    assert not capture.exists()
-    subprocess.run(['sh', launcher, 'prepare-launcher'], env=env, check=True)
-    assert capture.read_text().splitlines() == [
-        'sync', '--project', str(root), '--locked', '--no-dev', '--python', '3.12']
-    venv = root / '.venv/bin'
-    venv.mkdir(parents=True)
-    (venv / 'python').symlink_to(sys.executable)
     (root / 'src/knowledge_atlas').mkdir(parents=True)
     (root / 'src/knowledge_atlas/cli.py').write_text('import sys; print(sys.argv[1:])')
+    failed = subprocess.run(['sh', launcher], env={**env, 'UV_TEST_EXIT': '7'},
+                            capture_output=True, text=True)
+    assert failed.returncode == 7
+    assert failed.stdout == ''
+    for arguments in ([], ['mcp']):
+        result = subprocess.run(['sh', launcher, *arguments], env=env,
+                                check=True, capture_output=True, text=True)
+        assert result.stdout.strip() == "['mcp']"
+    assert capture.read_text().splitlines() == ['setup', 'setup']
+    assert (tmp_path / 'calls.args').read_text().splitlines() == [
+        'sync', '--project', str(root), '--locked', '--no-dev', '--python', '3.12']
+    subprocess.run(['sh', launcher, 'prepare-launcher'], env=env, check=True)
     result = subprocess.run(['sh', launcher, 'status'], env=env, capture_output=True,
                             check=True, text=True)
     assert result.stdout.strip() == "['status']"

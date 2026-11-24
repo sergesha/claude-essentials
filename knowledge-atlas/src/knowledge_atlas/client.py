@@ -115,8 +115,8 @@ class AtlasClient:
     def atlas_create(self,payload:models.Location,**selection)->OperationRecord:
         return self._typed('atlas.create',payload,**selection)
 
-    def atlas_open(self,payload:models.Location,**selection)->ActionResult:
-        return self._typed('atlas.open',payload,**selection)
+    def atlas_open(self,payload:models.OpenLocation | models.Location | None = None,**selection)->ActionResult:
+        return self._typed('atlas.open',payload or models.OpenLocation(),**selection)
 
     def atlas_status(self,payload:models.Payload,**selection)->ActionResult:
         return self._typed('atlas.status',payload,**selection)

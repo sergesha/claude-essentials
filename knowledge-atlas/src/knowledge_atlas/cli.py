@@ -33,16 +33,17 @@ def main() -> int:
             run_viewer(args.atlas,args.config,args.docker_project or os.getenv('KNOWLEDGE_ATLAS_DOCKER_PROJECT'),args.port)
             return 0
         if args.command != 'runtime':
-            from .launcher import load_config, ensure_service, serve_service, service_context
+            from .launcher import load_config, serve_service, service_context
             from .client import AtlasClient
+            if args.command == 'mcp':
+                import asyncio
+                from .mcp_bridge import SessionClient, default_project, serve
+                project = default_project() if args.config is None else None
+                asyncio.run(serve(SessionClient(args.config, args.channel, project)))
+                return 0
             config = load_config(args.config)
             if args.command == 'serve':
                 serve_service(config)
-            elif args.command == 'mcp':
-                import asyncio
-                from .mcp_bridge import serve
-                ensure_service(config)
-                asyncio.run(serve(AtlasClient(service_context(config).service_root, channel=args.channel)))
             else:
                 client = AtlasClient(service_context(config).service_root)
                 print(json.dumps(client.stop() if args.command == 'stop' else client.request('/v1/status')))

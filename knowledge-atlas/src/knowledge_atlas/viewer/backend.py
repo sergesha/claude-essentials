@@ -3,18 +3,24 @@ import asyncio
 from datetime import timedelta
 import json
 import os
-from pathlib import Path
 import sys
 import threading
 import time
 import uuid
 from ..contracts import AtlasError
+from ..runtime import _assets
+
+
+def compose_python(project):
+    compose = _assets().parent / 'docker/compose.yaml'
+    return ['docker', 'compose', '-p', project, '-f', str(compose), 'exec', '-T',
+            'atlas', '/opt/knowledge-atlas/.venv/bin/python']
 
 
 class MCPBackend:
-    def __init__(self,config=None,docker_project=None):
+    def __init__(self,config=None,docker_project=None,*,channel='viewer'):
         self.ready=threading.Event();self.stopped=threading.Event();self.error=None
-        self.config=config;self.docker_project=docker_project
+        self.config=config;self.docker_project=docker_project;self.channel=channel
         self.thread=threading.Thread(target=self._thread,daemon=True)
         self.thread.start()
         if not self.ready.wait(60):
@@ -30,15 +36,12 @@ class MCPBackend:
         from mcp.client.stdio import stdio_client
         self.loop=asyncio.get_running_loop()
         if self.docker_project:
-            package=Path(__file__).resolve().parents[3]
-            compose=package/'docker/compose.yaml'
-            if not compose.exists():compose=Path(__file__).resolve().parents[1]/'_assets/docker/compose.yaml'
-            command='docker';args=['compose','-p',self.docker_project,'-f',str(compose),'exec','-T','atlas',
-                '/opt/knowledge-atlas/.venv/bin/python','-m','knowledge_atlas.cli','mcp']
+            command,*args=compose_python(self.docker_project)
+            args+=['-m','knowledge_atlas.cli','mcp']
         else:
             command=sys.executable;args=['-m','knowledge_atlas.cli','mcp']
             if self.config:args+=['--config',str(self.config)]
-        args += ['--channel','viewer']
+        args += ['--channel',self.channel]
         async with stdio_client(StdioServerParameters(command=command,args=args,env=dict(os.environ))) as (reader,writer):
             async with ClientSession(reader,writer,read_timeout_seconds=timedelta(seconds=900)) as session:
                 await session.initialize();self.session=session;self.ready.set()
