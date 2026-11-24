@@ -393,3 +393,57 @@ def test_stopped_legacy_snapshot_remains_recoverable(tmp_path, monkeypatch):
     project, = list_projects(service_context(config))
     assert (project.atlas_id, project.path, project.graph_database) == (identity, store.base, 'admin/atlas')
     assert (data / 'graph/db/fixture').read_bytes() == (backup / 'graph/db/fixture').read_bytes()
+
+
+def test_restart_with_registered_child_of_legacy_path(tmp_path, monkeypatch):
+    from knowledge_atlas.launcher import service_context
+    from knowledge_atlas.project_registry import list_projects
+    from test_project_registry import create_project
+
+    config, _ = startup_config(tmp_path, monkeypatch)
+    path = tmp_path / 'data/atlas/notes'
+    identity = create_project(service_context(config), path)
+    restarted, _ = startup_config(tmp_path, monkeypatch)
+    binding, = list_projects(service_context(restarted))
+    assert (binding.atlas_id, binding.path) == (identity, path)
+
+
+@pytest.mark.parametrize('mount', ['missing', 'empty', 'cache-only'])
+def test_start_refuses_hidden_registered_legacy_mount(tmp_path, monkeypatch, mount):
+    import sqlite3
+    from knowledge_atlas.contracts import AtlasError
+    from knowledge_atlas.core.git_store import GitStore
+    from knowledge_atlas.core.publication import Publications
+    from knowledge_atlas.launcher import service_context
+    from knowledge_atlas.project_registry import list_projects
+    from test_project_registry import legacy_publication, vector_fixture
+
+    data = tmp_path / 'data'
+    data.mkdir()
+    path = data / 'atlas'
+    identity, _, ready = legacy_publication(path)
+    original = tmp_path / 'original-mount'
+    path.rename(original)
+    if mount == 'empty':
+        path.mkdir()
+    elif mount == 'cache-only':
+        vector_fixture(path / 'vectors')
+    (data / 'service').mkdir()
+    with sqlite3.connect(data / 'service/operations.sqlite3') as db:
+        db.execute('CREATE TABLE atlases (atlas_id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE)')
+        db.execute('INSERT INTO atlases VALUES (?,?)', (identity, str(path)))
+    config_path = data / 'service-config.json'
+    config_path.write_bytes(b'previous deployment configuration')
+    with pytest.raises(AtlasError, match='invalid_atlas|atlas_conflict'):
+        startup_config(tmp_path, monkeypatch)
+    assert config_path.read_bytes() == b'previous deployment configuration'
+    assert not (data / 'service/vectors').exists()
+    assert not (data / 'logs').exists()
+
+    if path.exists():
+        path.rename(tmp_path / 'hidden-mount')
+    original.rename(path)
+    config, _ = startup_config(tmp_path, monkeypatch)
+    binding, = list_projects(service_context(config))
+    assert (binding.atlas_id, binding.graph_database) == (identity, 'admin/atlas')
+    assert Publications(GitStore(path)).ready() == ready

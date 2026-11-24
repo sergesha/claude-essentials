@@ -211,12 +211,14 @@ def _persist_project(service, identity, path, *, legacy_database=None):
 def _migrate_project_vectors(path, cache):
     import sqlite3
     from .core.archive import seed_retained_vectors
-    from .core.embedding_provider import initialize_cache, merge_verified_cache
+    from .core.embedding_provider import copy_verified_vectors, initialize_cache
 
     try:
-        merge_verified_cache(path / 'vectors', cache)
         initialize_cache(cache)
+        original = path / 'vectors/vectors.sqlite3'
         with sqlite3.connect(cache / 'vectors.sqlite3') as target:
+            if original.exists():
+                copy_verified_vectors(original, target)
             seed_retained_vectors(Publications(GitStore(path)), target)
     except (ValueError, KeyError, TypeError, sqlite3.Error, OSError) as error:
         raise AtlasError('invalid_atlas', f'could not retain project vectors: {error}', 422) from error
@@ -232,17 +234,22 @@ def _save_binding(db, binding):
 def adopt_existing_atlas(service: ServiceContext, path: Path, graph_database: str) -> ProjectBinding | None:
     """Adopt the former deployment location before starting its dispatcher."""
     from .core.embedding_provider import merge_verified_cache
-    from .operations import validate_atlas_path
+    from .operations import _registered_roots, validate_atlas_path
 
-    path = Path(path)
-    if not path.exists():
-        return None
-    path = validate_atlas_path(service, path)
-    cache = service.service_root / 'vectors'
-    if path.is_dir() and all(item.name == 'vectors' for item in path.iterdir()):
-        # The old bridge could initialize its cache before a project was created.
-        merge_verified_cache(path / 'vectors', cache)
-        return None
+    location = Path(path).absolute()
+    path = validate_atlas_path(service, location)
+    registered = _registered_roots(service)
+    if location in registered and location != path:
+        raise AtlasError('atlas_conflict', 'the registered legacy location resolves to another path', 409)
+    if path not in registered and not (GitStore(path).root / '.git').exists():
+        if not path.exists():
+            return None
+        if path.is_dir() and all(item.name == 'vectors' for item in path.iterdir()):
+            # The old bridge could initialize its cache before a project was created.
+            merge_verified_cache(path / 'vectors', service.service_root / 'vectors')
+            return None
+        if any(path in child.parents for child in registered):
+            return None  # Projects may live below this ordinary parent directory.
     return _persist_project(service, repository_identity(path), path, legacy_database=graph_database)
 
 

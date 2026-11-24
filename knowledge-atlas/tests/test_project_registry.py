@@ -129,7 +129,7 @@ def test_registration_requires_the_repository_uuid(tmp_path):
     assert invoke(service, ActionRequest('atlas.open', atlas_id=original))[1].data['atlas_id'] == original
 
 
-def legacy_publication(path):
+def legacy_publication(path, vector_artifacts=None):
     identity = create_project(ServiceContext(path.parent / 'fixture-service'), path)
     store = GitStore(path)
     pubs = Publications(store)
@@ -138,7 +138,8 @@ def legacy_publication(path):
         'decision': 'accept', 'kind': 'synthetic', 'actor': 'Fixture', 'reason': 'Legacy',
         'accepted_at': '2026-11-13T01:00:00Z', 'base_publication': None,
     }, profile)
-    ready = pubs.publish(content, lambda oid: {**projection(oid), 'database': 'admin/atlas', 'vector_artifacts': {}})
+    ready = pubs.publish(content, lambda oid: {**projection(oid), 'database': 'admin/atlas',
+                                               'vector_artifacts': vector_artifacts or {}})
     return identity, store, ready
 
 
@@ -172,12 +173,12 @@ def test_adoption_failure_preserves_original(tmp_path):
     assert adopt_existing_atlas(service, path, 'admin/atlas').atlas_id == identity
 
 
-def vector_fixture(cache):
+def vector_fixture(cache, text='retained text'):
     from knowledge_atlas.core.embedding_provider import EmbeddingProvider
 
     provider = EmbeddingProvider(_assets() / 'embedding-profile.json', cache, 'offline')
     provider.request = lambda path, body=None: provider.profile['profile']['endpoint'] if path == '/info' else [[1.] * 768]
-    body = {'input': ['retained text'], 'role': 'document', 'model': provider.profile['model_namespace'], 'dimensions': 256}
+    body = {'input': [text], 'role': 'document', 'model': provider.profile['model_namespace'], 'dimensions': 256}
     provider.embed(body)
     return provider, body
 
@@ -272,3 +273,35 @@ def test_adoption_rejects_another_unmigrated_owner(tmp_path):
     with pytest.raises(AtlasError, match='graph_atlas_conflict'):
         adopt_existing_atlas(service, store.base, 'admin/atlas')
     assert Publications(store).ready() == ready
+
+
+def test_conflicting_git_vector_rolls_back_adoption_cache(tmp_path):
+    from knowledge_atlas.core.embedding_provider import cache_artifact
+    from knowledge_atlas.project_registry import adopt_existing_atlas, list_projects
+
+    fixture, _ = vector_fixture(tmp_path / 'fixture-vectors')
+    with fixture.connect() as db:
+        key, value = db.execute('SELECT key,artifact FROM vectors').fetchone()
+    canonical = {**json.loads(value), 'raw768': [2.] * 768}
+    identity, store, ready = legacy_publication(tmp_path / 'atlas', {canonical['input_sha256']: canonical})
+    source, _ = vector_fixture(store.base / 'vectors')
+    service = ServiceContext(tmp_path / 'service')
+    shared, _ = vector_fixture(service.service_root / 'vectors', 'another project')
+    rows = 'SELECT key,artifact,sha256 FROM vectors JOIN vector_integrity USING(key) ORDER BY key'
+    with shared.connect() as db:
+        previous = db.execute(rows).fetchall()
+
+    with pytest.raises(AtlasError, match='conflicting retained vector artifacts'):
+        adopt_existing_atlas(service, store.base, 'admin/atlas')
+    with shared.connect() as db:
+        assert db.execute(rows).fetchall() == previous
+    assert not list_projects(service)
+    assert Publications(store).ready() == ready
+
+    with source.connect() as db:
+        db.execute('DELETE FROM vectors WHERE key=?', (key,))
+        cache_artifact(db, key, canonical)
+    assert adopt_existing_atlas(service, store.base, 'admin/atlas').atlas_id == identity
+    with shared.connect() as db:
+        assert json.loads(db.execute('SELECT artifact FROM vectors WHERE key=?', (key,)).fetchone()[0]) == canonical
+        assert previous[0] in db.execute(rows).fetchall()

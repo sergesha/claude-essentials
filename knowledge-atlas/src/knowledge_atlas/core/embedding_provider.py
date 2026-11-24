@@ -66,8 +66,13 @@ def merge_verified_cache(source, destination):
     if not original.exists():
         return
     initialize_cache(destination)
-    with sqlite3.connect(original.as_uri() + '?mode=ro', uri=True) as old, sqlite3.connect(
-            Path(destination) / 'vectors.sqlite3') as new:
+    with sqlite3.connect(Path(destination) / 'vectors.sqlite3') as target:
+        copy_verified_vectors(original, target)
+
+
+def copy_verified_vectors(original, target):
+    """Insert source rows into the caller's transaction without committing it."""
+    with sqlite3.connect(original.as_uri() + '?mode=ro', uri=True) as old:
         if not old.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='vector_integrity'").fetchone():
             # Older caches lack checksums. Their canonical document vectors come from Git.
             return
@@ -80,7 +85,7 @@ def merge_verified_cache(source, destination):
             artifact = json.loads(value)
             if artifact_key(artifact) != key:
                 raise ValueError('legacy vector cache key mismatch')
-            cache_artifact(new, key, artifact)
+            cache_artifact(target, key, artifact)
 
 
 class EmbeddingProvider:
