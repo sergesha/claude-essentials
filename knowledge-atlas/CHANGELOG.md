@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.3](https://github.com/sergesha/claude-essentials/compare/knowledge-atlas-v0.3.2...knowledge-atlas-v0.3.3) (2026-11-24)
+
+
+### Bug Fixes
+
+* **knowledge-atlas:** open configured Compose instances from MCP ([#150](https://github.com/sergesha/claude-essentials/issues/150)) ([cddc3af](https://github.com/sergesha/claude-essentials/commit/cddc3af8fb1e3fe3d71b9ef76a1c7a74eb9b9274))
+
 ## [0.3.2](https://github.com/sergesha/claude-essentials/compare/knowledge-atlas-v0.3.1...knowledge-atlas-v0.3.2) (2026-11-22)
 
 
