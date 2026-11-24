@@ -572,3 +572,37 @@ def test_unrelated_create_survives_inaccessible_registration(tmp_path, permissio
 
     assert original_binding in list_projects(service)
     assert repository_identity(registered_path) == original_uuid
+
+
+@pytest.mark.parametrize('loop_appears', ['before_admission', 'after_queueing'])
+def test_unrelated_create_survives_symlink_loop_at_registration(tmp_path, loop_appears):
+    import errno
+    from knowledge_atlas.project_registry import list_projects, repository_identity
+    from knowledge_atlas.worker import run_next
+    from test_project_registry import create_project
+
+    service = ServiceContext(tmp_path / 'service')
+    parent = tmp_path / 'original'
+    original_uuid = create_project(service, parent / 'old')
+    original_binding, = list_projects(service)
+    destination = tmp_path / 'independent'
+    creation = request(path=str(destination))
+    if loop_appears == 'after_queueing':
+        operation = submit(service, creation)
+
+    moved = tmp_path / 'moved'
+    parent.rename(moved)
+    parent.symlink_to(parent.name)
+    with pytest.raises(OSError) as loop:
+        original_binding.path.stat()
+    assert loop.value.errno == errno.ELOOP
+
+    if loop_appears == 'before_admission':
+        operation = submit(service, creation)
+    run_next(service)
+    result = inspect_operation(service, operation.operation_id)
+    assert result.state == 'succeeded', result.error
+    assert result.result.data['atlas_id'] == repository_identity(destination)
+    assert result.result.data['atlas_id'] != original_uuid
+    assert original_binding in list_projects(service)
+    assert repository_identity(moved / 'old') == original_uuid

@@ -1,6 +1,7 @@
 """SQLite owns execution only. Handlers retain all canonical knowledge in Git."""
 from contextlib import contextmanager, nullcontext
 from dataclasses import asdict, replace
+import errno
 import fcntl
 import hashlib
 import json
@@ -121,8 +122,9 @@ def _accessible_ancestor(path):
     while True:
         try:
             return path, path.stat()
-        except (FileNotFoundError, NotADirectoryError, PermissionError):
-            if path == path.parent:
+        except OSError as error:
+            if (error.errno not in (errno.ENOENT, errno.ENOTDIR, errno.EACCES, errno.EPERM, errno.ELOOP)
+                    or path == path.parent):
                 raise
             path = path.parent
 
