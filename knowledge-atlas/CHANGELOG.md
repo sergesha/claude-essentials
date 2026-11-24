@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.4](https://github.com/sergesha/claude-essentials/compare/knowledge-atlas-v0.3.3...knowledge-atlas-v0.3.4) (2026-11-24)
+
+
+### Bug Fixes
+
+* **knowledge-atlas:** require an atlas target before native MCP open ([#152](https://github.com/sergesha/claude-essentials/issues/152)) ([f4009d8](https://github.com/sergesha/claude-essentials/commit/f4009d8c0c6764f487dcc8a97f66d106fdd72ec3))
+
 ## [0.3.3](https://github.com/sergesha/claude-essentials/compare/knowledge-atlas-v0.3.2...knowledge-atlas-v0.3.3) (2026-11-24)
 
 
