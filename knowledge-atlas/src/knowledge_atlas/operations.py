@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import shutil
 import sqlite3
+from stat import S_ISDIR
 import tempfile
 import uuid
 
@@ -115,10 +116,15 @@ def _binding_evidence(binding):
     return {**asdict(binding), 'path': str(binding.path)}
 
 
-def _existing_ancestor(path):
-    while not path.exists():
-        path = path.parent
-    return path
+def _accessible_ancestor(path):
+    """Find the closest ancestor whose filesystem identity can be read."""
+    while True:
+        try:
+            return path, path.stat()
+        except (FileNotFoundError, NotADirectoryError, PermissionError):
+            if path == path.parent:
+                raise
+            path = path.parent
 
 
 def _has_registered_destination(path, registered_paths):
@@ -127,12 +133,12 @@ def _has_registered_destination(path, registered_paths):
     if not registered_paths:
         return False
 
-    ancestor = _existing_ancestor(path)
+    ancestor, ancestor_stat = _accessible_ancestor(path)
     requested = path.relative_to(ancestor)
     alternates = []
     for registered in registered_paths:
-        registered_ancestor = _existing_ancestor(registered)
-        if not ancestor.samefile(registered_ancestor):
+        registered_ancestor, registered_stat = _accessible_ancestor(registered)
+        if not os.path.samestat(ancestor_stat, registered_stat):
             continue
         relative = registered.relative_to(registered_ancestor)
         if relative == requested:
@@ -140,7 +146,7 @@ def _has_registered_destination(path, registered_paths):
         if len(relative.parts) == len(requested.parts):
             alternates.append(relative)
 
-    if not alternates or not ancestor.is_dir():
+    if not alternates or not S_ISDIR(ancestor_stat.st_mode):
         return False
     # Test the exact spellings together on the destination filesystem. Keep
     # all scratch entries under one private directory in the existing ancestor.

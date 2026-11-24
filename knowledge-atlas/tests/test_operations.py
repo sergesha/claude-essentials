@@ -530,3 +530,45 @@ def test_create_reservation_respects_filesystem_name_equivalence(tmp_path, regis
         assert created.state == 'succeeded', created.error
         assert created.result.data['atlas_id'] != identity
         assert alternate.exists() and not reserved.exists()
+
+
+
+@pytest.mark.parametrize('permission_change', ['before_admission', 'after_queueing'])
+def test_unrelated_create_survives_inaccessible_registration(tmp_path, permission_change):
+    from stat import S_IMODE
+    from knowledge_atlas.project_registry import list_projects, repository_identity
+    from knowledge_atlas.worker import run_next
+    from test_project_registry import create_project
+
+    service = ServiceContext(tmp_path / 'service')
+    restricted = tmp_path / 'restricted'
+    registered_path = restricted / 'old'
+    original_uuid = create_project(service, registered_path)
+    original_binding, = list_projects(service)
+    destination = tmp_path / 'independent'
+    creation = request(path=str(destination))
+    if permission_change == 'after_queueing':
+        operation = submit(service, creation)
+
+    mode = S_IMODE(restricted.stat().st_mode)
+    restricted.chmod(0)
+    try:
+        try:
+            registered_path.stat()
+        except PermissionError:
+            pass
+        else:
+            pytest.skip('the test runtime can traverse a directory without search permissions')
+
+        if permission_change == 'before_admission':
+            operation = submit(service, creation)
+        run_next(service)
+        result = inspect_operation(service, operation.operation_id)
+        assert result.state == 'succeeded', result.error
+        assert result.result.data['atlas_id'] != original_uuid
+        assert repository_identity(destination) == result.result.data['atlas_id']
+    finally:
+        restricted.chmod(mode)
+
+    assert original_binding in list_projects(service)
+    assert repository_identity(registered_path) == original_uuid
