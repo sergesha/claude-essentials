@@ -23,7 +23,7 @@ def test_packaged_lifecycle(request, runtime_configuration, tmp_path):
     native=request.getfixturevalue('native_graph')
     package=Path(__file__).resolve().parents[2]
     config={'service_root':str(tmp_path/'service'),'runtime':{'runtime_root':str(native['runtime'])},
-        'configuration':{'profiles':profiles,'graph':{'url':native['graph'].url,'database':native['graph'].database}}}
+        'configuration':{'profiles':profiles,'graph':{'url':native['graph'].url}}}
     config_path=tmp_path/'service.json';config_path.write_text(json.dumps(config))
     from knowledge_atlas.client import AtlasClient
     try:
@@ -194,7 +194,7 @@ async def _cycle(package, config_path, native, root, host, profiles):
             await call('packages.inspect',{})
         await call('packages.inspect',{},publication=pin_publications[1])
         exported=await call('archive.export',{'path':str(root/'atlas.zip')},mutation=True)
-        native['switch_cache'](root/'restored/vectors')
+        native['switch_cache'](root/'restored-service/vectors')
         restore_config=json.loads(config_path.read_text())
         restore_config['service_root']=str(root/'restored-service')
         restore_config_path=root/'restored-service.json'

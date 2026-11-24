@@ -50,6 +50,39 @@ def initialize_cache(cache):
         db.execute('SELECT key, sha256 FROM vector_integrity LIMIT 0')
 
 
+def artifact_key(artifact):
+    profile_id = hashlib.sha256(canonical(artifact['profile']).encode()).hexdigest()
+    if artifact['profile_id'] != profile_id or artifact['role'] not in ('document', 'query'):
+        raise ValueError('vector artifact identity mismatch')
+    if hashlib.sha256(artifact['input'].encode()).hexdigest() != artifact['input_sha256']:
+        raise ValueError('vector input digest mismatch')
+    raw_vectors([artifact['raw768']], 1)
+    return hashlib.sha256(canonical([profile_id, artifact['role'], artifact['input']]).encode()).hexdigest()
+
+
+def merge_verified_cache(source, destination):
+    """Read a retained cache in place. Publish verified rows together or roll back."""
+    original = Path(source) / 'vectors.sqlite3'
+    if not original.exists():
+        return
+    initialize_cache(destination)
+    with sqlite3.connect(original.as_uri() + '?mode=ro', uri=True) as old, sqlite3.connect(
+            Path(destination) / 'vectors.sqlite3') as new:
+        if not old.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='vector_integrity'").fetchone():
+            # Older caches lack checksums. Their canonical document vectors come from Git.
+            return
+        rows = old.execute('SELECT v.key,v.artifact,i.sha256 FROM vectors v LEFT JOIN vector_integrity i USING(key)')
+        for key, value, digest in rows:
+            if digest is None:
+                continue  # Unverified legacy row in a partially upgraded cache.
+            if hashlib.sha256(value.encode()).hexdigest() != digest:
+                raise ValueError('legacy vector integrity mismatch')
+            artifact = json.loads(value)
+            if artifact_key(artifact) != key:
+                raise ValueError('legacy vector cache key mismatch')
+            cache_artifact(new, key, artifact)
+
+
 class EmbeddingProvider:
     def __init__(self, profile_path, cache, endpoint):
         self.profile = json.loads(Path(profile_path).read_text())

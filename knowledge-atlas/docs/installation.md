@@ -70,7 +70,7 @@ file. Both hosts use the same service configuration:
   "service_root": "/absolute/path/to/service",
   "runtime": {"runtime_root": "/absolute/path/to/prepared-runtime"},
   "configuration": {
-    "graph": {"url": "http://127.0.0.1:6363", "database": "admin/atlas"}
+    "graph": {"url": "http://127.0.0.1:6363"}
   }
 }
 ```
@@ -120,9 +120,12 @@ Use the prepared runtime Python to run `runtime/gemma-service.py` with
 a free local port. This is the CPU embedding service used by PoC9, with pinned
 assets and no Redis dependency. It binds only to loopback and never downloads
 weights during startup. Then run `runtime/embedding-provider.py` with `--profile`,
-`--cache` (the target atlas's `vectors/` directory), `--endpoint` (Gemma URL), and
+`--cache` (`vectors/` under the configured `service_root`, shared by its projects), `--endpoint` (Gemma URL), and
 `--port`. Set `PYTHONPATH` to the installed package's `src/` when using these
-source-tree scripts.
+source-tree scripts. When upgrading a registered project, take a stopped backup
+and point the bridge at the service cache before restarting the service. The
+registry retains the project's existing graph binding and copies verified vectors
+from the old cache and canonical publications when it first resolves that project.
 
 Run `runtime/native-runtime.py` with `--runtime`, a separate `--state`, `--profile`,
 `--tokenizer`, the bridge URL as `--provider`, and a free `--port`; use `init` once,

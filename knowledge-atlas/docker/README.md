@@ -12,7 +12,7 @@ provider authentication and runtime preparation are separate from image build.
 The image runs as Ubuntu's unprivileged `ubuntu` user (UID/GID 1000).
 New named volumes inherit writable ownership from the image.
 
-From the repository root, choose one project name per atlas:
+From the repository root, choose one Compose project name for the service and its volumes:
 
 ```sh
 atlas_compose_file="$PWD/knowledge-atlas/docker/compose.yaml"
@@ -87,8 +87,12 @@ projects, then verify a project with `atlas_atlas_open` and
 `atlas_atlas_status`. Use another MCP connection for another service or a
 replacement container.
 
-Create or restore the atlas at **`/data/atlas`**. This deployment binds its
-embedding cache to that atlas. Use another Compose project for another atlas.
+Create or restore each project at its own unused path on the data volume, for
+example `/data/projects/notes` or `/data/projects/library`. The data mount itself
+and its `service`, `graph` and `logs` directories are reserved. Select the resulting
+UUID for project actions. The service assigns each project its own database on
+the shared graph endpoint. All projects use the same embedding bridge and serial
+publication dispatcher.
 Source, archive and child-package paths supplied to tools are **container paths**.
 Source content can be submitted through the normal API. For local files, copy
 only the intended inputs, for example:
@@ -99,8 +103,8 @@ atlas_compose cp ./source.txt atlas:/data/imports/source.txt
 atlas_compose cp atlas:/data/exports/atlas.zip ./atlas.zip
 ```
 
-Canonical export/restore remains the existing Atlas API contract. Restore into
-`/data/atlas` in an unused project; do not overwrite an existing atlas.
+Canonical export/restore uses the existing Atlas API contract. Restore into an
+unused destination with a compatible project registration.
 No arbitrary host directory is shared automatically.
 
 Python/HTTP callers execute inside the container, preserving loopback binding.
@@ -123,7 +127,7 @@ the [viewer](../docs/viewer.md) from the host:
 
 ```sh
 sh /absolute/path/to/knowledge-atlas/scripts/launch.sh prepare-launcher
-sh /absolute/path/to/knowledge-atlas/scripts/launch.sh view --atlas /data/atlas --container-name atlas-atlas-1
+sh /absolute/path/to/knowledge-atlas/scripts/launch.sh view --atlas /data/projects/notes --container-name atlas-atlas-1
 ```
 
 Open the full localhost URL printed by that command. Browser pages and questions
@@ -179,7 +183,8 @@ container layer, but is not a backup and is not automatically disposable.
 
 | Contents | Default location | Retention |
 | --- | --- | --- |
-| Atlas Git repositories, sources, accepted outputs, provenance, decisions and vectors | `data:/data/atlas` | Durable; preserve actual results |
+| Project Git repositories, sources, accepted outputs, provenance, decisions and publication vectors | Each project directory under `/data`, including the original `/data/atlas` | Durable; preserve actual results |
+| Shared embedding cache | `data:/data/service/vectors` | Retain verified cached vectors across restart |
 | TerminusDB database | `data:/data/graph` | Durable; do not delete on the assumption that LLM regeneration restores it |
 | Pending operations, attempt/read evidence, service identity and logs | `data:/data/service` and other `/data` paths | Preserve pending work and audit evidence |
 | Provider/model configuration | `data:/data/profiles.json` | Durable, outside image layers |
@@ -194,6 +199,26 @@ Runtime packages remain in `/runtime/python`. Replacing the provider login
 volume no longer removes the runtime interpreter; retain that volume for login
 state. The graph's administrator key lives in `/data/graph/admin.key`. Keep it
 private and include it in a full backup of graph state.
+
+### Replacing a single-atlas container
+
+Drain operations, stop all writers and take the full stopped-state backup
+described below **before** replacing the application. Include the old image
+identity and all mounted atlas directories. Reuse the same Compose project
+name, volumes and bind mounts. At startup the supervisor checks the repository
+at `/data/atlas`, its committed UUID, READY receipt and graph ownership before
+registering it in place. The old deployment's database stays `admin/atlas`.
+New projects receive separate UUID-derived databases. A fresh deployment starts
+with an empty inventory.
+
+The upgrade copies verified cache entries and canonical publication vectors
+to `/data/service/vectors`. The original cache, Git refs, graph state and
+authentication remain on their existing volumes. If adoption fails, keep the
+deployment stopped and inspect the startup error. Check that all original mounts,
+Git objects, graph ownership and cache integrity match the backup. Correct the
+cause and restart using the same volumes. Verify the listed UUID, READY and a
+historical publication before retiring the snapshot. To roll back, restore the
+complete stopped pre-upgrade snapshot with the matching old application.
 
 ### Upgrading a 0.3.0 deployment
 
@@ -244,7 +269,7 @@ atlas_compose config
 ```
 
 Select one override, not both. Container paths stay `/data/atlas`, `/data/graph`
-and `/data/service`; MCP attachment still selects the running project by name.
+and `/data/service`; MCP attachment selects the running service by container name.
 Submodules must be materialized within the mounted tree; host paths outside it
 are not automatically accessible. Do not run concurrent host and container writers.
 Database files and provider credentials do not belong in Git.

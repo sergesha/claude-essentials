@@ -17,7 +17,7 @@ import zlib
 from .git_store import GitStore, git, _json
 from .publication import Publications
 from .decision_receipts import decision_inventory
-from .embedding_provider import EmbeddingProvider, canonical, raw_vectors, cache_artifact
+from .embedding_provider import EmbeddingProvider, canonical, artifact_key, cache_artifact
 
 
 # Limits apply to both supported archive formats, including archive.json.
@@ -233,6 +233,19 @@ def export_atlas(store, destination, *, tokenizer, formatter):
     return manifest
 
 
+def seed_retained_vectors(pubs, db):
+    current = pubs.ready()
+    seen = set()
+    while current:
+        if current in seen:
+            raise ValueError('publication history cycle')
+        seen.add(current)
+        receipt = pubs.read(current)
+        for artifact in receipt['vector_artifacts'].values():
+            cache_artifact(db, artifact_key(artifact), artifact)
+        current = receipt['previous_publication']
+
+
 def restore_atlas(archive, destination):
     destination=Path(destination).resolve()
     if destination.exists():raise ValueError('restore destination exists')
@@ -279,23 +292,8 @@ def restore_atlas(archive, destination):
         store=GitStore(base);pubs=Publications(store)
         if pubs.ready()!=manifest['ready']:raise ValueError('archive READY mismatch')
         provider=EmbeddingProvider(assets/'embedding-profile.json',base/'vectors','http://127.0.0.1:1')
-        current=pubs.ready();seen=set()
         with provider.connect() as db:
-            while current:
-                if current in seen:raise ValueError('publication history cycle')
-                seen.add(current);receipt=pubs.read(current)
-                for artifact in receipt['vector_artifacts'].values():
-                    profile_id=hashlib.sha256(canonical(artifact['profile']).encode()).hexdigest()
-                    if artifact['profile_id']!=profile_id or artifact['role'] not in ('document','query'):
-                        raise ValueError('vector artifact identity mismatch')
-                    if hashlib.sha256(artifact['input'].encode()).hexdigest()!=artifact['input_sha256']:
-                        raise ValueError('vector input digest mismatch')
-                    raw_vectors([artifact['raw768']],1)
-                    key=hashlib.sha256(canonical([profile_id,artifact['role'],artifact['input']]).encode()).hexdigest()
-                    # Archive members and Git receipts have already been verified.
-                    # Integrity metadata is local; canonical artifact bytes stay unchanged.
-                    cache_artifact(db,key,artifact)
-                current=receipt['previous_publication']
+            seed_retained_vectors(pubs, db)
         # Validate all retained pins, including unpublished proposals, before exposing restore.
         for commit in git(store.root,'rev-list','--all').splitlines():store.closure(commit)
         decisions=decision_inventory(store)

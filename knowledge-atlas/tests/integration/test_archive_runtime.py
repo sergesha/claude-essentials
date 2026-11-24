@@ -12,7 +12,7 @@ def test_native_archive_history_and_embedding_roles(runtime_configuration, reque
     if not runtime_configuration.get('archive'):
         pytest.skip('native archive qualification requires an explicit retained archive')
     native_graph = request.getfixturevalue('native_graph')
-    config = {'atlas':str(native_graph['atlas']), 'graph':{'url':native_graph['graph'].url,
+    config = {'atlas':str(native_graph['atlas']), 'cache':str(native_graph['cache']), 'graph':{'url':native_graph['graph'].url,
         'database':native_graph['graph'].database}, 'bridge':native_graph['bridge']}
     script="import runpy,json,sys; runpy.run_path(sys.argv[1])['_check_archive'](json.loads(sys.argv[2]))"
     result = subprocess.run([str(native_graph['runtime']/'python/bin/python'),'-c',script,
@@ -40,7 +40,7 @@ def _check_archive(config):
     assert initial['inference_calls']==0
     graph=GraphStage(config['graph']['url'],config['graph']['database'])
     rebuilt=rebuild_projections(store,NativeProjection(store,graph,store.base/'assets/tokenizer.json',
-        store.base/'assets/chunking.py',store.base/'vectors'))
+        store.base/'assets/chunking.py',config['cache']))
     assert rebuilt['publications']>=2
     assert stats()['inference_calls']==0
     assert stats()['cache_hits']>0

@@ -14,6 +14,8 @@ from knowledge_atlas.contracts import RuntimeConfig
 from knowledge_atlas.runtime import prepare_runtime, validate_runtime
 from knowledge_atlas.http_api import write_private
 from knowledge_atlas.client import AtlasClient
+from knowledge_atlas.launcher import service_context
+from knowledge_atlas.project_registry import adopt_existing_atlas
 
 PACKAGE = Path(__file__).resolve().parents[1]
 
@@ -112,7 +114,9 @@ def start():
         raise ValueError('profiles.json requires six explicit provider/model stage profiles')
     data.mkdir(parents=True, exist_ok=True, mode=0o700)
     config = {'service_root': str(data / 'service'), 'runtime': {'runtime_root': str(runtime)},
-              'configuration': {'atlas_path': str(data / 'atlas'), 'profiles': profiles, 'graph': {'url': 'http://127.0.0.1:9403', 'database': 'admin/atlas'}}}
+              'configuration': {'project_data_root': str(data), 'profiles': profiles, 'graph': {'url': 'http://127.0.0.1:9403'}}}
+    service = service_context(config)
+    adopt_existing_atlas(service, data / 'atlas', 'admin/atlas')
     write_private(data / 'service-config.json', json.dumps(config))
     python = runtime / 'python/bin/python'
     profile = PACKAGE / 'runtime/embedding-profile.json'
@@ -128,7 +132,7 @@ def start():
         raw = supervisor.launch('gemma', [python, PACKAGE / 'runtime/gemma-service.py'], env)
         supervisor.ready(raw, 'http://127.0.0.1:9401/health')
         bridge = supervisor.launch('bridge', [python, PACKAGE / 'runtime/embedding-provider.py',
-            '--profile', profile, '--cache', data / 'atlas/vectors', '--endpoint', 'http://127.0.0.1:9401', '--port', '9402'], env)
+            '--profile', profile, '--cache', service.service_root / 'vectors', '--endpoint', 'http://127.0.0.1:9401', '--port', '9402'], env)
         supervisor.ready(bridge, 'http://127.0.0.1:9402/stats')
         graph = [python, PACKAGE / 'runtime/native-runtime.py', '--runtime', runtime,
                  '--state', data / 'graph', '--profile', profile, '--tokenizer', runtime / 'model/tokenizer.json',
@@ -152,7 +156,7 @@ def start():
                 if time.monotonic() >= deadline:
                     raise RuntimeError('Atlas service readiness timeout; inspect logs')
                 time.sleep(.2)
-        print('Knowledge Atlas ready; atlas path: ' + str(data / 'atlas'), flush=True)
+        print('Knowledge Atlas ready', flush=True)
         while True:
             supervisor.check()
             time.sleep(.5)

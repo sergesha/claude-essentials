@@ -25,7 +25,8 @@ def run_native(context):
     context.evidence.mkdir(parents=True, exist_ok=True)
     payload = {'request':asdict(context.request), 'atlas_path':str(context.atlas_path),
                'evidence':str(context.evidence), 'configuration':context.configuration,
-               'runtime_root':str(identity.runtime_root), 'operation_id':context.operation_id}
+               'runtime_root':str(identity.runtime_root), 'operation_id':context.operation_id,
+               'vector_cache':str(context.service.service_root / 'vectors')}
     environment = {**os.environ, 'PYTHONPATH':str(Path(__file__).resolve().parent.parent),
                    'KNOWLEDGE_ATLAS_WIKI_ROOT':str(identity.runtime_root/'wiki'),
                    'POC9_EXTRACT_BIN':str(identity.runtime_root/'extract/target/debug/poc9-extract')}
@@ -127,10 +128,9 @@ def projection_graph(configuration):
 
 def claim_projection_database(context):
     from .core.git_store import GitStore
-    from .core.publication import Publications
-    from .core.reader import projection_receipt
     from .operations import database
-    from .project_registry import graph_endpoint, project_id, repository_identity, verify_graph_owner
+    from .project_registry import (graph_endpoint, project_id, repository_identity,
+                                   verify_graph_owner, verify_unmigrated_graph_owners)
 
     graph = projection_graph(context.configuration)
     endpoint = graph_endpoint(graph['url'])
@@ -157,15 +157,7 @@ def claim_projection_database(context):
                            (endpoint, name)).fetchone()
         if owner:
             return
-        # A legacy project can have a READY receipt predating the ownership table.
-        for row in db.execute('SELECT path FROM atlases WHERE atlas_id<>? AND graph_database IS NULL', (identity,)):
-            other = GitStore(row['path'])
-            if not (other.root / '.git').exists():
-                continue
-            pubs = Publications(other)
-            ready = pubs.ready()
-            if ready and projection_receipt(other, ready, pubs.read(ready)).get('database') == name:
-                raise AtlasError('graph_atlas_conflict', 'the graph database belongs to another atlas', 409)
+        verify_unmigrated_graph_owners(db, identity, name)
         db.execute('INSERT INTO projection_owners VALUES (?,?,?)', (endpoint, name, identity))
 
 
@@ -183,10 +175,13 @@ def project_native(payload, store):
     assets = store.base/'assets'
     tokenizer = assets/'tokenizer.json' if assets.exists() else runtime/'model/tokenizer.json'
     formatter = assets/'chunking.py' if assets.exists() else runtime/'chunking.py'
-    builder = NativeProjection(store, native, tokenizer, formatter, store.base/'vectors')
+    cache = Path(payload['vector_cache'])
+    builder = NativeProjection(store, native, tokenizer, formatter, cache)
     try:
         if rebuilding:
             from .core.archive import rebuild_projections
+            from .core.embedding_provider import merge_verified_cache
+            merge_verified_cache(store.base / 'vectors', cache)
             return ActionResult(data=rebuild_projections(store, builder), evidence=[payload['evidence']])
         return ActionResult(data=builder.build(content), evidence=[payload['evidence']])
     finally:

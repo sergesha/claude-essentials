@@ -218,3 +218,113 @@ def test_graph_client_uses_deployment_key_only_for_the_local_request(tmp_path, m
     with pytest.raises(ValueError, match='local graph endpoint'):
         graph_stage.GraphStage('http://example.invalid', 'admin/atlas').call('GET', '/api/users')
     assert len(requests) == 1
+
+
+def startup_config(tmp_path, monkeypatch):
+    module = deployment()
+    data = tmp_path / 'data'
+    data.mkdir(exist_ok=True)
+    profiles = json.loads((PACKAGE / 'runtime/model-profiles.json').read_text())
+    (data / 'profiles.json').write_text(json.dumps({k: {**v, 'provider': 'codex'} for k, v in profiles.items()}))
+    monkeypatch.setenv('ATLAS_DATA_ROOT', str(data))
+    monkeypatch.setenv('ATLAS_RUNTIME_ROOT', str(tmp_path / 'runtime'))
+    monkeypatch.setattr(module, 'validate_runtime', lambda *_: None)
+    monkeypatch.setattr(module.signal, 'signal', lambda *_: None)
+    calls = {}
+    def launch(self, name, argv, env):
+        calls[name] = argv
+        if name == 'bridge':
+            raise KeyboardInterrupt
+    monkeypatch.setattr(module.Supervisor, 'launch', launch)
+    monkeypatch.setattr(module.Supervisor, 'ready', lambda *_: None)
+    module.start()
+    return json.loads((data / 'service-config.json').read_text()), calls['bridge']
+
+
+def test_start_has_no_single_project_binding(tmp_path, monkeypatch):
+    from knowledge_atlas.launcher import service_context
+    from knowledge_atlas.project_registry import list_projects
+
+    config, _ = startup_config(tmp_path, monkeypatch)
+    assert config['configuration']['graph'] == {'url': 'http://127.0.0.1:9403'}
+    assert 'atlas_path' not in config['configuration']
+    assert list_projects(service_context(config)) == []
+    assert not (tmp_path / 'data/atlas').exists()
+
+
+def test_runtime_cache_is_outside_projects(tmp_path, monkeypatch):
+    config, argv = startup_config(tmp_path, monkeypatch)
+    assert Path(argv[argv.index('--cache') + 1]) == Path(config['service_root']) / 'vectors'
+
+
+def test_project_registry_survives_container_restart(tmp_path, monkeypatch):
+    from knowledge_atlas.launcher import service_context
+    from knowledge_atlas.project_registry import list_projects
+    from test_project_registry import create_project
+
+    config, _ = startup_config(tmp_path, monkeypatch)
+    service = service_context(config)
+    # This formerly bound path may also hold an ordinary new project.
+    ids = {create_project(service, tmp_path / 'data' / name) for name in ('atlas', 'second')}
+    prior = list_projects(service)
+    assert {p.atlas_id for p in prior} == ids
+    again, _ = startup_config(tmp_path, monkeypatch)
+    assert list_projects(service_context(again)) == prior
+
+
+def test_container_project_paths_stay_on_data_volume(tmp_path, monkeypatch):
+    from knowledge_atlas.contracts import AtlasError
+    from knowledge_atlas.launcher import service_context
+    from knowledge_atlas.operations import validate_atlas_path
+
+    config, _ = startup_config(tmp_path, monkeypatch)
+    service = service_context(config)
+    data = tmp_path / 'data'
+    (data / 'escape').symlink_to(tmp_path)
+    assert validate_atlas_path(service, data / 'projects/a') == data / 'projects/a'
+    for path in (data, tmp_path / 'auth/project', tmp_path / 'runtime/project', data / 'graph/project',
+                 data / 'service/project', data / 'logs/project', data / 'escape/outside'):
+        with pytest.raises(AtlasError, match='invalid_location'):
+            validate_atlas_path(service, path)
+
+
+def test_stopped_legacy_snapshot_remains_recoverable(tmp_path, monkeypatch):
+    import shutil
+    import sqlite3
+    from knowledge_atlas.contracts import AtlasError
+    from knowledge_atlas.core.git_store import git
+    from knowledge_atlas.core.publication import Publications
+    from knowledge_atlas.launcher import service_context
+    from knowledge_atlas.project_registry import list_projects
+    from test_project_registry import legacy_publication, vector_fixture
+
+    data = tmp_path / 'data'
+    data.mkdir()
+    identity, store, ready = legacy_publication(data / 'atlas')
+    original, _ = vector_fixture(store.base / 'vectors')
+    refs = git(store.root, 'show-ref')
+    (data / 'graph/db').mkdir(parents=True)
+    (data / 'graph/db/fixture').write_bytes(b'stopped native state marker')
+    (data / 'service').mkdir()
+    with sqlite3.connect(data / 'service/operations.sqlite3') as db:
+        db.execute('CREATE TABLE atlases (atlas_id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE)')
+        db.execute('INSERT INTO atlases VALUES (?,?)', (identity, str(store.base)))
+    prior_config = '{"configuration":{"atlas_path":"legacy"}}'
+    (data / 'service-config.json').write_text(prior_config)
+    backup = tmp_path / 'stopped-backup'
+    shutil.copytree(data, backup)
+
+    with original.connect() as db:
+        db.execute("UPDATE vector_integrity SET sha256='damaged'")
+    with pytest.raises(AtlasError, match='integrity'):
+        startup_config(tmp_path, monkeypatch)
+    assert (data / 'service-config.json').read_text() == prior_config
+    assert git(store.root, 'show-ref') == git(backup / 'atlas/atlas', 'show-ref') == refs
+    assert Publications(store).ready() == ready
+    with sqlite3.connect(backup / 'service/operations.sqlite3') as db:
+        assert [row[1] for row in db.execute('PRAGMA table_info(atlases)')] == ['atlas_id', 'path']
+    shutil.copy2(backup / 'atlas/vectors/vectors.sqlite3', original.cache / 'vectors.sqlite3')
+    config, _ = startup_config(tmp_path, monkeypatch)
+    project, = list_projects(service_context(config))
+    assert (project.atlas_id, project.path, project.graph_database) == (identity, store.base, 'admin/atlas')
+    assert (data / 'graph/db/fixture').read_bytes() == (backup / 'graph/db/fixture').read_bytes()

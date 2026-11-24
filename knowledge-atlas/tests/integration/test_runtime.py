@@ -64,7 +64,7 @@ def test_native_gemma_profile_and_roles(runtime_configuration, tmp_path):
 
 
 def test_native_historical_projection_and_eligible_top_k(native_graph, tmp_path):
-    config = {k:str(native_graph[k]) for k in ('runtime','atlas')}
+    config = {k:str(native_graph[k]) for k in ('runtime','atlas','cache')}
     config['graph_url'] = native_graph['graph'].url
     script = "import json,runpy,sys; from pathlib import Path; runpy.run_path(sys.argv[1])['_check_native_projection'](json.loads(sys.argv[2]),Path(sys.argv[3]))"
     result = subprocess.run([str(native_graph['runtime']/'python/bin/python'), '-c', script,
@@ -90,7 +90,7 @@ def _check_native_projection(native_graph, tmp_path):
     profile = json.loads((package/'runtime/embedding-profile.json').read_text())
     from knowledge_atlas.core.graph_stage import GraphStage
     graph = GraphStage(native_graph['graph_url'], 'admin/qualification'); runtime = Path(native_graph['runtime'])
-    builder = NativeProjection(store, graph, runtime/'model/tokenizer.json', runtime/'chunking.py', store.base/'vectors')
+    builder = NativeProjection(store, graph, runtime/'model/tokenizer.json', runtime/'chunking.py', native_graph['cache'])
     published = []
     for day in (13,14):
         if day == 14: wiki['pages'][0]['content'] += '\nQualification update: inspection remains required.\n'

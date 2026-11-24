@@ -135,6 +135,19 @@ def _legacy_database(db, store, atlas_id):
     return owned[0]['database_name'] if owned else None
 
 
+def verify_unmigrated_graph_owners(db, identity, name):
+    # A pre-upgrade READY receipt may predate both the binding and ownership columns.
+    rows = db.execute('SELECT path FROM atlases WHERE atlas_id<>? AND graph_database IS NULL', (identity,))
+    for row in rows:
+        other = GitStore(row['path'])
+        if not (other.root / '.git').exists():
+            continue
+        pubs = Publications(other)
+        ready = pubs.ready()
+        if ready and projection_receipt(other, ready, pubs.read(ready)).get('database') == name:
+            raise AtlasError('graph_atlas_conflict', 'the graph database belongs to another atlas', 409)
+
+
 def _verified_location(service, atlas_id, path):
     from .operations import validate_atlas_path
 
@@ -144,7 +157,7 @@ def _verified_location(service, atlas_id, path):
     return path
 
 
-def _registration_binding(db, service, atlas_id, path):
+def _registration_binding(db, service, atlas_id, path, *, legacy_database=None):
     row = db.execute('SELECT * FROM atlases WHERE atlas_id=?', (atlas_id,)).fetchone()
     if row and Path(row['path']) != path and Path(row['path']).exists():
         raise AtlasError('atlas_conflict', 'this UUID is already registered at another existing location', 409)
@@ -154,7 +167,18 @@ def _registration_binding(db, service, atlas_id, path):
     endpoint = graph_endpoint(graph['url']) if isinstance(graph, dict) and graph.get('url') else None
     name = row['graph_database'] if row else None
     store = GitStore(path)
-    if row and name is None:
+    if legacy_database is not None:
+        if row and Path(row['path']) != path:
+            raise AtlasError('atlas_conflict', 'legacy UUID is already registered at another path', 409)
+        expected = name or legacy_database
+        retained = _legacy_database(db, store, atlas_id)
+        if retained and retained != expected:
+            raise AtlasError('graph_atlas_conflict', 'legacy database disagrees with the retained projection', 409)
+        if db.execute('SELECT 1 FROM projection_owners WHERE endpoint=? AND atlas_id=? AND database_name<>?',
+                      (endpoint, atlas_id, expected)).fetchone():
+            raise AtlasError('graph_atlas_conflict', 'legacy database disagrees with its recorded owner', 409)
+        name = expected
+    elif row and name is None:
         name = _legacy_database(db, store, atlas_id)
     name = name or _fresh_database(atlas_id)
     verify_graph_owner(db, endpoint, name, atlas_id)
@@ -166,18 +190,60 @@ def _registration_binding(db, service, atlas_id, path):
 
 
 def register_project(service, atlas_id, path):
+    atlas_id = project_id(atlas_id)
+    return _persist_project(service, atlas_id, _verified_location(service, atlas_id, path))
+
+
+def _persist_project(service, identity, path, *, legacy_database=None):
     from .operations import database
 
-    atlas_id = project_id(atlas_id)
-    path = _verified_location(service, atlas_id, path)
     with database(service) as db:
         db.execute('BEGIN IMMEDIATE')
-        binding = _registration_binding(db, service, atlas_id, path)
-        db.execute('''INSERT INTO atlases (atlas_id,path,graph_database,git_url) VALUES (?,?,?,?)
-                      ON CONFLICT(atlas_id) DO UPDATE SET path=excluded.path,
-                          graph_database=excluded.graph_database, git_url=excluded.git_url''',
-                   (binding.atlas_id, str(binding.path), binding.graph_database, binding.git_url))
+        binding = _registration_binding(db, service, identity, path, legacy_database=legacy_database)
+        row = db.execute('SELECT graph_database FROM atlases WHERE atlas_id=?', (identity,)).fetchone()
+        if (row and row['graph_database'] is None) or (not row and legacy_database is not None):
+            verify_unmigrated_graph_owners(db, identity, binding.graph_database)
+            _migrate_project_vectors(path, service.service_root / 'vectors')
+        _save_binding(db, binding)
     return binding
+
+
+def _migrate_project_vectors(path, cache):
+    import sqlite3
+    from .core.archive import seed_retained_vectors
+    from .core.embedding_provider import initialize_cache, merge_verified_cache
+
+    try:
+        merge_verified_cache(path / 'vectors', cache)
+        initialize_cache(cache)
+        with sqlite3.connect(cache / 'vectors.sqlite3') as target:
+            seed_retained_vectors(Publications(GitStore(path)), target)
+    except (ValueError, KeyError, TypeError, sqlite3.Error, OSError) as error:
+        raise AtlasError('invalid_atlas', f'could not retain project vectors: {error}', 422) from error
+
+
+def _save_binding(db, binding):
+    db.execute('''INSERT INTO atlases (atlas_id,path,graph_database,git_url) VALUES (?,?,?,?)
+                  ON CONFLICT(atlas_id) DO UPDATE SET path=excluded.path,
+                      graph_database=excluded.graph_database, git_url=excluded.git_url''',
+               (binding.atlas_id, str(binding.path), binding.graph_database, binding.git_url))
+
+
+def adopt_existing_atlas(service: ServiceContext, path: Path, graph_database: str) -> ProjectBinding | None:
+    """Adopt the former deployment location before starting its dispatcher."""
+    from .core.embedding_provider import merge_verified_cache
+    from .operations import validate_atlas_path
+
+    path = Path(path)
+    if not path.exists():
+        return None
+    path = validate_atlas_path(service, path)
+    cache = service.service_root / 'vectors'
+    if path.is_dir() and all(item.name == 'vectors' for item in path.iterdir()):
+        # The old bridge could initialize its cache before a project was created.
+        merge_verified_cache(path / 'vectors', cache)
+        return None
+    return _persist_project(service, repository_identity(path), path, legacy_database=graph_database)
 
 
 def prepare_restored_project(service, path):

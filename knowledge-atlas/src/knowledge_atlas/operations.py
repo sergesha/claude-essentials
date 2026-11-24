@@ -93,6 +93,11 @@ def validate_atlas_path(context, path):
     bound = context.configuration.get('atlas_path')
     if bound is not None and (not isinstance(bound, str) or not bound or path != Path(bound).expanduser().resolve()):
         raise AtlasError('invalid_location', 'this deployment is bound to a different atlas path', 422)
+    data_root = context.configuration.get('project_data_root')
+    if data_root is not None:
+        root = Path(data_root).resolve()
+        if root not in path.parents or path.relative_to(root).parts[0] in ('graph', 'logs'):
+            raise AtlasError('invalid_location', 'projects require a destination on the deployment data volume outside internal state', 422)
     if path.is_relative_to(Path(__file__).resolve().parents[2]) or path.is_relative_to(context.service_root):
         raise AtlasError('invalid_location', 'atlas data must live outside the plugin and service')
     if _inside_atlas(path) or any(root in path.parents for root in _registered_roots(context)):
