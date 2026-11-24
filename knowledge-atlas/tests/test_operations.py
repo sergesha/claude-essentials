@@ -451,7 +451,12 @@ def test_create_rejects_unavailable_registered_destination(tmp_path):
     assert set((service.service_root / 'attempts').iterdir()) == attempts
 
 
-def test_queued_create_rechecks_registered_destination_under_lock(tmp_path, monkeypatch):
+@pytest.mark.parametrize(('registered_name', 'requested_name'), [
+    pytest.param('atlas', 'atlas', id='exact'),
+    pytest.param('caf\u00e9', 'cafe\u0301', id='unicode'),
+])
+def test_queued_create_rechecks_registered_destination_under_lock(tmp_path, monkeypatch,
+                                                                  registered_name, requested_name):
     from contextlib import contextmanager
     from knowledge_atlas import worker
     from knowledge_atlas.core.git_store import GitStore
@@ -460,49 +465,63 @@ def test_queued_create_rechecks_registered_destination_under_lock(tmp_path, monk
     from test_packages import snapshot
 
     service = ServiceContext(tmp_path / 'service')
-    destination = tmp_path / 'atlas'
+    destination = tmp_path / requested_name
+    reserved = tmp_path / registered_name
     queued = submit(service, request(path=str(destination)))
     moved = tmp_path / 'moved'
     registrations = []
+    aliases = []
 
     @contextmanager
     def register_before_worker_check(path):
         with AtlasLock(path):
-            store = GitStore(path)
+            store = GitStore(reserved)
             identity = store.read(snapshot(store))['manifest']['package_id']
-            registrations.append(register_atlas(service, identity, path))
-            path.rename(moved)
+            registrations.append(register_atlas(service, identity, reserved))
+            aliases.append(destination.exists() and destination.samefile(reserved))
+            reserved.rename(moved)
             yield
 
     monkeypatch.setattr(worker, 'AtlasLock', register_before_worker_check)
     worker.run_next(service)
 
-    failed = inspect_operation(service, queued.operation_id)
-    assert failed.state == 'failed' and failed.error['code'] == 'atlas_conflict'
-    assert not destination.exists()
-    assert list_projects(service) == registrations
+    result = inspect_operation(service, queued.operation_id)
+    if aliases[0]:
+        assert result.state == 'failed' and result.error['code'] == 'atlas_conflict'
+        assert not destination.exists()
+        assert list_projects(service) == registrations
+    else:
+        assert result.state == 'succeeded', result.error
+        assert result.result.data['atlas_id'] != registrations[0].atlas_id
+        assert destination.exists() and not reserved.exists()
     assert repository_identity(moved) == registrations[0].atlas_id
 
 
 
-def test_create_reservation_respects_destination_filesystem_case(tmp_path):
+@pytest.mark.parametrize(('registered_name', 'requested_name'), [
+    pytest.param('atlas', 'ATLAS', id='case'),
+    pytest.param('caf\u00e9', 'cafe\u0301', id='unicode'),
+])
+def test_create_reservation_respects_filesystem_name_equivalence(tmp_path, registered_name, requested_name):
     from knowledge_atlas.project_registry import list_projects
     from knowledge_atlas.worker import run_next
     from test_project_registry import create_project
 
     service = ServiceContext(tmp_path / 'service')
-    reserved = tmp_path / 'atlas'
-    alternate = tmp_path / 'ATLAS'
+    reserved = tmp_path / registered_name
+    alternate = tmp_path / requested_name
     identity = create_project(service, reserved)
     aliases_on_disk = alternate.exists() and alternate.samefile(reserved)
     reserved.rename(tmp_path / 'moved')
     assert not alternate.exists()
+    surroundings = set(tmp_path.iterdir())
 
     if aliases_on_disk:
         with pytest.raises(AtlasError) as failure:
             submit(service, request(path=str(alternate)))
         assert (failure.value.code, failure.value.status) == ('atlas_conflict', 409)
         assert not alternate.exists()
+        assert set(tmp_path.iterdir()) == surroundings
         assert [row.atlas_id for row in list_projects(service)] == [identity]
     else:
         operation = submit(service, request(path=str(alternate)))
