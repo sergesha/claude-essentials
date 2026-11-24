@@ -1,4 +1,4 @@
-"""A fixed native graph database has one publishing atlas per service."""
+"""Per-project graph ownership is required before native projection writes."""
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 import json
@@ -11,7 +11,8 @@ from knowledge_atlas.contracts import ActionContext, ActionRequest, AtlasError, 
 from knowledge_atlas.core.git_store import GitStore
 from knowledge_atlas.core.publication import Publications
 from knowledge_atlas.core.native_projection import NativeProjection
-from knowledge_atlas.operations import register_atlas
+from knowledge_atlas.operations import database, register_atlas
+from knowledge_atlas.project_registry import project_configuration
 from knowledge_atlas.runtime import _assets
 from test_decisions import projection
 from test_packages import snapshot
@@ -21,13 +22,14 @@ def setup_atlas(path, service, graph):
     store = GitStore(path)
     candidate = snapshot(store)
     manifest = store.read(candidate)['manifest']
-    register_atlas(service, manifest['package_id'], path)
+    binding = register_atlas(service, manifest['package_id'], path)
     pub = Publications(store)
     profile = json.loads((_assets()/'embedding-profile.json').read_text())
     accepted = pub.review(candidate, {'decision':'accept','kind':'synthetic','actor':'Fixture',
         'reason':'Ownership test','accepted_at':'2026-11-13T01:00:00Z','base_publication':None}, profile)
-    ctx = ActionContext(service, ActionRequest('publication.build', payload={'content':accepted}),
-                        path, path/'evidence', {'graph':graph})
+    request = ActionRequest('publication.build', atlas_id=binding.atlas_id, payload={'content':accepted})
+    configuration = project_configuration(replace(service, configuration={'graph':graph}), binding)
+    ctx = ActionContext(service, request, path, path/'evidence', configuration, project_binding=binding)
     return ctx, pub, accepted
 
 
@@ -36,7 +38,9 @@ def test_existing_publication_prevents_another_atlas_from_entering_native_build_
     svc = ServiceContext(tmp_path/'service', runtime=SimpleNamespace(runtime_root=tmp_path))
     owner, pubs, content = setup_atlas(tmp_path/'one', svc, graph)
     other, _, _ = setup_atlas(tmp_path/'two', svc, graph)
-    pubs.publish(content, lambda c:{**projection(c), 'database':graph['database']})
+    owner_database = owner.project_binding.graph_database
+    pubs.publish(content, lambda c:{**projection(c), 'database':owner_database})
+    other = replace(other, configuration={'graph': {**graph, 'database': owner_database}})
     monkeypatch.setattr(native_pipeline, 'validate_runtime', lambda rt:rt)
     real_run = native_pipeline.subprocess.run
     def no_native(argv, **kwargs):
@@ -45,29 +49,28 @@ def test_existing_publication_prevents_another_atlas_from_entering_native_build_
     monkeypatch.setattr(native_pipeline.subprocess,'run', no_native)
     for action in ('publication.build','publication.rebuild'):
         with pytest.raises(AtlasError) as error:
-            native_pipeline.run_native(replace(other, request=ActionRequest(action)))
+            native_pipeline.run_native(replace(other, request=replace(other.request, action=action)))
         assert error.value.code == 'graph_atlas_conflict' and error.value.status == 409
     native_pipeline.claim_projection_database(owner)
 
 
-def test_concurrent_first_writers_claim_one_owner_and_relocated_owner_can_rebuild(tmp_path):
+def test_concurrent_first_writers_claim_distinct_databases_and_relocation_preserves_owner(tmp_path):
     graph = {'url':'http://127.0.0.1:80/','database':'admin/fixture'}
-    svc = ServiceContext(tmp_path/'service')
-    contexts = [setup_atlas(tmp_path/name, svc, graph)[0] for name in ('one','two')]
-    contexts[1] = replace(contexts[1], configuration={'graph':{**graph, 'url':'http://127.0.0.1'}})
-    def try_claim(ctx):
-        try:
-            native_pipeline.claim_projection_database(ctx)
-            return ctx
-        except AtlasError as error:
-            assert error.code == 'graph_atlas_conflict'
+    service = ServiceContext(tmp_path/'service', configuration={'graph': graph})
+    first, second = [setup_atlas(tmp_path/name, service, graph)[0] for name in ('one','two')]
     with ThreadPoolExecutor(max_workers=2) as workers:
-        winners = [c for c in workers.map(try_claim,contexts) if c]
-    assert len(winners) == 1
-    winner = winners[0]
-    moved = winner.atlas_path.rename(tmp_path/'relocated')
-    native_pipeline.claim_projection_database(replace(winner, atlas_path=moved,
-        request=ActionRequest('publication.rebuild')))
+        list(workers.map(native_pipeline.claim_projection_database, (first, second)))
+    with database(service) as db:
+        owners = [tuple(row) for row in db.execute('SELECT database_name,atlas_id FROM projection_owners')]
+    assert set(owners) == {(ctx.project_binding.graph_database, ctx.request.atlas_id) for ctx in (first, second)}
+
+    moved = first.atlas_path.rename(tmp_path/'relocated')
+    register_atlas(service, first.request.atlas_id, moved)
+    request = replace(first.request, action='publication.rebuild')
+    relocated = ActionContext.for_read(service, request)
+    assert relocated.atlas_path == moved
+    assert relocated.project_binding.graph_database == first.project_binding.graph_database
+    native_pipeline.claim_projection_database(relocated)
 
 
 def test_unusable_cache_fails_before_graph_access(tmp_path, monkeypatch):
@@ -82,3 +85,16 @@ def test_unusable_cache_fails_before_graph_access(tmp_path, monkeypatch):
     with pytest.raises(OSError):
         NativeProjection(pubs.store,graph_service,None,None,wrong_cache).build(content)
     graph_service.call.assert_not_called()
+
+
+
+def test_projection_rejects_an_unbound_database_before_claiming_it(tmp_path):
+    graph = {'url': 'http://127.0.0.1:8765', 'database': 'admin/inherited'}
+    service = ServiceContext(tmp_path / 'service', configuration={'graph': graph})
+    ctx, _, _ = setup_atlas(tmp_path / 'atlas', service, graph)
+    attempt = replace(ctx, configuration={'graph': graph})
+
+    with pytest.raises(AtlasError, match='graph_atlas_conflict'):
+        native_pipeline.claim_projection_database(attempt)
+    with database(service) as db:
+        assert db.execute('SELECT count(*) FROM projection_owners').fetchone()[0] == 0

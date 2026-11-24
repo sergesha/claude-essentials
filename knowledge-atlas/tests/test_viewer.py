@@ -57,11 +57,49 @@ def test_viewer_rejects_oversize_body_before_read(viewer):
     assert send(viewer,headers={'Content-Length':str(2*1024*1024)})[0]==413
 
 
-def test_mcp_open_accepts_shared_read_result():
+def test_viewer_resolves_explicit_native_path_to_uuid(tmp_path):
+    from knowledge_atlas.contracts import ServiceContext
     from knowledge_atlas.viewer.backend import MCPBackend
-    backend=object.__new__(MCPBackend)
-    backend.call=lambda action,request:{'data':{'atlas_id':'atlas-existing'},'publication':'a'*40}
-    assert backend.open_atlas('/data/atlas')=='atlas-existing'
+    from test_project_registry import create_project
+
+    path = tmp_path / 'notes'
+    identity = create_project(ServiceContext(tmp_path / 'service'), path)
+    backend = object.__new__(MCPBackend)
+    backend.docker_project = None
+
+    def call(action, request):
+        assert action == 'atlas.open'
+        assert request == {'atlas_id': identity}
+        return {'data': {'atlas_id': identity}}
+
+    backend.call = call
+    assert backend.open_atlas(str(path)) == identity
+    assert backend.open_atlas(identity) == identity
+
+
+def test_viewer_resolves_docker_path_inside_selected_container(monkeypatch):
+    import subprocess
+    import uuid
+    from types import SimpleNamespace
+    from knowledge_atlas.viewer import backend as viewer_backend
+
+    identity = str(uuid.uuid4())
+    backend = object.__new__(viewer_backend.MCPBackend)
+    backend.docker_project = 'existing'
+
+    def run(argv, **_):
+        assert argv[:4] == ['docker', 'compose', '-p', 'existing']
+        assert argv[-1] == '/data/atlas'
+        return SimpleNamespace(stdout=identity + '\n')
+
+    def call(action, request):
+        assert action == 'atlas.open'
+        assert request == {'atlas_id': identity}
+        return {'data': {'atlas_id': identity}}
+
+    monkeypatch.setattr(subprocess, 'run', run)
+    backend.call = call
+    assert backend.open_atlas('/data/atlas') == identity
 
 
 def test_docker_view_command_runs_on_host(tmp_path):

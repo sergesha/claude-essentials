@@ -18,6 +18,7 @@ knowledge-atlas view --atlas /absolute/path/to/atlas --config /absolute/path/to/
 
 An installed Python wheel also supports the Docker command:
 `knowledge-atlas view --atlas /data/atlas --docker-project atlas`.
+The `--atlas` argument accepts a registered project UUID or an explicit repository path. With Docker, the viewer resolves the path inside the selected container.
 The host needs Python/uv for the viewer and Docker CLI for Docker attachment.
 The backend stays in its container; no container ports are published.
 

@@ -6,6 +6,7 @@ from ..core.git_store import GitStore, _repo, _json, _commit, git
 from ..core.publication import Publications
 from ..core.decision_receipts import decision_inventory, matching_decision_receipt, review_inventory
 from ..operations import register_atlas, database
+from ..project_registry import list_projects, resolve_project
 
 
 def create_atlas(context):
@@ -23,16 +24,26 @@ def create_atlas(context):
                         canonical_effects={'created_atlas':identity})
 
 
+def list_atlases(service, request):
+    if request.atlas_id is not None or request.payload:
+        raise AtlasError('invalid_request', 'atlas.list takes no project selector or payload')
+    projects = []
+    for entry in list_projects(service):
+        try:
+            binding = resolve_project(service, entry.atlas_id)
+            ready = Publications(GitStore(binding.path)).ready()
+            status = 'ready' if ready else 'unpublished'
+        except (AtlasError, ValueError, OSError):
+            ready = None
+            status = 'unavailable'
+        projects.append({'atlas_id': entry.atlas_id, 'name': entry.path.name, 'publication': ready, 'status': status})
+    return ActionResult(data={'projects': projects})
+
+
 def open_atlas(context):
-    store = GitStore(context.atlas_path)
-    try:
-        commit = git(store.root, 'rev-parse', 'HEAD')
-        snapshot = store.read(commit)
-        identity = snapshot['manifest']['package_id']
-    except (ValueError, KeyError, OSError) as error:
-        raise AtlasError('invalid_atlas', 'native atlas package is unavailable', 422) from error
-    register_atlas(context.service, identity, context.atlas_path)
-    return ActionResult(data={'atlas_id':identity, 'path':str(context.atlas_path)}, publication=Publications(store).ready())
+    binding = context.project_binding
+    return ActionResult(data={'atlas_id': binding.atlas_id, 'path': str(binding.path)},
+                        publication=Publications(GitStore(binding.path)).ready())
 
 
 def atlas_status(context):
@@ -42,8 +53,8 @@ def atlas_status(context):
         return git(store.root, 'for-each-ref', '--format=%(objectname)', prefix).splitlines()
     with database(context.service) as db:
         active = [dict(row) for row in db.execute(
-            "SELECT operation_id,state FROM operations WHERE atlas_path=? AND state IN ('queued','running')",
-            (str(context.atlas_path),))]
+            "SELECT operation_id,state FROM operations WHERE json_extract(request, '$.atlas_id')=? "
+            "AND state IN ('queued','running')", (identity,))]
     pubs = Publications(store)
     ready = pubs.ready()
     candidates = refs('refs/poc9/proposals/')

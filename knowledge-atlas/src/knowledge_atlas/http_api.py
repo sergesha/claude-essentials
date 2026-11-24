@@ -23,10 +23,14 @@ class LocalHTTPServer(ThreadingHTTPServer):
 
 def invoke(context,request):
     from .actions import register_handlers
-    from .actions.atlas import open_atlas,atlas_status
+    from .actions.atlas import list_atlases, open_atlas, atlas_status
     from .actions.decisions import inspect_candidate
     from .actions.packages import inspect_packages
     from .actions.reads import read_action
+    if request.action == 'atlas.list':
+        return 200,list_atlases(context,request)
+    if request.action == 'atlas.open' and request.payload:
+        raise AtlasError('invalid_request', 'atlas.open takes an atlas_id UUID and an empty or omitted payload')
     if request.action=='operation.read':
         return 200,inspect_operation(context,request.payload['operation_id'])
     if request.action=='operation.resume':

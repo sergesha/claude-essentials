@@ -13,7 +13,10 @@ import uuid
 
 from .contracts import ActionRequest, ActionResult, AtlasError, OperationRecord, ServiceContext
 from .locks import is_locked
+from .project_registry import project_configuration, project_id, register_project, resolve_project
 
+
+PATH_ACTIONS = frozenset(('atlas.create', 'archive.restore'))
 
 # Python's uuid.UUID also accepts legacy upper-case, compact, braced and URN
 # spellings. Index their equivalence without rewriting immutable request evidence.
@@ -28,7 +31,11 @@ def database(context):
     connection.row_factory = sqlite3.Row
     try:
         connection.executescript(f'''
-            CREATE TABLE IF NOT EXISTS atlases (atlas_id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE);
+            CREATE TABLE IF NOT EXISTS atlases (
+                atlas_id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE, graph_database TEXT, git_url TEXT);
+            CREATE TABLE IF NOT EXISTS projection_owners (
+                endpoint TEXT NOT NULL, database_name TEXT NOT NULL, atlas_id TEXT NOT NULL,
+                PRIMARY KEY (endpoint, database_name));
             CREATE TABLE IF NOT EXISTS operations (
                 operation_id TEXT PRIMARY KEY, request_id TEXT NOT NULL UNIQUE, digest TEXT NOT NULL,
                 request TEXT NOT NULL, configuration TEXT NOT NULL, atlas_path TEXT NOT NULL,
@@ -38,6 +45,7 @@ def database(context):
             CREATE INDEX IF NOT EXISTS operation_uuid ON operations ({_UUID_KEY});
             CREATE INDEX IF NOT EXISTS resume_uuid ON resumes ({_UUID_KEY});
         ''')
+        _migrate_registry(connection)
         yield connection
         connection.commit()
     except BaseException:
@@ -45,6 +53,19 @@ def database(context):
         raise
     finally:
         connection.close()
+
+
+def _migrate_registry(connection):
+    fields = {'graph_database', 'git_url'}
+    columns = {row['name'] for row in connection.execute('PRAGMA table_info(atlases)')}
+    if fields - columns:
+        # Another connection may migrate the registry while this one waits for the lock.
+        with connection:
+            connection.execute('BEGIN IMMEDIATE')
+            columns = {row['name'] for row in connection.execute('PRAGMA table_info(atlases)')}
+            for field in sorted(fields - columns):
+                connection.execute(f'ALTER TABLE atlases ADD COLUMN {field} TEXT')
+    connection.execute('CREATE UNIQUE INDEX IF NOT EXISTS atlas_graph_database ON atlases(graph_database)')
 
 
 def encoded(value):
@@ -77,29 +98,42 @@ def validate_atlas_path(context, path):
 
 
 def atlas_path(context, request):
-    if request.action in ('atlas.create', 'atlas.open', 'archive.restore'):
-        value = request.payload.get('path')
-        if request.action == 'atlas.open' and value is None:
-            value = context.configuration.get('atlas_path')
-            if not value:
-                raise AtlasError('invalid_request', 'this service has no configured atlas_path; supply a path to open')
-        if not isinstance(value, str) or not value:
-            raise AtlasError('invalid_request', 'external atlas path required')
-        return validate_atlas_path(context, Path(value).expanduser())
-    with database(context) as db:
-        row = db.execute('SELECT path FROM atlases WHERE atlas_id=?', (request.atlas_id,)).fetchone()
-    if row is None:
-        raise AtlasError('atlas_not_found', 'open the atlas first', 404)
-    return validate_atlas_path(context, Path(row['path']))
+    if request.action not in PATH_ACTIONS:
+        return resolve_project(context, request.atlas_id).path
+    value = request.payload.get('path')
+    if not isinstance(value, str) or not value:
+        raise AtlasError('invalid_request', 'external atlas path required')
+    return validate_atlas_path(context, Path(value).expanduser())
 
 
 def register_atlas(context, atlas_id, path):
-    with database(context) as db:
-        db.execute('BEGIN IMMEDIATE')
-        existing = db.execute('SELECT path FROM atlases WHERE atlas_id=?', (atlas_id,)).fetchone()
-        if existing and Path(existing['path']).exists() and Path(existing['path']) != Path(path):
-            raise AtlasError('atlas_conflict', 'this UUID is already open at another existing location', 409)
-        db.execute('INSERT INTO atlases VALUES (?,?) ON CONFLICT(atlas_id) DO UPDATE SET path=excluded.path', (atlas_id, str(path)))
+    return register_project(context, atlas_id, path)
+
+
+def _binding_evidence(binding):
+    return {**asdict(binding), 'path': str(binding.path)}
+
+
+def operation_project(service, request, path, frozen):
+    if request.action in PATH_ACTIONS:
+        if validate_atlas_path(service, path) != path:
+            raise AtlasError('atlas_conflict', 'the queued destination path changed', 409)
+        return None
+    try:
+        binding = resolve_project(service, request.atlas_id)
+    except AtlasError as error:
+        if error.code == 'atlas_not_found':
+            raise AtlasError('atlas_conflict', 'the queued atlas is no longer registered', 409) from error
+        raise
+    if binding.path != path:
+        raise AtlasError('atlas_conflict', 'the queued atlas repository path changed', 409)
+    expected = frozen.get('project_binding')
+    if expected is not None:
+        if binding.graph_database != expected['graph_database']:
+            raise AtlasError('graph_atlas_conflict', 'the queued atlas graph database changed', 409)
+        if _binding_evidence(binding) != expected:
+            raise AtlasError('atlas_conflict', 'the queued atlas binding changed', 409)
+    return binding
 
 
 def _record(row):
@@ -245,18 +279,23 @@ def submit(context: ServiceContext, request: ActionRequest) -> OperationRecord:
     from .actions import register_handlers
     if request.action not in register_handlers(context):
         raise AtlasError('unsupported_action', request.action, 422)
-    request = replace(request, request_id=str(uuid.UUID(request.request_id)))
+    atlas_id = request.atlas_id if request.action in PATH_ACTIONS else project_id(request.atlas_id)
+    request = replace(request, request_id=str(uuid.UUID(request.request_id)), atlas_id=atlas_id)
     request_json = encoded(asdict(request))
     digest = hashlib.sha256(request_json.encode()).hexdigest()
     with database(context) as db:
         existing = _existing_submission(db, request, request_json, digest)
         if existing is not None:
             return existing
-    path = atlas_path(context, request)
-    configuration = encoded({'configuration': context.configuration, 'runtime':
-        {'runtime_root': str(context.runtime.runtime_root.expanduser().resolve()),
-         'manifest': str(context.runtime.manifest.expanduser().resolve()) if context.runtime.manifest else None}
-        if context.runtime else None})
+    binding = resolve_project(context, request.atlas_id) if request.action not in PATH_ACTIONS else None
+    path = binding.path if binding else atlas_path(context, request)
+    frozen = {'configuration': project_configuration(context, binding) if binding else context.configuration,
+              'runtime': {'runtime_root': str(context.runtime.runtime_root.expanduser().resolve()),
+                          'manifest': str(context.runtime.manifest.expanduser().resolve()) if context.runtime.manifest else None}
+              if context.runtime else None}
+    if binding:
+        frozen['project_binding'] = _binding_evidence(binding)
+    configuration = encoded(frozen)
     staging = _archive_staging_lock(context) if request.action == 'archive.restore' else nullcontext()
     with staging:
         if request.action == 'archive.restore':

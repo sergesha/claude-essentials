@@ -1,18 +1,18 @@
 """Portable PoC9 archives, with readiness gated by native projection recovery."""
 from dataclasses import replace
-import json
 from pathlib import Path
 from ..contracts import ActionResult, AtlasError
 from ..core.archive import export_atlas, restore_atlas
-from ..core.git_store import GitStore, git
+from ..core.git_store import GitStore
 from ..core.publication import Publications
 from ..operations import external_archive_path, register_atlas, staged_restore_input
 from ..native_pipeline import run_native
+from ..project_registry import prepare_restored_project, project_configuration
 from ..runtime import validate_runtime
 
 
 def rebuild_restored(context):
-    request = replace(context.request, action='publication.rebuild')
+    request = replace(context.request, action='publication.rebuild', atlas_id=context.project_binding.atlas_id)
     return run_native(replace(context, request=request))
 
 
@@ -48,8 +48,10 @@ def restore_archive(context):
         raise AtlasError('invalid_archive', str(error), 422) from error
     # Canonical objects remain recoverable if native prerequisites fail. Never
     # register them as ready until the retained rebuild finishes successfully.
-    rebuilt = rebuild_restored(context)
-    identity = json.loads(git(store.root, 'show', 'HEAD:package.json'))['package_id']
+    binding = prepare_restored_project(context.service, store.base)
+    configuration = project_configuration(context.service, binding)
+    rebuilt = rebuild_restored(replace(context, configuration=configuration, project_binding=binding))
+    identity = binding.atlas_id
     register_atlas(context.service, identity, store.base)
     return ActionResult(data={'atlas_id':identity, 'path':str(store.base), 'status':'ready',
                              'rebuild':rebuilt.data}, publication=rebuilt.data['ready'],

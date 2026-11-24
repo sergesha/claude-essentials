@@ -126,46 +126,46 @@ def projection_graph(configuration):
 
 
 def claim_projection_database(context):
-    from .core.git_store import GitStore, git
+    from .core.git_store import GitStore
     from .core.publication import Publications
+    from .core.reader import projection_receipt
     from .operations import database
+    from .project_registry import graph_endpoint, project_id, repository_identity, verify_graph_owner
 
     graph = projection_graph(context.configuration)
-    address = urlsplit(graph['url'])
-    endpoint = f'http://{address.hostname}:{address.port or 80}' + address.path.rstrip('/')
+    endpoint = graph_endpoint(graph['url'])
     name = graph['database']
     store = GitStore(context.atlas_path)
-    identity = json.loads(git(store.root, 'show', 'HEAD:package.json'))['package_id']
-    conflict = 'the configured graph database belongs to another atlas'
+    identity = repository_identity(store.base)
+    binding = context.project_binding
+    if ((context.request.atlas_id is not None and project_id(context.request.atlas_id) != identity)
+            or (binding and (binding.atlas_id != identity or binding.path != store.base))):
+        raise AtlasError('atlas_conflict', 'the projection repository differs from the selected atlas', 409)
+    if binding and binding.graph_database != name:
+        raise AtlasError('graph_atlas_conflict', 'the projection database differs from the selected atlas binding', 409)
+
     with database(context.service) as db:
         db.execute('BEGIN IMMEDIATE')
-        db.execute('''CREATE TABLE IF NOT EXISTS projection_owners (
-            endpoint TEXT NOT NULL, database_name TEXT NOT NULL, atlas_id TEXT NOT NULL,
-            PRIMARY KEY (endpoint, database_name))''')
-        registered = db.execute('SELECT path FROM atlases WHERE atlas_id=?', (identity,)).fetchone()
-        if registered and Path(registered['path']) != store.base and Path(registered['path']).exists():
-            raise AtlasError('atlas_conflict', 'this UUID is already open at another existing location', 409)
-        owner = db.execute('SELECT atlas_id FROM projection_owners WHERE endpoint=? AND database_name=?',
+        registered = db.execute('SELECT path,graph_database FROM atlases WHERE atlas_id=?', (identity,)).fetchone()
+        if registered:
+            if Path(registered['path']) != store.base and Path(registered['path']).exists():
+                raise AtlasError('atlas_conflict', 'this UUID is already registered at another existing location', 409)
+            if registered['graph_database'] not in (None, name):
+                raise AtlasError('graph_atlas_conflict', 'the projection database differs from the registered binding', 409)
+        verify_graph_owner(db, endpoint, name, identity)
+        owner = db.execute('SELECT 1 FROM projection_owners WHERE endpoint=? AND database_name=?',
                            (endpoint, name)).fetchone()
         if owner:
-            if owner['atlas_id'] != identity:
-                raise AtlasError('graph_atlas_conflict', conflict, 409)
             return
-        # Pre-upgrade registrations may have published before a binding existed.
-        # Reads and package opens never claim a database. Restores retain the UUID.
-        for row in db.execute('SELECT path FROM atlases WHERE atlas_id<>?', (identity,)):
+        # A legacy project can have a READY receipt predating the ownership table.
+        for row in db.execute('SELECT path FROM atlases WHERE atlas_id<>? AND graph_database IS NULL', (identity,)):
             other = GitStore(row['path'])
-            if not (other.root/'.git').is_dir():
+            if not (other.root / '.git').exists():
                 continue
             pubs = Publications(other)
             ready = pubs.ready()
-            if ready:
-                receipt = pubs.read(ready)
-                mapping = other.base/'rebuilt-projections.json'
-                if mapping.exists():
-                    receipt = json.loads(mapping.read_text()).get(ready) or receipt
-                if receipt.get('database') == name:
-                    raise AtlasError('graph_atlas_conflict', conflict, 409)
+            if ready and projection_receipt(other, ready, pubs.read(ready)).get('database') == name:
+                raise AtlasError('graph_atlas_conflict', 'the graph database belongs to another atlas', 409)
         db.execute('INSERT INTO projection_owners VALUES (?,?,?)', (endpoint, name, identity))
 
 

@@ -145,7 +145,12 @@ def test_restore_registers_only_after_rebuild(portable,tmp_path,monkeypatch):
     path=tmp_path/'atlas.zip';archive(portable,path)
     service=ServiceContext(tmp_path/'fresh-service')
     def rebuild(context):
-        assert Publications(GitStore(context.atlas_path)).ready()==portable[3]
+        restored = GitStore(context.atlas_path)
+        assert Publications(restored).ready()==portable[3]
+        identity = restored.read(portable[3])['manifest']['package_id']
+        assert context.configuration['graph']['database'] == 'admin/atlas-' + uuid.UUID(identity).hex
+        with database(service) as db:
+            assert db.execute('SELECT count(*) FROM atlases').fetchone()[0] == 0
         return ActionResult(data={'ready':portable[3],'publications':1})
     monkeypatch.setattr(archives,'rebuild_restored',rebuild)
     request=ActionRequest('archive.restore',request_id=str(uuid.uuid4()),payload={'archive':str(path),'path':str(tmp_path/'restored')})
@@ -158,9 +163,12 @@ def test_restore_registers_only_after_rebuild(portable,tmp_path,monkeypatch):
     def unavailable(context): raise AtlasError('projection_unavailable','controlled offline',503)
     monkeypatch.setattr(archives,'rebuild_restored',unavailable)
     failed=replace(context,atlas_path=tmp_path/'unbuilt',request=replace(request,payload={**request.payload,'path':str(tmp_path/'unbuilt')}))
-    with pytest.raises(AtlasError,match='projection_unavailable'): archives.restore_archive(failed)
+    with pytest.raises(AtlasError,match='atlas_conflict'): archives.restore_archive(failed)
     with database(service) as db: assert db.execute('SELECT count(*) FROM atlases').fetchone()[0]==1
     assert Publications(GitStore(tmp_path/'unbuilt')).ready()==portable[3]
+    fresh = replace(failed, service=ServiceContext(tmp_path/'failed-service'), atlas_path=tmp_path/'offline')
+    with pytest.raises(AtlasError,match='projection_unavailable'): archives.restore_archive(fresh)
+    with database(fresh.service) as db: assert db.execute('SELECT count(*) FROM atlases').fetchone()[0]==0
 
 
 def test_submitted_restore_freezes_archive_bytes(portable,tmp_path,monkeypatch):
@@ -252,8 +260,8 @@ def test_restore_refuses_unsuitable_inputs_without_attempt(tmp_path, monkeypatch
 
     service = ServiceContext(tmp_path / 'service')
     atlas = tmp_path / 'registered'
-    atlas.mkdir()
-    register_atlas(service, 'fixture', atlas)
+    store = GitStore(atlas)
+    register_atlas(service, store.read(snapshot(store))['manifest']['package_id'], atlas)
     path = tmp_path / 'notes'
     if kind == 'directory':
         path.mkdir()

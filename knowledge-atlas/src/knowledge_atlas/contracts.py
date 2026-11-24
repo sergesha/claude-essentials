@@ -1,7 +1,10 @@
 """Shared configuration types; constructing one never probes a runtime."""
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .project_registry import ProjectBinding
 
 JsonObject = dict[str, Any]
 OperationId = str
@@ -109,8 +112,12 @@ class ActionContext:
     configuration: JsonObject
     operation_id: str | None = None
     previous_evidence: Path | None = None
+    project_binding: 'ProjectBinding | None' = None
 
     @classmethod
     def for_read(cls, service, request):
-        from .operations import atlas_path
-        return cls(service, request, atlas_path(service, request), service.service_root, service.configuration)
+        from .project_registry import project_configuration, resolve_project
+
+        binding = resolve_project(service, request.atlas_id)
+        return cls(service, request, binding.path, service.service_root,
+                   project_configuration(service, binding), project_binding=binding)

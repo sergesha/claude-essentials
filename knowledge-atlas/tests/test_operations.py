@@ -106,10 +106,13 @@ def test_create_open_status_preserve_native_identity(tmp_path):
     assert status.data['atlas_id'] == atlas_id
     assert status.publication is None
     assert status.data['accepted_content'] == []
-    other = ServiceContext(tmp_path/'other-service')
-    opened = open_atlas(ActionContext.for_read(other, ActionRequest('atlas.open', payload={'path':str(tmp_path/'data atlas')})))
+    request_open = ActionRequest('atlas.open', atlas_id=atlas_id)
+    opened = open_atlas(ActionContext.for_read(context, request_open))
     assert opened.data['atlas_id'] == atlas_id
     assert opened.publication is None
+    other = ServiceContext(tmp_path/'other-service')
+    with pytest.raises(AtlasError, match='atlas_not_found'):
+        ActionContext.for_read(other, request_open)
 
 
 def test_resume_requires_reconciliation_and_new_workspace(tmp_path):
@@ -202,14 +205,20 @@ def test_resume_requires_uuid_before_inspecting_operation(tmp_path):
     assert not context.service_root.exists()
 
 
-def test_concurrent_open_cannot_replace_existing_location(tmp_path, monkeypatch):
+def test_concurrent_registration_cannot_replace_existing_location(tmp_path, monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
     from contextlib import contextmanager
+    import shutil
     import threading
     from knowledge_atlas import operations
+    from knowledge_atlas.core.git_store import GitStore
+    from test_packages import snapshot
+
     context = ServiceContext(tmp_path/'service')
     first, second = tmp_path/'first', tmp_path/'second'
-    first.mkdir(); second.mkdir()
+    store = GitStore(first)
+    atlas_id = store.read(snapshot(store))['manifest']['package_id']
+    shutil.copytree(first, second)
     native_database = operations.database
     with native_database(context): pass
     barrier = threading.Barrier(2)
@@ -220,7 +229,7 @@ def test_concurrent_open_cannot_replace_existing_location(tmp_path, monkeypatch)
             def trace(statement):
                 # Schedule both unprotected reads together; protected reads
                 # already serialize on SQLite's real write transaction.
-                if statement.startswith('SELECT path FROM atlases') and not connection.in_transaction:
+                if statement.startswith('SELECT * FROM atlases WHERE atlas_id=') and not connection.in_transaction:
                     barrier.wait(timeout=5)
             connection.set_trace_callback(trace)
             yield connection
@@ -228,7 +237,7 @@ def test_concurrent_open_cannot_replace_existing_location(tmp_path, monkeypatch)
 
     def register(path):
         try:
-            operations.register_atlas(context, 'one-native-uuid', path)
+            operations.register_atlas(context, atlas_id, path)
             return 'registered'
         except AtlasError as error:
             return error.code
@@ -283,23 +292,139 @@ def test_nested_atlas_rejected_before_writing_inside_existing_worktree(tmp_path)
 
 
 def test_bound_atlas_path_guards_reads_mutations_and_queued_workers(tmp_path):
+    from knowledge_atlas.core.git_store import GitStore
     from knowledge_atlas.operations import atlas_path, register_atlas
     from knowledge_atlas.worker import run_next
+    from test_packages import snapshot
 
     service = ServiceContext(tmp_path / 'service')
     other = tmp_path / 'other'
-    queued = submit(service, request(path=str(other)))
-    register_atlas(service, 'existing', other)
+    queued_path = tmp_path / 'queued'
+    queued = submit(service, request(path=str(queued_path)))
+    store = GitStore(other)
+    atlas_id = store.read(snapshot(store))['manifest']['package_id']
+    register_atlas(service, atlas_id, other)
     bound = tmp_path / 'atlas'
     service.configuration['atlas_path'] = str(bound)
     assert atlas_path(service, request(path=str(bound))) == bound
-    for action in ('atlas.create', 'atlas.open', 'archive.restore'):
+    for action in ('atlas.create', 'archive.restore'):
         with pytest.raises(AtlasError, match='bound'):
             atlas_path(service, request(action, path=str(other)))
-    for action in ('atlas.status', 'candidate.decide'):
+    for action in ('atlas.open', 'atlas.status', 'candidate.decide'):
         with pytest.raises(AtlasError, match='bound'):
-            atlas_path(service, ActionRequest(action, atlas_id='existing'))
+            atlas_path(service, ActionRequest(action, atlas_id=atlas_id))
     run_next(service)
     failed = inspect_operation(service, queued.operation_id)
     assert failed.state == 'failed' and failed.error['code'] == 'invalid_location'
-    assert not other.exists()
+    assert not queued_path.exists()
+
+
+def test_queued_configuration_keeps_project(tmp_path):
+    from knowledge_atlas.http_api import invoke
+    from knowledge_atlas.operations import register_atlas
+    from knowledge_atlas.core.git_store import GitStore
+    from knowledge_atlas.core.publication import Publications
+    from knowledge_atlas.runtime import _assets
+    from test_decisions import projection
+    from test_packages import snapshot
+
+    graph = {'url': 'http://127.0.0.1:8765', 'database': 'admin/inherited'}
+    service = ServiceContext(tmp_path / 'service', configuration={'graph': graph},
+                             handlers={'candidate.decide': blocking_handler})
+    restarted_graph = {'url': 'http://127.0.0.1:8766', 'database': 'admin/changed'}
+    restarted = ServiceContext(service.service_root, configuration={'graph': restarted_graph},
+                               handlers=service.handlers)
+    projects, operations = [], []
+    profile = json.loads((_assets() / 'embedding-profile.json').read_text())
+    release = tmp_path / 'release'
+    for directory in ('first', 'second'):
+        store = GitStore(tmp_path / directory)
+        candidate = snapshot(store)
+        atlas_id = store.read(candidate)['manifest']['package_id']
+        register_atlas(service, atlas_id, store.base)
+        pubs = Publications(store)
+        content = pubs.review(candidate, {'decision': 'accept', 'kind': 'synthetic', 'actor': 'Fixture',
+            'reason': 'Existing READY', 'accepted_at': '2026-11-13T01:00:00Z', 'base_publication': None}, profile)
+        database = 'admin/atlas-' + uuid.UUID(atlas_id).hex
+        ready = pubs.publish(content, lambda commit: {**projection(commit), 'database': database})
+        projects.append((atlas_id, ready, database))
+        operations.append(submit(service, ActionRequest('candidate.decide', atlas_id=atlas_id,
+            request_id=str(uuid.uuid4()), expected_publication=ready, payload={'release': str(release)})))
+
+    first = dispatch(restarted)
+    try:
+        wait_for(restarted, operations[0].operation_id, 'running')
+        second = dispatch(restarted)
+        second.join(10)
+        assert second.exitcode == 0
+        assert inspect_operation(restarted, operations[1].operation_id).state == 'queued'
+        for atlas_id, ready, _ in projects:
+            _, result = invoke(restarted, ActionRequest('atlas.status', atlas_id=atlas_id))
+            assert result.publication == ready
+    finally:
+        release.touch()
+        first.join(10)
+        if first.is_alive():
+            first.terminate()
+            first.join(10)
+    assert first.exitcode == 0
+    second = dispatch(restarted)
+    second.join(10)
+    assert second.exitcode == 0
+    for operation, (_, _, database) in zip(operations, projects):
+        result = inspect_operation(restarted, operation.operation_id)
+        assert result.state == 'succeeded', result.error
+        assert result.result.data['frozen']['graph'] == {'url': graph['url'], 'database': database}
+
+
+@pytest.mark.parametrize('drift', ['location', 'repository', 'graph'])
+def test_project_binding_change_fails_before_execution(tmp_path, drift):
+    from knowledge_atlas.core.git_store import GitStore
+    from knowledge_atlas.operations import database, register_atlas
+    from knowledge_atlas.worker import run_next
+    from test_packages import snapshot
+
+    service = ServiceContext(tmp_path / 'service', handlers={'candidate.decide': blocking_handler})
+    store = GitStore(tmp_path / 'original')
+    atlas_id = store.read(snapshot(store))['manifest']['package_id']
+    register_atlas(service, atlas_id, store.base)
+    release = tmp_path / 'release'
+    release.touch()
+    operation = submit(service, ActionRequest('candidate.decide', atlas_id=atlas_id,
+        request_id=str(uuid.uuid4()), payload={'release': str(release)}))
+
+    relocated = tmp_path / 'relocated'
+    if drift == 'graph':
+        with database(service) as db:
+            db.execute('UPDATE atlases SET graph_database=? WHERE atlas_id=?', ('admin/reassigned', atlas_id))
+    else:
+        store.base.rename(relocated)
+        if drift == 'location':
+            register_atlas(service, atlas_id, relocated)
+        else:
+            snapshot(store)  # Reuse the path with a different repository UUID.
+
+    run_next(service)
+    result = inspect_operation(service, operation.operation_id)
+    assert result.state == 'failed'
+    assert result.error['code'] == ('graph_atlas_conflict' if drift == 'graph' else 'atlas_conflict')
+    assert not (result.evidence / 'started').exists()
+
+
+
+def test_queued_destination_symlink_cannot_redirect_worker_lock(tmp_path):
+    from knowledge_atlas.worker import run_next
+
+    service = ServiceContext(tmp_path / 'service')
+    destination = tmp_path / 'new'
+    operation = submit(service, request(path=str(destination)))
+    foreign_parent = tmp_path / 'replacement'
+    foreign_parent.mkdir()
+    destination.symlink_to(foreign_parent / 'new', target_is_directory=True)
+
+    run_next(service)
+
+    failed = inspect_operation(service, operation.operation_id)
+    assert failed.state == 'failed'
+    assert failed.error['code'] == 'atlas_conflict'
+    assert list(foreign_parent.iterdir()) == []

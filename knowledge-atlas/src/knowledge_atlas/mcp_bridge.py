@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from threading import Lock
 from pydantic import Field, ValidationError, create_model
-from .api_models import MODELS, OpenLocation, Payload, parse_request
+from .api_models import MODELS, Payload, parse_request
 from .client import AtlasClient
 from .compose_client import ComposeClient
 from .contracts import AtlasError
@@ -17,7 +17,7 @@ class InstanceSettings(Payload):
                                 description='Compose project to use for this MCP connection')
 
 
-class ProjectLocation(InstanceSettings, OpenLocation):
+class ProjectLocation(InstanceSettings):
     pass
 
 
@@ -44,25 +44,15 @@ class SessionClient:
         self.channel = channel
         self.project = project
         self.local = None
-        self.local_atlas_path = None
         self.connections = {}
         self.lock = Lock()
 
-    def _local(self, *, require_bound_atlas):
+    def _local(self):
         if self.local is None:
             config = load_config(self.config_path)
             context = service_context(config)
-            bound_path = context.configuration.get('atlas_path')
-        else:
-            bound_path = self.local_atlas_path
-        if require_bound_atlas and not bound_path:
-            raise AtlasError('invalid_request',
-                             'Choose a Compose instance with payload.project or open a native atlas with payload.path.',
-                             422)
-        if self.local is None:
             ensure_service(config)
             self.local = AtlasClient(context.service_root, channel=self.channel)
-            self.local_atlas_path = bound_path
         return self.local
 
     def call(self, request):
@@ -74,8 +64,7 @@ class SessionClient:
         with self.lock:
             project = selected or self.project
             if project is None:
-                client = self._local(require_bound_atlas=request.action == 'atlas.open'
-                                     and request.payload.get('path') is None)
+                client = self._local()
             elif project in self.connections:
                 client = self.connections[project]
             else:
@@ -101,9 +90,7 @@ class SessionClient:
 
 
 def tools_for():
-    open_description = ('Open a Knowledge Atlas. Pass payload.project to select a running Compose project '
-                        'or payload.path to open an unbound native atlas. Omit arguments when this MCP '
-                        'connection already has a Compose project or the native service has a configured atlas path.')
+    open_description = 'Verify a registered project by its atlas_id UUID.'
     return [{'name':'atlas_'+name.replace('.','_'),
              'description':open_description if name == 'atlas.open' else 'Knowledge Atlas '+name,
              'inputSchema':model.model_json_schema()} for name,model in MCP_MODELS.items()]

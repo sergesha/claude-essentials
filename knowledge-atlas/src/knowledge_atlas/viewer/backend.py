@@ -3,11 +3,13 @@ import asyncio
 from datetime import timedelta
 import json
 import os
+from pathlib import Path
+import subprocess
 import sys
 import threading
-import time
 import uuid
 from ..contracts import AtlasError
+from ..project_registry import repository_identity
 from ..runtime import _assets
 
 
@@ -56,18 +58,29 @@ class MCPBackend:
             value=json.loads(next(item.text for item in result.content if item.type=='text'))
         return value
 
-    def open_atlas(self,path):
-        response=self.call('atlas.open',{'payload':{'path':str(path)},'request_id':str(uuid.uuid4())})
-        if response.get('data',{}).get('atlas_id'):
-            return response['data']['atlas_id']
-        deadline=time.monotonic()+60
-        while response.get('operation_id'):
-            response=self.call('operation.read',{'payload':{'operation_id':response['operation_id']}})
-            if response.get('state')=='succeeded':return response['result']['data']['atlas_id']
-            if response.get('state') in ('failed','interrupted') or response.get('error'):break
-            if time.monotonic()>deadline:raise AtlasError('backend_unavailable','Atlas open timed out',503)
-            time.sleep(.2)
-        raise AtlasError('backend_unavailable','Cannot open atlas: '+json.dumps(response),503)
+    def open_atlas(self, selection):
+        try:
+            identity = str(uuid.UUID(str(selection)))
+        except ValueError:
+            if self.docker_project:
+                command = ("from pathlib import Path; import sys; "
+                           "from knowledge_atlas.project_registry import repository_identity; "
+                           "print(repository_identity(Path(sys.argv[1]).expanduser()))")
+                try:
+                    resolved = subprocess.run([*compose_python(self.docker_project), '-c', command, str(selection)],
+                                              capture_output=True, text=True, check=True, timeout=30)
+                    identity = str(uuid.UUID(resolved.stdout.strip()))
+                except (OSError, subprocess.SubprocessError, ValueError) as error:
+                    raise AtlasError('backend_unavailable', 'cannot resolve the atlas path in the selected container', 503) from error
+            else:
+                identity = repository_identity(Path(selection).expanduser())
+        response = self.call('atlas.open', {'atlas_id': identity})
+        if 'error' in response:
+            error = response['error']
+            raise AtlasError(error['code'], error['message'], error['status'])
+        if response.get('data', {}).get('atlas_id') != identity:
+            raise AtlasError('backend_unavailable', 'service returned a different atlas identity', 503)
+        return identity
 
     def close(self):
         self.stopped.set()

@@ -2,29 +2,25 @@
 
 The shared handler registry is the domain boundary. HTTP, MCP and Python clients use the same implemented backend; these examples describe action requests.
 
-## Opening an instance
+## Selecting a project
 
-To open a running Compose instance, call `atlas_atlas_open` with
-`{"payload":{"project":"my-atlas"}}`. The service uses its configured atlas path.
-After a successful open, subsequent calls on the same MCP connection use that
-project. A new connection starts with the expressly configured default, if any.
-Another successful open with `payload.project` switches the connection to that
-project.
+Call `atlas.list` on the service you want to use. Send `{}` to the HTTP action,
+call `client.atlas_list()` in Python, or call `atlas_atlas_list` in MCP without
+arguments. `data.projects` contains the registered `atlas_id`, a display `name`
+derived from the repository's directory name, the current `publication` ID or
+null, and a `status` of `ready`, `unpublished`, or `unavailable`.
 
-Omit arguments when the connection has a selected or configured Compose project
-or the MCP's native service configuration defines `configuration.atlas_path`.
-For an unbound native service, pass `{"payload":{"path":"/path/to/atlas"}}` on
-a connection without a Compose project. If the first open has no project or
-path and no configured atlas, the MCP returns `invalid_request` (422) with
-selection instructions before contacting a local service. An incompatible
-already-running native service returns `version_conflict` (409) when a native
-open is requested.
+Open a registered project with `{"atlas_id":"<UUID>"}` or
+`client.atlas_open(atlas_id=atlas_id)`. The service verifies that the repository
+agrees with its registration, returns the UUID in `data.atlas_id`, and reports
+READY in `publication` if present. Missing or malformed UUIDs return
+`invalid_request` (400), an unknown UUID returns `atlas_not_found` (404), and a
+changed location or repository identity returns `atlas_conflict` (409).
+Use the selected UUID on every subsequent project request. Opening a second UUID
+leaves the first addressable on the same service.
 
-Pass the returned `data.atlas_id` to subsequent tools on the same connection.
-For example, `atlas_atlas_status` accepts `{"atlas_id":"<returned ID>"}`.
-The ID identifies an atlas within the selected instance. Direct HTTP and Python
-clients address a specific service. Use an empty request object for a bound
-service or supply `payload.path` for an unbound service.
+Supply external filesystem paths for explicit data management through
+`atlas.create` and `archive.restore`.
 
 ## Source ingestion and update
 
@@ -132,7 +128,7 @@ when reconnecting. Keep tokens private. The service rejects browser origins.
 - `GET /v1/status`, `POST /v1/stop` with `{}`: explicit service lifecycle.
 
 Read the generated schema instead of maintaining another field catalogue.
-All action requests include `payload` (use `{}` for an empty payload). Mutations
+Actions with an empty payload may omit `payload`. Mutations
 carry a request UUID and expected publication; repeated identical requests return
 the same operation. Invalid input is 400, missing credential 401, missing entity
 404, conflict/stale/busy 409, unsupported input/configuration 422, and unavailable

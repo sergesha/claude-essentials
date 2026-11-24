@@ -2,13 +2,17 @@
 
 The service keeps operation bookkeeping in its external data directory. Canonical atlas identity, content, decisions and publication history remain in PoC9-compatible Git packages. Deleting an operation database does not delete canonical knowledge; portable archive recovery is a separate operation.
 
-`atlas.create` requires an unused external destination and returns the native package UUID. `atlas.open` validates an existing package and registers that same UUID. Relocation preserves identity. `atlas.status` separates READY publication, accepted content, pending candidate references, active operations and runtime configuration. A newly created atlas has no READY publication.
+`atlas.create` requires an unused external destination and returns its new UUID.
+`archive.restore` registers the recovered UUID after projection replay succeeds.
+`atlas.list` lists registered projects and their READY states. `atlas.open` verifies
+the registered repository for the supplied UUID. `atlas.status` separates READY
+publication, accepted content, pending candidates and active operations.
 
-Mutations require a client-generated UUID `request_id` and the expected READY publication (null for an empty atlas). The service persists the request and freezes configuration before queueing. Repeating an identical request UUID returns the original operation; changing its payload returns `request_conflict`. This deduplicates submission, not remote model billing.
+Mutations require a client-generated UUID `request_id` and the expected READY publication (null for an empty atlas). The service verifies the project and freezes its repository, graph binding and effective configuration before queueing. Repeating an identical request UUID returns the original operation; changing its payload returns `request_conflict`. This deduplicates submission, not remote model billing.
 
 Operations transition from `queued` to `running` and then `succeeded`, `failed` or `interrupted`. Domain results such as `pending_review` and accepted-but-not-published content are distinct from operation state. Each attempt retains its request/configuration, result or error, and stage evidence in a new directory. Input source content is part of the frozen JSON request; callers supply text, not a mutable file reference.
 
-A child worker holds the service writer lock and canonical atlas lock throughout mutation. Alias paths resolve to the same writer lock. A conflicting service receives `busy` rather than stealing an active lock. The dispatcher remains responsive to status requests while work runs. Client disconnection does not cancel accepted work.
+A child worker holds the service writer lock and canonical atlas lock throughout mutation. Alias paths resolve to the same writer lock. A conflicting service receives `busy` rather than stealing an active lock. The dispatcher runs one mutation at a time across all projects. Reads continue against each project’s available READY while work runs. Before calling a handler, the worker verifies that the queued repository UUID, location and graph binding still agree with the registry. Client disconnection does not cancel accepted work.
 
 After restart, an active attempt lock keeps an operation running; an inactive attempt becomes interrupted. No model call is automatically replayed. Explicit resume requires a new request UUID, an inactive attempt and handler-specific canonical reconciliation. It uses a fresh workspace and refuses `unsafe_resume` when safe continuation cannot be established. Completed, compatible stage artifacts may be copied by the domain recovery handler; an old agent workspace is never reused blindly.
 
@@ -55,12 +59,13 @@ kind, reason and decided_at. The original OID stays immutable. If an interrupted
 revision has no completed canonical receipt, resume refuses `unsafe_resume` rather
 than repeat an uncertain model effect; retained attempt evidence must be inspected.
 
-Projection uses the prepared runtime tokenizer/formatter and the original
-`NativeProjection` builder. Service configuration selects the local native graph as
-`graph: {"url": "http://127.0.0.1:<port>", "database": "admin/<database>"}`; request
-payloads cannot select executable commands. The embedding bridge and builder must
-share the atlas `vectors` cache. Native runtime launch and complete platform/host
-qualification are separate from the controlled publication-failure tests.
+Projection uses the prepared runtime tokenizer and formatter. Configure its local
+native endpoint with `graph: {"url": "http://127.0.0.1:<port>"}`. The registry
+assigns each new project a unique database derived from its UUID. On migration
+it retains a verified database already used by an existing project. Ownership
+conflicts produce `graph_atlas_conflict` before a native projection write.
+The embedding bridge and builder must share a compatible cache. Native runtime
+and host qualification are recorded separately from controlled projection tests.
 
 ## Docker storage durability
 

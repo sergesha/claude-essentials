@@ -15,6 +15,25 @@ def short_id(value):
     return value.split('/data/')[-1]
 
 
+def projection_receipt(store, publication, receipt):
+    """Apply a verified local rebuild to the selected Git publication."""
+    rebuilt_path = store.base / 'rebuilt-projections.json'
+    if not rebuilt_path.exists():
+        return dict(receipt)
+    rebuilt_map = json.loads(rebuilt_path.read_text())
+    if not isinstance(rebuilt_map, dict):
+        raise ValueError('invalid rebuilt projection inventory')
+    if publication not in rebuilt_map:
+        return dict(receipt)
+    rebuilt = rebuilt_map[publication]
+    if (not isinstance(rebuilt, dict) or rebuilt.get('content_commit') != receipt['content_commit']
+            or rebuilt.get('profile_id') != receipt['profile_id']
+            or rebuilt.get('ready') is not True or not rebuilt.get('graph_commit')
+            or rebuilt.get('search_checkpoint') != rebuilt['graph_commit']):
+        raise ValueError('rebuilt projection does not match published content')
+    return {**receipt, **{field: rebuilt[field] for field in ('database', 'graph_commit', 'search_checkpoint')}}
+
+
 class AtlasReader:
     def __init__(self, store, url, policy, publication=None, *, as_known_at=None):
         if publication is not None and as_known_at is not None:
@@ -50,20 +69,7 @@ class AtlasReader:
             self.publication = selected
         if self.publication not in self.chain:
             raise ValueError('slice is not in published history')
-        self.receipt = dict(self.chain[self.publication])
-        rebuilt_path = store.base/'rebuilt-projections.json'
-        rebuilt_map = json.loads(rebuilt_path.read_text()) if rebuilt_path.exists() else {}
-        if self.publication in rebuilt_map:
-            rebuilt = rebuilt_map[self.publication]
-            if (not rebuilt or rebuilt.get('content_commit') != self.receipt['content_commit']
-                    or rebuilt.get('profile_id') != self.receipt['profile_id']
-                    or rebuilt.get('ready') is not True
-                    or not rebuilt.get('graph_commit')
-                    or rebuilt.get('search_checkpoint') != rebuilt['graph_commit']):
-                raise ValueError('rebuilt projection does not match published content')
-            # Local derived locations cannot replace acceptance or Git history.
-            for field in ('database','graph_commit','search_checkpoint'):
-                self.receipt[field] = rebuilt[field]
+        self.receipt = projection_receipt(store, self.publication, self.chain[self.publication])
         self.records = self._records(self.publication)
         self.graph = GraphStage(url, self.receipt['database'])
 

@@ -44,12 +44,31 @@ def test_three_interfaces_preserve_results_and_errors(app,tmp_path):
         time.sleep(.05)
     assert operation.state=='succeeded',operation.error
     atlas_id=operation.result.data['atlas_id']
+    second=client.atlas_create(Location(path=str(tmp_path/'second')),request_id=str(uuid.uuid4()))
+    deadline=time.monotonic()+15
+    while second.state in ('queued','running'):
+        assert time.monotonic()<deadline
+        time.sleep(.05)
+        second=client.operation(second.operation_id)
+    assert second.state=='succeeded',second.error
+    second_id=second.result.data['atlas_id']
+
+    status,http=raw(app,'atlas.list',{})
+    assert status==200 and http==asdict(client.atlas_list())==call_tool(client,'atlas_atlas_list',None)
+    assert {row['atlas_id'] for row in http['data']['projects']}=={atlas_id,second_id}
+    for identity in (atlas_id,second_id,atlas_id):
+        selection={'atlas_id':identity}
+        status,http=raw(app,'atlas.open',selection)
+        assert status==200 and http==asdict(client.atlas_open(**selection))
+        assert http==call_tool(client,'atlas_atlas_open',selection)
+        assert http['data']['atlas_id']==identity
+
     request=ActionRequest('atlas.status',atlas_id=atlas_id)
     status,http=raw(app,request.action,asdict(request))
     python=asdict(client.call(request))
     mcp=call_tool(client,'atlas_atlas_status',asdict(request))
     assert status==200 and http==python==mcp
-    bad=ActionRequest('atlas.status',atlas_id='missing')
+    bad=ActionRequest('atlas.status',atlas_id=str(uuid.uuid4()))
     with pytest.raises(AtlasError) as python_error:client.call(bad)
     mcp_error=call_tool(client,'atlas_atlas_status',asdict(bad))
     assert python_error.value.code==mcp_error['error']['code']=='atlas_not_found'
@@ -81,16 +100,15 @@ def test_schema_is_shared_with_mcp(app):
     assert all(tool['inputSchema']==schema['actions'][tool['name'][6:].replace('_','.')]['input']
                for tool in tools if tool['name'] != 'atlas_atlas_open')
     open_schema = next(tool['inputSchema'] for tool in tools if tool['name'] == 'atlas_atlas_open')
-    assert 'payload' not in open_schema.get('required', [])
+    assert open_schema.get('required') == ['atlas_id']
     assert 'project' in open_schema['$defs']['ProjectLocation']['properties']
 
 
-def test_open_uses_bound_atlas_without_payload(app, tmp_path):
+def test_mcp_opens_registered_uuid_without_configured_path(app, tmp_path):
     from knowledge_atlas.client import AtlasClient
     from knowledge_atlas.mcp_bridge import SessionClient, call_tool
     client = AtlasClient(app.context.service_root)
     path = tmp_path/'bound'
-    app.context.configuration['atlas_path'] = str(path)
     created = client.call(ActionRequest('atlas.create', request_id=str(uuid.uuid4()), payload={'path':str(path)}))
     deadline = time.monotonic() + 15
     while (record := client.operation(created.operation_id)).state in ('queued', 'running'):
@@ -98,13 +116,10 @@ def test_open_uses_bound_atlas_without_payload(app, tmp_path):
         time.sleep(.05)
     assert record.state == 'succeeded', record.error
     identity = record.result.data['atlas_id']
-    assert client.request('/v1/actions/atlas.open', {})['data']['atlas_id'] == identity
-    assert client.atlas_open().data['path'] == str(path)
-    config = tmp_path/'bound.json'
-    config.write_text(json.dumps({'service_root': str(app.context.service_root),
-                                  'configuration': {'atlas_path': str(path)}}))
+    config = tmp_path/'service.json'
+    config.write_text(json.dumps({'service_root': str(app.context.service_root)}))
     session = SessionClient(config, 'mcp')
-    assert call_tool(session, 'atlas_atlas_open', {})['data']['atlas_id'] == identity
+    assert call_tool(session, 'atlas_atlas_open', {'atlas_id': identity})['data']['atlas_id'] == identity
 
 
 def test_mcp_project_routing_is_per_session_and_switches_only_on_success(monkeypatch):
@@ -127,14 +142,40 @@ def test_mcp_project_routing_is_per_session_and_switches_only_on_success(monkeyp
     session = mcp_bridge.SessionClient(None, 'mcp', 'initial')
     def call(name, args):
         return mcp_bridge.call_tool(session, 'atlas_atlas_'+name, args)
-    assert call('open', {})['data']['project'] == 'initial'
-    assert call('open', {'payload':{'project':'fde-knowledge-atlas'}})['data']['project'] == 'fde-knowledge-atlas'
+    selection = {'atlas_id': str(uuid.uuid4())}
+    assert call('open', selection)['data']['project'] == 'initial'
+    assert call('open', {**selection, 'payload':{'project':'fde-knowledge-atlas'}})['data']['project'] == 'fde-knowledge-atlas'
     assert called[-1] == ('fde-knowledge-atlas', 'atlas.open', {})
-    assert call('open', {'payload':{'project':'offline'}})['error']['code'] == 'backend_unavailable'
-    assert call('open', {})['data']['project'] == 'fde-knowledge-atlas'
-    assert call('status', {'atlas_id':'test'})['data']['project'] == 'fde-knowledge-atlas'
-    assert call('open', {'payload':{'project':'bad name'}})['error']['code'] == 'invalid_request'
+    assert call('open', {**selection, 'payload':{'project':'offline'}})['error']['code'] == 'backend_unavailable'
+    assert call('open', selection)['data']['project'] == 'fde-knowledge-atlas'
+    assert call('status', selection)['data']['project'] == 'fde-knowledge-atlas'
+    assert call('open', {**selection, 'payload':{'project':'bad name'}})['error']['code'] == 'invalid_request'
     assert mcp_bridge.SessionClient(None, 'mcp').project is None
+
+
+
+def test_selected_compose_transport_forwards_open_uuid(monkeypatch):
+    import subprocess
+    from knowledge_atlas import compose_client
+
+    class Backend:
+        def __init__(self, **_):
+            pass
+
+        def call(self, action, body):
+            assert action == 'atlas.open'
+            assert body['atlas_id'] == identity
+            assert body['payload'] == {}
+            return {'data': {'atlas_id': identity}}
+
+    identity = str(uuid.uuid4())
+    monkeypatch.setattr(compose_client, 'MCPBackend', Backend)
+    def unexpected_probe(*_, **__):
+        pytest.fail('UUID open tried to probe a container path')
+
+    monkeypatch.setattr(subprocess, 'run', unexpected_probe)
+    remote = compose_client.ComposeClient('existing', 'mcp')
+    assert remote.call(ActionRequest('atlas.open', atlas_id=identity)).data['atlas_id'] == identity
 
 
 def test_mcp_saved_instance_matches_claude_plugin_setting(tmp_path, monkeypatch):
@@ -170,9 +211,8 @@ def test_singleton_launcher_and_version_conflict(tmp_path):
             with pytest.raises(AtlasError,match='version_conflict'):ensure_service(config)
             session = SessionClient(config_path, 'mcp')
             missing = call_tool(session, 'atlas_atlas_open', {})['error']
-            assert (missing['code'], missing['status']) == ('invalid_request', 422)
-            assert 'payload.project' in missing['message'] and 'payload.path' in missing['message']
-            explicit = call_tool(session, 'atlas_atlas_open', {'payload': {'path': str(tmp_path/'atlas')}})
+            assert (missing['code'], missing['status']) == ('invalid_request', 400)
+            explicit = call_tool(session, 'atlas_atlas_open', {'atlas_id': str(uuid.uuid4())})
             assert explicit['error']['code'] == 'version_conflict'
         finally:path.write_text(actual)
         client.stop()
@@ -200,7 +240,7 @@ def test_mcp_sdk_discovers_tools_and_calls_same_service(tmp_path):
                 await session.initialize()
                 listed=await session.list_tools()
                 assert any(t.name=='atlas_atlas_create' for t in listed.tools)
-                response=await session.call_tool('atlas_atlas_status',{'atlas_id':'missing','payload':{}})
+                response=await session.call_tool('atlas_atlas_status',{'atlas_id':str(uuid.uuid4()),'payload':{}})
                 assert response.isError
                 assert response.structuredContent['error']['code']=='atlas_not_found'
                 accepted=await session.call_tool('atlas_atlas_create',{'request_id':str(uuid.uuid4()),'payload':{'path':str(tmp_path/'atlas')}})
