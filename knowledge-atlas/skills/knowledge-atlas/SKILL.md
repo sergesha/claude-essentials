@@ -12,10 +12,14 @@ is `atlas_atlas_status`. Omit `payload` for calls with no payload fields.
 
 ## Operate
 
-1. Open the configured atlas with `atlas_atlas_open` without arguments. When the
-   user names a Compose project, pass `{"payload":{"project":"PROJECT"}}` on open;
-   subsequent tools use that project on this connection. Use an explicit path
-   for an unbound local service. Retain the returned `atlas_id`. Read its
+1. For a named Compose project, open with `atlas_atlas_open` and
+   `{"payload":{"project":"PROJECT"}}`. Subsequent tools use that project on
+   the same MCP connection. On a new connection, pass the project again unless
+   it is configured as the default. Omit arguments for a selected or configured
+   Compose project, or for a native service with a configured atlas path. Use
+   `payload.path` for an unbound native service on a connection without a Compose
+   project. Retain the returned `atlas_id` for subsequent calls on that
+   connection. Read its
    current READY publication before preparing a mutation. Keep the user's
    source IDs stable; omitted sources remain, explicit removals are versioned.
 2. Submit with a fresh request UUID and the reviewed `expected_publication`.

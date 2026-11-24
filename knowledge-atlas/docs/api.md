@@ -4,15 +4,27 @@ The shared handler registry is the domain boundary. HTTP, MCP and Python clients
 
 ## Opening an instance
 
-Call the MCP tool `atlas_atlas_open` without arguments to open the atlas bound to
-the default instance. To select a running Compose project in this connection, send
-`{"payload":{"project":"my-atlas"}}`. The returned `data.atlas_id` identifies
-the atlas for subsequent tools. Switch projects with another successful open.
-For example, `atlas_atlas_status` accepts `{"atlas_id":"<returned ID>"}`.
+To open a running Compose instance, call `atlas_atlas_open` with
+`{"payload":{"project":"my-atlas"}}`. The service uses its configured atlas path.
+After a successful open, subsequent calls on the same MCP connection use that
+project. A new connection starts with the expressly configured default, if any.
+Another successful open with `payload.project` switches the connection to that
+project.
 
-`project` is an MCP connection setting. Direct HTTP clients already address a
-specific service. A bound service accepts an empty request body object for
-`atlas.open`. An unbound local service requires `payload.path`.
+Omit arguments when the connection has a selected or configured Compose project
+or the MCP's native service configuration defines `configuration.atlas_path`.
+For an unbound native service, pass `{"payload":{"path":"/path/to/atlas"}}` on
+a connection without a Compose project. If the first open has no project or
+path and no configured atlas, the MCP returns `invalid_request` (422) with
+selection instructions before contacting a local service. An incompatible
+already-running native service returns `version_conflict` (409) when a native
+open is requested.
+
+Pass the returned `data.atlas_id` to subsequent tools on the same connection.
+For example, `atlas_atlas_status` accepts `{"atlas_id":"<returned ID>"}`.
+The ID identifies an atlas within the selected instance. Direct HTTP and Python
+clients address a specific service. Use an empty request object for a bound
+service or supply `payload.path` for an unbound service.
 
 ## Source ingestion and update
 

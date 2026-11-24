@@ -73,9 +73,11 @@ Open a running project from the installed MCP plugin:
 ```
 
 Send this to `atlas_atlas_open`. The MCP bridge selects the project's running
-`atlas` service and opens the path configured inside it. Subsequent tools on that
-connection use the selected project. Reopen it by calling `atlas_atlas_open`
-without arguments. A failed switch returns an error and keeps the prior selection.
+`atlas` service and opens the path configured inside it. Pass the returned
+`atlas_id` to tools such as `atlas_atlas_status` on that connection. Reopen
+the same atlas by calling `atlas_atlas_open` without arguments. A failed project
+switch keeps the prior selection. When the MCP reconnects, select the project
+again unless you configured a default.
 
 To choose a default project at installation in Claude Code, set the plugin's
 `project` setting. In Codex, put `{"project":"my-atlas"}` in
