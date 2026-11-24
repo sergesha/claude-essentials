@@ -87,6 +87,7 @@ def test_schema_is_shared_with_mcp(app):
 
 def test_open_uses_bound_atlas_without_payload(app, tmp_path):
     from knowledge_atlas.client import AtlasClient
+    from knowledge_atlas.mcp_bridge import SessionClient, call_tool
     client = AtlasClient(app.context.service_root)
     path = tmp_path/'bound'
     app.context.configuration['atlas_path'] = str(path)
@@ -99,6 +100,11 @@ def test_open_uses_bound_atlas_without_payload(app, tmp_path):
     identity = record.result.data['atlas_id']
     assert client.request('/v1/actions/atlas.open', {})['data']['atlas_id'] == identity
     assert client.atlas_open().data['path'] == str(path)
+    config = tmp_path/'bound.json'
+    config.write_text(json.dumps({'service_root': str(app.context.service_root),
+                                  'configuration': {'atlas_path': str(path)}}))
+    session = SessionClient(config, 'mcp')
+    assert call_tool(session, 'atlas_atlas_open', {})['data']['atlas_id'] == identity
 
 
 def test_mcp_project_routing_is_per_session_and_switches_only_on_success(monkeypatch):
@@ -125,6 +131,7 @@ def test_mcp_project_routing_is_per_session_and_switches_only_on_success(monkeyp
     assert call('open', {'payload':{'project':'fde-knowledge-atlas'}})['data']['project'] == 'fde-knowledge-atlas'
     assert called[-1] == ('fde-knowledge-atlas', 'atlas.open', {})
     assert call('open', {'payload':{'project':'offline'}})['error']['code'] == 'backend_unavailable'
+    assert call('open', {})['data']['project'] == 'fde-knowledge-atlas'
     assert call('status', {'atlas_id':'test'})['data']['project'] == 'fde-knowledge-atlas'
     assert call('open', {'payload':{'project':'bad name'}})['error']['code'] == 'invalid_request'
     assert mcp_bridge.SessionClient(None, 'mcp').project is None
@@ -148,7 +155,10 @@ def test_singleton_launcher_and_version_conflict(tmp_path):
     from knowledge_atlas.launcher import ensure_service
     from knowledge_atlas.client import AtlasClient
     from knowledge_atlas.locks import is_locked
+    from knowledge_atlas.mcp_bridge import SessionClient, call_tool
     config={'service_root':str(tmp_path/'service')}
+    config_path = tmp_path/'config.json'
+    config_path.write_text(json.dumps(config))
     first=ensure_service(config)
     try:
         second=ensure_service(config)
@@ -158,6 +168,12 @@ def test_singleton_launcher_and_version_conflict(tmp_path):
         actual=path.read_text();changed=json.loads(actual);changed['version']='999.0.0';path.write_text(json.dumps(changed))
         try:
             with pytest.raises(AtlasError,match='version_conflict'):ensure_service(config)
+            session = SessionClient(config_path, 'mcp')
+            missing = call_tool(session, 'atlas_atlas_open', {})['error']
+            assert (missing['code'], missing['status']) == ('invalid_request', 422)
+            assert 'payload.project' in missing['message'] and 'payload.path' in missing['message']
+            explicit = call_tool(session, 'atlas_atlas_open', {'payload': {'path': str(tmp_path/'atlas')}})
+            assert explicit['error']['code'] == 'version_conflict'
         finally:path.write_text(actual)
         client.stop()
         deadline=time.monotonic()+10

@@ -50,10 +50,12 @@ relative launcher path. Codex CLI 0.167.0 passed placeholder strings literally
 to `sh` during native qualification, although [OpenAI's desktop MCP packaging guide](https://developers.openai.com/plugins/deploy/desktop-only) documents `${PLUGIN_ROOT}`.
 Claude uses `${CLAUDE_PLUGIN_ROOT}`.
 
-For a running Docker deployment, choose a project using `atlas.open` or save
-an instance default. Claude Code exposes `project` in the plugin settings;
-Codex reads `{"project":"my-atlas"}` from `~/.config/knowledge-atlas/mcp.json`
-(under `$XDG_CONFIG_HOME` when set). See the [Docker guide](../docker/README.md#use-the-installed-plugin).
+For a running Docker deployment, pass `payload.project` to `atlas.open` on
+the first call of a new connection. You can optionally set a default. Claude
+Code exposes `project` in the plugin settings. Codex reads
+`{"project":"my-atlas"}` from `~/.config/knowledge-atlas/mcp.json` (under
+`$XDG_CONFIG_HOME` when set). Installation and startup leave this optional file
+for the user to create. See the [Docker guide](../docker/README.md#use-the-installed-plugin).
 
 For a native service, set `KNOWLEDGE_ATLAS_CONFIG` to an external service JSON
 file. Both hosts use the same service configuration:
