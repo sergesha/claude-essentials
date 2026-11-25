@@ -232,16 +232,16 @@ def _build_runtime(config: RuntimeConfig, *, image_revision: str | None = None) 
             for line in patch.read_text().splitlines():
                 if line.startswith('+++ b/'):
                     path = directory / line.removeprefix('+++ b/')
-                    comment = {'.pl': '%', '.rs': '//', '.lock': '#', '.toml': '#'}[path.suffix]
+                    comment = {'.pl': '%', '.rs': '//', '.lock': '#', '.toml': '#', '.txt': '#'}[path.suffix]
                     with path.open('a') as modified:
                         modified.write(f'\n{comment} Modified by Knowledge Atlas; see runtime/patches/{patch.name}.\n')
 
     for name, directory in (('wiki_llm', 'wiki'), ('terminusdb', 'terminusdb'), ('vectorlink', 'vectorlink')):
         clone(name, pins[name]['repository'], pins[name]['revision'], root / directory)
-    for name in ('terminusdb', 'vectorlink'):
+    for name, directory in (('wiki_llm', 'wiki'), ('terminusdb', 'terminusdb'), ('vectorlink', 'vectorlink')):
         patch = assets / 'patches' / patches[name]['patch']
         _check_hash(patch, patches[name]['sha256'], name + ' patch')
-        apply_patch(name, patch, root / name)
+        apply_patch(name, patch, root / directory)
 
     swi_archive = root / 'downloads/swipl-10.0.2.tar.gz'
     _acquire('https://www.swi-prolog.org/download/stable/src/swipl-10.0.2.tar.gz', swi_archive,
@@ -294,7 +294,7 @@ def _build_runtime(config: RuntimeConfig, *, image_revision: str | None = None) 
         acquire_model(root)
     shutil.copy2(assets / 'embedding-profile.json', root / 'embedding-profile.json')
     shutil.copy2(assets / 'chunking.py', root / 'chunking.py')
-    run('python', ['uv', 'venv', '--python', '3.12.14', root / 'python'])
+    run('python', ['uv', 'venv', '--python', '3.12.16', root / 'python'])
     python = root / 'python/bin/python'
     run('python', ['uv', 'pip', 'install', '--python', python,
         '-r', root / 'wiki/mcp/requirements.lock',

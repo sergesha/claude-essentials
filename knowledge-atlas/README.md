@@ -65,7 +65,7 @@ original project. [Local viewer usage](docs/viewer.md)
 
 ## Development
 
-Use Python 3.12.14 and `uv sync --locked`, then `uv run pytest`. Native checks are
+Use Python 3.12.16 and `uv sync --locked`, then `uv run pytest`. Native checks are
 explicitly configured; skipped checks are not platform qualification. Run
 `uv run knowledge-atlas --help` for service and runtime commands.
 
