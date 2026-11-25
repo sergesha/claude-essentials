@@ -1,0 +1,41 @@
+name: Plugin image security
+description: Scan the local candidate and retain its release decision
+inputs:
+  producer:
+    description: Producer inventory identifier
+    required: true
+  image:
+    description: Local Docker image reference
+    required: true
+  platform:
+    description: Single-platform OS/architecture
+    required: true
+  out:
+    description: New directory for the candidate and scan
+    required: true
+runs:
+  using: composite
+  steps:
+    - id: scan
+      shell: bash
+      env:
+        PRODUCER: ${{ inputs.producer }}
+        IMAGE: ${{ inputs.image }}
+        PLATFORM: ${{ inputs.platform }}
+        OUT: ${{ inputs.out }}
+      run: |
+        set -eu
+        [[ "$PRODUCER" =~ ^[a-zA-Z0-9._-]+$ && "$PLATFORM" =~ ^[a-z0-9]+/[a-z0-9]+$ ]]
+        [[ ! -e "$OUT" && ! -L "$OUT" ]]
+        if [[ "$OUT" =~ [[:cntrl:]] || "$OUT" == *['*?[]{}!~']* ]]; then exit 2; fi
+        printf 'reports=%s/reports/\n' "$OUT" >> "$GITHUB_OUTPUT"
+        printf 'artifact=image-security-%s-%s-%s-%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$PRODUCER" "${PLATFORM//\//-}" >> "$GITHUB_OUTPUT"
+        python3 "$GITHUB_ACTION_PATH/../../../tools/image_security/gate.py" scan --producer "$PRODUCER" --image "$IMAGE" --platform "$PLATFORM" --out "$OUT"
+    - name: Retain image security evidence
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: ${{ steps.scan.outputs.artifact }}
+        path: ${{ steps.scan.outputs.reports }}
+        if-no-files-found: error
+        include-hidden-files: true
