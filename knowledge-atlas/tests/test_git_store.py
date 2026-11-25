@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import pytest
 from knowledge_atlas.core.git_store import GitStore, git
 
 ROOT=Path(__file__).resolve().parent / 'fixtures'
@@ -82,3 +83,31 @@ def test_recompilation_validates_both_owned_repositories_before_writes(tmp_path)
         store.snapshot(wiki, original['extraction'], {}, recorded_at='2026-11-14T00:00:00Z',
                        relation_previous=original['relations'])
     assert before == [git(path, 'show-ref') for path in (store.root, source, knowledge)]
+
+@pytest.mark.parametrize(('kind','damage'), [('knowledge','missing-wiki'), ('sources','project-manifest')])
+def test_snapshot_rejects_wrong_writable_leaf_before_changing_files_or_refs(tmp_path, kind, damage):
+    from knowledge_atlas.core.git_store import _commit
+    from test_packages import snapshot
+
+    store = GitStore(tmp_path/'project')
+    original = store.read(snapshot(store))
+    source, knowledge = (store.base/'modules'/name for name in ('sources','knowledge'))
+    leaf = store.base/'modules'/kind
+    if damage == 'missing-wiki':
+        (leaf/'wiki.json').unlink()
+    else:
+        (leaf/'manifest.json').write_bytes((store.root/'manifest.json').read_bytes())
+    _commit(leaf, 'Retain incompatible leaf HEAD')
+    repositories = [store.root, source, knowledge]
+
+    def state():
+        files = {path: path.read_bytes() for repo in repositories for path in repo.rglob('*')
+                 if '.git' not in path.relative_to(repo).parts and path.is_file()}
+        return files, [git(repo, 'show-ref') for repo in repositories]
+
+    before = state()
+    wiki = original['wiki']
+    wiki['sources'][0]['recorded_at'] = '2026-11-14T00:00:00Z'
+    with pytest.raises(ValueError, match='invalid ' + kind + ' content module'):
+        store.snapshot(wiki, original['extraction'], {}, recorded_at='2026-11-14T00:00:00Z')
+    assert state() == before

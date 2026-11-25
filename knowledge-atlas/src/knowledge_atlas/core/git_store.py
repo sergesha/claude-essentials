@@ -211,11 +211,12 @@ class GitStore:
             previous = {}
         paths = {kind:self.module_path(self.root,previous[kind]) if kind in previous else self.base/'modules'/kind
                  for kind in ('sources','knowledge')}
-        for path in paths.values():
+        for kind, path in paths.items():
             if path.exists():
                 if not (path/'.git').exists():
                     raise ValueError('existing content module is not a Git repository')
                 _repo(path)
+                _validate_leaf(path, 'HEAD', kind)
         relations = (validate_bundle(relation_bundle, extraction) if relation_bundle is not None else
                      resolve_relations(extraction, model=relation_model, previous=relation_previous))
         package_id=_repo(self.root)

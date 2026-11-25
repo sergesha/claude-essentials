@@ -625,3 +625,74 @@ def test_export_inventory_matches_mirrored_refs(portable, tmp_path, monkeypatch)
     archive(portable, path)
     restored = restore_atlas(path, tmp_path/'restored')
     assert len(decision_inventory(restored)) == 1
+
+
+@pytest.mark.parametrize(('location', 'fields'), [
+    ('ready', {'ready':False}),
+    ('ready', {'ready':1}),
+    ('history', {'graph_commit':'', 'search_checkpoint':''}),
+    ('child', {'search_checkpoint':'different-graph-revision'}),
+])
+def test_invalid_projection_receipts_rejected_before_archive_exposure(portable, tmp_path, location, fields):
+    from knowledge_atlas.core.publication import commit_files
+    from test_packages import layout, selection
+
+    root, _, _, ready, profile, projection = portable
+    owner = root
+    if location == 'child':
+        owner = GitStore(tmp_path/'child')
+        pubs = Publications(owner)
+        proposal = snapshot(owner)
+        content = pubs.review(proposal, {'decision':'accept','kind':'synthetic','actor':'Fixture',
+            'reason':'Review child','accepted_at':'2026-11-13T01:00:00Z','base_publication':None}, profile)
+        selected = pubs.publish(content, lambda oid: projection(oid, owner))
+        pending = layout(root, selection(root, owner, selected))
+    else:
+        pubs = Publications(root)
+        selected = ready
+
+    original = tmp_path/'original.zip'
+    inventory = archive(portable, original)
+    receipt = pubs.read(selected)
+    content = receipt['content_commit']
+    bad = commit_files(owner.root, content, {'publication.json':{**receipt, **fields}},
+                       [content], 'Inconsistent projection receipt')
+    if location == 'ready':
+        git(root.root, 'update-ref', pubs.ref, bad, selected)
+        inventory['ready'] = bad
+    else:
+        git(owner.root, 'update-ref', 'refs/fixture/retained', bad)
+
+    if location == 'child':
+        manifest = root.read(pending)['manifest']
+        child, = [mod for mod in manifest['modules'].values() if mod.get('kind') == 'atlas']
+        child['publication'] = bad
+        pending = commit_files(root.root, pending, {'manifest.json':manifest}, [pending], 'Select bad child wrapper')
+        git(root.root, 'update-ref', 'refs/poc9/proposals/'+pending, pending)
+
+    # Rebundle the raw Git refs and refresh the ZIP digests independently of export validation.
+    members = {}
+    for store in dict.fromkeys((root, owner)):
+        identity = json.loads(git(store.root, 'show', 'HEAD:package.json'))['package_id']
+        name = next(row['bundle'] for row in inventory['packages'] if row['package_id'] == identity)
+        bundle = tmp_path/name
+        git(store.root, 'bundle', 'create', str(bundle), '--all')
+        members[name] = bundle.read_bytes()
+        inventory['sha256'][name] = hashlib.sha256(members[name]).hexdigest()
+    members['archive.json'] = json.dumps(inventory).encode()
+    damaged = tmp_path/'damaged.zip'
+    with zipfile.ZipFile(original) as source, zipfile.ZipFile(damaged, 'w') as target:
+        for name in source.namelist():
+            target.writestr(name, members[name] if name in members else source.read(name))
+
+    before = damaged.read_bytes()
+    with pytest.raises(ValueError, match='projection is not ready'):
+        restore_atlas(damaged, tmp_path/'restored')
+    assert damaged.read_bytes() == before
+    assert not (tmp_path/'restored').exists()
+    with pytest.raises(ValueError, match='projection is not ready'):
+        archive(portable, tmp_path/'export.zip')
+    assert not (tmp_path/'export.zip').exists()
+    if location == 'child':
+        with pytest.raises(ValueError, match='projection is not ready'):
+            root.read(pending)

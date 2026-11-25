@@ -170,6 +170,13 @@ class Publications:
         if self._read_receipt(publication, wrapper)['content_commit'] != content_commit:
             raise ValueError('child publication/content mismatch')
 
+    @staticmethod
+    def _require_ready_projection(receipt, content):
+        if (receipt.get('content_commit') != content or receipt.get('ready') is not True
+                or not receipt.get('graph_commit')
+                or receipt.get('search_checkpoint') != receipt['graph_commit']):
+            raise ValueError('projection is not ready for this exact content')
+
     def _read_receipt(self, publication, wrapper_manifest):
         receipt = json.loads(git(self.store.root, 'show', publication + ':publication.json'))
         parents = git(self.store.root, 'show', '-s', '--format=%P', publication).split()
@@ -177,6 +184,7 @@ class Publications:
         previous = receipt['previous_publication']
         if parents != ([previous, content] if previous else [content]):
             raise ValueError('publication does not reference its accepted content and previous publication')
+        self._require_ready_projection(receipt, parents[-1])
         changed = git(self.store.root, 'diff-tree', '-r', '--no-renames', '--ignore-submodules=none',
                       '--name-only', content, publication)
         if changed != 'publication.json':
@@ -223,10 +231,7 @@ class Publications:
         receipt = build_projection(content)
         if receipt.get('profile_id') != snapshot['manifest']['profile_id']:
             raise ValueError('projection profile does not match accepted content')
-        if (receipt.get('content_commit') != content or receipt.get('ready') is not True
-                or not receipt.get('graph_commit')
-                or receipt.get('search_checkpoint') != receipt['graph_commit']):
-            raise ValueError('projection is not ready for this exact content')
+        self._require_ready_projection(receipt, content)
         publication = {**receipt, 'previous_publication': previous,
                        'profile_id': snapshot['manifest']['profile_id'],
                        'acceptance_kind': review['kind'], 'accepted_at': review['accepted_at'],
