@@ -1,5 +1,4 @@
 """Relocation of the installed launch command keeps data outside the plugin."""
-import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -35,10 +34,15 @@ def test_shipped_profiles_explicitly_pin_all_six_stage_providers():
     profiles = json.loads(path.read_text())
     assert set(profiles) == {'wiki', 'open', 'phrase', 'proposal', 'review_extension', 'grounded_answer'}
     assert all(settings['provider'] == 'codex' for settings in profiles.values())
+
+
+def test_shipped_profile_manifest_retains_upstream_provenance():
     manifest = json.loads((ROOT / 'runtime/source-manifest.json').read_text())
-    assert any(entry.get('destination') == 'runtime/model-profiles.json'
-               and entry.get('source_sha256') == hashlib.sha256(path.read_bytes()).hexdigest()
-               for entry in manifest['files'])
+    profile, = (entry for entry in manifest['files'] if entry['destination'] == 'runtime/model-profiles.json')
+    assert manifest['source_revision'] == '0fa0b15caffd55f6e840306854ab59b8f543c408'
+    assert profile['source'] == 'model-profiles.json'
+    assert profile['source_sha256'] == '96b3e164a0fcb4e06716f8bfc9284f8af742fa3510405103cd147982491cae31'
+    assert profile['adaptation']
 
 
 def test_marketplace_and_release_registration():
