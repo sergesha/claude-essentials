@@ -139,32 +139,6 @@ def test_graph_init_selection_preserves_existing_database(tmp_path):
     assert (tmp_path/'db/sentinel').read_text() == 'preserve'
 
 
-def test_upgrade_rebinds_existing_venv_without_auth_volume(tmp_path):
-    module = deployment()
-    runtime = tmp_path / 'runtime'
-    venv = runtime / 'python'
-    (venv / 'bin').mkdir(parents=True)
-    legacy = Path('/auth/.local/share/uv/python')
-    build = Path('cpython-3.12.14-linux-aarch64-gnu/bin')
-    stable = tmp_path / 'installed-python'
-    (stable / build).mkdir(parents=True)
-    (stable / build / 'python3.12').write_text('same interpreter build')
-    python = venv / 'bin/python'
-    python.symlink_to(legacy / build / 'python3.12')
-    (venv / 'bin/python3').symlink_to('python')
-    cfg = venv / 'pyvenv.cfg'
-    cfg.write_text(f'home = {legacy / build}\nversion_info = 3.12.14\n')
-    marker = runtime / 'runtime.json'
-    marker.write_text('retained')
-
-    module.migrate_runtime_interpreter(runtime, stable)
-    module.migrate_runtime_interpreter(runtime, stable)
-    assert python.resolve() == stable / build / 'python3.12'
-    assert (venv / 'bin/python3').readlink() == Path('python')
-    assert f'home = {stable / build}\n' in cfg.read_text()
-    assert marker.read_text() == 'retained'
-
-
 def test_mcp_launcher_retries_failed_setup_and_reuses_ready_environment(tmp_path):
     root = tmp_path / 'installed'
     (root / 'scripts').mkdir(parents=True)
@@ -197,6 +171,7 @@ exit "${UV_TEST_EXIT:-0}"
         result = subprocess.run(['sh', launcher, *arguments], env=env,
                                 check=True, capture_output=True, text=True)
         assert result.stdout.strip() == "['mcp']"
+    assert not (tmp_path / '.config/knowledge-atlas').exists()
     assert capture.read_text().splitlines() == ['setup', 'setup']
     assert (tmp_path / 'calls.args').read_text().splitlines() == [
         'sync', '--project', str(root), '--locked', '--no-dev', '--python', '3.12']
@@ -293,7 +268,12 @@ def startup_config(tmp_path, monkeypatch):
     (data / 'profiles.json').write_text(json.dumps({k: {**v, 'provider': 'codex'} for k, v in profiles.items()}))
     monkeypatch.setenv('ATLAS_DATA_ROOT', str(data))
     monkeypatch.setenv('ATLAS_RUNTIME_ROOT', str(tmp_path / 'runtime'))
-    monkeypatch.setattr(module, 'validate_runtime', lambda *_: None)
+    binary = tmp_path / 'runtime/providers/codex/node_modules/.bin/codex'
+    binary.parent.mkdir(parents=True, exist_ok=True)
+    if not binary.exists():
+        binary.write_text('#!/bin/sh\necho "codex-cli 0.167.0"\n')
+        binary.chmod(0o755)
+    monkeypatch.setattr(module, 'check_packaged_runtime', lambda *_: None)
     monkeypatch.setattr(module.signal, 'signal', lambda *_: None)
     calls = {}
     def launch(self, name, argv, env):
@@ -483,3 +463,75 @@ def test_restart_serves_other_projects_after_completed_binding(tmp_path, monkeyp
     assert invoke(service, ActionRequest('atlas.open', atlas_id=other))[1].data['atlas_id'] == other
     with pytest.raises(AtlasError, match='atlas_conflict'):
         invoke(service, ActionRequest('atlas.open', atlas_id=identity))
+
+
+def compose_service(*files):
+    if not shutil.which('docker'):
+        pytest.skip('Docker Compose CLI required to resolve deployment recipe')
+    command = ['docker', 'compose', '-p', 'atlas-fixture']
+    for file in files:
+        command.extend(['-f', str(PACKAGE / 'docker' / file)])
+    result = subprocess.run([*command, 'config', '--format', 'json'], check=True,
+                            env={**os.environ, 'ATLAS_REVISION': '1' * 40,
+                                 'ATLAS_VERSION': '0.4.0', 'ATLAS_IMAGE_DIGEST': ''},
+                            capture_output=True, text=True)
+    return json.loads(result.stdout)['services']['atlas']
+
+
+def test_default_compose_pulls_only():
+    service = compose_service('compose.yaml')
+    assert service['image'] == 'ghcr.io/sergesha/knowledge-atlas:0.4.0'
+    assert 'build' not in service
+    assert {v['target'] for v in service['volumes']} == {'/runtime', '/data', '/auth'}
+
+
+def test_explicit_build_overlay():
+    assert (PACKAGE / 'docker/compose.build.yaml').is_file(), 'local build overlay missing'
+    service = compose_service('compose.yaml', 'compose.build.yaml')
+    assert service['image'] == 'knowledge-atlas:local'
+    assert service['pull_policy'] == 'never'
+    assert service['build']['context'] == str(PACKAGE)
+    assert service['build']['dockerfile'] == 'docker/Dockerfile'
+    assert service['build']['args']['ATLAS_REVISION'] == '1' * 40
+
+
+@pytest.mark.parametrize(('provider', 'package', 'version'), [
+    ('codex', '@openai/codex', '0.167.0'), ('claude', '@anthropic-ai/claude-code', '2.1.319')])
+def test_provider_login_acquires_verified_selected_cli(tmp_path, monkeypatch, provider, package, version):
+    module = deployment()
+    assert hasattr(module, 'ensure_provider'), 'login needs the selected vendor CLI'
+    npm = tmp_path / 'npm'
+    npm.write_text('#!' + sys.executable + '\n' + """import json, os, pathlib, sys
+assert sys.argv[1] == 'ci'
+lock = json.loads(pathlib.Path('package-lock.json').read_text())
+wrapper = lock['packages']['node_modules/' + os.environ['FIXTURE_PACKAGE']]
+assert wrapper['integrity'].startswith('sha512-')
+assert wrapper['version'] == os.environ['FIXTURE_VERSION']
+binary = pathlib.Path('node_modules/.bin') / os.environ['FIXTURE_PROVIDER']
+binary.parent.mkdir(parents=True)
+binary.write_text('#!/bin/sh\\necho ' + wrapper['version'] + '\\n')
+binary.chmod(0o755)
+""")
+    npm.chmod(0o755)
+    monkeypatch.setenv('PATH', str(tmp_path) + os.pathsep + os.defpath)
+    monkeypatch.setenv('FIXTURE_PACKAGE', package)
+    monkeypatch.setenv('FIXTURE_VERSION', version)
+    monkeypatch.setenv('FIXTURE_PROVIDER', provider)
+    volume = tmp_path / 'volume'
+    volume.mkdir()
+    binary = module.ensure_provider(volume, provider)
+    assert binary.is_relative_to(volume)
+    assert subprocess.check_output([binary, '--version'], text=True).strip() == version
+    npm.unlink()
+    assert module.ensure_provider(volume, provider) == binary
+    assert not (volume / 'providers' / ('claude' if provider == 'codex' else 'codex')).exists()
+
+
+def test_start_refuses_replaced_provider(tmp_path, monkeypatch):
+    binary = tmp_path / 'runtime/providers/codex/node_modules/.bin/codex'
+    binary.parent.mkdir(parents=True)
+    binary.write_text('#!/bin/sh\necho "codex-cli 0.0.1"\n')
+    binary.chmod(0o755)
+    with pytest.raises(RuntimeError, match='codex 0.167.0'):
+        startup_config(tmp_path, monkeypatch)
+    assert not (tmp_path / 'data/service-config.json').exists()

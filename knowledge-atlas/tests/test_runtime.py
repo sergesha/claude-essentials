@@ -193,3 +193,16 @@ def test_missing_m4_is_reported_as_prerequisite(monkeypatch):
         runtime.check_prerequisites()
     assert error.value.component == 'm4'
     assert error.value.code == 'missing_prerequisite'
+
+
+def test_native_prepare_without_docker(tmp_path, monkeypatch, capsys):
+    """Reach native preflight directly from the CLI with Docker absent."""
+    import sys
+    from knowledge_atlas import cli
+    config = tmp_path / 'native.json'
+    config.write_text(json.dumps({'runtime_root': str(tmp_path / 'runtime')}))
+    monkeypatch.setenv('PATH', '')
+    monkeypatch.setattr(sys, 'argv', ['knowledge-atlas', 'runtime', 'prepare', '--config', str(config)])
+    assert cli.main() == 1
+    assert json.loads(capsys.readouterr().err)['component'] == 'git'
+    assert not (tmp_path / 'runtime').exists()

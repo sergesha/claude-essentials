@@ -1,10 +1,17 @@
 # Installation
 
-Start with [Docker installation](../docker/README.md) on qualified ARM64 systems,
-then [launch the local viewer](viewer.md). Native preparation remains supported
-and is documented below.
+The [Docker guide](../docker/README.md) describes the versioned GHCR pull and
+the explicit, same-source ARM64 local build. Check that the selected release
+has a qualified image digest before using its pull command. The 0.4.0 image
+is pending qualification.
 
-The Knowledge Atlas 0.1.0 backend has completed the documented technical qualification. Both host lifecycles have passed on the prepared macOS runtime. Prepared Linux runtime checks and both Codex and Claude packaged lifecycles also pass. See the verification notes for native host checks and environment limits. The initial targets are macOS arm64 and Ubuntu 24.04/glibc arm64; Windows is excluded.
+## Native installation without Docker
+
+On supported macOS or Linux, install uv, the native build prerequisites below,
+and the vendor CLI for each selected provider. From the package directory run
+`uv sync --locked` and use the resulting `.venv/bin/knowledge-atlas` command
+(or activate `.venv` for the examples below). Native preparation, component
+startup and MCP operation run directly on the host.
 
 The runtime recipe packages PoC9's retained native build: Wiki-LLM's local SQLite/MCP mode, the unchanged Utopia extraction library through its existing Rust wrapper, patched TerminusDB/embedded VectorLink/Lance, and the exact Gemma Q4 artifacts. It does not require Redis, PostgreSQL or the full Utopia server. Source revisions, patches and acquisition provenance are in `runtime/components.json`, `runtime/patches/manifest.json` and `runtime/source-manifest.json`.
 
@@ -111,7 +118,7 @@ a new version; automatic downgrade or data rewrite is not performed.
 | Gemma | Exact Q4 model, tokenizer and qualified runtime | The PoC used a separate embedding container; the optional Atlas Docker image packages this same runtime. |
 | Redis / PostgreSQL | Not needed by the selected atlas backend | Their availability as images does not establish a need for them here. |
 
-Native deployment remains available on macOS/Linux alongside the qualified optional
+Native deployment remains available on macOS/Linux alongside the optional
 Docker deployment. ACP is deferred; neither ACP nor Docker is required for native
 operation with the two supported provider paths.
 This decision does not claim native installation is faster or cheaper. Actual
@@ -187,4 +194,4 @@ and [Claude authentication instructions](https://code.claude.com/docs/en/authent
 
 ## Recommended Docker installation
 
-The local image and Compose deployment are described in [the Docker guide](../docker/README.md). This opt-in path uses persistent volumes and stdio MCP attachment without publishing ports. Native launch remains available; consult the verification report for the actual deployment evidence and remaining prerequisites.
+The versioned pull, explicit local build, pinned model download and vendor login commands are described in [the Docker guide](../docker/README.md). This opt-in path uses persistent volumes and stdio MCP attachment without publishing ports. Native launch remains available; consult the verification report for the actual deployment evidence and remaining prerequisites.

@@ -1,0 +1,10 @@
+services:
+  atlas:
+    image: knowledge-atlas:local
+    pull_policy: never
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        ATLAS_REVISION: ${ATLAS_REVISION:?Set ATLAS_REVISION to the exact source commit}
+        ATLAS_VERSION: ${ATLAS_VERSION:?Set ATLAS_VERSION to the matching source package version}

@@ -1,38 +1,75 @@
-# Local Docker deployment
+# Docker installation
 
-This path runs the existing Atlas components in one Ubuntu 24.04 ARM64 container.
-It uses local image builds and persistent named volumes. Docker is the recommended qualified ARM64 deployment; native installation
-remains supported. No service ports are published; MCP attaches through Docker
-stdio. The Docker daemon must already be available on the local machine.
+The release target is Linux ARM64 on a native ARM64 Docker host. Image delivery
+requires a published, anonymously verified digest for the selected Atlas release.
+The 0.4.0 image and its native pipeline are pending qualification. Use the
+release's recorded image digest when available.
 
-The supported initial CPU target is ARM64 on macOS or Linux. Do not enable
-Rosetta, force x86 emulation, use privileged mode or mount the Docker socket.
-The image includes the qualified toolchain and Codex 0.167.0 / Claude 2.1.319;
-provider authentication and runtime preparation are separate from image build.
-The image runs as Ubuntu's unprivileged `ubuntu` user (UID/GID 1000).
-New named volumes inherit writable ownership from the image.
+## Pull the release image
 
-From the repository root, choose one Compose project name for the service and its volumes:
+From the repository root, use the Compose file for the matching plugin release.
+Choose one project name for this service, its data and its provider login state.
 
 ```sh
 atlas_compose_file="$PWD/knowledge-atlas/docker/compose.yaml"
 atlas_compose() { docker compose -p atlas -f "$atlas_compose_file" "$@"; }
-atlas_compose build
-atlas_compose run --rm atlas prepare
+export ATLAS_IMAGE_DIGEST='sha256:REPLACE_WITH_THE_QUALIFIED_RELEASE_DIGEST'
+atlas_compose pull atlas
+atlas_compose run --rm --no-deps atlas prepare
 ```
 
-Preparation uses the existing pinned native build and model acquisition recipe.
-It needs network access, substantial free disk space and sufficient free Docker
-VM memory. The shared 8 GiB qualification VM previously exhausted memory during
-compilation/linking; one Cargo job does not guarantee a successful build under
-memory pressure. A subsequent fresh preparation passed after temporarily
-stopping selected workloads, with about 4.8 GiB available at the start. This is
-an observed successful condition, not a guaranteed minimum; inspect actual
-memory use and restore any workloads you temporarily stop. Failed builds and
-logs remain in the runtime volume. The
-existing fresh-directory rule applies; do not erase that volume to hide a
-failure. Retained/recovered runtime verification is not a clean-install result.
-Startup only validates prepared artifacts; it never silently downloads/builds.
+Compose defaults to the versioned public GHCR tag. With the release digest set,
+Docker verifies the content digest on pull. Keep the digest in this deployment's
+environment. If the tag, digest or architecture is unavailable, the pull fails.
+Choose the explicit build below on native ARM64 or use the [native installation](../docs/installation.md).
+Installing the plugin prepares its MCP Python dependencies on first use. Image
+acquisition, container startup and MCP attachment are separate operator actions.
+
+## Explicit local build
+
+Use the same Dockerfile as the release job. Select the matching source commit
+and build its committed files from a clean snapshot. From the repository root:
+
+```sh
+export ATLAS_REVISION="$(git rev-parse HEAD)"
+atlas_snapshot="$(mktemp -d)"
+git archive "$ATLAS_REVISION" knowledge-atlas | tar -x -C "$atlas_snapshot"
+atlas_compose_file="$atlas_snapshot/knowledge-atlas/docker/compose.yaml"
+export ATLAS_VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$atlas_snapshot/knowledge-atlas/pyproject.toml")"
+atlas_build_file="$atlas_snapshot/knowledge-atlas/docker/compose.build.yaml"
+atlas_compose() { docker compose -p atlas -f "$atlas_compose_file" -f "$atlas_build_file" "$@"; }
+atlas_compose build atlas
+atlas_compose run --rm --no-deps atlas prepare
+```
+
+Retain the snapshot while using those Compose files. The build needs Internet
+access, disk for native source and build trees, and enough free Docker guest
+memory to compile and link the locked Rust graph engine. A shared 8 GiB guest
+exhausted memory compiling Lance with one Cargo job. A failed build leaves the
+release unqualified. The local tag stays on this Docker host.
+
+Both image paths run as UID/GID 1000, publish no ports and require no Docker
+socket mount, elevated capabilities or emulation. The image contains the
+prebuilt Community graph, extractor, patched sources, interpreter and embedding
+packages. During prepare it links them at their stable image paths and downloads
+the three EmbeddingGemma Q4 files from the pinned ONNX Community revision into
+`/runtime/model`. Setup checks each SHA-256. It needs HTTPS access to Hugging
+Face and its download hosts. The selected revision was available anonymously.
+If access, storage or a hash check fails, inspect the error. Retry a network
+interruption with the same volume. A hash mismatch requires investigation and
+a fresh runtime volume. Startup validates the completed seed and requires the
+matching application version, source revision and runtime manifest. [Pinned hashes](../runtime/gemma-runtime-artifacts.json) · [Model revision](https://huggingface.co/onnx-community/embeddinggemma-300m-ONNX/tree/5090578d9565bb06545b4552f76e6bc2c93e4a66) · [Gemma terms](https://gemma.ai/resources/terms/)
+
+The image build retains component revisions, native hashes, source inventories
+and toolchain versions in `/opt/atlas-seed/runtime.json`. The checked-out
+Community sources include their licenses and identify the files Atlas patches.
+The SWI source archive, Cargo notices, source inventory and corresponding
+crate archives are under `/usr/share/doc/knowledge-atlas`. The application
+ships the exact patches and supplemental Lance and Tokenizers licenses under
+`/opt/knowledge-atlas/runtime/patches` and `/opt/knowledge-atlas/docker/licenses`.
+Wheel licenses and third-party notices remain with the installed packages. Public
+release qualification also needs the actual image's linked libraries and SWI
+extensions checked against their notice and corresponding-source requirements.
 
 ## Explicit stage profiles and native sign-in
 
@@ -50,6 +87,13 @@ For Claude, use its own explicit models/settings and native subscription login:
 atlas_compose run --rm atlas exec python3 -c 'import json; p=json.load(open("/opt/knowledge-atlas/runtime/model-profiles.json")); p={k:{**v,"provider":"claude","model":"sonnet","effort":"high"} for k,v in p.items()}; json.dump(p,open("/data/profiles.json","w"),indent=2)'
 atlas_compose run --rm atlas exec claude auth login --claudeai
 ```
+
+The login command acquires the selected vendor's pinned Linux executable via
+npm over HTTPS. Its package lock checks the wrapper and platform package
+integrity. Codex 0.167.0 and Claude Code 2.1.319 are installed separately under
+`/runtime/providers`. A prepare with existing profiles also installs all their
+selected providers. Retry prepare or the chosen login after resolving registry
+access. Provider credentials remain in the private `/auth` volume. [Codex authentication](https://developers.openai.com/codex/auth/) · [Claude Code setup and terms](https://code.claude.com/docs/en/setup)
 
 These are alternative initial configurations; editing profiles affects future
 processing/reuse identity. See [provider guidance](../docs/providers.md),
@@ -133,23 +177,12 @@ sh /absolute/path/to/knowledge-atlas/scripts/launch.sh view --atlas /data/projec
 Open the full localhost URL printed by that command. Browser pages and questions
 use the same backend as the installed Codex and Claude plugins.
 
-## Future versioned GHCR images
-
-This recipe builds a **build-capable image**; runtime preparation still compiles
-native components and downloads pinned model artifacts. Publishing that image
-alone would not remove preparation. Ready-to-use GHCR images need a prebuilt,
-validated runtime, stable interpreter paths, volume initialization/version checks,
-version/revision tags and immutable digests, and qualification for each advertised
-architecture. Data and credentials must remain external. Public distribution also
-requires a complete license/feature inventory for bundled CLIs, VectorLink modules,
-Gemma weights and transitive dependencies. No image is published by this increment.
-
 ## Stop, replace and retain data
 
 ```sh
 atlas_compose stop
 atlas_compose up -d --wait --wait-timeout 150
-# After building a replacement image:
+# After preparing the selected replacement image and runtime volume:
 atlas_compose up -d --force-recreate --wait --wait-timeout 150
 # Remove the disposable container/network, retaining volumes:
 atlas_compose down
@@ -189,13 +222,13 @@ container layer, but is not a backup and is not automatically disposable.
 | Pending operations, attempt/read evidence, service identity and logs | `data:/data/service` and other `/data` paths | Preserve pending work and audit evidence |
 | Provider/model configuration | `data:/data/profiles.json` | Durable, outside image layers |
 | Provider credentials and provider home | `auth:/auth` | Private durable state; never commit to Git |
-| Prepared runtime and downloaded models | `runtime:/runtime` | Reproducible from pinned inputs, with build/download cost |
+| Prepared runtime and downloaded models | `runtime:/runtime` | Image-bound native links, verified model downloads and selected provider installations |
 | Export and full-backup copies | Explicit destination outside Docker | Retain independently of Docker storage |
 
 Only verified derived indexes and temporary files are disposable. Do not equate
 re-running Wiki/Utopia/LLM extraction with restoring the same accepted version.
 The image supplies the pinned Python interpreter under `/opt/uv/python`.
-Runtime packages remain in `/runtime/python`. Replacing the provider login
+The runtime exposes the image’s Python packages through `/runtime/python`. Replacing the provider login
 volume no longer removes the runtime interpreter; retain that volume for login
 state. The graph's administrator key lives in `/data/graph/admin.key`. Keep it
 private and include it in a full backup of graph state.
@@ -205,7 +238,17 @@ private and include it in a full backup of graph state.
 Drain operations, stop all writers and take the full stopped-state backup
 described below **before** replacing the application. Include the old image
 identity and all mounted atlas directories. Reuse the same Compose project
-name, volumes and bind mounts. At startup the supervisor checks the repository
+name, data and auth volumes and bind mounts. A runtime from the previous
+release or a different build is rejected. Preserve that volume for rollback
+and select an unused runtime volume before preparing the replacement:
+
+```sh
+export ATLAS_RUNTIME_VOLUME=atlas_runtime_040
+atlas_compose run --rm --no-deps atlas prepare
+atlas_compose up -d --wait --wait-timeout 150
+```
+
+Keep that runtime volume selected on future commands. At startup the supervisor checks the repository
 at `/data/atlas`, its committed UUID, READY receipt and graph ownership before
 registering it in place. The old deployment's database stays `admin/atlas`.
 New projects receive separate UUID-derived databases. A fresh deployment starts
@@ -223,21 +266,21 @@ complete stopped pre-upgrade snapshot with the matching old application.
 ### Upgrading a 0.3.0 deployment
 
 Drain accepted operations, stop all writers, and back up the persistent volumes
-and any bind mounts. Build the new image using the existing project name.
+and any bind mounts. Select the new image using the existing project name.
 Earlier images wrote root-owned files. For the original named-volume layout,
 transfer ownership once, while the deployment is stopped:
 
 ```sh
 atlas_compose stop
-atlas_compose build
-atlas_compose run --rm --no-deps --user 0 atlas exec find /runtime /data /auth -xdev -uid 0 -exec chown -h 1000:1000 '{}' +
+export ATLAS_RUNTIME_VOLUME=atlas_runtime_040
+atlas_compose run --rm --no-deps --user 0 atlas exec find /data /auth -xdev -uid 0 -exec chown -h 1000:1000 '{}' +
+atlas_compose run --rm --no-deps atlas prepare
 atlas_compose up -d --wait --wait-timeout 150
 ```
 
 For bind mounts, give UID 1000 access to the intended host paths through their
 host ownership or ACLs before starting. Include separately mounted atlas paths.
-Startup rebinds the old virtual environment to the identical Python build in
-the image, validates the runtime, and rotates the legacy database's admin
+Startup validates the freshly seeded runtime and rotates the legacy database's admin
 password offline. Existing publications, indexes, provider login, and native
 packages stay on their original volumes. Confirm that status returns the
 expected READY and that an exact historical publication is readable before
