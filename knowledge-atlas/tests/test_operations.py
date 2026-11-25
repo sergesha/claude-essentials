@@ -151,6 +151,43 @@ def test_queued_configuration_is_frozen_and_status_remains_responsive(tmp_path):
         if process.is_alive(): process.terminate(); process.join(10)
 
 
+def test_operation_read_can_observe_committed_state_while_writer_is_active(tmp_path):
+    import sqlite3
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import closing
+    service = ServiceContext(tmp_path / 'service')
+    queued = submit(service, request(path=str(tmp_path / 'project')))
+    with ThreadPoolExecutor(max_workers=1) as readers:
+        with closing(sqlite3.connect(service.service_root / 'operations.sqlite3')) as writer:
+            writer.execute("UPDATE operations SET state='running' WHERE operation_id=?", (queued.operation_id,))
+            read = readers.submit(inspect_operation, service, queued.operation_id)
+            assert read.result(timeout=2).state == 'queued'
+
+
+def test_idle_dispatcher_does_not_repeatedly_open_database(tmp_path, monkeypatch):
+    import threading
+    from knowledge_atlas import operations
+    context = ServiceContext(tmp_path / 'service')
+    operations.initialize_service_storage(context)
+    first_scan = threading.Event()
+    another_scan = threading.Event()
+    database = operations.database
+
+    def track_scan(service):
+        if threading.current_thread().name == 'atlas-dispatcher':
+            (another_scan if first_scan.is_set() else first_scan).set()
+        return database(service)
+
+    monkeypatch.setattr(operations, 'database', track_scan)
+    dispatcher = operations.Dispatcher(context)
+    dispatcher.start()
+    try:
+        assert first_scan.wait(3)
+        assert not another_scan.wait(.35)
+    finally:
+        dispatcher.stop()
+
+
 def test_dispatcher_drains_queue_and_shutdown_reports_active_work(tmp_path):
     from knowledge_atlas.operations import Dispatcher
     context = ServiceContext(tmp_path/'service', handlers={'atlas.create':blocking_handler})
@@ -769,7 +806,6 @@ while time.monotonic() < deadline and not Path(sys.argv[3]).exists():
                (f'https://example.invalid/project?revision={count}', sys.argv[2]))
     if count == 1:
         print('writing', flush=True)
-    time.sleep(.004)
 db.close()
 """
     proc = subprocess.Popen([sys.executable, '-c', script, str(path), project, str(stop)],

@@ -293,11 +293,38 @@ def test_preflight_rechecks_cached_header_after_in_place_journal_mode_change(tmp
     assert before == {p.name: p.read_bytes() for p in service.service_root.iterdir()}
 
 
+def test_preflight_rejects_wal_transition_after_physical_header_read(tmp_path, monkeypatch):
+    from contextlib import closing
+    from knowledge_atlas import storage
+    from knowledge_atlas.operations import check_service_storage, initialize_service_storage
+    service = ServiceContext(tmp_path / 'service')
+    initialize_service_storage(service)
+    path = service.service_root / 'operations.sqlite3'
+    probe = storage._probe
+    wal_contents = None
+
+    def switch_after_header(command, *args):
+        nonlocal wal_contents
+        reply = probe(command, *args)
+        if command == 'header' and args[0] == path and wal_contents is None:
+            with closing(sqlite3.connect(path)) as db:
+                assert db.execute('PRAGMA journal_mode=WAL').fetchone()[0] == 'wal'
+            wal_contents = path.read_bytes()
+            assert list(service.service_root.iterdir()) == [path]
+        return reply
+
+    monkeypatch.setattr(storage, '_probe', switch_after_header)
+    with pytest.raises(AtlasError, match='unsupported.*format'):
+        check_service_storage(service)
+    assert wal_contents is not None and path.read_bytes() == wal_contents
+    assert list(service.service_root.iterdir()) == [path]
+
+
 @pytest.mark.parametrize(('installation', 'entry'), [
     (installation, entry)
     for installation in ('missing', 'broken')
     for entry in ('fresh-service', 'current-service', 'fresh-cache')
-] + [('broken-header', 'current-service')])
+] + [('broken-header', entry) for entry in ('fresh-service', 'current-service', 'fresh-cache')])
 def test_unusable_inspection_helper_preserves_supplied_storage(tmp_path, installation, entry):
     import shutil
     import subprocess
@@ -316,8 +343,9 @@ def test_unusable_inspection_helper_preserves_supplied_storage(tmp_path, install
     if installation == 'broken':
         (package / '_sqlite_probe.py').write_text('raise SystemExit(2)\n')
     elif installation == 'broken-header':
+        from knowledge_atlas.storage import _PROBE_PROTOCOL
         (package / '_sqlite_probe.py').write_text(
-            "import sys\nif sys.argv[1:] == ['ready']:\n    print('atlas-sqlite-probe/1')\n"
+            f"import sys\nif sys.argv[1:] == ['ready']:\n    sys.stdout.buffer.write({_PROBE_PROTOCOL!r})\n"
             "else:\n    raise SystemExit(2)\n")
     script = """import sys
 from pathlib import Path

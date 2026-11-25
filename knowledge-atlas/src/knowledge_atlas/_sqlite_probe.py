@@ -7,7 +7,7 @@ import stat
 import sys
 
 
-PROTOCOL = b'atlas-sqlite-probe/1\n'
+PROTOCOL = b'atlas-sqlite-probe/2\n'
 
 
 class InputDisappeared(FileNotFoundError):
@@ -26,15 +26,21 @@ def open_regular(path):
         yield stream
 
 
+def fingerprint(stream):
+    info = os.fstat(stream.fileno())
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+
 def main(args):
-    if args == ['ready']:
-        return b''
     command, name, *rest = args
     path = Path(name)
     if command == 'header' and not rest:
         with open_regular(path) as source:
-            opened = os.fstat(source.fileno())
-            return f'{opened.st_dev}:{opened.st_ino}\n'.encode() + source.read(64)
+            before = fingerprint(source)
+            header = source.read(64)
+            if fingerprint(source) != before:
+                return b'changed'
+            return ':'.join(map(str, before)).encode() + b'\n' + header
     if command != 'copy' or len(rest) != 1:
         raise RuntimeError('invalid SQLite inspection command')
     scratch = Path(rest[0])

@@ -11,11 +11,12 @@ import subprocess
 import sys
 from stat import S_ISREG
 import tempfile
+import time
 
 
 FORMAT = 3
 _PROBE_PROGRAM = Path(__file__).with_name('_sqlite_probe.py')
-_PROBE_PROTOCOL = b'atlas-sqlite-probe/1\n'
+_PROBE_PROTOCOL = b'atlas-sqlite-probe/2\n'
 
 
 @contextmanager
@@ -57,8 +58,18 @@ def _probe(*args):
 
 @lru_cache(maxsize=1)
 def _check_probe_revision(identity):
-    if _probe('ready') != b'':
-        raise RuntimeError('SQLite inspection helper returned an invalid readiness reply')
+    # Exercise the installed header command before creating any supplied state.
+    with tempfile.TemporaryDirectory() as temporary:
+        path = Path(temporary) / 'probe.sqlite3'
+        with closing(sqlite3.connect(path)) as db:
+            db.execute(f'PRAGMA user_version={FORMAT}')
+        expected = _snapshot_identity(path)
+        try:
+            if _verify_header(path, expected) == expected:
+                return
+        except (OSError, ValueError) as error:
+            raise RuntimeError('SQLite inspection helper failed its header check') from error
+        raise RuntimeError('SQLite inspection helper returned an invalid file fingerprint')
 
 
 def check_probe_ready():
@@ -72,15 +83,34 @@ def check_probe_ready():
 @lru_cache(maxsize=1)
 def _verify_header(path, identity):
     """Reuse only the most recently checked physical file revision during polling."""
-    opened, separator, header = _probe('header', path).partition(b'\n')
-    fields = opened.split(b':')
-    if not separator or len(fields) != 2 or not all(field.isdigit() for field in fields):
+    return _inspect_header(path, identity[:2])
+
+
+def _inspect_header(path, original):
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            reply = _probe('header', path)
+        except FileNotFoundError as error:
+            raise ValueError(f'{path.name} disappeared during inspection') from error
+        if reply != b'changed':
+            break
+        # Only retry a change across the helper's physical read of the header.
+        if time.monotonic() >= deadline:
+            raise ValueError(f'{path.name} kept changing during physical header inspection')
+    opened, separator, header = reply.partition(b'\n')
+    try:
+        fingerprint = tuple(int(field) for field in opened.split(b':'))
+    except ValueError as error:
+        raise RuntimeError('SQLite inspection helper returned an invalid header reply') from error
+    if not separator or len(fingerprint) != 5:
         raise RuntimeError('SQLite inspection helper returned an invalid header reply')
-    if opened != f'{identity[0]}:{identity[1]}'.encode():
+    if fingerprint[:2] != original:
         raise ValueError(f'{path.name} replaced during inspection')
     if (header[:16] != b'SQLite format 3\x00' or header[18:20] != b'\x01\x01'
             or int.from_bytes(header[60:64], 'big') != FORMAT):
         raise ValueError(f'unsupported {path.name} database format')
+    return fingerprint
 
 
 def _current_identity(path, original=None):
@@ -107,15 +137,12 @@ def _read_snapshot(path, original):
     check_probe_ready()
     uri = path.absolute().as_uri()
     for _ in range(4):
-        identity = _current_identity(path, original)
-        try:
-            _verify_header(path, identity)
-        except FileNotFoundError:
+        inspected = _verify_header(path, _current_identity(path, original))
+        if _current_identity(path, original) != inspected:
+            # A commit or a journal-mode switch changed the file. Read the actual
+            # format again. Writers can keep committing while this helper exits.
+            _inspect_header(path, original)
             _current_identity(path, original)
-            continue
-        # Row commits can change size and times during the physical format
-        # check. The inode identifies the file; SQLite establishes the snapshot.
-        _current_identity(path, original)
         with closing(sqlite3.connect(uri + '?mode=ro', uri=True, timeout=10)) as db:
             db.row_factory = sqlite3.Row
             db.execute('BEGIN')

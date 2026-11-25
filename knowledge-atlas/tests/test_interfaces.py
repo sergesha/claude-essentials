@@ -376,3 +376,38 @@ def test_status_marks_closed_http11_connections(app):
             assert json.load(response)['endpoint'] == app.endpoint
     finally:
         connection.close()
+
+
+@pytest.mark.parametrize('source', ['http', 'direct'])
+def test_idle_dispatch_sources(tmp_path, source):
+    import threading
+    from knowledge_atlas.client import AtlasClient
+    from knowledge_atlas.operations import inspect_operation, submit
+    from knowledge_atlas.http_api import create_app
+    app = create_app(ServiceContext(tmp_path / 'service'))
+    idle = threading.Event()
+    wait = app.dispatcher.wakeup.wait
+
+    # For HTTP, only an admission notification can wake the parked dispatcher
+    # before our deadline. Direct submissions rely on its regular timer.
+    def parked(timeout):
+        idle.set()
+        return wait(30 if source == 'http' else timeout)
+
+    app.dispatcher.wakeup.wait = parked
+    app.start()
+    try:
+        assert idle.wait(5)
+        request = ActionRequest('atlas.create', request_id=str(uuid.uuid4()),
+                                payload={'path': str(tmp_path / 'project')})
+        if source == 'http':
+            record = AtlasClient(app.context.service_root).call(request)
+        else:
+            record = submit(app.context, request)
+        deadline = time.monotonic() + 8
+        while record.state in ('queued', 'running') and time.monotonic() < deadline:
+            time.sleep(.1)
+            record = inspect_operation(app.context, record.operation_id)
+        assert record.state == 'succeeded', record
+    finally:
+        app.stop(wait=True)

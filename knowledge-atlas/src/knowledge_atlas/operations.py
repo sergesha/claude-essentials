@@ -450,6 +450,11 @@ def _persist_submission(context, request, request_json, digest, path, configurat
 
 def inspect_operation(context, operation_id):
     with database(context) as db:
+        row = _row(db, operation_id)
+        if row['state'] != 'running' or is_locked(Path(row['evidence']) / 'worker.lock'):
+            return _record(row)
+        # Only an apparently orphaned operation needs a write reservation.
+        # Recheck after taking it because another reader may have reconciled it.
         db.execute('BEGIN IMMEDIATE')
         row = _row(db, operation_id)
         if row['state'] == 'running' and not is_locked(Path(row['evidence']) / 'worker.lock'):
@@ -502,13 +507,13 @@ def dispatch(context):
 
 
 class Dispatcher:
-    """Service-owned polling loop; child work is independent of request connections."""
+    """Drain durable work on startup and admission, independently of request connections."""
     def __init__(self, context):
         import threading
         self.context = context
         self.stopping = threading.Event()
+        self.wakeup = threading.Event()
         self.thread = None
-        self.process = None
 
     def start(self):
         import threading
@@ -522,16 +527,20 @@ class Dispatcher:
 
     def _loop(self):
         while not self.stopping.is_set():
-            if self.process is not None and not self.process.is_alive():
-                self.process.join(); self.process = None
+            self.wakeup.clear()
             with database(self.context) as db:
                 running = [row[0] for row in db.execute("SELECT operation_id FROM operations WHERE state='running'")]
                 queued = db.execute("SELECT 1 FROM operations WHERE state='queued' LIMIT 1").fetchone()
             for identifier in running:
                 inspect_operation(self.context, identifier)
-            if queued and self.process is None and not is_locked(self.context.service_root/'writer.lock'):
-                self.process = dispatch(self.context)
-            self.stopping.wait(.05)
+            if queued and not is_locked(self.context.service_root/'writer.lock'):
+                process = dispatch(self.context)
+                process.join()
+                continue
+            # Independent submitters and workers surviving a service restart
+            # cannot signal this dispatcher. Reconcile those on a slower timer.
+            if not self.stopping.is_set():
+                self.wakeup.wait(2)
 
     def stop(self, *, wait=False):
         import time
@@ -540,7 +549,7 @@ class Dispatcher:
                 active = [row[0] for row in db.execute("SELECT operation_id FROM operations WHERE state IN ('queued','running')")]
             if not active: break
             if not wait: raise AtlasError('busy', 'active operations: ' + ', '.join(active), 409)
-            time.sleep(.05)
+            time.sleep(.25)
         self.stopping.set()
+        self.wakeup.set()
         if self.thread is not None: self.thread.join()
-        if self.process is not None: self.process.join()

@@ -131,6 +131,7 @@ class LocalApp:
                                 service = replace(app.context, configuration={
                                     **app.context.configuration, 'attribution_channel': channel})
                                 status,result=invoke(service,request)
+                                app.dispatcher.wakeup.set()
                             finally:
                                 with app.admission:
                                     app.submissions -= 1
