@@ -44,7 +44,7 @@ def lookup(records):
         payload = records[(source, identifier)]
         if isinstance(payload, Exception):
             raise payload
-        return json.dumps(payload).encode()
+        return json.dumps(payload).encode(), adv.SOURCES[source] + identifier
     return read
 
 
@@ -148,12 +148,12 @@ class GateTest(unittest.TestCase):
         coverage = {"complete": qualified, "errors": [] if qualified else ["unqualified"],
                     "components": [{"name": "sample", "version": "1.0"}], "findings": []}
         host = "Darwin-arm64"
-        scanner_id = dict(gate.PINS["assets"][host], host=host, version=gate.VERSION)
+        scanner_id = dict(gate.load_pins()["assets"][host], host=host, version=gate.VERSION)
         with patch.object(gate, "export_candidate", side_effect=export), \
              patch.object(gate, "install_scanner", return_value=(Path("trivy"), scanner_id)), \
              patch.object(gate, "download_db", side_effect=download_db), \
              patch.object(gate, "run_scanner", side_effect=scanner), \
-             patch.object(gate, "download", return_value=json.dumps(catalog()).encode()), \
+             patch.object(gate, "fetch_advisory", return_value=(json.dumps(catalog()).encode(), gate.KEV_SOURCES[0])), \
              patch.object(gate, "collect_coverage", return_value=coverage):
             return gate.main(["scan", "--image", "image", "--producer", "sample",
                               "--platform", "linux/arm64", "--out", str(out)])
@@ -211,7 +211,7 @@ class GateTest(unittest.TestCase):
             calls.append((source, identifier))
             if source == "github":
                 raise limited
-            return json.dumps({"id": identifier, "aliases": [KEV]}).encode()
+            return json.dumps({"id": identifier, "aliases": [KEV]}).encode(), adv.SOURCES[source] + identifier
         resolver = adv.Aliases(read)
         for identifier in (GHSA, gh2):
             result = adv.evaluate(finding(identifier), {KEV}, resolver)
@@ -233,12 +233,13 @@ class GateTest(unittest.TestCase):
 
     def test_kev_mirror_and_outage(self):
         reports = self.root
-        with patch.object(gate, "download", side_effect=[OSError("canonical outage"), json.dumps(catalog()).encode()]):
+        with patch.object(gate, "fetch_advisory", side_effect=[OSError("canonical outage"),
+                                                              (json.dumps(catalog()).encode(), gate.KEV_SOURCES[1])]):
             cves, meta = gate.fetch_kev(reports)
         self.assertEqual(cves, {KEV})
         self.assertEqual(meta["source"], gate.KEV_SOURCES[1])
         self.assertIn("canonical outage", gate.read_json(reports / "kev-attempts.json")[0]["error"])
-        with patch.object(gate, "download", side_effect=[OSError("canonical outage"), ValueError("mirror invalid")]):
+        with patch.object(gate, "fetch_advisory", side_effect=[OSError("canonical outage"), ValueError("mirror invalid")]):
             with self.assertRaisesRegex(ValueError, "mirror invalid"):
                 gate.fetch_kev(reports)
         self.assertTrue(all("error" in attempt for attempt in gate.read_json(reports / "kev-attempts.json")))
@@ -300,11 +301,12 @@ class GateTest(unittest.TestCase):
         class FakeOpener:
             def open(self, request, timeout):
                 calls.append(request)
-                return io.BytesIO(b"{}")
+                response = io.BytesIO(b"{}")
+                response.url = request.full_url
+                return response
         with patch.dict(os.environ, {"GITHUB_TOKEN": token}), \
-             patch.object(gate, "build_opener", return_value=FakeOpener()) as opener, \
-             patch.object(gate, "download", return_value=b"public") as public:
-            self.assertEqual(gate.lookup_advisory("github", GHSA), b"{}")
+             patch.object(gate, "build_opener", return_value=FakeOpener()) as opener:
+            self.assertEqual(gate.lookup_advisory("github", GHSA), (b"{}", adv.SOURCES["github"] + GHSA))
             request = calls[0]
             self.assertEqual(request.full_url, "https://api.github.com/advisories/" + GHSA)
             self.assertEqual(request.unredirected_hdrs["Authorization"], "Bearer " + token)
@@ -312,30 +314,123 @@ class GateTest(unittest.TestCase):
             handler = opener.call_args.args[0]
             for destination in ("https://example.com/leak", "https://api.github.com/another"):
                 self.assertIsNone(handler.redirect_request(request, None, 302, "", {}, destination))
-            self.assertEqual(gate.lookup_advisory("osv", OSV), b"public")
-            public.assert_called_once_with("https://api.osv.dev/v1/vulns/" + OSV)
+            self.assertEqual(gate.lookup_advisory("osv", OSV), (b"{}", adv.SOURCES["osv"] + OSV))
+            self.assertFalse(calls[-1].has_header("Authorization"))
             with self.assertRaises(ValueError):
                 gate.lookup_advisory("github", "../elsewhere")
-            self.assertEqual(len(calls), 1)
+            self.assertEqual(len(calls), 2)
             self.assertNotIn("GITHUB_TOKEN", gate.docker_env())
             self.assertNotIn("GITHUB_TOKEN", gate.scanner_env(self.root))
             opener.return_value.open = Mock(side_effect=HTTPError(request.full_url, 403, token, {}, None))
             record = adv.Aliases(gate.lookup_advisory).record("github", GHSA)
             self.assertIn("403", record["error"])
             self.assertNotIn(token, json.dumps(record))
-        for url in (*gate.KEV_SOURCES, gate.PINS["release"] + gate.PINS["assets"]["Darwin-arm64"]["name"],
-                    adv.SOURCES["osv"] + OSV):
-            response = io.BytesIO(b"public")
-            response.url = url
-            with patch.dict(os.environ, {"GITHUB_TOKEN": token}), \
-                 patch.object(gate, "urlopen", return_value=response) as fetch:
-                self.assertEqual(gate.download(url), b"public")
-                self.assertFalse(fetch.call_args.args[0].has_header("Authorization"))
+        with patch.dict(os.environ, {"GITHUB_TOKEN": token}), \
+             patch.object(gate, "build_opener", return_value=FakeOpener()):
+            for url in gate.KEV_SOURCES:
+                gate.fetch_advisory(gate.advisory_request(url))
+                self.assertFalse(calls[-1].has_header("Authorization"))
+        pins = gate.load_pins()
+        url = pins["release"] + pins["assets"]["Darwin-arm64"]["name"]
+        response = io.BytesIO(b"pinned downloadable asset")
+        response.url = "https://release-assets.githubusercontent.com/example"
+        with patch.dict(os.environ, {"GITHUB_TOKEN": token}), \
+             patch.object(gate, "urlopen", return_value=response) as fetch:
+            self.assertEqual(gate.download_asset(url), b"pinned downloadable asset")
+            self.assertFalse(fetch.call_args.args[0].has_header("Authorization"))
         with patch.dict(os.environ, {"GITHUB_TOKEN": ""}), \
              patch.object(gate, "build_opener", return_value=FakeOpener()):
             gate.lookup_advisory("github", GHSA)
             self.assertFalse(calls[-1].has_header("Authorization"))
 
+
+    def test_destination_retagged_during_db_verification(self):
+        out = self.root / "scan"
+        self.assertEqual(self.scan_fixture(out), 0)
+        candidate = gate.read_json(out / "reports/candidate.json")
+        current = candidate.copy()
+        real_hash = gate.sha256
+        def hash_and_retag(path):
+            digest = real_hash(path)
+            if path == out.resolve() / "cache/db/trivy.db":
+                current["id"] = "sha256:" + "f" * 64
+            return digest
+        with patch.object(gate, "sha256", side_effect=hash_and_retag), \
+             patch.object(gate, "inspect_image", side_effect=lambda ref: current.copy()):
+            self.assertEqual(gate.main(["verify", "--image", "destination", "--platform", "linux/arm64",
+                                        "--revision", REV, "--out", str(out)]), 2)
+        refusal = gate.read_json(next((out / "reports").glob("verify-*.json")))
+        self.assertEqual(refusal["error"], "destination image identity mismatch")
+
+    def test_trusted_advisory_redirects_and_provenance(self):
+        from urllib.error import HTTPError
+        foreign = "https://other.example/feed"
+        osv = adv.SOURCES["osv"] + OSV
+        content = json.dumps(catalog()).encode()
+        def response(url, body):
+            stream = io.BytesIO(body)
+            stream.url = url
+            return stream
+        def opener(handler):
+            def fetch(request, timeout):
+                url = request.full_url
+                if url in (gate.KEV_SOURCES[0], osv):
+                    for redirect in (foreign, "http://other.example/feed"):
+                        self.assertIsNone(handler.redirect_request(request, None, 302, "", {}, redirect))
+                    raise HTTPError(url, 302, "redirect refused", {}, None)
+                return response(url, content)
+            return Mock(open=fetch)
+        with patch.object(gate, "build_opener", side_effect=opener), \
+             patch.object(gate, "urlopen", side_effect=lambda *a, **k: response(foreign, content)):
+            cves, provenance = gate.fetch_kev(self.root)
+            self.assertEqual(cves, {KEV})
+            self.assertEqual(provenance["source"], gate.KEV_SOURCES[1])
+            self.assertEqual(provenance["effective_url"], gate.KEV_SOURCES[1])
+            self.assertIn("302", gate.read_json(self.root / "kev-attempts.json")[0]["error"])
+            record = adv.Aliases(gate.lookup_advisory).record("osv", OSV)
+            self.assertIn("302", record["error"])
+            self.assertNotIn("effective_url", record)
+        with patch.object(gate, "build_opener", return_value=Mock(open=Mock(
+                return_value=response(osv, json.dumps({"id": OSV}).encode())))):
+            record = adv.Aliases(gate.lookup_advisory).record("osv", OSV)
+            self.assertEqual(record["effective_url"], osv)
+            self.assertNotIn("error", record)
+
+    def test_pin_failure_writes_diagnostic_at_cli_entry(self):
+        import shutil
+        import subprocess
+        import sys
+        code = self.root / "tools"
+        code.mkdir()
+        for filename in ("advisories.py", "gate.py"):
+            shutil.copyfile(gate.HERE / filename, code / filename)
+        for index, content in enumerate((None, "{", "{}", '{"version": "bad"}')):
+            if content is not None:
+                (code / "trivy-pins.json").write_text(content)
+            out = self.root / f"scan-{index}"
+            proc = subprocess.run([sys.executable, str(code / "gate.py"), "scan", "--image", "sample",
+                                   "--producer", "sample", "--platform", "linux/arm64", "--out", str(out)],
+                                  capture_output=True, text=True, env=dict(os.environ, PATH=""))
+            with self.subTest(content=content):
+                self.assertEqual(proc.returncode, 2)
+                receipt = gate.read_json(out / "reports/decision.json")
+                self.assertEqual(receipt["status"], "incomplete")
+                self.assertIn("scanner pins", " ".join(receipt["errors"]))
+                self.assertNotIn("Traceback", proc.stderr)
+
+    def test_malformed_findings_keep_independent_blockers(self):
+        out = self.root / "scan"
+        rows = [dict(finding(KEV, severity="CRITICAL"), Status={}),
+                dict(finding(KEV), Severity=["LOW"])]
+        self.assertEqual(self.scan_fixture(out, extra_findings=rows), 2)
+        receipt = gate.read_json(out / "reports/decision.json")
+        self.assertEqual(receipt["status"], "incomplete")
+        self.assertEqual([f["finding"] for f in receipt["findings"]], rows)
+        for f in receipt["findings"]:
+            self.assertEqual(f["matched_kev"], [KEV])
+            self.assertIn("CISA KEV", f["reasons"])
+            self.assertTrue(f["errors"])
+        self.assertIn("CRITICAL", receipt["findings"][0]["reasons"])
 
     def test_composite_action(self):
         from re import findall

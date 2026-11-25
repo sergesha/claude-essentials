@@ -100,7 +100,7 @@ class Aliases:
                 entry["error"] = f"{source} lookup {identifier} skipped after rate limit: {self.rate_limits[source]}"
                 return entry
             try:
-                raw = self.lookup(source, identifier)
+                raw, entry["effective_url"] = self.lookup(source, identifier)
                 entry["sha256"] = hashlib.sha256(raw).hexdigest()
                 entry["record"] = json.loads(raw)
                 entry["equivalents"] = equivalents(source, identifier, entry["record"])
@@ -176,22 +176,23 @@ class Aliases:
 
 def evaluate(finding, kev, resolver):
     errors, reasons = [], []
-    primary = finding.get("VulnerabilityID")
-    aliases = resolver.resolve(primary, finding.get("VendorIDs", []))
+    fields = finding if isinstance(finding, dict) else {}
+    primary = fields.get("VulnerabilityID")
+    aliases = resolver.resolve(primary, fields.get("VendorIDs", []))
     errors.extend(aliases["errors"])
     matches = sorted(set(aliases["cves"]) & kev)
-    severity = finding.get("Severity")
-    fixed = finding.get("FixedVersion", "")
-    status = finding.get("Status", "unknown")
-    if severity not in SEVERITIES:
+    severity = fields.get("Severity")
+    fixed = fields.get("FixedVersion", "")
+    status = fields.get("Status", "unknown")
+    if not isinstance(severity, str) or severity not in SEVERITIES:
         errors.append("invalid severity")
     if not isinstance(fixed, str) or (fixed and not fixed.strip()):
         errors.append("invalid FixedVersion")
-    if status not in STATUSES or (status != "unknown" and (status == "fixed") != bool(fixed)):
+    if not isinstance(status, str) or status not in STATUSES or (status != "unknown" and (status == "fixed") != bool(fixed)):
         errors.append("contradictory or invalid vulnerability status")
-    if not all(string(finding.get(key)) for key in ("PkgName", "InstalledVersion")):
+    if not all(string(fields.get(key)) for key in ("PkgName", "InstalledVersion")):
         errors.append("missing installed package identity")
-    if not isinstance(finding.get("DataSource"), dict) or not string(finding["DataSource"].get("ID")):
+    if not isinstance(fields.get("DataSource"), dict) or not string(fields["DataSource"].get("ID")):
         errors.append("missing advisory data source")
     if severity == "CRITICAL":
         reasons.append("CRITICAL")

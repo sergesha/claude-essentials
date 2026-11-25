@@ -21,8 +21,7 @@ import advisories as adv
 from advisories import demand, string
 
 HERE = Path(__file__).resolve().parent
-PINS = json.loads((HERE / "trivy-pins.json").read_text())
-VERSION = PINS["version"]
+VERSION = "0.76.2"
 SOURCE = "https://github.com/sergesha/claude-essentials"
 POLICY = "plugin-image-security/1"
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
@@ -53,6 +52,20 @@ def sha256(path):
         return stream_hash(stream)
 
 
+def load_pins():
+    pins = read_json(HERE / "trivy-pins.json")
+    demand(pins.get("version") == VERSION, "missing or unexpected Trivy version")
+    demand(pins.get("release") == f"https://github.com/aquasecurity/trivy/releases/download/v{VERSION}/",
+           "unexpected Trivy release URL")
+    for host, suffix in (("Darwin-arm64", "macOS-ARM64"), ("Linux-arm64", "Linux-ARM64"),
+                         ("Linux-amd64", "Linux-64bit")):
+        asset = pins["assets"][host]
+        demand(asset["name"] == f"trivy_{VERSION}_{suffix}.tar.gz" and
+               re.fullmatch(r"[0-9a-f]{64}", asset["sha256"]), f"invalid Trivy pin for {host}")
+    demand(set(pins["assets"]) == {"Darwin-arm64", "Linux-arm64", "Linux-amd64"}, "unexpected Trivy host pin")
+    return pins
+
+
 def policy_files():
     return {name: sha256(HERE / name) for name in ("gate.py", "advisories.py", "trivy-pins.json")}
 
@@ -69,7 +82,7 @@ def write_json(path, value):
     tmp.replace(path)
 
 
-def download(url):
+def download_asset(url):
     request = Request(url, headers={"User-Agent": "claude-essentials-image-security/1"})
     with urlopen(request, timeout=60) as response:
         demand(response.url.startswith("https://"), "insecure redirect")
@@ -77,26 +90,37 @@ def download(url):
 
 
 class RejectRedirect(HTTPRedirectHandler):
-    """A GitHub credential is valid only on the exact requested advisory URL."""
+    """Require the exact advisory endpoint to serve its own bytes."""
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
 
 
+def advisory_request(url):
+    return Request(url, headers={"User-Agent": "claude-essentials-image-security/1"})
+
+
+def fetch_advisory(request):
+    demand(request.full_url.startswith("https://"), "advisory endpoint requires HTTPS")
+    with build_opener(RejectRedirect()).open(request, timeout=60) as response:
+        demand(response.url == request.full_url and response.url.startswith("https://"),
+               "unexpected effective advisory URL")
+        return response.read(), response.url
+
+
 def lookup_advisory(source, identifier):
     if source == "osv":
-        return download(adv.SOURCES["osv"] + adv.advisory_id(identifier))
+        return fetch_advisory(advisory_request(adv.SOURCES["osv"] + adv.advisory_id(identifier)))
     demand(source == "github" and adv.GHSA.fullmatch(identifier), "invalid GitHub advisory lookup")
     url = adv.SOURCES["github"] + identifier
-    request = Request(url, headers={"User-Agent": "claude-essentials-image-security/1"})
+    request = advisory_request(url)
     token = os.environ.get("GITHUB_TOKEN")
     if token:
         demand(token.isascii() and token.isprintable() and not any(c.isspace() for c in token),
                "invalid GitHub token encoding")
         request.add_unredirected_header("Authorization", "Bearer " + token)
     try:
-        with build_opener(RejectRedirect()).open(request, timeout=60) as response:
-            return response.read()
+        return fetch_advisory(request)
     except HTTPError as exc:
         # Persist only the status and rate-limit headers. A peer controls the reason text.
         headers = {name: exc.headers.get(name) for name in
@@ -209,14 +233,14 @@ def unpack_scanner(archive, expected, directory):
     return binary
 
 
-def install_scanner(directory):
+def install_scanner(directory, pins):
     arch = {"aarch64": "arm64", "x86_64": "amd64"}.get(platform.machine(), platform.machine())
     host = platform.system() + "-" + arch
-    demand(host in PINS["assets"], f"unsupported scanner host {host}")
-    asset = PINS["assets"][host]
-    url = PINS["release"] + asset["name"]
+    demand(host in pins["assets"], f"unsupported scanner host {host}")
+    asset = pins["assets"][host]
+    url = pins["release"] + asset["name"]
     archive = directory / asset["name"]
-    archive.write_bytes(download(url))
+    archive.write_bytes(download_asset(url))
     binary = unpack_scanner(archive, asset["sha256"], directory)
     return binary, dict(asset, host=host, version=VERSION, url=url, binary_sha256=sha256(binary))
 
@@ -266,7 +290,7 @@ def fetch_kev(reports):
         entry = {"source": source}
         attempts.append(entry)
         try:
-            raw = download(source)
+            raw, entry["effective_url"] = fetch_advisory(advisory_request(source))
             entry.update(sha256=hashlib.sha256(raw).hexdigest(), fetched_at=now().isoformat())
             (reports / f"kev-response-{len(attempts)}.json").write_bytes(raw)
             catalog = json.loads(raw)
@@ -276,6 +300,8 @@ def fetch_kev(reports):
             return cves, dict(entry, **metadata)
         except ERRORS as exc:
             entry["error"] = str(exc)
+            if isinstance(exc, HTTPError):
+                exc.close()
         finally:
             write_json(reports / "kev-attempts.json", attempts)
     raise ValueError("KEV unavailable: " + "; ".join(a["source"] + ": " + a["error"] for a in attempts))
@@ -332,7 +358,7 @@ def scan(args, directory):
     directory.mkdir(mode=0o700)
     reports = directory / "reports"
     reports.mkdir()
-    decision = {"status": "incomplete", "policy": POLICY, "policy_files": policy_files(), "started_at": now().isoformat(),
+    decision = {"status": "incomplete", "policy": POLICY, "policy_files": None, "started_at": now().isoformat(),
                 "producer": args.producer, "image": args.image, "platform": args.platform,
                 "candidate": None, "archive_sha256": None, "scanner": None, "db": None, "kev": None,
                 "config": {"flags": SCAN_FLAGS, "isolated": True}, "findings": [],
@@ -349,6 +375,8 @@ def scan(args, directory):
             errors.append(f"{name}: {exc}")
             return None
 
+    pins = step("scanner pins", load_pins)
+    decision["policy_files"] = step("policy file identities", policy_files)
     archive = directory / "candidate.tar"
     candidate = step("candidate", lambda: export_candidate(args.image, args.platform, directory))
     if candidate is None:
@@ -369,7 +397,7 @@ def scan(args, directory):
     kev = set()
     binary = None
     if decision["archive_sha256"]:
-        scanner = step("scanner integrity", lambda: install_scanner(directory))
+        scanner = step("scanner integrity", lambda: install_scanner(directory, pins)) if pins else None
         if scanner:
             binary, decision["scanner"] = scanner
             def fetch_db():
@@ -454,12 +482,11 @@ def verify(args, directory):
         demand(candidate == decision["candidate"] and candidate["revision"] == args.revision, "candidate revision mismatch")
         if os.environ.get("GITHUB_ACTIONS") == "true":
             demand(os.environ.get("GITHUB_SHA") == args.revision, "revision differs from CI checkout")
-        demand(inspect_image(args.image) == candidate, "destination image identity mismatch")
         archive = directory / "candidate.tar"
         demand(sha256(archive) == decision["archive_sha256"], "candidate archive hash mismatch")
         check_archive(archive, candidate)
         scanner = decision["scanner"]
-        pin = PINS["assets"][scanner["host"]]
+        pin = load_pins()["assets"][scanner["host"]]
         demand(scanner["version"] == VERSION and scanner["sha256"] == pin["sha256"] and
                scanner["name"] == pin["name"], "unexpected scanner identity")
         coverage = read_json(reports / "coverage.json")
@@ -468,7 +495,8 @@ def verify(args, directory):
                coverage["archive_sha256"] == decision["archive_sha256"], "coverage incomplete or mismatched")
         catalog = read_json(reports / "kev.json")
         adv.catalog_cves(catalog, now())
-        demand(decision["kev"]["source"] in KEV_SOURCES and decision["kev"]["sha256"] == evidence["kev.json"],
+        demand(decision["kev"]["source"] in KEV_SOURCES and
+               decision["kev"]["effective_url"] == decision["kev"]["source"] and decision["kev"]["sha256"] == evidence["kev.json"],
                "KEV evidence mismatch")
         db = decision["db"]
         demand(read_json(directory / "cache/db/metadata.json") == db["metadata"] and
@@ -476,6 +504,7 @@ def verify(args, directory):
         check_db(db["metadata"], now())
         check_recent(db["fetched_at"], now())
         check_recent(decision["kev"]["fetched_at"], now())
+        demand(inspect_image(args.image) == candidate, "destination image identity mismatch")
         record.update(status="pass", image_id=candidate["id"], archive_sha256=decision["archive_sha256"])
     except ERRORS as exc:
         record["error"] = str(exc)
