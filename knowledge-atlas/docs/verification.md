@@ -1,6 +1,43 @@
-# Knowledge Atlas 0.3.1 verification
+# Knowledge Atlas verification
 
-## Patch qualification
+## Atlas image release and recovery
+
+The Atlas image jobs run when Release Please creates an Atlas release from
+`main`. The publishing job builds the tagged commit on a hosted Linux ARM64
+runner. It checks the packaged application, scans the candidate with the
+shared plugin image security gate and verifies the scanned config ID again
+immediately before pushing the version tag to GHCR. The pipeline then
+compares the registry's platform config ID with the candidate it scanned.
+
+The publishing job retains its scan and publication artifacts. The clean
+verification job pulls the recorded manifest digest anonymously, checks OCI
+metadata and authenticated application status, and runs the native
+multi-project test on that exact ARM64 image. Review both jobs and their
+artifacts before treating the image as delivered. Native host installation and
+provider-account qualification have separate evidence.
+
+On first publication, the package owner sets the new package's visibility to
+Public in [GitHub Packages settings](https://docs.github.com/en/packages/learn-github-packages/configuring-a-packages-access-control-and-visibility).
+If anonymous pull failed while the package was private, rerun the failed
+verification job from the original release workflow. GitHub preserves the
+successful publisher's output digest. A retry of the publisher itself verifies
+an existing version against the publication receipt from the same run and
+preserves that digest. A conflict, missing receipt or unreadable registry
+response stops publication for maintainer investigation.
+
+When the matching image remains unavailable, follow the
+[explicit local build instructions](../docker/README.md) or
+[native installation](installation.md). For a qualified public release, use
+the versioned image and recorded digest with the Docker instructions.
+The verification helper accepts the recorded digest reference directly.
+
+```sh
+python3 knowledge-atlas/scripts/verify-release-image.py \
+  --image "ghcr.io/sergesha/knowledge-atlas@$ATLAS_DIGEST" \
+  --version "$ATLAS_VERSION" --revision "$ATLAS_REVISION"
+```
+
+## Atlas 0.3.1 patch qualification
 
 The Linux ARM64 package run used the locked Python environment and pinned Utopia extractor.
 The 0.3.1 run passed 267 tests and 11 subtests, with 11 opt-in integrations skipped.

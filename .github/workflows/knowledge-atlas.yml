@@ -9,6 +9,9 @@ on:
       - "release-please-config.json"
       - ".release-please-manifest.json"
       - ".github/workflows/knowledge-atlas.yml"
+      - ".github/workflows/release-please.yml"
+      - ".github/actions/plugin-image-security/**"
+      - "tools/image_security/**"
   push:
     branches: [main]
     paths:
@@ -18,6 +21,9 @@ on:
       - "release-please-config.json"
       - ".release-please-manifest.json"
       - ".github/workflows/knowledge-atlas.yml"
+      - ".github/workflows/release-please.yml"
+      - ".github/actions/plugin-image-security/**"
+      - "tools/image_security/**"
 
 permissions:
   contents: read
@@ -72,3 +78,37 @@ jobs:
           test -x "$POC9_EXTRACT_BIN"
           uv sync --locked
           uv run --no-sync pytest -q tests/test_retained_ingest.py tests/test_type_decisions.py
+
+  atlas-image:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build pull request candidate
+        id: build
+        run: |
+          set -euo pipefail
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("knowledge-atlas/pyproject.toml", "rb"))["project"]["version"])')"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          df -h "$RUNNER_TEMP"
+          free -h
+          docker buildx build --load --platform linux/arm64 --tag atlas-pr-candidate:local \
+            --build-arg ATLAS_VERSION="$version" \
+            --build-arg ATLAS_REVISION="$GITHUB_SHA" -f knowledge-atlas/docker/Dockerfile knowledge-atlas
+          printf 'image=%s\nversion=%s\n' \
+            "$(docker image inspect --format '{{.Id}}' atlas-pr-candidate:local)" "$version" >> "$GITHUB_OUTPUT"
+      - name: Exercise the packaged Atlas application
+        env:
+          IMAGE_ID: ${{ steps.build.outputs.image }}
+          ATLAS_VERSION: ${{ steps.build.outputs.version }}
+        run: |
+          python3 knowledge-atlas/scripts/verify-release-image.py --local-id "$IMAGE_ID" \
+            --version "$ATLAS_VERSION" --revision "$GITHUB_SHA"
+      - uses: ./.github/actions/plugin-image-security
+        with:
+          producer: knowledge-atlas
+          image: ${{ steps.build.outputs.image }}
+          platform: linux/arm64
+          out: ${{ runner.temp }}/atlas-security

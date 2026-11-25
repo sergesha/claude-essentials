@@ -1,0 +1,293 @@
+"""Release workflow contracts and isolated registry verification failures."""
+
+import importlib.util
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+import pytest
+import yaml
+
+
+PACKAGE = Path(__file__).resolve().parents[1]
+WORKFLOWS = PACKAGE.parent / ".github" / "workflows"
+REGISTRY = "ghcr.io/sergesha/knowledge-atlas"
+REVISION = "a" * 40
+VERSION = "0.4.0"
+DIGEST = "sha256:" + "b" * 64
+IMAGE = f"{REGISTRY}@{DIGEST}"
+ID = "sha256:" + "c" * 64
+
+
+def workflow(name):
+    text = (WORKFLOWS / name).read_text()
+    return yaml.load(text, Loader=yaml.BaseLoader)
+
+
+@pytest.fixture
+def helper():
+    path = PACKAGE / "scripts" / "verify-release-image.py"
+    spec = importlib.util.spec_from_file_location("verify_release_image", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_release_uses_only_atlas_outputs_and_exact_checkout():
+    release = workflow("release-please.yml")
+    assert set(release["on"]) == {"push"}
+    assert release["on"]["push"]["branches"] == ["main"]
+    assert release["permissions"] == {"contents": "read"}
+    jobs = release["jobs"]
+    outputs = jobs["release-please"]["outputs"]
+    assert set(outputs) == {"atlas_created", "atlas_sha", "atlas_tag", "atlas_version"}
+    for key, name in {
+        "atlas_created": "release_created", "atlas_sha": "sha",
+        "atlas_tag": "tag_name", "atlas_version": "version",
+    }.items():
+        assert f"knowledge-atlas--{name}" in outputs[key]
+    publish = jobs["atlas-image"]
+    assert publish["needs"] == "release-please"
+    assert "needs.release-please.outputs.atlas_created == 'true'" in publish["if"]
+    assert publish["permissions"] == {"contents": "read", "packages": "write"}
+    assert publish["runs-on"] == "ubuntu-24.04-arm"
+    assert "atlas_version" in publish["concurrency"]["group"]
+    assert publish["concurrency"]["cancel-in-progress"] == "false"
+    assert publish["steps"][0]["with"] == {
+        "ref": "${{ needs.release-please.outputs.atlas_sha }}",
+        "persist-credentials": "false",
+    }
+    steps = "\n".join(step.get("run", "") for step in publish["steps"])
+    assert "--build-arg ATLAS_VERSION=" in steps
+    assert "--build-arg ATLAS_REVISION=" in steps
+    assert "git rev-parse HEAD" in steps
+
+
+def test_pr_scans_candidate_without_push_permissions():
+    checks = workflow("knowledge-atlas.yml")
+    assert checks["permissions"] == {"contents": "read"}
+    assert "pull_request_target" not in checks["on"]
+    assert {
+        "tools/image_security/**", ".github/actions/plugin-image-security/**",
+    } <= set(checks["on"]["pull_request"]["paths"])
+    job = checks["jobs"]["atlas-image"]
+    assert job["if"] == "github.event_name == 'pull_request'"
+    assert job["runs-on"] == "ubuntu-24.04-arm"
+    assert not job.get("permissions")
+    for step in job["steps"]:
+        assert "docker login" not in step.get("run", "")
+        assert "docker push" not in step.get("run", "")
+    for name in ("knowledge-atlas.yml", "release-please.yml"):
+        steps = workflow(name)["jobs"]["atlas-image"]["steps"]
+        gate = next(step for step in steps if step.get("uses") == "./.github/actions/plugin-image-security")
+        assert gate["with"]["producer"] == "knowledge-atlas"
+        assert gate["with"]["platform"] == "linux/arm64"
+        assert gate["with"]["image"] == "${{ steps.build.outputs.image }}"
+        assert gate["with"]["out"] == "${{ runner.temp }}/atlas-security"
+        assert "continue-on-error" not in gate
+
+
+def test_native_job_qualifies_public_digest_separately():
+    release = workflow("release-please.yml")
+    job = release["jobs"]["atlas-verify"]
+    assert "atlas-image" in job["needs"]
+    assert job["runs-on"] == "ubuntu-24.04-arm"
+    assert job.get("permissions", {"contents": "read"}) == {"contents": "read"}
+    steps = "\n".join(step.get("run", "") for step in job["steps"])
+    assert "verify-release-image.py" in steps
+    assert "needs.atlas-image.outputs.digest" in json.dumps(job)
+    assert "uv run --no-sync pytest -q tests/integration/test_multi_project_runtime.py" in steps
+    assert "--runtime-config" in steps and "--evidence-dir" in steps
+    assert "docker login" not in steps
+    compose = yaml.load((PACKAGE / "docker/compose.yaml").read_text(), Loader=yaml.BaseLoader)
+    assert compose["services"]["atlas"]["image"].startswith(f"{REGISTRY}:{VERSION}")
+
+
+def test_publisher_checks_again_and_verifies_before_the_only_push():
+    steps = workflow("release-please.yml")["jobs"]["atlas-image"]["steps"]
+    index = next(i for i, step in enumerate(steps) if step.get("uses") == "./.github/actions/plugin-image-security")
+    publish = next(step for step in steps[index + 1:] if "docker push " in step.get("run", ""))
+    code = publish["run"]
+    assert code.count("docker push ") == 1
+    assert code.index("imagetools inspect") < code.index("gate.py verify") < code.index("docker push ")
+    assert "always()" not in publish.get("if", "")
+    assert "continue-on-error" not in publish
+    assert any("always()" in step.get("if", "") and "upload-artifact@" in step.get("uses", "") for step in steps)
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ("version", "version"), ("revision", "revision"), ("source", "source"),
+        ("digest", "digest"), ("platform", "platform"), ("unavailable", "manifest unknown"),
+        ("denied", "denied"), ("handshake", "application version"),
+        ("", None),
+    ],
+)
+def test_public_image_runs_anonymous_pull_and_authenticated_handshake(helper, monkeypatch, capsys, change, message):
+    options = {
+        "Id": ID, "Os": "linux", "Architecture": "arm64", "RepoDigests": [IMAGE],
+        "Config": {"Labels": {
+            "org.opencontainers.image.source": "https://github.com/sergesha/claude-essentials",
+            "org.opencontainers.image.version": VERSION,
+            "org.opencontainers.image.revision": REVISION,
+        }},
+    }
+    if change in {"version", "revision", "source"}:
+        options["Config"]["Labels"][f"org.opencontainers.image.{change}"] = "changed"
+    if change == "digest":
+        options["RepoDigests"] = [f"{REGISTRY}@{ID}"]
+    if change == "platform":
+        options["Architecture"] = "amd64"
+    calls = []
+
+    def command(argv, **kwargs):
+        assert argv[0:2] == ["docker", "--config"]
+        assert "ghcr.io" in json.loads((Path(argv[2]) / "config.json").read_text())["auths"]
+        calls.append(argv[3:])
+        if argv[3] == "pull":
+            if change in {"unavailable", "denied"}:
+                raise subprocess.CalledProcessError(1, argv, stderr=message)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if argv[3:5] == ["image", "inspect"]:
+            return subprocess.CompletedProcess(argv, 0, json.dumps([options]), "")
+        assert argv[3] == "run"
+        assert argv[argv.index("--network") + 1] == "none"
+        assert IMAGE in argv
+        result = {"application_version": "0.3.4" if change == "handshake" else VERSION}
+        return subprocess.CompletedProcess(argv, 0, json.dumps(result), "")
+
+    monkeypatch.setattr(helper.subprocess, "run", command)
+    outcome = helper.main(["--image", IMAGE, "--version", VERSION, "--revision", REVISION])
+    captured = capsys.readouterr()
+    assert calls[0] == ["pull", "--platform", "linux/arm64", IMAGE]
+    if message:
+        assert outcome != 0
+        assert message in captured.err.lower()
+    else:
+        assert outcome == 0
+        assert json.loads(captured.out)["config_id"] == ID
+        assert len(calls) == 3
+
+
+def test_tag_only_image_is_rejected_without_docker(helper, monkeypatch, capsys):
+    def unexpected_command(*args, **kwargs):
+        pytest.fail("Docker must not run for a mutable tag")
+
+    monkeypatch.setattr(helper.subprocess, "run", unexpected_command)
+    assert helper.main(["--image", f"{REGISTRY}:{VERSION}", "--version", VERSION, "--revision", REVISION]) != 0
+    assert "digest" in capsys.readouterr().err.lower()
+
+# The workflow's real shell runs with a disposable Docker/scan boundary. The
+# shared gate owns vulnerability decisions; these cases exercise their effect
+# on the Atlas publisher and the previously recorded registry identity.
+PUBLISH_COMMAND = """
+import json
+import os
+from pathlib import Path
+import sys
+
+tool, *args = sys.argv[1:]
+case = os.environ["ATLAS_TEST_CASE"]
+image = os.environ["ATLAS_REPOSITORY"] + ":" + os.environ["ATLAS_VERSION"]
+config = os.environ["IMAGE_ID"]
+digest = os.environ["ATLAS_TEST_DIGEST"]
+with Path(os.environ["ATLAS_TEST_TRACE"]).open("a") as trace:
+    print(tool, *args, file=trace)
+
+if tool == "git":
+    assert args == ["rev-parse", "HEAD"]
+    print(os.environ["ATLAS_REVISION"])
+elif tool == "python3":
+    assert args == [
+        "tools/image_security/gate.py", "verify", "--image", image, "--platform", "linux/arm64",
+        "--revision", os.environ["ATLAS_REVISION"], "--out", os.environ["RUNNER_TEMP"] + "/atlas-security",
+    ]
+    assert os.environ["GITHUB_SHA"] == os.environ["ATLAS_REVISION"]
+    if case in {"blocked", "incomplete", "stale", "substituted"}:
+        print(case, file=sys.stderr)
+        sys.exit(2)
+elif args[:3] == ["buildx", "imagetools", "inspect"]:
+    if args[3] == image:
+        if case == "denied":
+            print("ERROR: denied", file=sys.stderr)
+            sys.exit(1)
+        trace = Path(os.environ["ATLAS_TEST_TRACE"]).read_text()
+        if case not in {"reuse", "conflict"} and "docker push" not in trace:
+            print(f"ERROR: {image}: not found", file=sys.stderr)
+            sys.exit(1)
+        print(json.dumps({"digest": digest}))
+    elif args[-1] == "--raw":
+        print(json.dumps({"config": {"digest": config}}))
+    else:
+        print(json.dumps({
+            "architecture": "arm64", "os": "linux", "config": {"Labels": {
+                "org.opencontainers.image.source": "https://github.com/sergesha/claude-essentials",
+                "org.opencontainers.image.version": os.environ["ATLAS_VERSION"],
+                "org.opencontainers.image.revision": os.environ["ATLAS_REVISION"],
+            }},
+        }))
+elif args[0] == "tag":
+    assert args == ["tag", config, image]
+elif args[0] == "push":
+    assert args == ["push", image]
+else:
+    raise AssertionError(args)
+"""
+
+
+@pytest.mark.skipif(not shutil.which("bash") or not shutil.which("jq"), reason="publisher uses bash and jq")
+@pytest.mark.parametrize("case", ["blocked", "incomplete", "stale", "substituted", "denied", "conflict", "reuse", "publish"])
+def test_publisher_refuses_unsafe_attempts_and_reuses_exact_receipt(tmp_path, case):
+    steps = workflow("release-please.yml")["jobs"]["atlas-image"]["steps"]
+    lookup = next(step["run"] for step in steps if step.get("id") == "existing")
+    publish = next(step["run"] for step in steps if step.get("id") == "publish")
+    trace = tmp_path / "commands.txt"
+    shim = tmp_path / "command.py"
+    shim.write_text(PUBLISH_COMMAND)
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    for tool in ["docker", "git", "python3"]:
+        path = commands / tool
+        path.write_text(f'#!/bin/sh\nexec "$ATLAS_TEST_PYTHON" "$ATLAS_TEST_SHIM" {tool} "$@"\n')
+        path.chmod(0o755)
+    evidence = tmp_path / "atlas-publication"
+    evidence.mkdir()
+    output = tmp_path / "outputs"
+    output.touch()
+    tag = f"knowledge-atlas-v{VERSION}"
+    expected = {
+        "digest": DIGEST, "config_id": ID, "version": VERSION, "revision": REVISION,
+        "platform": "linux/arm64", "tag": tag,
+    }
+    if case in {"reuse", "conflict"}:
+        prior = tmp_path / "atlas-prior-publication" / "atlas-publication-1"
+        prior.mkdir(parents=True)
+        receipt = expected if case == "reuse" else {**expected, "digest": "sha256:" + "d" * 64}
+        (prior / "publication.json").write_text(json.dumps(receipt))
+    env = {
+        **os.environ, "PATH": f"{commands}:{os.environ['PATH']}", "RUNNER_TEMP": str(tmp_path),
+        "GITHUB_OUTPUT": str(output), "ATLAS_REPOSITORY": REGISTRY, "ATLAS_TAG": tag,
+        "ATLAS_VERSION": VERSION, "ATLAS_REVISION": REVISION, "IMAGE_ID": ID,
+        "ATLAS_TEST_CASE": case, "ATLAS_TEST_DIGEST": DIGEST, "ATLAS_TEST_PYTHON": sys.executable,
+        "ATLAS_TEST_SHIM": str(shim), "ATLAS_TEST_TRACE": str(trace),
+    }
+
+    result = subprocess.run(["bash", "-ec", lookup], env=env, capture_output=True, text=True)
+    if result.returncode == 0 and not output.read_text():
+        result = subprocess.run(["bash", "-ec", publish], env=env, capture_output=True, text=True)
+
+    calls = trace.read_text().splitlines()
+    pushes = [call for call in calls if call.startswith("docker push ")]
+    assert len(pushes) == (1 if case == "publish" else 0)
+    if case in {"reuse", "publish"}:
+        assert result.returncode == 0, result.stderr
+        assert json.loads((evidence / "publication.json").read_text()) == expected
+        assert f"digest={DIGEST}" in output.read_text()
+    else:
+        assert result.returncode != 0
+        assert not (evidence / "publication.json").exists()
+        assert not output.read_text()
