@@ -535,3 +535,38 @@ def test_start_refuses_replaced_provider(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match='codex 0.167.0'):
         startup_config(tmp_path, monkeypatch)
     assert not (tmp_path / 'data/service-config.json').exists()
+
+
+@pytest.mark.parametrize('invalid', ['missing-stage', 'unknown-provider', 'missing-model', 'invalid-shape', 'invalid-effort'])
+def test_prepare_validates_retained_profiles_before_setup(tmp_path, monkeypatch, invalid):
+    module = deployment()
+    profiles = {name: {'provider': 'codex', 'model': 'fixture', 'effort': 'high'} for name in
+                ('wiki', 'open', 'phrase', 'proposal', 'review_extension', 'grounded_answer')}
+    if invalid == 'missing-stage':
+        del profiles['wiki']
+    elif invalid == 'unknown-provider':
+        profiles['open']['provider'] = 'unknown'
+    elif invalid == 'missing-model':
+        del profiles['phrase']['model']
+    elif invalid == 'invalid-effort':
+        profiles['wiki']['effort'] = 'unknown'
+    else:
+        profiles = []
+    data = tmp_path / 'data'
+    data.mkdir()
+    (data / 'profiles.json').write_text(json.dumps(profiles))
+    volume = tmp_path / 'volume'
+    monkeypatch.setattr(module, 'roots', lambda: (volume, data))
+    monkeypatch.setattr(module, 'seed_packaged_runtime', lambda *_: pytest.fail('unexpected runtime setup'))
+    monkeypatch.setattr(sys, 'argv', ['entrypoint.py', 'prepare'])
+    monkeypatch.setattr(module.os, 'umask', lambda *_: None)
+    with pytest.raises(ValueError, match='profiles.json'):
+        module.main()
+    assert not volume.exists()
+
+
+def test_provider_boundary_rejects_unrecognized_name_without_writes(tmp_path):
+    module = deployment()
+    with pytest.raises(ValueError, match='provider'):
+        module.ensure_provider(tmp_path, 'unknown')
+    assert list(tmp_path.iterdir()) == []

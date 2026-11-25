@@ -141,3 +141,37 @@ def test_copyleft_crate_corresponding_source_is_preserved(tmp_path):
     entry = json.loads((materials / 'cargo-inventory.json').read_text())['registry/src/index/rug-1.19.2']
     assert entry['sha256'] == hashlib.sha256(archive.read_bytes()).hexdigest()
     assert entry['license'] == 'LGPL-3.0+'
+
+
+def test_process_death_reclaims_only_interrupted_download(seed, tmp_path):
+    import sys
+    destination = tmp_path / 'volume'
+    child = """
+import io, os, sys, urllib.request
+from pathlib import Path
+from knowledge_atlas import runtime
+from knowledge_atlas.packaged_runtime import seed_packaged_runtime
+
+class InterruptedDownload(io.BytesIO):
+    def read(self, size=-1):
+        if self.tell():
+            os._exit(73)
+        return super().read()
+
+runtime._assets = lambda: Path(sys.argv[3])
+urllib.request.urlopen = lambda *a, **kw: InterruptedDownload(b'x' * 1048576)
+seed_packaged_runtime(Path(sys.argv[1]), Path(sys.argv[2]))
+"""
+    result = subprocess.run([sys.executable, '-c', child, str(seed), str(destination),
+                             str(runtime._assets())], timeout=10)
+    assert result.returncode == 73
+    def partials():
+        return [p for p in destination.rglob('*') if p.is_file() and p.stat().st_size == 1048576]
+    assert len(partials()) == 1
+    retained = destination / 'model/tmp-operator-file'
+    retained.write_bytes(b'retain')
+    result = package().seed_packaged_runtime(seed, destination)
+    assert result.runtime_root == destination
+    assert retained.read_bytes() == b'retain'
+    assert (destination / 'model/tokenizer.json').read_bytes() == b'model fixture'
+    assert partials() == []

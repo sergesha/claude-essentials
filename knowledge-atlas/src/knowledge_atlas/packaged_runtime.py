@@ -76,7 +76,11 @@ def seed_packaged_runtime(seed: Path, destination: Path) -> RuntimeIdentity:
         if any(p.name not in allowed for p in destination.iterdir()):
             raise _incompatible()
         _links(seed, destination, initialize=True)
-        runtime.acquire_model(destination)
+        # The pending marker owns this single staging file. The mount lock also
+        # covers recovery after a killed downloader and every subsequent write.
+        partial = pending / 'model.download'
+        partial.unlink(missing_ok=True)
+        runtime.acquire_model(destination, partial=partial)
         identity = runtime.validate_runtime(RuntimeConfig(destination))
         pending.rename(ready)
         return identity

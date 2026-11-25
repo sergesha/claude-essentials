@@ -17,6 +17,8 @@ from knowledge_atlas.http_api import write_private
 from knowledge_atlas.client import AtlasClient
 from knowledge_atlas.launcher import service_context
 from knowledge_atlas.project_registry import adopt_existing_atlas
+from knowledge_atlas.providers.base import ProviderError
+from knowledge_atlas.providers.config import OPERATIONS, resolve_profile
 
 PACKAGE = Path(__file__).resolve().parents[1]
 
@@ -81,6 +83,8 @@ PROVIDERS = {'codex': '@openai/codex', 'claude': '@anthropic-ai/claude-code'}
 
 def ensure_provider(runtime, name):
     """Install the selected vendor binary into this deployment using its integrity lock."""
+    if not isinstance(name, str) or name not in PROVIDERS:
+        raise ValueError('unsupported provider; choose codex or claude')
     recipe = PACKAGE / 'docker/providers' / name
     providers = runtime / 'providers'
     providers.mkdir(exist_ok=True)
@@ -109,14 +113,24 @@ def verify_provider(path, name):
     raise RuntimeError(f'{name} {version} is required; run prepare with the configured profiles or use a fresh runtime volume')
 
 
+def read_profiles(path):
+    profiles = json.loads(path.read_text())
+    if not isinstance(profiles, dict) or set(profiles) != set(OPERATIONS):
+        raise ValueError('profiles.json requires six explicit provider/model stage profiles')
+    for stage, profile in profiles.items():
+        if not isinstance(profile, dict) or 'provider' not in profile:
+            raise ValueError(f'profiles.json requires an explicit provider for {stage}')
+        try:
+            resolve_profile(profiles, stage)
+        except (ProviderError, TypeError) as exc:
+            raise ValueError(f'profiles.json contains invalid settings for {stage}: {exc}') from exc
+    return profiles
+
+
 def start():
     runtime, data = roots()
     check_packaged_runtime(SEED, runtime)
-    profiles = json.loads((data / 'profiles.json').read_text())
-    stages = {'wiki', 'open', 'phrase', 'proposal', 'review_extension', 'grounded_answer'}
-    if set(profiles) != stages or any(not isinstance(p, dict) or p.get('provider') not in {'codex', 'claude'}
-                                    or not p.get('model') for p in profiles.values()):
-        raise ValueError('profiles.json requires six explicit provider/model stage profiles')
+    profiles = read_profiles(data / 'profiles.json')
     for name in sorted({profile['provider'] for profile in profiles.values()}):
         verify_provider(runtime / 'providers' / name / 'node_modules/.bin' / name, name)
     data.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -180,11 +194,11 @@ def main():
         start()
     elif args == ['prepare']:
         runtime, data = roots()
+        path = data / 'profiles.json'
+        profiles = read_profiles(path) if path.exists() else {}
         identity = seed_packaged_runtime(SEED, runtime)
-        profiles = data / 'profiles.json'
-        if profiles.is_file():
-            for name in sorted({p['provider'] for p in json.loads(profiles.read_text()).values()}):
-                ensure_provider(runtime, name)
+        for name in sorted({p['provider'] for p in profiles.values()}):
+            ensure_provider(runtime, name)
         print(identity)
     elif args[0] == 'exec' and len(args) > 1:
         if args[1] in PROVIDERS:

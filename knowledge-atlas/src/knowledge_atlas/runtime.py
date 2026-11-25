@@ -144,9 +144,11 @@ def _validate_runtime(config: RuntimeConfig, *, check_model: bool) -> RuntimeIde
     return RuntimeIdentity(root, target, components, profile['profile_id'])
 
 
-def _acquire(url: str, destination: Path, digest: str):
+def _acquire(url: str, destination: Path, digest: str, *, partial: Path | None = None):
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as output:
+    output = (tempfile.NamedTemporaryFile(dir=destination.parent, delete=False)
+              if partial is None else partial.open('xb'))
+    with output:
         partial = Path(output.name)
         try:
             with urllib.request.urlopen(url, timeout=120) as source:
@@ -160,7 +162,7 @@ def _acquire(url: str, destination: Path, digest: str):
             partial.unlink(missing_ok=True)
 
 
-def acquire_model(root: Path):
+def acquire_model(root: Path, *, partial: Path | None = None):
     """Acquire only the pinned weights and tokenizer; completed files can be reused."""
     pins = _json(_assets() / 'components.json', 'pinned components')['embedding']
     model = _json(_assets() / 'gemma-runtime-artifacts.json', 'model artifacts')
@@ -171,7 +173,8 @@ def acquire_model(root: Path):
         if path.exists():
             _check_hash(path, digest, name)
         else:
-            _acquire(f"https://huggingface.co/{pins['model']}/resolve/{pins['revision']}/{name}", path, digest)
+            url = f"https://huggingface.co/{pins['model']}/resolve/{pins['revision']}/{name}"
+            _acquire(url, path, digest, partial=partial)
 
 
 def prepare_runtime(config: RuntimeConfig) -> RuntimeIdentity:
