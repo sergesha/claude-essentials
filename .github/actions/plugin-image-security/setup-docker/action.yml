@@ -1,0 +1,40 @@
+name: Select classic Docker image store
+description: Use config digest image IDs for single-platform image checks on hosted Linux
+runs:
+  using: composite
+  steps:
+    - name: Select and verify the classic store
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [[ "${GITHUB_ACTIONS:-}" != true || "${RUNNER_ENVIRONMENT:-}" != github-hosted || "${RUNNER_OS:-}" != Linux ]]; then
+          echo "::error::Docker image store setup requires a GitHub-hosted Linux runner."
+          exit 1
+        fi
+
+        classic_store() {
+          [[ "$1" == "overlay2 "* && "$1" != *io.containerd.snapshotter.v1* ]]
+        }
+        store_format='{{.Driver}} {{json .DriverStatus}}'
+        store="$(docker info --format "$store_format")"
+        if ! classic_store "$store"; then
+          # The gate binds the image ID to the saved config bytes.
+          config="$(mktemp "$RUNNER_TEMP/docker-daemon.XXXXXX")"
+          trap 'rm -f "$config"' EXIT
+          {
+            if sudo -n test -e /etc/docker/daemon.json; then
+              sudo -n cat /etc/docker/daemon.json
+            else
+              printf '{}\n'
+            fi
+          } | jq '.features["containerd-snapshotter"] = false' > "$config"
+          sudo -n dockerd --validate --config-file "$config"
+          sudo -n install -D -m 0600 "$config" /etc/docker/daemon.json
+          sudo -n systemctl restart docker.service
+          store="$(docker info --format "$store_format")"
+        fi
+        if ! classic_store "$store"; then
+          echo "::error::Docker did not select the classic overlay2 image store."
+          exit 1
+        fi
+        echo "Docker uses the classic overlay2 image store."

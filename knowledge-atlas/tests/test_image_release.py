@@ -110,6 +110,100 @@ def test_native_job_qualifies_public_digest_separately():
     assert compose["services"]["atlas"]["image"].startswith(f"{REGISTRY}:{VERSION}")
 
 
+@pytest.mark.parametrize(("filename", "job"), [
+    ("knowledge-atlas.yml", "atlas-image"),
+    ("release-please.yml", "atlas-image"),
+    ("release-please.yml", "atlas-verify"),
+])
+def test_atlas_selects_classic_store_before_docker_work(filename, job):
+    steps = workflow(filename)["jobs"][job]["steps"]
+    assert steps[0]["uses"].startswith("actions/checkout@")
+    assert steps[1] == {"uses": "./.github/actions/plugin-image-security/setup-docker"}
+
+
+@pytest.mark.skipif(not shutil.which("jq"), reason="runner setup uses jq")
+@pytest.mark.parametrize("case", ["self-hosted", "classic", "switch", "fresh", "invalid", "restart-failed", "wrong-store"])
+def test_hosted_image_store_setup(tmp_path, case):
+    action = WORKFLOWS.parent / "actions/plugin-image-security/setup-docker/action.yml"
+    step, = yaml.load(action.read_text(), Loader=yaml.BaseLoader)["runs"]["steps"]
+    assert step["shell"] == "bash"
+    old = {"debug": True, "features": {"containerd-snapshotter": True, "other": True}}
+    config = tmp_path / "daemon.json"
+    if case != "fresh":
+        config.write_text(json.dumps(old))
+    trace = tmp_path / "calls"
+    shim = tmp_path / "command.py"
+    shim.write_text(r"""import os
+from pathlib import Path
+import shutil
+import sys
+
+tool, *args = sys.argv[1:]
+case = os.environ["SETUP_CASE"]
+root = Path(os.environ["RUNNER_TEMP"])
+config = root / "daemon.json"
+restarted = root / "restarted"
+with (root / "calls").open("a") as trace:
+    trace.write(tool + " " + args[0] + "\n")
+
+if tool == "docker":
+    assert args[0:2] == ["info", "--format"]
+    if case == "classic" or (restarted.exists() and case != "wrong-store"):
+        print('overlay2 [["Backing Filesystem","extfs"]]')
+    else:
+        print('overlayfs [["driver-type","io.containerd.snapshotter.v1"]]')
+else:
+    assert args.pop(0) == "-n"
+    command, *args = args
+    if command in ("test", "cat"):
+        assert args[-1] == "/etc/docker/daemon.json"
+        if command == "test":
+            assert args[0] == "-e"
+            sys.exit(not config.exists())
+        print(config.read_text(), end="")
+    elif command == "dockerd":
+        assert args[:2] == ["--validate", "--config-file"]
+        (root / "validated").write_bytes(Path(args[2]).read_bytes())
+        sys.exit(case == "invalid")
+    elif command == "install":
+        assert args[:3] == ["-D", "-m", "0600"]
+        assert args[4] == "/etc/docker/daemon.json"
+        assert (root / "validated").read_bytes() == Path(args[3]).read_bytes()
+        shutil.copyfile(args[3], config)
+    else:
+        assert (command, args) == ("systemctl", ["restart", "docker.service"])
+        if case == "restart-failed":
+            sys.exit(3)
+        restarted.touch()
+""")
+    for tool in ("docker", "sudo"):
+        path = tmp_path / tool
+        path.write_text(f'#!/bin/sh\nexec "{sys.executable}" "{shim}" {tool} "$@"\n')
+        path.chmod(0o755)
+    env = {**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}", "RUNNER_TEMP": str(tmp_path),
+           "RUNNER_OS": "Linux", "GITHUB_ACTIONS": "true", "SETUP_CASE": case,
+           "RUNNER_ENVIRONMENT": "self-hosted" if case == "self-hosted" else "github-hosted"}
+    result = subprocess.run(["bash", "-c", step["run"]], env=env, capture_output=True, text=True)
+    if case == "self-hosted":
+        assert result.returncode != 0
+        assert not trace.exists()
+    elif case == "classic":
+        assert result.returncode == 0, result.stderr
+        assert trace.read_text().splitlines() == ["docker info"]
+        assert json.loads(config.read_text()) == old
+    elif case == "invalid":
+        assert result.returncode != 0
+        assert not (tmp_path / "restarted").exists()
+        assert json.loads(config.read_text()) == old
+    else:
+        assert (result.returncode == 0) == (case in {"switch", "fresh"}), result.stderr
+        expected = {} if case == "fresh" else old
+        expected.setdefault("features", {})["containerd-snapshotter"] = False
+        assert json.loads(config.read_text()) == expected
+        if case != "restart-failed":
+            assert trace.read_text().splitlines()[-1] == "docker info"
+
+
 def test_publisher_checks_again_and_verifies_before_the_only_push():
     steps = workflow("release-please.yml")["jobs"]["atlas-image"]["steps"]
     index = next(i for i, step in enumerate(steps) if step.get("uses") == "./.github/actions/plugin-image-security")

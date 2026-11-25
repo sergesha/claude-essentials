@@ -48,6 +48,7 @@ jobs:
         with:
           ref: ${{ needs.release-please.outputs.atlas_sha }}
           persist-credentials: false
+      - uses: ./.github/actions/plugin-image-security/setup-docker
       - name: Verify release source
         run: |
           set -euo pipefail
@@ -209,6 +210,7 @@ jobs:
         with:
           ref: ${{ needs.release-please.outputs.atlas_sha }}
           persist-credentials: false
+      - uses: ./.github/actions/plugin-image-security/setup-docker
       - name: Anonymous pull and authenticated application handshake
         run: |
           set -euo pipefail

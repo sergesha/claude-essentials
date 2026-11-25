@@ -53,6 +53,7 @@ jobs:
         target: [mcp, embeddings]
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/plugin-image-security/setup-docker
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

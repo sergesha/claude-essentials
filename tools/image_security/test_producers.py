@@ -101,6 +101,10 @@ class TestProducerCoverage(unittest.TestCase):
                       "image: ${{ steps.build.outputs.image }}", "redis-memory-${{ matrix.target }}",
                       'smoke_mcp.py "$IMAGE"', "scope-isolation:", "native-python:"):
             self.assertIn(value, workflow)
+        images = workflow.split("\n  images:\n", 1)[1].split("\n  native-python:\n", 1)[0]
+        setup = images.index("uses: ./.github/actions/plugin-image-security/setup-docker")
+        self.assertLess(images.index("uses: actions/checkout@"), setup)
+        self.assertLess(setup, images.index("docker build"))
         for trigger in ("tools/image_security/**", ".github/actions/plugin-image-security/**"):
             self.assertEqual(workflow.count(trigger), 2)
         self.assertIn("coverage.py", gate.policy_files())
