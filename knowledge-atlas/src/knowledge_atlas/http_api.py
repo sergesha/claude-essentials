@@ -11,7 +11,7 @@ import threading
 from . import __version__
 from .api_models import parse_request, schema
 from .contracts import ActionContext, AtlasError
-from .operations import Dispatcher, inspect_operation, resume, submit
+from .operations import initialize_service_storage, Dispatcher, inspect_operation, resume, submit
 from .locks import FileLock
 from .providers.base import ProviderError
 from .atomic import write_private
@@ -57,7 +57,7 @@ class LocalApp:
         self.shutdown_lock=threading.Lock()
 
     def start(self):
-        self.context.service_root.mkdir(parents=True,exist_ok=True,mode=0o700)
+        initialize_service_storage(self.context)
         os.chmod(self.context.service_root,0o700)
         self.lock.__enter__()
         try:

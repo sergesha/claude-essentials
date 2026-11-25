@@ -5,7 +5,7 @@ from pathlib import Path
 import traceback
 from .contracts import ActionContext, ActionRequest, ActionResult, AtlasError, RuntimeConfig
 from .locks import FileLock, AtlasLock
-from .operations import database, encoded, operation_project, staged_restore_input, validate_atlas_path
+from .operations import initialize_service_storage, database, encoded, operation_project, staged_restore_input, validate_atlas_path
 from .project_registry import project_configuration
 from .actions import register_handlers, register_recoveries
 
@@ -34,6 +34,7 @@ def run_attempt(context, handler):
 
 
 def run_next(service):
+    initialize_service_storage(service)
     try:
         with FileLock(service.service_root/'writer.lock'):
             _execute_next(service)

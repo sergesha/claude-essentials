@@ -324,7 +324,7 @@ container layer, but is not a backup and is not automatically disposable.
 
 | Contents | Default location | Retention |
 | --- | --- | --- |
-| Project Git repositories, sources, accepted outputs, provenance, decisions and publication vectors | Each project directory under `/data`, including the original `/data/atlas` | Durable; preserve actual results |
+| Project Git repositories, sources, accepted outputs, provenance, decisions and publication vectors | Each project directory under `/data`, including a project explicitly created at `/data/atlas` | Durable; preserve actual results |
 | Shared embedding cache | `data:/data/service/vectors` | Retain verified cached vectors across restart |
 | TerminusDB database | `data:/data/graph` | Durable; do not delete on the assumption that LLM regeneration restores it |
 | Pending operations, attempt/read evidence, service identity and logs | `data:/data/service` and other `/data` paths | Preserve pending work and audit evidence |
@@ -341,58 +341,22 @@ volume no longer removes the runtime interpreter; retain that volume for login
 state. The graph's administrator key lives in `/data/graph/admin.key`. Keep it
 private and include it in a full backup of graph state.
 
-### Replacing a single-atlas container
+### Reattaching current storage
 
 Drain operations, stop all writers and take the full stopped-state backup
-described below **before** replacing the application. Include the old image
-identity and all mounted atlas directories. Reuse the same Compose project
-name, data and auth volumes and bind mounts. A runtime from the previous
-release or a different build is rejected. Preserve that volume for rollback
-and select an unused runtime volume before preparing the replacement:
+described below. To replace the container, select a matching application image,
+the same Compose project name, and the same current data, runtime, auth and
+project mounts. Each registered UUID opens its recorded location and graph
+database. The shared bridge cache verifies retained vectors before startup.
+Keep `/data/graph/admin.key` and `/data/graph/atlas-format.json` with the graph
+database and VectorLink state.
 
-```sh
-export ATLAS_RUNTIME_VOLUME=atlas_runtime_040
-atlas_compose run --rm --no-deps atlas prepare
-atlas_compose up -d --wait --wait-timeout 150
-```
-
-Keep that runtime volume selected on future commands. At startup the supervisor checks the repository
-at `/data/atlas`, its committed UUID, READY receipt and graph ownership before
-registering it in place. The old deployment's database stays `admin/atlas`.
-New projects receive separate UUID-derived databases. A fresh deployment starts
-with an empty inventory.
-
-The upgrade copies verified cache entries and canonical publication vectors
-to `/data/service/vectors`. The original cache, Git refs, graph state and
-authentication remain on their existing volumes. If adoption fails, keep the
-deployment stopped and inspect the startup error. Check that all original mounts,
-Git objects, graph ownership and cache integrity match the backup. Correct the
-cause and restart using the same volumes. Verify the listed UUID, READY and a
-historical publication before retiring the snapshot. To roll back, restore the
-complete stopped pre-upgrade snapshot with the matching old application.
-
-### Upgrading a 0.3.0 deployment
-
-Drain accepted operations, stop all writers, and back up the persistent volumes
-and any bind mounts. Select the new image using the existing project name.
-Earlier images wrote root-owned files. For the original named-volume layout,
-transfer ownership once, while the deployment is stopped:
-
-```sh
-atlas_compose stop
-export ATLAS_RUNTIME_VOLUME=atlas_runtime_040
-atlas_compose run --rm --no-deps --user 0 atlas exec find /data /auth -xdev -uid 0 -exec chown -h 1000:1000 '{}' +
-atlas_compose run --rm --no-deps atlas prepare
-atlas_compose up -d --wait --wait-timeout 150
-```
-
-For bind mounts, give UID 1000 access to the intended host paths through their
-host ownership or ACLs before starting. Include separately mounted atlas paths.
-Startup validates the freshly seeded runtime and rotates the legacy database's admin
-password offline. Existing publications, indexes, provider login, and native
-packages stay on their original volumes. Confirm that status returns the
-expected READY and that an exact historical publication is readable before
-retiring the backup.
+A fresh deployment can start with the supplied profiles, prepared runtime and
+provider login. It creates an empty service registry. An unmarked database,
+previous single-project store, invalid vector cache or graph missing its key
+stops startup before Atlas changes credentials or starts components. Keep the
+original mounts and stopped backup intact. Initialize a new deployment on
+fresh storage to create projects under the coordinated contract.
 
 For a **new deployment**, choose either override below. Keep the same Compose
 project name and the same override on subsequent management commands. Required
@@ -425,12 +389,11 @@ Submodules must be materialized within the mounted tree; host paths outside it
 are not automatically accessible. Do not run concurrent host and container writers.
 Database files and provider credentials do not belong in Git.
 
-For an **existing deployment**, first drain active work, stop all writers, and
-back up the original data. Deliberately copy the full selected directory into the
-host destination, including hidden Git files and permissions, before changing
-mounts. A new empty bind mount hides volume contents; it does not migrate them.
-Keep the original volume until the migrated deployment and recovery have been
-verified. There is no automatic migration or volume deletion in these overrides.
+When changing mount locations for a **current-format deployment**, drain active
+work, stop all writers and back up the data. Copy the full selected directory,
+including hidden Git files and permissions, into the host destination before
+changing mounts. An empty bind mount hides existing volume contents. Keep the
+original volume until the reattached service and its recovery have been verified.
 A bounded macOS/Rancher Desktop host-mount test passed two TerminusDB process
 SIGKILL/restart cycles, exact historical graph/vector preservation, an interrupted
 transaction with no partial visibility, and a subsequent write. This is process

@@ -39,7 +39,7 @@ def test_list_without_atlas_or_payload(tmp_path):
 
 def test_open_uuid_never_falls_back_to_path(tmp_path):
     path = tmp_path / 'legacy'
-    service = ServiceContext(tmp_path / 'service', configuration={'atlas_path': str(path)})
+    service = ServiceContext(tmp_path / 'service', configuration={})
     atlas_id = create_project(service, path)
     for selection, payload, expected in [
         (str(uuid.uuid4()), {}, ('atlas_not_found', 404)),
@@ -88,37 +88,6 @@ def test_distinct_graph_bindings_survive_restart(tmp_path):
     assert shared['database'] == 'admin/inherited'
 
 
-def test_registry_preserves_verified_legacy_database(tmp_path):
-    path = tmp_path / 'legacy'
-    atlas_id = create_project(ServiceContext(tmp_path / 'fixture-service'), path)
-    store = GitStore(path)
-    pubs = Publications(store)
-    profile = json.loads((_assets() / 'embedding-profile.json').read_text())
-    content = pubs.review(git(store.root, 'rev-parse', 'HEAD'), {
-        'decision': 'accept', 'kind': 'synthetic', 'actor': 'Fixture', 'reason': 'Legacy publication',
-        'accepted_at': '2026-11-13T01:00:00Z', 'base_publication': None,
-    }, profile)
-    ready = pubs.publish(content, lambda commit: {**projection(commit), 'database': 'admin/retained', 'vector_artifacts': {}})
-    git(store.root, 'config', '--local', 'remote.origin.url', 'ssh://git.example/legacy.git')
-    service = ServiceContext(tmp_path / 'service', configuration={
-        'graph': {'url': 'http://127.0.0.1:8765', 'database': 'admin/inherited'},
-    })
-    service.service_root.mkdir()
-    with sqlite3.connect(service.service_root / 'operations.sqlite3') as database:
-        database.execute('CREATE TABLE atlases (atlas_id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE)')
-        database.execute('INSERT INTO atlases VALUES (?, ?)', (atlas_id, str(path)))
-
-    from knowledge_atlas.project_registry import list_projects
-
-    assert list_projects(service)[0].graph_database == 'admin/retained'
-    request = ActionRequest('atlas.status', atlas_id=atlas_id)
-    resolved = ActionContext.for_read(service, request)
-    assert resolved.configuration['graph']['database'] == 'admin/retained'
-    assert resolved.project_binding.git_url == 'ssh://git.example/legacy.git'
-    assert invoke(service, ActionRequest('atlas.open', atlas_id=atlas_id))[1].publication == ready
-    assert register_atlas(ServiceContext(service.service_root), atlas_id, path) == resolved.project_binding
-
-
 def test_registration_requires_the_repository_uuid(tmp_path):
     path = tmp_path / 'atlas'
     original = create_project(ServiceContext(tmp_path / 'fixture-service'), path)
@@ -129,48 +98,19 @@ def test_registration_requires_the_repository_uuid(tmp_path):
     assert invoke(service, ActionRequest('atlas.open', atlas_id=original))[1].data['atlas_id'] == original
 
 
-def legacy_publication(path, vector_artifacts=None):
-    identity = create_project(ServiceContext(path.parent / 'fixture-service'), path)
+def retained_publication(path, vector_artifacts=None, *, database=None, service_root=None):
+    identity = create_project(ServiceContext(service_root or path.parent / 'fixture-service'), path)
     store = GitStore(path)
     pubs = Publications(store)
     profile = json.loads((_assets() / 'embedding-profile.json').read_text())
     content = pubs.review(git(store.root, 'rev-parse', 'HEAD'), {
-        'decision': 'accept', 'kind': 'synthetic', 'actor': 'Fixture', 'reason': 'Legacy',
+        'decision': 'accept', 'kind': 'synthetic', 'actor': 'Fixture', 'reason': 'Retained publication fixture',
         'accepted_at': '2026-11-13T01:00:00Z', 'base_publication': None,
     }, profile)
-    ready = pubs.publish(content, lambda oid: {**projection(oid), 'database': 'admin/atlas',
+    name = database or 'admin/atlas-' + uuid.UUID(identity).hex
+    ready = pubs.publish(content, lambda oid: {**projection(oid), 'database': name,
                                                'vector_artifacts': vector_artifacts or {}})
     return identity, store, ready
-
-
-def test_adopt_existing_uuid_and_database_once(tmp_path):
-    from knowledge_atlas.project_registry import adopt_existing_atlas, list_projects
-
-    path = tmp_path / 'atlas'
-    identity, store, ready = legacy_publication(path)
-    refs = git(store.root, 'show-ref')
-    service = ServiceContext(tmp_path / 'service')
-    for _ in range(2):
-        binding = adopt_existing_atlas(service, path, 'admin/atlas')
-        assert (binding.atlas_id, binding.path, binding.graph_database) == (identity, path, 'admin/atlas')
-        assert list_projects(service) == [binding]
-        assert Publications(store).ready() == ready
-        assert git(store.root, 'show-ref') == refs
-
-
-def test_adoption_failure_preserves_original(tmp_path):
-    from knowledge_atlas.project_registry import adopt_existing_atlas, list_projects
-
-    path = tmp_path / 'atlas'
-    identity, store, ready = legacy_publication(path)
-    refs = git(store.root, 'show-ref')
-    service = ServiceContext(tmp_path / 'service')
-    with pytest.raises(AtlasError, match='graph_atlas_conflict'):
-        adopt_existing_atlas(service, path, 'admin/other')
-    assert list_projects(service) == []
-    assert git(store.root, 'show-ref') == refs
-    assert Publications(store).ready() == ready
-    assert adopt_existing_atlas(service, path, 'admin/atlas').atlas_id == identity
 
 
 def vector_fixture(cache, text='retained text'):
@@ -183,36 +123,18 @@ def vector_fixture(cache, text='retained text'):
     return provider, body
 
 
-def test_adoption_copies_verified_cache_before_registration(tmp_path):
-    from knowledge_atlas.core.embedding_provider import EmbeddingProvider
-    from knowledge_atlas.project_registry import adopt_existing_atlas, list_projects
-
-    path = tmp_path / 'atlas'
-    identity, store, ready = legacy_publication(path)
-    source, body = vector_fixture(path / 'vectors')
-    with source.connect() as db:
-        key, digest = db.execute('SELECT key, sha256 FROM vector_integrity').fetchone()
-        db.execute("UPDATE vector_integrity SET sha256='damaged'")
-    service = ServiceContext(tmp_path / 'service')
-    with pytest.raises(AtlasError, match='integrity'):
-        adopt_existing_atlas(service, path, 'admin/atlas')
-    assert list_projects(service) == []
-    assert Publications(store).ready() == ready
-    with source.connect() as db:
-        db.execute('UPDATE vector_integrity SET sha256=? WHERE key=?', (digest, key))
-    assert adopt_existing_atlas(service, path, 'admin/atlas').atlas_id == identity
-    shared = EmbeddingProvider(_assets() / 'embedding-profile.json', service.service_root / 'vectors', 'offline')
-    assert shared.embed(body)['data'] == source.embed(body)['data']
-    assert shared.stats['inference_calls'] == 0
-
-
 def test_rebuild_seeds_archive_vectors_before_native_replay(tmp_path, monkeypatch):
     from knowledge_atlas.core import archive
     from knowledge_atlas.native_pipeline import project_native
 
-    store = GitStore(tmp_path / 'restored')
-    source, body = vector_fixture(store.base / 'vectors')
+    source, body = vector_fixture(tmp_path / 'source-cache')
     expected = source.embed(body)
+    with source.connect() as db:
+        artifact = json.loads(db.execute('SELECT artifact FROM vectors').fetchone()[0])
+    identity, store, _ = retained_publication(tmp_path / 'published', {artifact['input_sha256']: artifact})
+    old = store.base / 'vectors/vectors.sqlite3'
+    old.parent.mkdir()
+    old.write_bytes(b'unmarked unused old cache')
     cache = tmp_path / 'service/vectors'
     def replay(restored, builder):
         from knowledge_atlas.core.embedding_provider import EmbeddingProvider
@@ -223,85 +145,91 @@ def test_rebuild_seeds_archive_vectors_before_native_replay(tmp_path, monkeypatc
     monkeypatch.setattr(archive, 'rebuild_projections', replay)
     evidence = tmp_path / 'evidence'
     evidence.mkdir()
-    payload = {'configuration': {'graph': {'url': 'http://127.0.0.1:9403', 'database': 'admin/restored'}},
+    payload = {'configuration': {'graph': {'url': 'http://127.0.0.1:9403', 'database': 'admin/atlas-' + uuid.UUID(identity).hex}},
                'vector_cache': str(cache), 'runtime_root': str(tmp_path / 'runtime'), 'evidence': str(evidence),
                'request': {'action': 'publication.rebuild', 'payload': {}}}
     assert project_native(payload, store).data == {'ready': 'retained'}
+    assert old.read_bytes() == b'unmarked unused old cache'
 
 
-def test_legacy_bridge_cache_without_project_keeps_verified_vectors(tmp_path):
-    from knowledge_atlas.core.embedding_provider import EmbeddingProvider
-    from knowledge_atlas.project_registry import adopt_existing_atlas, list_projects
 
+@pytest.mark.parametrize('damage', ['zero-version', 'missing-schema', 'missing-binding', 'ambiguous-owner'])
+def test_invalid_registry_registration_is_never_completed_by_a_read(tmp_path, damage):
+    from knowledge_atlas.operations import database
+    from knowledge_atlas.project_registry import list_projects
     service = ServiceContext(tmp_path / 'service')
-    path = tmp_path / 'atlas'
-    source, body = vector_fixture(path / 'vectors')
-    assert adopt_existing_atlas(service, path, 'admin/atlas') is None
+    identity, store, ready = retained_publication(tmp_path / 'atlas')
+    register_atlas(service, identity, store.base)
+    path = service.service_root / 'operations.sqlite3'
+    with sqlite3.connect(path) as db:
+        if damage == 'zero-version':
+            db.execute('PRAGMA user_version=0')
+        elif damage == 'missing-schema':
+            db.execute('DROP TABLE resumes')
+        elif damage == 'missing-binding':
+            db.execute('ALTER TABLE atlases RENAME TO original')
+            db.execute('CREATE TABLE atlases AS SELECT atlas_id,path,NULL AS graph_database,git_url FROM original')
+            db.execute('DROP TABLE original')
+        else:
+            db.execute('INSERT INTO projection_owners VALUES (?,?,?)',
+                       ('http://127.0.0.1:9403', 'admin/atlas-' + uuid.UUID(identity).hex, str(uuid.uuid4())))
+    original = path.read_bytes()
+    refs = git(store.root, 'show-ref')
+    with pytest.raises(AtlasError, match='unsupported'):
+        list_projects(service)
+    assert path.read_bytes() == original
+    assert git(store.root, 'show-ref') == refs and Publications(store).ready() == ready
+
+
+def test_listing_fresh_and_current_registry_is_read_only(tmp_path):
+    from knowledge_atlas.project_registry import list_projects
+    service = ServiceContext(tmp_path / 'service')
     assert list_projects(service) == []
-    target = EmbeddingProvider(_assets() / 'embedding-profile.json', service.service_root / 'vectors', 'offline')
-    assert target.embed(body) == source.embed(body)
+    assert not service.service_root.exists()
+    identity = create_project(service, tmp_path / 'one')
+    path = service.service_root / 'operations.sqlite3'
+    original = path.read_bytes()
+    assert [p.atlas_id for p in list_projects(service)] == [identity]
+    assert original == path.read_bytes()
 
 
-def test_legacy_native_registry_migrates_cache_with_binding(tmp_path):
-    from knowledge_atlas.core.embedding_provider import EmbeddingProvider
-    from knowledge_atlas.project_registry import resolve_project
+def test_bridge_first_service_start_preserves_verified_vectors(tmp_path):
+    from knowledge_atlas.operations import database
+    service = ServiceContext(tmp_path / 'service')
+    provider, body = vector_fixture(service.service_root / 'vectors')
+    original = (provider.cache / 'vectors.sqlite3').read_bytes()
+    with database(service) as db:
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 3
+    with provider.connect() as db:
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 3
+    assert (provider.cache / 'vectors.sqlite3').read_bytes() == original
+    provider.request = lambda *_: pytest.fail('restarted bridge performed inference')
+    assert provider.embed(body)['data'][0]['embedding'] == [1.] * 256
 
-    path = tmp_path / 'legacy'
-    identity, store, ready = legacy_publication(path)
-    source, body = vector_fixture(path / 'vectors')
+
+def test_rejected_cache_merge_preserves_source_and_absent_destination(tmp_path):
+    from knowledge_atlas.core.embedding_provider import merge_verified_cache
+    provider, _ = vector_fixture(tmp_path / 'source')
+    with provider.connect() as db:
+        db.execute('DELETE FROM vector_integrity')
+    original = (provider.cache / 'vectors.sqlite3').read_bytes()
+    destination = tmp_path / 'destination'
+    with pytest.raises(ValueError, match='vector'):
+        merge_verified_cache(provider.cache, destination)
+    assert original == (provider.cache / 'vectors.sqlite3').read_bytes()
+    assert not destination.exists()
+
+
+def test_unmarked_wal_registry_leaves_no_sqlite_sidecars(tmp_path):
+    from contextlib import closing
+    from knowledge_atlas.operations import check_service_storage
     service = ServiceContext(tmp_path / 'service')
     service.service_root.mkdir()
-    with sqlite3.connect(service.service_root / 'operations.sqlite3') as db:
-        db.execute('CREATE TABLE atlases (atlas_id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE)')
-        db.execute('INSERT INTO atlases VALUES (?,?)', (identity, str(path)))
-    assert resolve_project(service, identity).graph_database == 'admin/atlas'
-    target = EmbeddingProvider(_assets() / 'embedding-profile.json', service.service_root / 'vectors', 'offline')
-    assert target.embed(body) == source.embed(body)
-    assert Publications(store).ready() == ready
-
-
-def test_adoption_rejects_another_unmigrated_owner(tmp_path):
-    from knowledge_atlas.project_registry import adopt_existing_atlas
-
-    first, _, _ = legacy_publication(tmp_path / 'retained')
-    _, store, ready = legacy_publication(tmp_path / 'legacy')
-    service = ServiceContext(tmp_path / 'service')
-    service.service_root.mkdir()
-    with sqlite3.connect(service.service_root / 'operations.sqlite3') as db:
-        db.execute('CREATE TABLE atlases (atlas_id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE)')
-        db.execute('INSERT INTO atlases VALUES (?,?)', (first, str(tmp_path / 'retained')))
-    with pytest.raises(AtlasError, match='graph_atlas_conflict'):
-        adopt_existing_atlas(service, store.base, 'admin/atlas')
-    assert Publications(store).ready() == ready
-
-
-def test_conflicting_git_vector_rolls_back_adoption_cache(tmp_path):
-    from knowledge_atlas.core.embedding_provider import cache_artifact
-    from knowledge_atlas.project_registry import adopt_existing_atlas, list_projects
-
-    fixture, _ = vector_fixture(tmp_path / 'fixture-vectors')
-    with fixture.connect() as db:
-        key, value = db.execute('SELECT key,artifact FROM vectors').fetchone()
-    canonical = {**json.loads(value), 'raw768': [2.] * 768}
-    identity, store, ready = legacy_publication(tmp_path / 'atlas', {canonical['input_sha256']: canonical})
-    source, _ = vector_fixture(store.base / 'vectors')
-    service = ServiceContext(tmp_path / 'service')
-    shared, _ = vector_fixture(service.service_root / 'vectors', 'another project')
-    rows = 'SELECT key,artifact,sha256 FROM vectors JOIN vector_integrity USING(key) ORDER BY key'
-    with shared.connect() as db:
-        previous = db.execute(rows).fetchall()
-
-    with pytest.raises(AtlasError, match='conflicting retained vector artifacts'):
-        adopt_existing_atlas(service, store.base, 'admin/atlas')
-    with shared.connect() as db:
-        assert db.execute(rows).fetchall() == previous
-    assert not list_projects(service)
-    assert Publications(store).ready() == ready
-
-    with source.connect() as db:
-        db.execute('DELETE FROM vectors WHERE key=?', (key,))
-        cache_artifact(db, key, canonical)
-    assert adopt_existing_atlas(service, store.base, 'admin/atlas').atlas_id == identity
-    with shared.connect() as db:
-        assert json.loads(db.execute('SELECT artifact FROM vectors WHERE key=?', (key,)).fetchone()[0]) == canonical
-        assert previous[0] in db.execute(rows).fetchall()
+    path = service.service_root / 'operations.sqlite3'
+    with closing(sqlite3.connect(path)) as db:
+        assert db.execute('PRAGMA journal_mode=WAL').fetchone()[0] == 'wal'
+        db.execute('CREATE TABLE atlases (atlas_id TEXT PRIMARY KEY)')
+    before = {p.name: p.read_bytes() for p in service.service_root.iterdir()}
+    with pytest.raises(AtlasError, match='unsupported'):
+        check_service_storage(service)
+    assert before == {p.name: p.read_bytes() for p in service.service_root.iterdir()}

@@ -133,24 +133,24 @@ assets and no Redis dependency. It binds only to loopback and never downloads
 weights during startup. Then run `runtime/embedding-provider.py` with `--profile`,
 `--cache` (`vectors/` under the configured `service_root`, shared by its projects), `--endpoint` (Gemma URL), and
 `--port`. Set `PYTHONPATH` to the installed package's `src/` when using these
-source-tree scripts. When upgrading a registered project, take a stopped backup
-and point the bridge at the service cache before restarting the service. The
-registry retains the project's existing graph binding and copies verified vectors
-from the old cache and canonical publications when it first resolves that project.
+source-tree scripts. A fresh native setup can start the bridge first. The service
+recognizes its current, integrity-checked cache on startup. Reattach the same
+service root to retain project UUIDs, graph bindings and verified vectors.
+An unsupported service or cache format stops startup and leaves its contents intact.
 
 Run `runtime/native-runtime.py` with `--runtime`, a separate `--state`, `--profile`,
 `--tokenizer`, the bridge URL as `--provider`, and a free `--port`; use `init` once,
 then `serve`. Initialization writes a private random administrator key to
 `<state>/admin.key`. Set `KNOWLEDGE_ATLAS_GRAPH_KEY_FILE` to its absolute path in
 the environment that starts the Atlas service and any direct graph clients.
-Back up this file with the graph database. On the first `serve` of a 0.3.0 state
-directory, stop existing graph writers first. The launcher changes only the
-offline database's administrator password and saves the new key before serving.
-Wait for HTTP 200 from `/api/v1/health` before publication/indexing.
+Back up the key with the graph's `atlas-format.json`, database and VectorLink
+state. A matching release requires that complete set on restart. A keyless or
+unmarked database stops startup with its original files intact. Rerun `init`
+after an interrupted fresh initialization to complete current owned staging.
+Wait for HTTP 200 from `/api/v1/health` before publication or indexing.
 `/api/info` can respond while the embedded engine is still initializing.
-Keep the bridge cache bound to the atlas being projected; use separate component
-state/ports for another independently running atlas. Runtime preparation and
-service launch do not silently start or share this atlas-specific cache.
+All projects in one service share its bridge cache and have distinct graph
+databases. Use separate service and graph storage for independent deployments.
 
 ## Linux qualification in Docker
 

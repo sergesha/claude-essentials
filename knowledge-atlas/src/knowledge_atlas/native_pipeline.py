@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import uuid
 from urllib.parse import urlsplit
 
 from .contracts import ActionRequest, ActionResult, AtlasError
@@ -136,8 +137,8 @@ def projection_graph(configuration):
 def claim_projection_database(context):
     from .core.git_store import GitStore
     from .operations import database
-    from .project_registry import (graph_endpoint, project_id, repository_identity,
-                                   verify_graph_owner, verify_unmigrated_graph_owners)
+    from .project_registry import (graph_endpoint, project_database, project_id, repository_identity,
+                                   verify_graph_owner)
 
     graph = projection_graph(context.configuration)
     endpoint = graph_endpoint(graph['url'])
@@ -145,10 +146,12 @@ def claim_projection_database(context):
     store = GitStore(context.atlas_path)
     identity = repository_identity(store.base)
     binding = context.project_binding
+    if binding is None:
+        raise AtlasError('graph_atlas_conflict', 'projection requires a current project binding', 409)
     if ((context.request.atlas_id is not None and project_id(context.request.atlas_id) != identity)
-            or (binding and (binding.atlas_id != identity or binding.path != store.base))):
+            or binding.atlas_id != identity or binding.path != store.base):
         raise AtlasError('atlas_conflict', 'the projection repository differs from the selected atlas', 409)
-    if binding and binding.graph_database != name:
+    if binding.graph_database != name or name != project_database(uuid.UUID(identity)):
         raise AtlasError('graph_atlas_conflict', 'the projection database differs from the selected atlas binding', 409)
 
     with database(context.service) as db:
@@ -157,14 +160,13 @@ def claim_projection_database(context):
         if registered:
             if Path(registered['path']) != store.base and Path(registered['path']).exists():
                 raise AtlasError('atlas_conflict', 'this UUID is already registered at another existing location', 409)
-            if registered['graph_database'] not in (None, name):
+            if registered['graph_database'] != name:
                 raise AtlasError('graph_atlas_conflict', 'the projection database differs from the registered binding', 409)
         verify_graph_owner(db, endpoint, name, identity)
         owner = db.execute('SELECT 1 FROM projection_owners WHERE endpoint=? AND database_name=?',
                            (endpoint, name)).fetchone()
         if owner:
             return
-        verify_unmigrated_graph_owners(db, identity, name)
         db.execute('INSERT INTO projection_owners VALUES (?,?,?)', (endpoint, name, identity))
 
 
@@ -186,9 +188,13 @@ def project_native(payload, store):
     builder = NativeProjection(store, native, tokenizer, formatter, cache)
     try:
         if rebuilding:
-            from .core.archive import rebuild_projections
-            from .core.embedding_provider import merge_verified_cache
-            merge_verified_cache(store.base / 'vectors', cache)
+            import sqlite3
+            from .core.archive import rebuild_projections, seed_retained_vectors
+            from .core.embedding_provider import initialize_cache
+            from .core.publication import Publications
+            initialize_cache(cache)
+            with sqlite3.connect(cache / 'vectors.sqlite3') as db:
+                seed_retained_vectors(Publications(store), db)
             return ActionResult(data=rebuild_projections(store, builder), evidence=[payload['evidence']])
         return ActionResult(data=builder.build(content), evidence=[payload['evidence']])
     finally:

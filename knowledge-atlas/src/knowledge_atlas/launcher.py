@@ -9,6 +9,7 @@ from .contracts import AtlasError,RuntimeConfig,ServiceContext
 from .locks import FileLock,is_locked
 from .http_api import create_app,write_private
 from .client import AtlasClient
+from .operations import initialize_service_storage
 
 
 def load_config(path=None):
@@ -28,13 +29,16 @@ def service_context(config):
     if runtime:
         runtime=RuntimeConfig(Path(runtime['runtime_root']).expanduser().resolve(),
                               Path(runtime['manifest']).expanduser().resolve() if runtime.get('manifest') else None)
-    return ServiceContext(root,runtime,config.get('configuration',{}))
+    settings = config.get('configuration', {})
+    if not isinstance(settings, dict) or 'atlas_path' in settings:
+        raise AtlasError('invalid_configuration', 'unsupported service configuration or universal atlas_path', 422)
+    return ServiceContext(root,runtime,settings)
 
 
 def ensure_service(config):
     context=service_context(config)
     root=context.service_root
-    root.mkdir(parents=True,exist_ok=True,mode=0o700)
+    initialize_service_storage(context)
     deadline=time.monotonic()+20
     while True:
         try:

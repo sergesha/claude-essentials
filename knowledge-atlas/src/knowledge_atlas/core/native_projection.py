@@ -11,7 +11,7 @@ from .git_store import git
 from .graph_stage import records_for, record_schema
 from .vector_projection import chunk_schema
 from .vector_chunks import chunks_for
-from .embedding_provider import initialize_cache, raw_vectors
+from .embedding_provider import initialize_cache, verified_vectors, raw_vectors
 
 
 def canonical_record(record):
@@ -91,7 +91,7 @@ class NativeProjection:
         # Retain this limitation explicitly; do not relabel native export as exact.
         excluded_ids = sorted(set(vectors) - expected_ids)
         with sqlite3.connect(self.cache / 'vectors.sqlite3') as db:
-            cached = [json.loads(row[0]) for row in db.execute('SELECT artifact FROM vectors')]
+            cached = [artifact for _, artifact in verified_vectors(db)]
         artifacts = {};max_error = 0.0
         for d in chunks:
             final_input = 'title: none | text: ' + d['text']

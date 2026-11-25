@@ -98,3 +98,36 @@ def test_projection_rejects_an_unbound_database_before_claiming_it(tmp_path):
         native_pipeline.claim_projection_database(attempt)
     with database(service) as db:
         assert db.execute('SELECT count(*) FROM projection_owners').fetchone()[0] == 0
+
+
+@pytest.mark.parametrize('damage', ['version', 'table', 'row', 'digest'])
+def test_damaged_vector_storage_is_untouched_before_graph_access(tmp_path, monkeypatch, damage):
+    from knowledge_atlas.core import native_projection
+    from test_project_registry import vector_fixture
+    cache = tmp_path / 'vectors'
+    source, _ = vector_fixture(cache)
+    with source.connect() as db:
+        db.execute({'version': 'PRAGMA user_version=0', 'table': 'DROP TABLE vector_integrity',
+                    'row': 'DELETE FROM vector_integrity', 'digest': "UPDATE vector_integrity SET sha256='bad'"}[damage])
+    path = cache / 'vectors.sqlite3'
+    before = path.read_bytes()
+    graph = {'url':'http://127.0.0.1:8765','database':'admin/fixture'}
+    ctx, pubs, content = setup_atlas(tmp_path / 'one', ServiceContext(tmp_path / 'svc'), graph)
+    graph_service = Mock(database='admin/fixture')
+    graph_service.call.side_effect = AssertionError('cache failure reached graph')
+    monkeypatch.setattr(native_projection, 'chunks_for', lambda *a: [])
+    with pytest.raises(ValueError, match='vector'):
+        NativeProjection(pubs.store, graph_service, None, None, cache).build(content)
+    assert path.read_bytes() == before
+    graph_service.call.assert_not_called()
+
+
+def test_projection_requires_current_binding_before_claim_on_an_unregistered_store(tmp_path):
+    graph = {'url':'http://127.0.0.1:8765', 'database':'admin/inherited'}
+    service = ServiceContext(tmp_path / 'service', configuration={'graph': graph})
+    ctx, _, _ = setup_atlas(tmp_path / 'atlas', service, graph)
+    fresh = ServiceContext(tmp_path / 'unregistered')
+    with pytest.raises(AtlasError, match='graph_atlas_conflict'):
+        native_pipeline.claim_projection_database(replace(ctx, service=fresh, configuration={'graph': graph},
+                                                         project_binding=None))
+    assert not fresh.service_root.exists()

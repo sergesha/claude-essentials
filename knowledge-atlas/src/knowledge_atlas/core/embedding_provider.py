@@ -3,6 +3,7 @@
 Returns raw first-256 components; native VectorLink owns the final L2 step.
 The pinned profile supplies identities, not permission to silently truncate input.
 """
+from contextlib import closing
 import hashlib
 import json
 import math
@@ -10,6 +11,14 @@ from pathlib import Path
 import sqlite3
 import time
 import urllib.request
+from ..storage import (check_init_stage, directory_lock, initialize_database, init_stage,
+                       readonly_database, verify_schema)
+
+
+VECTOR_SCHEMA = (
+    'CREATE TABLE vectors (key TEXT PRIMARY KEY NOT NULL, artifact TEXT NOT NULL)',
+    'CREATE TABLE vector_integrity (key TEXT PRIMARY KEY NOT NULL, sha256 TEXT NOT NULL)',
+)
 
 
 def canonical(value):
@@ -19,12 +28,17 @@ def canonical(value):
 def cache_artifact(db, key, artifact):
     """Retain new inference or verified Git bytes without changing artifact format."""
     value = canonical(artifact)
-    old = db.execute('SELECT artifact FROM vectors WHERE key=?', (key,)).fetchone()
-    if old and old[0] != value:
-        raise ValueError('conflicting retained vector artifacts')
     digest = hashlib.sha256(value.encode()).hexdigest()
-    db.execute('INSERT OR IGNORE INTO vectors VALUES (?,?)', (key, value))
-    db.execute('INSERT OR REPLACE INTO vector_integrity VALUES (?,?)', (key, digest))
+    inserted = db.execute('INSERT OR IGNORE INTO vectors VALUES (?,?)', (key, value))
+    if inserted.rowcount:
+        db.execute('INSERT INTO vector_integrity VALUES (?,?)', (key, digest))
+        return
+    old = db.execute('SELECT artifact,sha256 FROM vectors LEFT JOIN vector_integrity USING(key) '
+                     'WHERE key=?', (key,)).fetchone()
+    if old[0] != value:
+        raise ValueError('conflicting retained vector artifacts')
+    if old[1] != digest:
+        raise ValueError('cached vector integrity missing or mismatched')
 
 
 def raw_vectors(response, count):
@@ -40,14 +54,55 @@ def raw_vectors(response, count):
     return response
 
 
+def verified_vectors(db):
+    rows = db.execute('SELECT v.key,v.artifact,i.sha256 FROM vectors v LEFT JOIN vector_integrity i USING(key)')
+    for key, value, digest in rows:
+        if not isinstance(value, str) or hashlib.sha256(value.encode()).hexdigest() != digest:
+            raise ValueError('vector integrity missing or mismatched')
+        artifact = json.loads(value)
+        if artifact_key(artifact) != key:
+            raise ValueError('vector cache key mismatch')
+        yield key, artifact
+
+
+def verify_cache_contents(db):
+    verify_schema(db, VECTOR_SCHEMA)
+    if db.execute('SELECT key FROM vector_integrity EXCEPT SELECT key FROM vectors LIMIT 1').fetchone():
+        raise ValueError('orphaned vector integrity')
+    for _ in verified_vectors(db):
+        pass
+
+
+def check_cache(cache, *, locked=False, recover=False):
+    cache = Path(cache)
+    path = cache / 'vectors.sqlite3'
+    if cache.is_symlink():
+        raise ValueError('unsupported vector cache directory')
+    if not cache.exists():
+        return
+    if not cache.is_dir():
+        raise NotADirectoryError(cache)
+    if not path.exists() and not locked:
+        with directory_lock(cache):
+            return check_cache(cache, locked=True, recover=recover)
+    try:
+        if not path.exists() and not path.is_symlink():
+            check_init_stage(path)
+            if any(p != init_stage(path) for p in cache.iterdir()):
+                raise ValueError('unsupported vector storage without its database')
+            return
+        with readonly_database(path, recover_after_validation=recover) as db:
+            verify_cache_contents(db)
+    except (ValueError, KeyError, TypeError, AttributeError, sqlite3.Error) as error:
+        raise ValueError(f'unsupported vector storage: {error}') from error
+
+
 def initialize_cache(cache):
     cache = Path(cache)
-    cache.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(cache / 'vectors.sqlite3') as db:
-        db.execute('CREATE TABLE IF NOT EXISTS vectors (key TEXT PRIMARY KEY, artifact TEXT NOT NULL)')
-        db.execute('CREATE TABLE IF NOT EXISTS vector_integrity (key TEXT PRIMARY KEY, sha256 TEXT NOT NULL)')
-        db.execute('SELECT key, artifact FROM vectors LIMIT 0')
-        db.execute('SELECT key, sha256 FROM vector_integrity LIMIT 0')
+    check_cache(cache, recover=True)
+    path = cache / 'vectors.sqlite3'
+    if not path.exists():
+        initialize_database(path, VECTOR_SCHEMA, lambda: check_cache(cache, locked=True))
 
 
 def artifact_key(artifact):
@@ -61,31 +116,16 @@ def artifact_key(artifact):
 
 
 def merge_verified_cache(source, destination):
-    """Read a retained cache in place. Publish verified rows together or roll back."""
+    """Merge an explicitly supplied, current verified cache in one transaction."""
     original = Path(source) / 'vectors.sqlite3'
-    if not original.exists():
-        return
-    initialize_cache(destination)
-    with sqlite3.connect(Path(destination) / 'vectors.sqlite3') as target:
-        copy_verified_vectors(original, target)
-
-
-def copy_verified_vectors(original, target):
-    """Insert source rows into the caller's transaction without committing it."""
-    with sqlite3.connect(original.as_uri() + '?mode=ro', uri=True) as old:
-        if not old.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='vector_integrity'").fetchone():
-            # Older caches lack checksums. Their canonical document vectors come from Git.
+    with readonly_database(original) as source_db:
+        verify_cache_contents(source_db)
+        if original.parent.resolve() == Path(destination).resolve():
             return
-        rows = old.execute('SELECT v.key,v.artifact,i.sha256 FROM vectors v LEFT JOIN vector_integrity i USING(key)')
-        for key, value, digest in rows:
-            if digest is None:
-                continue  # Unverified legacy row in a partially upgraded cache.
-            if hashlib.sha256(value.encode()).hexdigest() != digest:
-                raise ValueError('legacy vector integrity mismatch')
-            artifact = json.loads(value)
-            if artifact_key(artifact) != key:
-                raise ValueError('legacy vector cache key mismatch')
-            cache_artifact(target, key, artifact)
+        initialize_cache(destination)
+        with closing(sqlite3.connect(Path(destination) / 'vectors.sqlite3')) as target, target:
+            for key, artifact in verified_vectors(source_db):
+                cache_artifact(target, key, artifact)
 
 
 class EmbeddingProvider:
@@ -130,7 +170,8 @@ class EmbeddingProvider:
                     if not integrity or integrity[0] != hashlib.sha256(row[0].encode()).hexdigest():
                         raise ValueError('cached vector integrity missing or mismatched; restore retained vectors from a verified atlas archive')
                     artifact = json.loads(row[0])
-                    raw_vectors([artifact['raw768']], 1)
+                    if artifact_key(artifact) != key:
+                        raise ValueError('cached vector identity mismatch')
                     expected = [self.profile['profile_id'], role, inputs[keys.index(key)]]
                     if [artifact['profile_id'], artifact['role'], artifact['input']] != expected:
                         raise ValueError('cached vector identity mismatch')

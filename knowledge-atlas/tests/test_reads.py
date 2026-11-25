@@ -185,7 +185,7 @@ def test_historical_read_retains_project_owned_graph(published, registered_histo
 
     store, first, content, lesson, service, docs = published
     binding, ready = registered_history
-    old_database = 'admin/retained'
+    old_database = binding.graph_database
     set_rebuilt_database(store, first, old_database)
     with database(service) as db:
         db.execute('INSERT INTO projection_owners VALUES (?,?,?)',

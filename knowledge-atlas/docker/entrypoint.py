@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Supervise the existing local Atlas components inside one container."""
+from contextlib import ExitStack
 import fcntl
 import json
 import os
@@ -15,8 +16,10 @@ import urllib.request
 from knowledge_atlas.packaged_runtime import check_packaged_runtime, seed_packaged_runtime
 from knowledge_atlas.http_api import write_private
 from knowledge_atlas.client import AtlasClient
+from knowledge_atlas.contracts import AtlasError
 from knowledge_atlas.launcher import service_context
-from knowledge_atlas.project_registry import adopt_existing_atlas
+from knowledge_atlas.operations import check_service_storage, initialize_service_storage
+from knowledge_atlas.storage import check_graph_state, directory_lock
 from knowledge_atlas.providers.base import ProviderError
 from knowledge_atlas.providers.config import OPERATIONS, resolve_profile
 
@@ -69,7 +72,7 @@ class Supervisor:
 
 
 def needs_graph_init(state):
-    return not (Path(state) / 'db').exists()
+    return check_graph_state(state)
 
 
 def roots():
@@ -129,15 +132,41 @@ def read_profiles(path):
 
 def start():
     runtime, data = roots()
-    check_packaged_runtime(SEED, runtime)
+    with ExitStack() as startup:
+        try:
+            startup.enter_context(directory_lock(data, blocking=False))
+        except BlockingIOError as error:
+            raise RuntimeError('another container is already supervising this data directory') from error
+        start_components(runtime, data)
+
+
+def start_components(runtime, data):
     profiles = read_profiles(data / 'profiles.json')
-    for name in sorted({profile['provider'] for profile in profiles.values()}):
-        verify_provider(runtime / 'providers' / name / 'node_modules/.bin' / name, name)
-    data.mkdir(parents=True, exist_ok=True, mode=0o700)
     config = {'service_root': str(data / 'service'), 'runtime': {'runtime_root': str(runtime)},
               'configuration': {'project_data_root': str(data), 'profiles': profiles, 'graph': {'url': 'http://127.0.0.1:9403'}}}
     service = service_context(config)
-    adopt_existing_atlas(service, data / 'atlas', 'admin/atlas')
+    check_service_storage(service)
+    needs_graph_init(data / 'graph')
+    retained_config = data / 'service-config.json'
+    if retained_config.is_symlink():
+        raise ValueError('unsupported retained service configuration')
+    if retained_config.exists():
+        try:
+            retained = service_context(json.loads(retained_config.read_text()))
+            if retained.service_root != service.service_root:
+                raise ValueError('different service root')
+        except (AtlasError, ValueError, KeyError, TypeError) as error:
+            raise ValueError('unsupported retained service configuration') from error
+    if not (service.service_root / 'operations.sqlite3').exists():
+        for entry in data.iterdir():
+            if entry.name in ('profiles.json', 'service'):
+                continue
+            if entry.is_symlink() or not entry.is_dir() or any(entry.iterdir()):
+                raise ValueError('unsupported deployment state without its service registry')
+    check_packaged_runtime(SEED, runtime)
+    for name in sorted({profile['provider'] for profile in profiles.values()}):
+        verify_provider(runtime / 'providers' / name / 'node_modules/.bin' / name, name)
+    initialize_service_storage(service)
     write_private(data / 'service-config.json', json.dumps(config))
     python = runtime / 'python/bin/python'
     profile = PACKAGE / 'runtime/embedding-profile.json'

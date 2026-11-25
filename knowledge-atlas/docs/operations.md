@@ -61,9 +61,9 @@ than repeat an uncertain model effect; retained attempt evidence must be inspect
 
 Projection uses the prepared runtime tokenizer and formatter. Configure its local
 native endpoint with `graph: {"url": "http://127.0.0.1:<port>"}`. The registry
-assigns each new project a unique database derived from its UUID. On migration
-it retains a verified database already used by an existing project. Ownership
-conflicts produce `graph_atlas_conflict` before a native projection write.
+assigns each new project a unique database derived from its UUID and reopens that
+exact binding on restart. A registry with missing or ambiguous ownership stops
+startup before workers run. Conflicts during project selection produce `graph_atlas_conflict` before a native projection write.
 The embedding bridge and builder must share a compatible cache. Native runtime
 and host qualification are recorded separately from controlled projection tests.
 

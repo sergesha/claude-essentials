@@ -16,7 +16,7 @@ import uuid
 
 from .contracts import ActionRequest, ActionResult, AtlasError, OperationRecord, ServiceContext
 from .locks import is_locked
-from .project_registry import project_configuration, project_id, register_project, resolve_project
+from .project_registry import graph_endpoint, project_database, project_configuration, project_id, register_project, resolve_project
 
 
 PATH_ACTIONS = frozenset(('atlas.create', 'archive.restore'))
@@ -26,49 +26,106 @@ PATH_ACTIONS = frozenset(('atlas.create', 'archive.restore'))
 _UUID_KEY = "replace(trim(replace(replace(lower(request_id),'urn:',''),'uuid:',''),'{}'),'-','')"
 
 
+REGISTRY_SCHEMA = (
+    'CREATE TABLE atlases (atlas_id TEXT PRIMARY KEY NOT NULL, path TEXT NOT NULL UNIQUE, '
+    'graph_database TEXT NOT NULL UNIQUE, git_url TEXT)',
+    'CREATE TABLE projection_owners (endpoint TEXT NOT NULL, database_name TEXT NOT NULL, '
+    'atlas_id TEXT NOT NULL, PRIMARY KEY (endpoint, database_name))',
+    'CREATE TABLE operations (operation_id TEXT PRIMARY KEY, request_id TEXT NOT NULL UNIQUE, '
+    'digest TEXT NOT NULL, request TEXT NOT NULL, configuration TEXT NOT NULL, atlas_path TEXT NOT NULL, '
+    'state TEXT NOT NULL, attempt INTEGER NOT NULL, evidence TEXT NOT NULL, previous_evidence TEXT, '
+    'result TEXT, error TEXT)',
+    'CREATE TABLE resumes (request_id TEXT PRIMARY KEY, operation_id TEXT NOT NULL)',
+    f'CREATE INDEX operation_uuid ON operations ({_UUID_KEY})',
+    f'CREATE INDEX resume_uuid ON resumes ({_UUID_KEY})',
+)
+
+
+def _check_registry(context, *, locked=False, recover=False):
+    from .storage import check_init_stage, directory_lock, init_stage, readonly_database, verify_schema
+    root = context.service_root
+    path = root / 'operations.sqlite3'
+    if 'atlas_path' in context.configuration:
+        raise AtlasError('invalid_configuration', 'unsupported universal atlas_path configuration', 422)
+    try:
+        if root.is_symlink() or (root.exists() and not root.is_dir()):
+            raise ValueError('unsupported service root')
+        if root.is_dir() and not path.exists() and not locked:
+            with directory_lock(root):
+                return _check_registry(context, locked=True, recover=recover)
+        if not path.exists() and not path.is_symlink():
+            if root.exists():
+                check_init_stage(path)
+                if any(p.name not in (init_stage(path).name, 'vectors') for p in root.iterdir()):
+                    raise ValueError('unsupported service state without its registry')
+                if (root / 'vectors').exists() or (root / 'vectors').is_symlink():
+                    from .core.embedding_provider import check_cache
+                    check_cache(root / 'vectors')
+            return
+        with readonly_database(path, recover_after_validation=recover) as db:
+            verify_schema(db, REGISTRY_SCHEMA)
+            for row in db.execute('SELECT atlas_id,path,graph_database FROM atlases'):
+                identity = uuid.UUID(row['atlas_id'])
+                if (str(identity) != row['atlas_id'] or not Path(row['path']).is_absolute()
+                        or row['graph_database'] != project_database(identity)):
+                    raise ValueError('unsupported project binding')
+            for row in db.execute('SELECT endpoint,database_name,atlas_id FROM projection_owners'):
+                identity = uuid.UUID(row['atlas_id'])
+                if (str(identity) != row['atlas_id'] or not row['endpoint']
+                        or graph_endpoint(row['endpoint']) != row['endpoint']
+                        or not row['endpoint'].startswith('http://127.0.0.1:')
+                        or row['database_name'] != project_database(identity)):
+                    raise ValueError('unsupported projection ownership')
+    except (ValueError, TypeError, AttributeError, sqlite3.Error) as error:
+        raise AtlasError('unsupported_storage', f'unsupported service registry: {error}', 422) from error
+
+
+def check_service_storage(context: ServiceContext) -> None:
+    """Inspect supplied durable state before startup writes or worker dispatch."""
+    from .core.embedding_provider import check_cache
+    _check_registry(context)
+    try:
+        check_cache(context.service_root / 'vectors')
+    except (ValueError, sqlite3.Error) as error:
+        raise AtlasError('unsupported_storage', f'unsupported service vector cache: {error}', 422) from error
+
+
+@contextmanager
+def read_registry(context):
+    from .storage import readonly_database
+    _check_registry(context)
+    path = context.service_root / 'operations.sqlite3'
+    if path.exists():
+        with readonly_database(path) as db:
+            yield db
+    else:
+        yield None
+
+
+def _current_registry(context):
+    from .storage import initialize_database
+    _check_registry(context, recover=True)
+    path = context.service_root / 'operations.sqlite3'
+    if not path.exists():
+        initialize_database(path, REGISTRY_SCHEMA, lambda: _check_registry(context, locked=True))
+    return path
+
+
+def initialize_service_storage(context):
+    check_service_storage(context)
+    _current_registry(context)
+
+
 @contextmanager
 def database(context):
-    root = context.service_root
-    root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    connection = sqlite3.connect(root / 'operations.sqlite3', timeout=10)
+    path = _current_registry(context)
+    connection = sqlite3.connect(path.absolute().as_uri() + '?mode=rw', uri=True, timeout=10)
     connection.row_factory = sqlite3.Row
     try:
-        connection.executescript(f'''
-            CREATE TABLE IF NOT EXISTS atlases (
-                atlas_id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE, graph_database TEXT, git_url TEXT);
-            CREATE TABLE IF NOT EXISTS projection_owners (
-                endpoint TEXT NOT NULL, database_name TEXT NOT NULL, atlas_id TEXT NOT NULL,
-                PRIMARY KEY (endpoint, database_name));
-            CREATE TABLE IF NOT EXISTS operations (
-                operation_id TEXT PRIMARY KEY, request_id TEXT NOT NULL UNIQUE, digest TEXT NOT NULL,
-                request TEXT NOT NULL, configuration TEXT NOT NULL, atlas_path TEXT NOT NULL,
-                state TEXT NOT NULL, attempt INTEGER NOT NULL, evidence TEXT NOT NULL,
-                previous_evidence TEXT, result TEXT, error TEXT);
-            CREATE TABLE IF NOT EXISTS resumes (request_id TEXT PRIMARY KEY, operation_id TEXT NOT NULL);
-            CREATE INDEX IF NOT EXISTS operation_uuid ON operations ({_UUID_KEY});
-            CREATE INDEX IF NOT EXISTS resume_uuid ON resumes ({_UUID_KEY});
-        ''')
-        _migrate_registry(connection)
-        yield connection
-        connection.commit()
-    except BaseException:
-        connection.rollback()
-        raise
+        with connection:
+            yield connection
     finally:
         connection.close()
-
-
-def _migrate_registry(connection):
-    fields = {'graph_database', 'git_url'}
-    columns = {row['name'] for row in connection.execute('PRAGMA table_info(atlases)')}
-    if fields - columns:
-        # Another connection may migrate the registry while this one waits for the lock.
-        with connection:
-            connection.execute('BEGIN IMMEDIATE')
-            columns = {row['name'] for row in connection.execute('PRAGMA table_info(atlases)')}
-            for field in sorted(fields - columns):
-                connection.execute(f'ALTER TABLE atlases ADD COLUMN {field} TEXT')
-    connection.execute('CREATE UNIQUE INDEX IF NOT EXISTS atlas_graph_database ON atlases(graph_database)')
 
 
 def encoded(value):
@@ -84,15 +141,12 @@ def _inside_atlas(path):
 
 
 def _registered_roots(context):
-    with database(context) as db:
-        return [Path(row['path']) for row in db.execute('SELECT path FROM atlases')]
+    with read_registry(context) as db:
+        return [Path(row['path']) for row in db.execute('SELECT path FROM atlases')] if db is not None else []
 
 
 def validate_atlas_path(context, path):
     path = Path(path).resolve()
-    bound = context.configuration.get('atlas_path')
-    if bound is not None and (not isinstance(bound, str) or not bound or path != Path(bound).expanduser().resolve()):
-        raise AtlasError('invalid_location', 'this deployment is bound to a different atlas path', 422)
     data_root = context.configuration.get('project_data_root')
     if data_root is not None:
         root = Path(data_root).resolve()
@@ -262,9 +316,6 @@ def external_archive_path(context, value):
     except (ValueError, OSError, RuntimeError) as error:
         raise AtlasError('invalid_archive', 'archive input path is unavailable', 422) from error
     roots = [context.service_root, *_registered_roots(context)]
-    bound = context.configuration.get('atlas_path')
-    if bound:
-        roots.append(Path(bound).expanduser().resolve())
     if _inside_atlas(source) or _inside_private_root(source, roots):
         raise AtlasError('invalid_archive', 'archive input must be outside service and atlas data', 422)
     return source

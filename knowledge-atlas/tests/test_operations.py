@@ -291,32 +291,49 @@ def test_nested_atlas_rejected_before_writing_inside_existing_worktree(tmp_path)
     assert not nested.exists()
 
 
-def test_bound_atlas_path_guards_reads_mutations_and_queued_workers(tmp_path):
-    from knowledge_atlas.core.git_store import GitStore
-    from knowledge_atlas.operations import atlas_path, register_atlas
+@pytest.mark.parametrize('entry', ['launcher', 'serve', 'worker'])
+@pytest.mark.parametrize('damage', ['atlas_path', 'old-schema', 'attempts'])
+def test_unsupported_startup_leaves_storage_and_workers_untouched(tmp_path, monkeypatch, entry, damage):
+    import sqlite3
+    from knowledge_atlas import launcher
+    from knowledge_atlas.http_api import create_app
     from knowledge_atlas.worker import run_next
-    from test_packages import snapshot
+    root = tmp_path / 'service'
+    root.mkdir()
+    config = {'service_root': str(root), 'configuration': {}}
+    if damage == 'atlas_path':
+        config['configuration']['atlas_path'] = str(tmp_path / 'atlas')
+    elif damage == 'old-schema':
+        with sqlite3.connect(root / 'operations.sqlite3') as db:
+            db.execute('CREATE TABLE atlases (atlas_id TEXT PRIMARY KEY, path TEXT NOT NULL UNIQUE)')
+    else:
+        (root / 'attempts').mkdir()
+    (root / 'token').write_bytes(b'original')
+    before = {p.name: p.read_bytes() if p.is_file() else None for p in root.iterdir()}
+    monkeypatch.setattr(launcher.subprocess, 'Popen', lambda *a, **kw: pytest.fail('started process'))
+    from knowledge_atlas import operations
+    monkeypatch.setattr(operations.Dispatcher, 'start', lambda *a: pytest.fail('started worker'))
+    with pytest.raises(AtlasError, match='unsupported'):
+        if entry == 'launcher':
+            launcher.ensure_service(config)
+        elif entry == 'serve':
+            create_app(ServiceContext(root, configuration=config['configuration'])).start()
+        else:
+            run_next(ServiceContext(root, configuration=config['configuration']))
+    assert before == {p.name: p.read_bytes() if p.is_file() else None for p in root.iterdir()}
 
+
+def test_concurrent_first_initialization_installs_one_complete_registry(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from knowledge_atlas.operations import database
     service = ServiceContext(tmp_path / 'service')
-    other = tmp_path / 'other'
-    queued_path = tmp_path / 'queued'
-    queued = submit(service, request(path=str(queued_path)))
-    store = GitStore(other)
-    atlas_id = store.read(snapshot(store))['manifest']['package_id']
-    register_atlas(service, atlas_id, other)
-    bound = tmp_path / 'atlas'
-    service.configuration['atlas_path'] = str(bound)
-    assert atlas_path(service, request(path=str(bound))) == bound
-    for action in ('atlas.create', 'archive.restore'):
-        with pytest.raises(AtlasError, match='bound'):
-            atlas_path(service, request(action, path=str(other)))
-    for action in ('atlas.open', 'atlas.status', 'candidate.decide'):
-        with pytest.raises(AtlasError, match='bound'):
-            atlas_path(service, ActionRequest(action, atlas_id=atlas_id))
-    run_next(service)
-    failed = inspect_operation(service, queued.operation_id)
-    assert failed.state == 'failed' and failed.error['code'] == 'invalid_location'
-    assert not queued_path.exists()
+    def submit_one(index):
+        return submit(service, request(path=str(tmp_path / str(index)))).operation_id
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        ids = set(pool.map(submit_one, range(6)))
+    with database(service) as db:
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 3
+        assert {r[0] for r in db.execute('SELECT operation_id FROM operations')} == ids
 
 
 def test_queued_configuration_keeps_project(tmp_path):
@@ -396,7 +413,11 @@ def test_project_binding_change_fails_before_execution(tmp_path, drift):
     relocated = tmp_path / 'relocated'
     if drift == 'graph':
         with database(service) as db:
-            db.execute('UPDATE atlases SET graph_database=? WHERE atlas_id=?', ('admin/reassigned', atlas_id))
+            row = db.execute('SELECT configuration FROM operations WHERE operation_id=?', (operation.operation_id,)).fetchone()
+            frozen = json.loads(row[0])
+            frozen['project_binding']['graph_database'] = 'admin/reassigned'
+            db.execute('UPDATE operations SET configuration=? WHERE operation_id=?',
+                       (json.dumps(frozen), operation.operation_id))
     else:
         store.base.rename(relocated)
         if drift == 'location':
@@ -606,3 +627,75 @@ def test_unrelated_create_survives_symlink_loop_at_registration(tmp_path, loop_a
     assert result.result.data['atlas_id'] != original_uuid
     assert original_binding in list_projects(service)
     assert repository_identity(moved / 'old') == original_uuid
+
+
+@pytest.mark.parametrize('valid', [True, False])
+def test_hot_transaction_validates_without_rewriting_before_recovery(tmp_path, valid):
+    import sqlite3
+    import subprocess
+    import sys
+    from knowledge_atlas.operations import check_service_storage, database
+    service = ServiceContext(tmp_path / 'service', configuration={'notes': 'reviewed' * 20000})
+    operation = submit(service, request(path=str(tmp_path / 'atlas')))
+    path = service.service_root / 'operations.sqlite3'
+    with database(service) as db:
+        original = db.execute('SELECT configuration FROM operations').fetchone()[0]
+        if not valid:
+            db.execute('DROP TABLE resumes')
+    script = """import os, sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+db.execute('PRAGMA cache_size=1')
+db.execute("UPDATE operations SET configuration=replace(configuration,'reviewed','unproven')")
+os._exit(0)
+"""
+    subprocess.run([sys.executable, '-c', script, str(path)], check=True)
+    journal = path.with_name(path.name + '-journal')
+    before = path.read_bytes(), journal.read_bytes()
+    if not valid:
+        with pytest.raises(AtlasError, match='unsupported'):
+            with database(service):
+                pytest.fail('opened unsupported hot database')
+        assert before == (path.read_bytes(), journal.read_bytes())
+        return
+    check_service_storage(service)
+    assert before == (path.read_bytes(), journal.read_bytes())
+    with database(service) as db:
+        assert db.execute('SELECT operation_id,configuration FROM operations').fetchone()[:] == (operation.operation_id, original)
+    assert not journal.exists()
+
+
+def test_concurrent_first_native_launch_attaches_to_one_service(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from knowledge_atlas.client import AtlasClient
+    from knowledge_atlas.launcher import ensure_service
+    root = tmp_path / 'service'
+    config = {'service_root': str(root)}
+    try:
+        with ThreadPoolExecutor(max_workers=3) as starts:
+            descriptors = list(starts.map(ensure_service, [config] * 3))
+        assert len({(d['pid'], d['endpoint']) for d in descriptors}) == 1
+        assert AtlasClient(root).request('/v1/status')['version']
+    finally:
+        if (root / 'discovery.json').is_file():
+            AtlasClient(root).stop()
+
+
+def test_interrupted_current_sqlite_initialization_retries_without_exposing_partial_state(tmp_path):
+    import subprocess
+    import sys
+    from knowledge_atlas.operations import database
+    root = tmp_path / 'service'
+    script = """import os, sys
+from pathlib import Path
+from knowledge_atlas import storage
+from knowledge_atlas.contracts import ServiceContext
+from knowledge_atlas.operations import database
+storage.os.link = lambda *args: os._exit(17)
+with database(ServiceContext(Path(sys.argv[1]))):
+    raise AssertionError('exposed an uninstalled database')
+"""
+    assert subprocess.run([sys.executable, '-c', script, str(root)]).returncode == 17
+    assert not (root / 'operations.sqlite3').exists()
+    with database(ServiceContext(root)) as db:
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 3
+        assert db.execute('SELECT count(*) FROM operations').fetchone()[0] == 0
