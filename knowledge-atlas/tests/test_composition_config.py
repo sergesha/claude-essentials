@@ -359,3 +359,105 @@ def test_nested_conflicting_versions_and_reviewed_rollback(service):
     for publication, expected in [(ready, old), (second, newer), (last, old)]:
         mod, = parent.read(publication)['manifest']['modules'].values()
         assert mod['publication'] == expected
+
+def recovery_copy(parent, child):
+    """Reproduce the archive layout: flat independent repos and a UUID location map."""
+    import shutil
+
+    locations = {}
+    for node in child.closure(git(child.root, 'rev-parse', 'HEAD')):
+        path = parent.base / 'modules' / node['package_id']
+        shutil.copytree(node['path'], path)
+        locations[node['package_id']] = str(path.relative_to(parent.base))
+    (parent.base / 'package-locations.json').write_text(json.dumps(locations))
+    return parent.at_repository(parent.base / locations[identity(child)])
+
+
+def gc(repo):
+    git(repo, 'reflog', 'expire', '--expire=now', '--all')
+    git(repo, 'gc', '--prune=now')
+
+
+def test_distinct_recovery_stores_retain_each_exact_diamond_receipt(service):
+    from knowledge_atlas.project_registry import project_store
+
+    parent, left, right = [project(service, name) for name in ('parent', 'left', 'right')]
+    leaf = project(service, 'leaf', materials=True)
+    first = publish(leaf, git(leaf.root, 'rev-parse', 'HEAD'))
+    receipt = Publications(leaf).read(first)
+    content = receipt['content_commit']
+    second = commit_files(leaf.root, content, {'publication.json': {**receipt, 'provider_run': 'alternate'}},
+                          [content], 'Another receipt for the same content')
+    branches = []
+    copies = []
+    for branch, selected in ((left, first), (right, second)):
+        branch_pub = publish(branch, candidate(configure(service, branch, [include(leaf, 'leaf', selected)])))
+        branches.append(include(branch, branch.base.name, branch_pub))
+        copy = recovery_copy(branch, leaf)
+        for ref in git(copy.root, 'for-each-ref', '--format=%(refname)').splitlines():
+            if git(copy.root, 'rev-parse', ref) in (first, second):
+                git(copy.root, 'update-ref', '-d', ref)
+        git(copy.root, 'update-ref', 'refs/fixture/selected', selected)
+        gc(copy.root)
+        assert Publications(project_store(service, branch.base)).read(branch_pub)
+        with pytest.raises(ValueError):
+            git(copy.root, 'cat-file', '-e', second if selected == first else first)
+        copies.append((copy, selected))
+
+    parent_store = project_store(service, parent.base)
+    oid = candidate(configure(service, parent, branches))
+    for copy, selected in copies:
+        git(copy.root, 'update-ref', '-d', 'refs/fixture/selected')
+        gc(copy.root)
+        assert Publications(copy).read(selected)['content_commit'] == content
+
+    ready = publish(parent_store, oid)
+    records = [json.loads(item['payload']) for item in records_for(parent_store.read(ready), oid)]
+    leaf_records = [item for item in records if item.get('package_id') == identity(leaf)]
+    assert len(leaf_records) == len(records_for(leaf.read(content), content))
+    assert all(item['inclusions'] == [{'mount': 'left/leaf', 'publication': first},
+                                      {'mount': 'right/leaf', 'publication': second}] for item in leaf_records)
+
+
+def test_restored_parent_repins_registered_child_and_keeps_older_copy(service):
+    from knowledge_atlas.project_registry import project_store
+
+    parent = project(service, 'parent')
+    child = project(service, 'child', materials=True)
+    first = publish(child, git(child.root, 'rev-parse', 'HEAD'))
+    ready = publish(parent, candidate(configure(service, parent, [include(child, 'child', first)])))
+    old_copy = recovery_copy(parent, child)
+    # A different receipt may select the same content already present in the copy.
+    receipt = Publications(child).read(first)
+    content = receipt['content_commit']
+    alternate = commit_files(child.root, content, {'publication.json': {**receipt, 'provider_run': 'alternate'}},
+                             [content], 'Another publication of this content')
+    same_content = candidate(configure(service, parent, [include(child, 'child', alternate)], expected=ready))
+    revised = snapshot(child, 2)
+    manifest = child.read(revised)['manifest']
+    manifest['proposal_base_publication'] = first
+    revised = commit_files(child.root, revised, {'manifest.json': manifest}, [revised], 'Review updated evidence')
+    second = publish(child, revised)
+    with pytest.raises(ValueError):
+        git(old_copy.root, 'cat-file', '-e', second)
+
+    parent_store = project_store(service, parent.base)
+    proposed = candidate(configure(service, parent, [include(child, 'child', second)], expected=ready))
+    assert Publications(parent_store).ready() == ready
+    assert parent_store.read(proposed)['included_packages'][0]['snapshot']['evidence'] == {'version': 2}
+    newer = publish(parent_store, proposed)
+    git(child.root, 'update-ref', '-d', Publications.ref)
+    gc(child.root)
+    gc(old_copy.root)
+    same, = project_store(service, parent.base).read(same_content)['included_packages']
+    assert same['commit'] == content and same['inclusions'] == [{'mount': 'child', 'publication': alternate}]
+    for pub, child_pub, version in [(ready, first, 0), (newer, second, 2)]:
+        store = project_store(service, parent.base)
+        selected = Publications(store).read(pub)['content_commit']
+        inclusion, = store.read(selected)['included_packages']
+        assert inclusion['inclusions'] == [{'mount': 'child', 'publication': child_pub}]
+        assert inclusion['snapshot']['evidence'] == {'version': version}
+        historical = store.read_package(identity(child), inclusion['commit'], atlas_commit=selected)
+        assert historical['evidence'] == {'version': version}
+    child.base.rename(child.base.with_name('unavailable-child'))
+    assert Publications(project_store(service, parent.base)).read(ready)

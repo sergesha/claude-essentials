@@ -139,9 +139,8 @@ def configure_composition(store: GitStore, base: str, resolved: list[dict], *, r
 
     # Walk the complete proposed tree before making any ref visible. Gitlinks
     # cross object stores; the owner's refs must keep each such target alive.
-    nodes = store.closure(candidate)
-    for node in nodes[1:]:
-        child = store.at_repository(node['path'])
+    owners = store.repository_closure(candidate)
+    for child, node in owners[1:]:
         for receipt in sorted({row['publication'] for row in node.get('inclusions', ())}):
             retain_child_publication(child, receipt, node['commit'])
         git(child.root, 'update-ref', 'refs/poc9/retained/contents/' + node['commit'], node['commit'])

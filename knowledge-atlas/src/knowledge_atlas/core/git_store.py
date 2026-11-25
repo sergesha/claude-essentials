@@ -57,20 +57,46 @@ class GitStore:
         store.root = root
         return store
 
+    @staticmethod
+    def _has_commits(repo, *oids):
+        if any(not isinstance(oid, str) or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', oid) for oid in oids):
+            raise ValueError('exact Git object ID required')
+        if not repo.is_dir():
+            return False
+        objects = git(repo, 'cat-file', '--batch-check=%(objecttype)', data=('\n'.join(oids) + '\n').encode())
+        return objects.splitlines() == ['commit'] * len(oids)
+
     def module_path(self, parent, mod):
+        return self._module_store(parent, mod).root
+
+    def _module_store(self, parent, mod):
         locations=self.base/'package-locations.json'
         mapping=json.loads(locations.read_text()) if locations.exists() else {}
+        registered = mod.get('kind') == 'atlas' and 'publication' in mod and self.resolve_atlas is not None
         if mod['package_id'] in mapping:
-            return (self.base/mapping[mod['package_id']]).resolve()
-        if mod.get('kind') == 'atlas' and 'publication' in mod and self.resolve_atlas:
-            return self.resolve_atlas(mod['package_id'])
+            mapped = (self.base / mapping[mod['package_id']]).resolve()
+            if not registered or self._has_commits(mapped, mod['commit'], mod['publication']):
+                return self.at_repository(mapped)
+        if registered:
+            root = self.resolve_atlas(mod['package_id'])
+            # This is a separate registered project. Its own materials use its
+            # location map and locators even if the parent has an older copy.
+            return GitStore(root.parent, resolve_atlas=self.resolve_atlas)
         if re.match(r'^[^/]+:', mod['url']):
             raise ValueError('registered or archive-local repository required for Git locator')
-        return (parent/mod['url']).resolve()
+        return self.at_repository((parent/mod['url']).resolve())
 
     def closure(self, commit, *, root=None):
         """Resolve pinned packages, preserving every inclusion of an identity."""
-        nodes={}
+        return [node for _, node in self._closure(commit, root=root, by_repository=False)]
+
+    def repository_closure(self, commit):
+        """Return verified owners and their local content/receipt retention obligations."""
+        return self._closure(commit, root=None, by_repository=True)
+
+    def _closure(self, commit, *, root, by_repository):
+        nodes = {}
+        versions = {}
 
         def visit(owner, path, oid, expected, mount, ancestors, publication=None):
             if not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}',oid):
@@ -87,8 +113,12 @@ class GitStore:
                 raise ValueError('package identity mismatch')
             if identity in ancestors:
                 raise ValueError('package identity cycle: '+identity)
-            key=(identity,oid)
-            node=nodes.setdefault(key,{'package_id':identity,'commit':oid,'path':path,'mounts':[]})
+            if versions.setdefault(identity, oid) != oid:
+                raise ValueError('conflicting pins for package identity: ' + identity)
+            key = (identity, oid, path) if by_repository else (identity, oid)
+            if key not in nodes:
+                nodes[key] = owner, {'package_id': identity, 'commit': oid, 'path': path, 'mounts': []}
+            _, node = nodes[key]
             if mount not in node['mounts']:node['mounts'].append(mount)
             if publication is not None:
                 from .publication import Publications
@@ -102,16 +132,13 @@ class GitStore:
             from .composition import validate_layout
             validate_layout(path, oid, manifest['modules'])
             for mod in manifest['modules'].values():
-                child=owner.module_path(path,mod)
+                child = owner._module_store(path, mod)
                 inclusion=mount+'/'+mod['mount'] if mount else mod['mount']
-                visit(owner.at_repository(child),child,mod['commit'],mod['package_id'],inclusion,ancestors|{identity},mod.get('publication'))
+                visit(child, child.root, mod['commit'], mod['package_id'], inclusion,
+                      ancestors | {identity}, mod.get('publication'))
 
         path = self.root if root is None else root
         visit(self.at_repository(path),path,commit,None,'',set())
-        versions = {}
-        for node in nodes.values():
-            if versions.setdefault(node['package_id'], node['commit']) != node['commit']:
-                raise ValueError('conflicting pins for package identity: ' + node['package_id'])
         return list(nodes.values())
 
     def snapshot(self,wiki,extraction,evidence,*,recorded_at,relation_model=None,relation_bundle=None,relation_previous=None):
@@ -226,7 +253,8 @@ class GitStore:
         included={}
         for kind,mod in manifest['modules'].items():
             oid=mod['commit']
-            path=self.module_path(repo,mod)
+            child = self._module_store(repo, mod)
+            path = child.root
             identity=json.loads(git(path,'show',oid+':package.json'))['package_id']
             if identity!=mod['package_id']:raise ValueError('package identity mismatch')
             if kind=='sources':
@@ -242,7 +270,7 @@ class GitStore:
                 key=(identity,oid)
                 if key not in included:
                     included[key]={'package_id':identity,'commit':oid,'scope':'all','mounts':[],
-                                   'snapshot':self.at_repository(path)._read_package(path,oid)}
+                                   'snapshot':child._read_package(path,oid)}
                 included[key]['mounts'].append(mod['mount'])
                 if 'publication' in mod:
                     included[key].setdefault('inclusions', []).append(
@@ -256,10 +284,10 @@ class GitStore:
         return result
 
     def read_package(self,package_id,commit,*,atlas_commit):
-        for node in self.closure(atlas_commit):
-            if node['package_id']==package_id:
-                self.closure(commit,root=node['path'])
-                identity=json.loads(git(node['path'],'show',commit+':package.json'))['package_id']
-                if identity!=package_id:raise ValueError('historical package identity mismatch')
-                return self.at_repository(node['path'])._read_package(node['path'],commit)
+        for owner, node in self.repository_closure(atlas_commit):
+            if node['package_id'] == package_id and self._has_commits(owner.root, commit):
+                snapshot = owner.read(commit)
+                if snapshot['manifest']['package_id'] != package_id:
+                    raise ValueError('historical package identity mismatch')
+                return snapshot
         raise ValueError('package unavailable in selected atlas')
