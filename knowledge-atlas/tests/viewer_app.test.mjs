@@ -434,3 +434,76 @@ test('candidate inspection displays exact changed child receipts for review',asy
  assert.ok(section);
  assert.deepEqual(JSON.parse(section.children[1].textContent),changes);
 });
+
+for(const editAfterSubmission of [false,true])test(
+ 'same-project replay rejection protects '+(editAfterSubmission?'newer edits':'the original form text'),
+ async()=>{
+  const confirmations=[];
+  const original='Original clarification';
+  const edited='Newer clarification typed during recovery';
+  let submissions=0;
+  const a=atlasFixture({
+   confirm:message=>{confirmations.push(message);return confirmations.length===2;},
+   onRequest:action=>{
+    if(action!=='knowledge.revise')return;
+    submissions++;
+    if(submissions===1)return response({error:{message:'Connection lost'}},503);
+    return response({error:{code:'stale_publication',message:'Publication changed'}},409);
+   },
+  });
+  await turn();
+  a.get('actor').value='Reviewer';
+  a.get('clarification').value=original;
+  await a.get('clarify-form').onsubmit();
+  assert.equal(a.get('reconcile').hidden,false);
+  if(editAfterSubmission)a.get('clarification').value=edited;
+  await a.get('reconcile').onclick();
+  assert.equal(a.get('reconcile').hidden,true);
+  assert.match(a.get('notice').textContent,/publication changed/i);
+  assert.equal(a.get('clarification').value,editAfterSubmission?edited:original);
+  await a.select(atlasB);
+  a.displayed(atlasA,aReady,aPage);
+  assert.equal(a.get('clarification').value,editAfterSubmission?edited:original);
+  assert.equal(confirmations.length,1);
+  await a.select(atlasB);
+  a.displayed(atlasB,bReady,bPage);
+  assert.equal(a.get('clarification').value,'');
+  assert.equal(confirmations.length,2);
+ },
+);
+
+test('a replay rejection from an earlier A generation preserves new A edits',async()=>{
+ const replay=deferred(),confirmations=[];
+ let submissions=0;
+ const a=atlasFixture({
+  confirm:message=>{confirmations.push(message);return false;},
+  onRequest:action=>{
+   if(action!=='knowledge.revise')return;
+   submissions++;
+   if(submissions===1)return response({error:{message:'Connection lost'}},503);
+   return replay.promise;
+  },
+ });
+ await turn();
+ a.get('actor').value='Original reviewer';
+ a.get('clarification').value='Original clarification';
+ await a.get('clarify-form').onsubmit();
+ const recovery=a.get('reconcile').onclick();
+ await a.select(atlasB);
+ a.displayed(atlasB,bReady,bPage);
+ await a.select(atlasA);
+ a.displayed(atlasA,aReady,aPage);
+ assert.equal(confirmations.length,0);
+ a.get('actor').value='Current reviewer';
+ a.get('clarification').value='Current clarification';
+ const notice=a.get('notice').textContent;
+ replay.resolve(response({error:{code:'stale_publication',message:'Publication changed'}},409));
+ await recovery;
+ assert.equal(a.get('notice').textContent,notice);
+ assert.equal(a.get('actor').value,'Current reviewer');
+ assert.equal(a.get('clarification').value,'Current clarification');
+ await a.select(atlasB);
+ a.displayed(atlasA,aReady,aPage);
+ assert.equal(confirmations.length,1);
+ assert.equal(a.get('clarification').value,'Current clarification');
+});

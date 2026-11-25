@@ -5,7 +5,7 @@ const token=location.hash.slice(1);history.replaceState(null,'',location.pathnam
 let selected=null,ready=null,pageId=null,targetId=null,inspected=null;
 let project={atlasId:null,generation:0};
 let viewEpoch=0,pageEpoch=0,inspectEpoch=0;
-let fieldBaselines=new WeakMap();
+let fieldBaselines=new WeakMap(),pendingFields=null;
 const isCurrent=scope=>scope.atlasId===project.atlasId&&scope.generation===project.generation;
 let pageNames=new Map(),versionNames=new Map(),pageLinks=new Map();
 const text=(id,value)=>{$(id).textContent=typeof value==='string'?value:JSON.stringify(value,null,2);};
@@ -117,7 +117,10 @@ function setCandidate(value){
  fieldBaselines.set(field,value);
 }
 function hasDraft(){
- return draftFields().some(field=>field.value.trim()&&field.value!==fieldBaselines.get(field));
+ const entry=queue.get(project.atlasId);
+ // The queue holds a recoverable copy until the service acknowledges the submission.
+ const queued=entry&&entry===pendingFields?.entry?pendingFields.values:null;
+ return draftFields().some(field=>field.value.trim()&&field.value!==(queued?.get(field)??fieldBaselines.get(field)));
 }
 function resetProjectView(){
  selected=ready=pageId=null;
@@ -125,7 +128,7 @@ function resetProjectView(){
  pageNames=new Map();versionNames=new Map();pageLinks=new Map();
  for(const id of ['actor','clarification','reason','question','candidate','page-filter'])$(id).value='';
  for(const id of ['publication','before','timeline','proposal-list','dates','sources','pages','review','types','citations','evidence','diff'])$(id).replaceChildren();
- fieldBaselines=new WeakMap();
+ fieldBaselines=new WeakMap();pendingFields=null;
  target(null);resetReview();graph.reset(null);setAskBusy(false);filterPages();
  $('graph-page').disabled=true;$('propose').disabled=true;$('compare').disabled=true;
  $('return-current').hidden=true;$('evidence').hidden=true;$('source-details').open=false;
@@ -270,11 +273,22 @@ async function observe(operation,scope){
  else notice('Operation completed: '+(result.data?.status||'success'));
 }
 async function followOperation(request,scope){
+ const submitted=pendingFields;
  $('reconcile').disabled=true;
  syncOperationControls();
- try{await observe(await request,scope);}
- finally{
-  if(isCurrent(scope)){$('reconcile').disabled=false;syncOperationControls();}
+ try{
+  const operation=await request;
+  if(!isCurrent(scope))return;
+  if(submitted&&submitted===pendingFields){
+   for(const [field,value] of submitted.values)fieldBaselines.set(field,value);
+   pendingFields=null;
+  }
+  await observe(operation,scope);
+ }finally{
+  if(isCurrent(scope)){
+   if(submitted===pendingFields&&!queue.get(scope.atlasId))pendingFields=null;
+   $('reconcile').disabled=false;syncOperationControls();
+  }
  }
 }
 async function mutate(action,payload,fields=[]){
@@ -282,15 +296,12 @@ async function mutate(action,payload,fields=[]){
  if(!ready||selected!==ready)throw new Error('Historical publications are read-only.');
  if(queue.get(scope.atlasId))throw new Error('Reconcile the pending operation before another decision.');
  const expected=inspected?.base??ready;
- const previous=fields.map(field=>fieldBaselines.get(field));
- for(const field of fields)fieldBaselines.set(field,field.value);
+ const request=queue.begin(scope.atlasId,action,payload,expected);
+ pendingFields={entry:queue.get(scope.atlasId),values:new Map(fields.map(field=>[field,field.value]))};
  try{
-  await followOperation(queue.begin(scope.atlasId,action,payload,expected),scope);
+  await followOperation(request,scope);
  }catch(error){
-  if(isCurrent(scope)&&!queue.get(scope.atlasId)&&error.status>=400&&error.status<500){
-   for(const [index,field] of fields.entries())fieldBaselines.set(field,previous[index]);
-   resetReview();
-  }
+  if(isCurrent(scope)&&!queue.get(scope.atlasId)&&error.status>=400&&error.status<500)resetReview();
   throw error;
  }
 }
