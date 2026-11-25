@@ -291,3 +291,56 @@ def test_preflight_rechecks_cached_header_after_in_place_journal_mode_change(tmp
     with pytest.raises(AtlasError, match='unsupported.*format'):
         check_service_storage(service)
     assert before == {p.name: p.read_bytes() for p in service.service_root.iterdir()}
+
+
+@pytest.mark.parametrize(('installation', 'entry'), [
+    (installation, entry)
+    for installation in ('missing', 'broken')
+    for entry in ('fresh-service', 'current-service', 'fresh-cache')
+] + [('broken-header', 'current-service')])
+def test_unusable_inspection_helper_preserves_supplied_storage(tmp_path, installation, entry):
+    import shutil
+    import subprocess
+    import sys
+    from pathlib import Path
+    import knowledge_atlas
+    from knowledge_atlas.operations import initialize_service_storage
+    root = tmp_path / 'supplied'
+    if entry == 'current-service':
+        initialize_service_storage(ServiceContext(root))
+    original = {p.name: p.read_bytes() for p in root.iterdir()} if root.exists() else None
+    isolated = tmp_path / 'installation/src'
+    package = isolated / 'knowledge_atlas'
+    shutil.copytree(Path(knowledge_atlas.__file__).parent, package,
+                    ignore=shutil.ignore_patterns('__pycache__', '_sqlite_probe.py'))
+    if installation == 'broken':
+        (package / '_sqlite_probe.py').write_text('raise SystemExit(2)\n')
+    elif installation == 'broken-header':
+        (package / '_sqlite_probe.py').write_text(
+            "import sys\nif sys.argv[1:] == ['ready']:\n    print('atlas-sqlite-probe/1')\n"
+            "else:\n    raise SystemExit(2)\n")
+    script = """import sys
+from pathlib import Path
+from types import SimpleNamespace
+sys.path.insert(0, sys.argv[1])
+from knowledge_atlas import launcher, storage
+from knowledge_atlas.core.embedding_provider import initialize_cache
+assert Path(storage.__file__).resolve().parent.parent == Path(sys.argv[1])
+def reject_launch(*args, **kwargs):
+    raise AssertionError('service process launched')
+launcher.subprocess = SimpleNamespace(Popen=reject_launch, DEVNULL=launcher.subprocess.DEVNULL)
+try:
+    if sys.argv[3] == 'fresh-cache':
+        initialize_cache(Path(sys.argv[2]))
+    else:
+        launcher.ensure_service({'service_root': sys.argv[2]})
+except RuntimeError as error:
+    assert 'SQLite inspection helper' in str(error), str(error)
+else:
+    raise AssertionError('incomplete installation was admitted')
+"""
+    result = subprocess.run([sys.executable, '-B', '-c', script, str(isolated), str(root), entry],
+                            capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+    after = {p.name: p.read_bytes() for p in root.iterdir()} if root.exists() else None
+    assert after == original

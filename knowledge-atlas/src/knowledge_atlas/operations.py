@@ -87,6 +87,8 @@ def _check_registry(context, *, locked=False, recover=False):
 def check_service_storage(context: ServiceContext) -> None:
     """Inspect supplied durable state before startup writes or worker dispatch."""
     from .core.embedding_provider import check_cache
+    from .storage import check_probe_ready
+    check_probe_ready()
     _check_registry(context)
     try:
         check_cache(context.service_root / 'vectors')

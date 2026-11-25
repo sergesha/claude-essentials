@@ -14,6 +14,8 @@ import tempfile
 
 
 FORMAT = 3
+_PROBE_PROGRAM = Path(__file__).with_name('_sqlite_probe.py')
+_PROBE_PROTOCOL = b'atlas-sqlite-probe/1\n'
 
 
 @contextmanager
@@ -34,23 +36,48 @@ def _snapshot_identity(path):
     return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
 
 
-def _probe(path, *args):
-    # SQLite uses process-wide POSIX record locks. A raw open/close in this
-    # process could release a transaction held by a different SQLite handle.
-    result = subprocess.run([sys.executable, '-I', '-B', '-S',
-                             Path(__file__).with_name('_sqlite_probe.py'), path, *args],
-                            stdin=subprocess.DEVNULL, capture_output=True)
-    if result.returncode == 2:
-        raise FileNotFoundError('database or rollback journal disappeared during inspection')
-    if result.returncode:
-        raise ValueError(f'could not inspect {path.name}: {result.stderr.decode(errors="replace").strip()}')
-    return result.stdout
+def _probe(*args):
+    # A raw open/close in an SQLite host process can release the POSIX locks
+    # of another connection to the same inode.
+    try:
+        result = subprocess.run([sys.executable, '-I', '-B', '-S', _PROBE_PROGRAM, *args],
+                                stdin=subprocess.DEVNULL, capture_output=True)
+    except OSError as error:
+        raise RuntimeError(f'SQLite inspection helper could not start: {error}') from error
+    if result.stdout == _PROBE_PROTOCOL:
+        if result.returncode == os.EX_NOINPUT:
+            raise FileNotFoundError('database or rollback journal disappeared during inspection')
+        if result.returncode == os.EX_DATAERR:
+            raise ValueError(f'could not inspect SQLite input: {result.stderr.decode(errors="replace").strip()}')
+    if result.returncode or not result.stdout.startswith(_PROBE_PROTOCOL):
+        detail = result.stderr.decode(errors='replace').strip() or f'unexpected response (exit {result.returncode})'
+        raise RuntimeError(f'SQLite inspection helper failed: {detail}')
+    return result.stdout[len(_PROBE_PROTOCOL):]
+
+
+@lru_cache(maxsize=1)
+def _check_probe_revision(identity):
+    if _probe('ready') != b'':
+        raise RuntimeError('SQLite inspection helper returned an invalid readiness reply')
+
+
+def check_probe_ready():
+    try:
+        identity = _snapshot_identity(_PROBE_PROGRAM)
+    except (ValueError, OSError) as error:
+        raise RuntimeError(f'SQLite inspection helper unavailable: {_PROBE_PROGRAM}') from error
+    _check_probe_revision(identity)
 
 
 @lru_cache(maxsize=1)
 def _verify_header(path, identity):
     """Reuse only the most recently checked physical file revision during polling."""
-    header = _probe(path)
+    opened, separator, header = _probe('header', path).partition(b'\n')
+    fields = opened.split(b':')
+    if not separator or len(fields) != 2 or not all(field.isdigit() for field in fields):
+        raise RuntimeError('SQLite inspection helper returned an invalid header reply')
+    if opened != f'{identity[0]}:{identity[1]}'.encode():
+        raise ValueError(f'{path.name} replaced during inspection')
     if (header[:16] != b'SQLite format 3\x00' or header[18:20] != b'\x01\x01'
             or int.from_bytes(header[60:64], 'big') != FORMAT):
         raise ValueError(f'unsupported {path.name} database format')
@@ -77,6 +104,7 @@ def _journal_pair(path, original):
 
 @contextmanager
 def _read_snapshot(path, original):
+    check_probe_ready()
     uri = path.absolute().as_uri()
     for _ in range(4):
         identity = _current_identity(path, original)
@@ -85,8 +113,9 @@ def _read_snapshot(path, original):
         except FileNotFoundError:
             _current_identity(path, original)
             continue
-        if _current_identity(path, original) != identity:
-            continue
+        # Row commits can change size and times during the physical format
+        # check. The inode identifies the file; SQLite establishes the snapshot.
+        _current_identity(path, original)
         with closing(sqlite3.connect(uri + '?mode=ro', uri=True, timeout=10)) as db:
             db.row_factory = sqlite3.Row
             db.execute('BEGIN')
@@ -96,6 +125,7 @@ def _read_snapshot(path, original):
                 if error.sqlite_errorcode != sqlite3.SQLITE_READONLY_ROLLBACK:
                     raise
             else:
+                _current_identity(path, original)
                 yield db, None
                 return
         # An admitted handle may independently complete native recovery. Retry
@@ -106,7 +136,8 @@ def _read_snapshot(path, original):
         with tempfile.TemporaryDirectory() as temporary:
             scratch = Path(temporary)
             try:
-                _probe(path, scratch)
+                if _probe('copy', path, scratch) != b'':
+                    raise RuntimeError('SQLite inspection helper returned an invalid snapshot reply')
             except FileNotFoundError:
                 _current_identity(path, original)
                 continue
@@ -161,6 +192,7 @@ def init_stage(path):
 
 def initialize_database(path, schema, check):
     """Publish a complete schema from a private file under the owning directory lock."""
+    check_probe_ready()
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with directory_lock(path.parent):
         check()

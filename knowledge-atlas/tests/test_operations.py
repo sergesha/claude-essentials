@@ -745,3 +745,45 @@ def test_native_service_root_refuses_literal_symlink(tmp_path, direct):
         ctx = ServiceContext(link) if direct else service_context({'service_root': str(link)})
         initialize_service_storage(ctx)
     assert link.is_symlink() and not list(target.iterdir())
+
+
+def test_registry_preflight_admits_reads_while_current_writer_progresses(tmp_path):
+    import sqlite3
+    import subprocess
+    import sys
+    from contextlib import closing
+    from knowledge_atlas.operations import check_service_storage
+    from test_project_registry import create_project
+    service = ServiceContext(tmp_path / 'service')
+    project = create_project(service, tmp_path / 'project')
+    path = service.service_root / 'operations.sqlite3'
+    stop = tmp_path / 'stop-writer'
+    script = """import sqlite3, sys, time
+from pathlib import Path
+db = sqlite3.connect(sys.argv[1], isolation_level=None)
+deadline = time.monotonic() + 20
+count = 0
+while time.monotonic() < deadline and not Path(sys.argv[3]).exists():
+    count += 1
+    db.execute('UPDATE atlases SET git_url=? WHERE atlas_id=?',
+               (f'https://example.invalid/project?revision={count}', sys.argv[2]))
+    if count == 1:
+        print('writing', flush=True)
+    time.sleep(.004)
+db.close()
+"""
+    proc = subprocess.Popen([sys.executable, '-c', script, str(path), project, str(stop)],
+                            stdout=subprocess.PIPE, text=True)
+    try:
+        assert proc.stdout.readline().strip() == 'writing'
+        observed = []
+        with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)) as reader:
+            for _ in range(4):
+                check_service_storage(service)
+                locator = reader.execute('SELECT git_url FROM atlases WHERE atlas_id=?', (project,)).fetchone()[0]
+                observed.append(int(locator.rsplit('=', 1)[1]))
+        assert observed[-1] > observed[0] and proc.poll() is None
+    finally:
+        stop.touch()
+        assert proc.wait(timeout=10) == 0
+        proc.stdout.close()
