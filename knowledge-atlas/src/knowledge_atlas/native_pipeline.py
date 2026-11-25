@@ -48,20 +48,23 @@ def run_native(context):
 
 def execute_native(payload):
     from .actions.sources import prepare_sources
-    from .core.git_store import GitStore, git
+    from .core.git_store import git
     from .core.ingest import ingest
     from .core.model_config import ConfiguredModels
     from .core.publication import Publications
     from .core.relations import propose_resolution, TypeDecisionUnavailable
     request = ActionRequest(**payload['request'])
     evidence = Path(payload['evidence'])
-    if 'service_root' in payload:
-        from .contracts import ServiceContext
-        from .project_registry import project_store
-        service = ServiceContext(Path(payload['service_root']), configuration=payload['configuration'])
-        store = project_store(service, Path(payload['atlas_path']))
-    else:
-        store = GitStore(payload['atlas_path'])
+    from .contracts import ServiceContext
+    from .project_registry import project_store
+    root = payload.get('service_root')
+    if not isinstance(root, str) or not Path(root).is_absolute() or str(Path(root).resolve()) != root:
+        raise AtlasError('invalid_configuration', 'native execution requires the absolute service root')
+    service = ServiceContext(Path(root), configuration=payload['configuration'])
+    cache = service.service_root / 'vectors'
+    if payload.get('vector_cache') != str(cache) or cache.resolve() != cache:
+        raise AtlasError('invalid_configuration', 'native execution requires the service vector-cache location')
+    store = project_store(service, Path(payload['atlas_path']))
     pubs = Publications(store)
     data = request.payload
     if request.action in ('publication.build', 'publication.rebuild'):
@@ -77,8 +80,8 @@ def execute_native(payload):
         selected = pubs.read(request.expected_publication)['content_commit'] if request.expected_publication else git(store.root,'rev-parse','HEAD')
         if revision:
             from .actions.decisions import _binding, _check_base
-            from .contracts import ActionContext, ServiceContext
-            context = ActionContext(ServiceContext(evidence/'service'), request, store.base, evidence, payload['configuration'])
+            from .contracts import ActionContext
+            context = ActionContext(service, request, store.base, evidence, payload['configuration'])
             _check_base(store, _binding(context, 'revise'))
             selected = data['candidate']
             if not data.get('sources') and not data.get('remove_source_ids') and not data.get('instructions'):

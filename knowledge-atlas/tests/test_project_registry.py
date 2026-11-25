@@ -5,6 +5,7 @@ import uuid
 
 import pytest
 
+from acceptance_fixture import review_acceptance
 from knowledge_atlas.api_models import parse_request
 from knowledge_atlas.contracts import ActionContext, ActionRequest, AtlasError, ServiceContext
 from knowledge_atlas.core.git_store import GitStore, git
@@ -103,7 +104,7 @@ def retained_publication(path, vector_artifacts=None, *, database=None, service_
     store = GitStore(path)
     pubs = Publications(store)
     profile = json.loads((_assets() / 'embedding-profile.json').read_text())
-    content = pubs.review(git(store.root, 'rev-parse', 'HEAD'), {
+    content = review_acceptance(pubs, git(store.root, 'rev-parse', 'HEAD'), {
         'decision': 'accept', 'kind': 'synthetic', 'actor': 'Fixture', 'reason': 'Retained publication fixture',
         'accepted_at': '2026-11-13T01:00:00Z', 'base_publication': None,
     }, profile)

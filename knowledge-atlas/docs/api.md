@@ -220,10 +220,10 @@ those projection payloads remain intact in the Git-owned publication receipt.
 ### Review and answer metadata
 
 Publication history and the selected wiki expose the caller-supplied acceptance kind and
-channel. Older publications report an unrecorded channel. The `matching_decision_receipt`
-field indicates whether a retained decision agrees with the publication. A missing receipt
-is valid for pre-receipt history. An unsigned matching receipt establishes internal
-consistency. Before serving a publication, the reader checks that its Git parents
+channel. The service validates the exact decision ref, request digest, actor,
+kind, reason, channel and recorded acceptance time. Missing or inconsistent
+evidence makes the publication unavailable. A matching unsigned receipt
+establishes internal consistency. Before serving a publication, the reader checks that its Git parents
 identify the previous publication and the reviewed content. It also checks that
 the accepted content descends directly from the candidate named in the review
 and that the publication metadata agrees with that review. A publication that points to a
@@ -241,12 +241,8 @@ its projection. A timestamp more than five minutes ahead of the service clock re
 `invalid_acceptance_time`. For `candidate.decide` with action `accept`, this timestamp
 comes from `decided_at`.
 
-On older history, `as_known_at` selects the latest publication whose entire chain was
-eligible by the requested instant. If a legacy acceptance was more than five minutes
-ahead of its own `published_at`, selection uses that publication time. If a child was
-accepted earlier than an ancestor, it becomes visible with that ancestor. History and
-`wiki.pages` preserve the caller's `accepted_at` and include `effective_accepted_at`
-when the two instants differ.
-New reviews and pending publications must meet the base publication's effective
-cutoff. The service derives it from Git history and caches it locally for the
-exact publication ID. A restored atlas can reconstruct it from the archive.
+An `as_known_at` read selects the latest publication accepted by that instant.
+Acceptance times must be chronological along the publication chain. A retained
+acceptance more than five minutes ahead of its own publication time fails
+validation. History and `wiki.pages` expose the original recorded `accepted_at`.
+Domain validity remains optional.

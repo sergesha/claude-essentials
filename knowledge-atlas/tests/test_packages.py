@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import uuid
 import pytest
+from acceptance_fixture import review_acceptance
 from knowledge_atlas.contracts import ActionRequest, ActionContext, ServiceContext, AtlasError
 from knowledge_atlas.core.git_store import GitStore, git
 from knowledge_atlas.core.publication import Publications
@@ -24,7 +25,7 @@ def snapshot(store, version=0):
 def publish(store, candidate, build=projection):
     from knowledge_atlas.runtime import _assets
     pubs = Publications(store)
-    content = pubs.review(candidate, {'decision': 'accept', 'kind': 'synthetic', 'actor': 'Fixture',
+    content = review_acceptance(pubs, candidate, {'decision': 'accept', 'kind': 'synthetic', 'actor': 'Fixture',
         'reason': 'Review child layout', 'accepted_at': '2026-11-13T02:00:00Z',
         'base_publication': pubs.ready()}, json.loads((_assets()/'embedding-profile.json').read_text()))
     return pubs.publish(content, build)
@@ -102,7 +103,7 @@ def test_cross_package_withdrawal_preserves_alternative(tmp_path):
         return propose_records(store,base,entries,actor='Synthetic fixture',method='Explicit curation',
                                reason='Cross-package grounds',recorded_at='2026-11-13T01:00:00Z',base_publication=Publications(store).ready())
     def accept(store,candidate):
-        return Publications(store).review(candidate,{'decision':'accept','kind':'synthetic','actor':'Fixture',
+        return review_acceptance(Publications(store), candidate,{'decision':'accept','kind':'synthetic','actor':'Fixture',
             'reason':'Controlled grounds check','accepted_at':'2026-11-13T02:00:00Z','base_publication':Publications(store).ready()},profile)
     quote = child.read(child_base)['sources']['review.txt'].decode().split('\n')[0]
     provenance = [{'record_id':'Record/'+key('source','review.txt'),'start':0,'end':len(quote),'quote':quote}]

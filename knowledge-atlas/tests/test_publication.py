@@ -4,6 +4,7 @@ from unittest.mock import patch
 from pathlib import Path
 import tempfile
 import unittest
+from acceptance_fixture import review_acceptance
 from knowledge_atlas.core.git_store import GitStore, git
 from knowledge_atlas.core.knowledge import propose_records
 from knowledge_atlas.core.publication import Publications, commit_files
@@ -29,7 +30,7 @@ class PublicationTests(unittest.TestCase):
             recorded_at='2026-11-10T00:00:00Z', base_publication=publication)
 
     def review(self, base=None, actor='Synthetic reviewer A', *, candidate=None, when='2026-11-10T00:00:00Z'):
-        return self.pub.review(candidate or self.candidate, {'decision': 'accept', 'actor': actor,
+        return review_acceptance(self.pub, candidate or self.candidate, {'decision': 'accept', 'actor': actor,
             'kind': 'synthetic', 'reason': 'Lifecycle exercise only, not human practical acceptance',
             'accepted_at': when, 'base_publication': base},
             json.loads((ROOT / 'embedding-profile.json').read_text()))
@@ -66,7 +67,7 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual(self.store.read(changed)['manifest']['status'], 'candidate')
         # An explicitly new decision for the changed candidate remains possible.
         fresh = {**decision, 'candidate_commit': changed, 'reason': 'New review of changed proposal'}
-        accepted = self.pub.review(changed, fresh, profile)
+        accepted = review_acceptance(self.pub, changed, fresh, profile)
         self.assertEqual(self.store.read(accepted)['manifest']['acceptance']['candidate_commit'], changed)
 
     def test_failed_projection_preserves_ready_and_publication_has_real_parent_edges(self):
@@ -116,7 +117,7 @@ class PublicationTests(unittest.TestCase):
         publications = []
         for when in ('2026-03-10T10:00:00Z', '2026-04-20T10:00:00Z'):
             candidate = self.next_candidate(self.pub.ready()) if self.pub.ready() else self.candidate
-            content = self.pub.review(candidate, {'decision': 'accept', 'actor': 'Synthetic time reviewer',
+            content = review_acceptance(self.pub, candidate, {'decision': 'accept', 'actor': 'Synthetic time reviewer',
                 'kind': 'synthetic', 'reason': 'Imported fixture axis, not server clock',
                 'accepted_at': when, 'base_publication': self.pub.ready()}, profile)
             publications.append(self.pub.publish(content, lambda c: {**self.projection(c), 'database': 'admin/test-only'}))
@@ -165,11 +166,11 @@ class PublicationTests(unittest.TestCase):
             self.review(first, candidate=legacy)
         self.assertEqual(self.pub.ready(), first)
 
-    def test_channel_is_preserved_and_pre_channel_publications_remain_readable(self):
+    def test_channel_is_preserved_and_pre_channel_publications_are_rejected(self):
         profile = json.loads((ROOT / 'embedding-profile.json').read_text())
         decision = {'decision':'accept', 'actor':'Fixture', 'kind':'synthetic', 'reason':'Channel test',
                     'attribution_channel':'mcp', 'base_publication':None, 'accepted_at':'2026-11-10T00:00:00Z'}
-        content = self.pub.review(self.candidate, decision, profile)
+        content = review_acceptance(self.pub, self.candidate, decision, profile)
         current = self.pub.publish(content, self.projection)
         receipt = self.pub.read(current)
         self.assertEqual(receipt['acceptance_channel'], 'mcp')
@@ -179,7 +180,8 @@ class PublicationTests(unittest.TestCase):
             self.pub.read(conflicting)
         del receipt['acceptance_channel']
         legacy = commit_files(self.store.root, current, {'publication.json':receipt}, [content], 'Legacy receipt')
-        self.assertEqual(self.pub.read(legacy)['acceptance_channel'], 'unrecorded')
+        with self.assertRaisesRegex(ValueError, 'channel|metadata'):
+            self.pub.read(legacy)
 
     def test_acceptance_order_compares_instants_and_rechecks_pending_content(self):
         first = self.pub.publish(self.review(), self.projection)
@@ -201,37 +203,10 @@ class PublicationTests(unittest.TestCase):
         with patch.object(Publications, '_check_acceptance_time'):
             content = self.review(second, candidate=self.next_candidate(second), when=before)
             broken = self.pub.publish(content, receipt)
-        with self.assertRaisesRegex(ValueError, 'no published slice'):
-            reader(as_known_at=before)
-        self.assertEqual(reader(as_known_at='2026-11-10T00:00:00Z').publication, broken)
-        self.assertEqual(reader().publication, broken)
-        self.assertEqual(reader(publication=second).publication, second)
-
-    def test_historical_selection_preserves_earlier_prefix_across_legacy_inversion(self):
-        project = lambda c: {**self.projection(c), 'database': 'admin/fixture'}
-        first = self.pub.publish(self.review(), project)
-        second_time = '2026-11-12T00:00:00Z'
-        third_time = '2026-11-11T00:00:00Z'
-        second = self.pub.publish(self.review(first, candidate=self.next_candidate(first), when=second_time), project)
-        with patch.object(Publications, '_check_acceptance_time'):
-            third = self.pub.publish(self.review(second, candidate=self.next_candidate(second), when=third_time), project)
-        # Pre-upgrade and freshly restored repositories have no local cutoff cache.
-        git(self.store.root, 'config', '--local', '--unset', 'atlas.acceptanceCutoff')
-        earlier = AtlasReader(self.store, 'http://unused.invalid', set, as_known_at=third_time)
-        later = AtlasReader(self.store, 'http://unused.invalid', set, as_known_at=second_time)
-        self.assertEqual(earlier.publication, first)
-        self.assertEqual(later.publication, third)
-        self.assertEqual(later.receipt['accepted_at'], third_time)
-        self.assertEqual(datetime.fromisoformat(later.receipt['effective_accepted_at']), datetime.fromisoformat(second_time))
-        candidate = self.next_candidate(third)
-        with self.assertRaisesRegex(ValueError, 'precedes'):
-            self.review(third, candidate=candidate, when=third_time)
-        with patch.object(Publications, '_check_acceptance_time'):
-            pending = self.review(third, candidate=candidate, when=third_time)
-        with self.assertRaisesRegex(ValueError, 'precedes'):
-            self.pub.publish(pending, lambda _: self.fail('unexpected projection'))
-        corrected = self.pub.publish(self.review(third, candidate=candidate, when=second_time), project)
-        self.assertEqual(self.pub.read(corrected)['previous_publication'], third)
+        for selector in ({'as_known_at': before}, {'publication': broken}, {}):
+            with self.assertRaisesRegex(ValueError, 'precedes'):
+                reader(**selector)
+        self.assertEqual(self.pub.ready(), broken)
 
     def test_future_acceptance_rejected_before_review_and_projection(self):
         future = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
@@ -254,25 +229,27 @@ class PublicationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'future'):
                 Publications._check_acceptance_time({'accepted_at': (boundary + timedelta(microseconds=1)).isoformat()}, None)
 
-    def test_legacy_future_acceptance_recovers_without_rewriting_history(self):
+    def test_retained_future_acceptance_fails_without_rewriting_history(self):
         future = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
         project = lambda c: {**self.projection(c), 'database': 'admin/fixture'}
         with patch.object(Publications, '_check_acceptance_time'):
             old = self.pub.publish(self.review(when=future), project)
         saved = git(self.store.root, 'show', old + ':publication.json')
         published = datetime.fromisoformat(json.loads(saved)['published_at'])
-        def at(when):
-            return AtlasReader(self.store, 'http://unused.invalid', set, as_known_at=when.isoformat()).publication
-        with self.assertRaisesRegex(ValueError, 'no published slice'):
-            at(published - timedelta(microseconds=1))
-        self.assertEqual(at(published), old)
-        candidate = self.next_candidate(old)
-        now = datetime.now(timezone.utc)
-        current = self.pub.publish(self.review(old, candidate=candidate, when=now.isoformat()), project)
-        self.assertEqual(at(published), old)
-        self.assertEqual(at(now), current)
-        self.assertEqual(self.pub.read(current)['previous_publication'], old)
+        with self.assertRaisesRegex(ValueError, 'future'):
+            AtlasReader(self.store, 'http://unused.invalid', set, as_known_at=published.isoformat())
         self.assertEqual(git(self.store.root, 'show', old + ':publication.json'), saved)
+
+    def test_future_wrapper_clock_cannot_validate_an_impossible_acceptance(self):
+        future = (datetime.now(timezone.utc) + timedelta(days=2)).isoformat()
+        with patch.object(Publications, '_check_acceptance_time'):
+            content = self.review(when=future)
+            wrapper = self.pub.publish(content, self.projection)
+        receipt = json.loads(git(self.store.root, 'show', wrapper + ':publication.json'))
+        receipt['published_at'] = future
+        forged = commit_files(self.store.root, content, {'publication.json': receipt}, [content], 'Future clocks')
+        with self.assertRaisesRegex(ValueError, 'future'):
+            self.pub.read(forged)
 
     def test_publication_read_requires_accepted_content(self):
         content = self.review()

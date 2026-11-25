@@ -53,15 +53,8 @@ class AtlasReader:
             current = receipt['previous_publication']
         when = instant(as_known_at) if as_known_at is not None else None
         selected = None
-        visible_from = None
         for oid, receipt in reversed(self.chain.items()):
-            # A child incorporates its ancestors and cannot be visible earlier.
-            accepted = acceptance_instant(receipt)
-            visible_from = max(visible_from, accepted) if visible_from is not None else accepted
-            receipt.pop('effective_accepted_at', None)  # Derived from the chain at read time.
-            if visible_from != instant(receipt['accepted_at']):
-                receipt['effective_accepted_at'] = visible_from.isoformat()
-            if when is not None and visible_from <= when:
+            if when is not None and acceptance_instant(receipt) <= when:
                 selected = oid
         if when is not None:
             if selected is None:
@@ -77,7 +70,9 @@ class AtlasReader:
         self.graph = GraphStage(url, database_name)
 
     def matching_decision_receipt(self, publication=None):
-        return matching_decision_receipt(self.store, self.chain[publication or self.publication])
+        if not matching_decision_receipt(self.store, self.chain[publication or self.publication]):
+            raise ValueError('publication lacks its matching acceptance decision')
+        return True
 
     def _records(self, publication):
         if publication not in self.chain:
@@ -351,8 +346,6 @@ class AtlasReader:
                 entry = {'publication_commit': current, 'accepted_at': receipt['accepted_at'],
                          'acceptance_kind': receipt['acceptance_kind'], 'acceptance_channel': receipt['acceptance_channel'],
                          'record': records[record_id], 'matching_decision_receipt': self.matching_decision_receipt(current)}
-                if 'effective_accepted_at' in receipt:
-                    entry['effective_accepted_at'] = receipt['effective_accepted_at']
                 result.append(entry)
             current = self.chain[current]['previous_publication']
         return result

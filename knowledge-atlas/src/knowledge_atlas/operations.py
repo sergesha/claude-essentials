@@ -14,17 +14,12 @@ from stat import S_ISDIR
 import tempfile
 import uuid
 
-from .contracts import ActionRequest, ActionResult, AtlasError, OperationRecord, ServiceContext
+from .contracts import ActionRequest, ActionResult, AtlasError, OperationRecord, ServiceContext, require_canonical_uuid
 from .locks import is_locked
 from .project_registry import graph_endpoint, project_database, project_configuration, project_id, register_project, resolve_project
 
 
 PATH_ACTIONS = frozenset(('atlas.create', 'archive.restore'))
-
-# Python's uuid.UUID also accepts legacy upper-case, compact, braced and URN
-# spellings. Index their equivalence without rewriting immutable request evidence.
-_UUID_KEY = "replace(trim(replace(replace(lower(request_id),'urn:',''),'uuid:',''),'{}'),'-','')"
-
 
 REGISTRY_SCHEMA = (
     'CREATE TABLE atlases (atlas_id TEXT PRIMARY KEY NOT NULL, path TEXT NOT NULL UNIQUE, '
@@ -36,14 +31,14 @@ REGISTRY_SCHEMA = (
     'state TEXT NOT NULL, attempt INTEGER NOT NULL, evidence TEXT NOT NULL, previous_evidence TEXT, '
     'result TEXT, error TEXT)',
     'CREATE TABLE resumes (request_id TEXT PRIMARY KEY, operation_id TEXT NOT NULL)',
-    f'CREATE INDEX operation_uuid ON operations ({_UUID_KEY})',
-    f'CREATE INDEX resume_uuid ON resumes ({_UUID_KEY})',
 )
 
 
 def _verify_registry(db):
     from .storage import verify_schema
     verify_schema(db, REGISTRY_SCHEMA)
+    for row in db.execute('SELECT request_id FROM operations UNION ALL SELECT request_id FROM resumes'):
+        require_canonical_uuid(row['request_id'])
     for row in db.execute('SELECT atlas_id,path,graph_database FROM atlases'):
         identity = uuid.UUID(row['atlas_id'])
         if (str(identity) != row['atlas_id'] or not Path(row['path']).is_absolute()
@@ -231,7 +226,7 @@ def _verify_create_destination(db, path):
 
 def operation_project(service, request, path, frozen):
     if request.action in PATH_ACTIONS:
-        if validate_atlas_path(service, path) != path:
+        if atlas_path(service, request) != path:
             raise AtlasError('atlas_conflict', 'the queued destination path changed', 409)
         if request.action == 'atlas.create':
             with database(service) as db:
@@ -246,11 +241,13 @@ def operation_project(service, request, path, frozen):
     if binding.path != path:
         raise AtlasError('atlas_conflict', 'the queued atlas repository path changed', 409)
     expected = frozen.get('project_binding')
-    if expected is not None:
-        if binding.graph_database != expected['graph_database']:
-            raise AtlasError('graph_atlas_conflict', 'the queued atlas graph database changed', 409)
-        if _binding_evidence(binding) != expected:
-            raise AtlasError('atlas_conflict', 'the queued atlas binding changed', 409)
+    if not isinstance(expected, dict):
+        raise AtlasError('atlas_conflict', 'the queued operation lacks its original project binding', 409)
+    if (binding.graph_database != expected.get('graph_database')
+            or frozen['configuration'].get('graph', {}).get('database') != binding.graph_database):
+        raise AtlasError('graph_atlas_conflict', 'the queued atlas graph database changed', 409)
+    if _binding_evidence(binding) != expected:
+        raise AtlasError('atlas_conflict', 'the queued atlas binding changed', 409)
     return binding
 
 
@@ -260,6 +257,14 @@ def _record(row):
                            json.loads(row['error']) if row['error'] else None)
 
 
+def retained_request(row):
+    request = ActionRequest(**json.loads(row['request']))
+    digest = hashlib.sha256(encoded(asdict(request)).encode()).hexdigest()
+    if request.request_id != row['request_id'] or digest != row['digest']:
+        raise AtlasError('request_conflict', 'retained request disagrees with operation identity or digest', 409)
+    return request
+
+
 def _row(db, identifier):
     row = db.execute('SELECT * FROM operations WHERE operation_id=?', (identifier,)).fetchone()
     if row is None: raise AtlasError('operation_not_found', identifier, 404)
@@ -267,15 +272,13 @@ def _row(db, identifier):
 
 
 def _request_owner(db, request_id):
-    compact = uuid.UUID(request_id).hex
-    owners = db.execute(f"""
-        SELECT operation_id, 'operation' AS kind FROM operations WHERE {_UUID_KEY}=?
+    owners = db.execute("""
+        SELECT operation_id, 'operation' AS kind FROM operations WHERE request_id=?
         UNION ALL
-        SELECT operation_id, 'resume' AS kind FROM resumes WHERE {_UUID_KEY}=?
-        LIMIT 2
-    """, (compact, compact)).fetchall()
+        SELECT operation_id, 'resume' AS kind FROM resumes WHERE request_id=?
+    """, (request_id, request_id)).fetchall()
     if len(owners) > 1:
-        raise AtlasError('request_conflict', 'legacy request UUID has multiple owners', 409)
+        raise AtlasError('request_conflict', 'request UUID has multiple owners', 409)
     return owners[0] if owners else None
 
 
@@ -286,12 +289,8 @@ def _existing_submission(db, request, request_json, digest):
     if owner['kind'] != 'operation':
         raise AtlasError('request_conflict', 'request_id belongs to a resume', 409)
     row = _row(db, owner['operation_id'])
-    if row['digest'] != digest:
-        # The legacy digest includes the original spelling of the UUID.
-        stored = json.loads(row['request'])
-        stored['request_id'] = request.request_id
-        if encoded(stored) != request_json:
-            raise AtlasError('request_conflict', 'request_id already has another payload', 409)
+    if row['digest'] != digest or row['request'] != request_json:
+        raise AtlasError('request_conflict', 'request_id already has another payload or digest', 409)
     return _record(row)
 
 
@@ -396,7 +395,7 @@ def submit(context: ServiceContext, request: ActionRequest) -> OperationRecord:
     if request.action not in register_handlers(context):
         raise AtlasError('unsupported_action', request.action, 422)
     atlas_id = request.atlas_id if request.action in PATH_ACTIONS else project_id(request.atlas_id)
-    request = replace(request, request_id=str(uuid.UUID(request.request_id)), atlas_id=atlas_id)
+    request = replace(request, atlas_id=atlas_id)
     request_json = encoded(asdict(request))
     digest = hashlib.sha256(request_json.encode()).hexdigest()
     with database(context) as db:
@@ -409,6 +408,8 @@ def submit(context: ServiceContext, request: ActionRequest) -> OperationRecord:
               'runtime': {'runtime_root': str(context.runtime.runtime_root.expanduser().resolve()),
                           'manifest': str(context.runtime.manifest.expanduser().resolve()) if context.runtime.manifest else None}
               if context.runtime else None}
+    if request.action in ('candidate.decide', 'candidate.revise'):
+        frozen['configuration'] = {'attribution_channel': 'python', **frozen['configuration']}
     if binding:
         frozen['project_binding'] = _binding_evidence(binding)
     configuration = encoded(frozen)
@@ -469,7 +470,6 @@ def resume(context, operation_id, request_id):
         raise AtlasError('invalid_request', 'resume requires a fresh request UUID')
     from .actions import register_recoveries
     ActionRequest('operation.resume', request_id=request_id)
-    request_id = str(uuid.UUID(request_id))
     inspect_operation(context, operation_id)
     with database(context) as db:
         db.execute('BEGIN IMMEDIATE')
@@ -479,8 +479,8 @@ def resume(context, operation_id, request_id):
                 raise AtlasError('request_conflict', 'request UUID reused', 409)
             return _record(_row(db, operation_id))
         row = _row(db, operation_id)
-        request = json.loads(row['request'])
-        action = request['action']
+        request = retained_request(row)
+        action = request.action
         pending_publication = (row['state'] == 'succeeded'
             and action == 'candidate.decide'
             and row['result'] is not None
@@ -489,10 +489,12 @@ def resume(context, operation_id, request_id):
             raise AtlasError('busy', 'resume requires an inactive failed, interrupted or publication-pending operation', 409)
         if action == 'archive.restore' and register_recoveries(context).get(action) is None:
             raise AtlasError('unsafe_resume', 'inspect the restore and submit a new request for an unused destination', 409)
+        frozen = json.loads(row['configuration'])
+        operation_project(context, request, Path(row['atlas_path']), frozen)
         attempt = row['attempt'] + 1
         evidence = context.service_root / 'attempts' / operation_id / str(attempt)
         evidence.mkdir(parents=True, exist_ok=False)
-        (evidence / 'input.json').write_text(encoded({'request':request, **json.loads(row['configuration'])}))
+        (evidence / 'input.json').write_text(encoded({'request':asdict(request), **frozen}))
         db.execute('INSERT INTO resumes VALUES (?,?)', (request_id, operation_id))
         db.execute("UPDATE operations SET state='queued',attempt=?,previous_evidence=evidence,evidence=?,result=NULL,error=NULL WHERE operation_id=?", (attempt, str(evidence), operation_id))
         return _record(_row(db, operation_id))

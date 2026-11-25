@@ -45,6 +45,8 @@ def _create_reviewed_archive(config):
     from knowledge_atlas.core.graph_stage import GraphStage
     from knowledge_atlas.core.native_projection import NativeProjection
     from knowledge_atlas.core.publication import Publications
+    from runpy import run_path
+    review_acceptance = run_path(str(Path(__file__).resolve().parents[1] / "acceptance_fixture.py"))["review_acceptance"]
 
     directory = Path(config['atlas']).parent
     runtime = Path(config['runtime'])
@@ -53,7 +55,7 @@ def _create_reviewed_archive(config):
 
     def publish(store, oid, graph_name):
         pubs = Publications(store)
-        content = pubs.review(oid, {'decision': 'accept', 'kind': 'synthetic', 'actor': 'Fixture',
+        content = review_acceptance(pubs, oid, {'decision': 'accept', 'kind': 'synthetic', 'actor': 'Fixture',
             'reason': 'Review archive fixture', 'accepted_at': '2026-11-16T02:00:00Z',
             'base_publication': pubs.ready()}, profile)
         graph = GraphStage(config['graph']['url'], graph_name)

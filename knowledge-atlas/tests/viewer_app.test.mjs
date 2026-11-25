@@ -121,8 +121,7 @@ test('acceptance attribution identifies the channel and unsigned receipt separat
  assert.match(label,/Channel: viewer/);
  assert.match(label,/Matching decision receipt present/);
  const old=a.run("attribution({acceptance_kind:'synthetic'})");
- assert.match(old,/unrecorded/);
- assert.match(old,/No matching decision receipt/);
+ assert.match(old,/incomplete acceptance evidence/i);
 });
 
 const atlasA='10000000-0000-4000-8000-000000000001';

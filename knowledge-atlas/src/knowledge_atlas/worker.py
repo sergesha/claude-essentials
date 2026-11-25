@@ -3,10 +3,9 @@ from dataclasses import asdict, replace
 import json
 from pathlib import Path
 import traceback
-from .contracts import ActionContext, ActionRequest, ActionResult, AtlasError, RuntimeConfig
+from .contracts import ActionContext, ActionResult, AtlasError, RuntimeConfig
 from .locks import FileLock, AtlasLock
-from .operations import initialize_service_storage, database, encoded, operation_project, staged_restore_input, validate_atlas_path
-from .project_registry import project_configuration
+from .operations import initialize_service_storage, database, encoded, operation_project, retained_request, staged_restore_input, validate_atlas_path
 from .actions import register_handlers, register_recoveries
 
 
@@ -50,12 +49,13 @@ def _execute_next(service):
     with FileLock(evidence/'worker.lock'):
         with database(service) as db:
             db.execute("UPDATE operations SET state='running' WHERE operation_id=? AND state='queued'", (row['operation_id'],))
-        frozen = json.loads(row['configuration'])
-        runtime = frozen['runtime']
-        request = ActionRequest(**json.loads(row['request']))
-        path = Path(row['atlas_path'])
+        request = None
         previous = Path(row['previous_evidence']) if row['previous_evidence'] else None
         try:
+            request = retained_request(row)
+            frozen = json.loads(row['configuration'])
+            runtime = frozen['runtime']
+            path = Path(row['atlas_path'])
             # AtlasLock itself resolves aliases. Check the persisted location first.
             if validate_atlas_path(service, path) != path:
                 raise AtlasError('atlas_conflict', 'the queued repository or destination path changed', 409)
@@ -64,9 +64,6 @@ def _execute_next(service):
                 attempt_service = replace(service, configuration=frozen['configuration'], runtime=(RuntimeConfig(
                     Path(runtime['runtime_root']), Path(runtime['manifest']) if runtime['manifest'] else None)
                     if runtime else None))
-                if binding and 'project_binding' not in frozen:
-                    # Legacy attempts recorded the destination and runtime but used the deployment database.
-                    attempt_service.configuration = project_configuration(attempt_service, binding)
                 context = ActionContext(attempt_service, request, path, evidence, attempt_service.configuration,
                                         row['operation_id'], previous, binding)
                 handler = register_handlers(service).get(request.action)
@@ -83,7 +80,7 @@ def _execute_next(service):
             (evidence/'traceback.txt').write_text(traceback.format_exc())
             # A previous service version could already have queued an unsupported
             # restore resume. Its original bytes are still needed for inspection.
-            interrupted = (request.action == 'archive.restore' and previous is not None
+            interrupted = (request is not None and request.action == 'archive.restore' and previous is not None
                            and details['code'] == 'unsafe_resume')
             with database(service) as db:
                 db.execute("UPDATE operations SET state=?,error=? WHERE operation_id=?",
@@ -92,5 +89,5 @@ def _execute_next(service):
                 return
         # The state is durable before discarding bytes. An interrupted attempt
         # retains its original evidence until an operator reconciles the restore.
-        if request.action == 'archive.restore':
+        if request is not None and request.action == 'archive.restore':
             staged_restore_input(evidence).unlink(missing_ok=True)

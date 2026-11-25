@@ -6,6 +6,7 @@ import time
 import uuid
 import pytest
 
+from acceptance_fixture import review_acceptance
 from knowledge_atlas.contracts import ActionRequest, ActionResult, ServiceContext, AtlasError
 from knowledge_atlas.operations import submit, inspect_operation, dispatch, resume
 from knowledge_atlas.locks import AtlasLock
@@ -283,33 +284,30 @@ def test_concurrent_registration_cannot_replace_existing_location(tmp_path, monk
     assert sorted(outcomes) == ['atlas_conflict', 'registered']
 
 
-def test_mutation_uuid_aliases_preserve_legacy_operation_and_resume(tmp_path):
-    from dataclasses import asdict, replace
-    import hashlib
-    from knowledge_atlas.operations import database, encoded
-
+@pytest.mark.parametrize('spelling', ['uppercase', 'compact', 'braced', 'urn'])
+def test_mutation_and_resume_require_canonical_uuid(tmp_path, spelling):
+    from dataclasses import replace
     service = ServiceContext(tmp_path / 'service')
     req = request(path=str(tmp_path / 'atlas'))
-    uppercase = replace(req, request_id=req.request_id.upper())
-    operation = submit(service, uppercase)
-    assert json.loads((operation.evidence / 'input.json').read_text())['request']['request_id'] == req.request_id
-    assert submit(service, req) == operation
-    legacy = encoded(asdict(uppercase))
+    uid = uuid.UUID(req.request_id)
+    alias = {'uppercase': str(uid).upper(), 'compact': uid.hex, 'braced': '{'+str(uid)+'}', 'urn': uid.urn}[spelling]
+    with pytest.raises(AtlasError, match='invalid_request'):
+        submit(service, replace(req, request_id=alias))
+    op = submit(service, req)
+    with pytest.raises(AtlasError, match='invalid_request'):
+        resume(service, op.operation_id, alias)
+    assert submit(service, req) == op
+
+
+def test_mutation_rejects_an_inconsistent_retained_digest(tmp_path):
+    from knowledge_atlas.operations import database
+    service = ServiceContext(tmp_path / 'service')
+    req = request(path=str(tmp_path / 'atlas'))
+    op = submit(service, req)
     with database(service) as db:
-        db.execute('UPDATE operations SET request_id=?,request=?,digest=?,state=? WHERE operation_id=?',
-                   (uppercase.request_id, legacy, hashlib.sha256(legacy.encode()).hexdigest(), 'failed', operation.operation_id))
-    assert submit(service, req).operation_id == operation.operation_id
-    with pytest.raises(AtlasError, match='request_conflict'):
-        submit(service, replace(req, payload={'path': 'different'}))
-    with pytest.raises(AtlasError, match='request_conflict'):
-        resume(service, operation.operation_id, req.request_id)
-    key = str(uuid.uuid4())
-    resumed = resume(service, operation.operation_id, key.upper())
-    with database(service) as db:
-        db.execute('UPDATE resumes SET request_id=? WHERE request_id=?', (key.upper(), key))
-    assert resume(service, operation.operation_id, key) == resumed
-    with pytest.raises(AtlasError, match='request_conflict'):
-        submit(service, replace(req, request_id=key))
+        db.execute('UPDATE operations SET digest=? WHERE operation_id=?', ('0'*64, op.operation_id))
+    with pytest.raises(AtlasError, match='request_conflict|unsupported_storage'):
+        submit(service, req)
 
 
 def test_nested_atlas_rejected_before_writing_inside_existing_worktree(tmp_path):
@@ -399,7 +397,7 @@ def test_queued_configuration_keeps_project(tmp_path):
         atlas_id = store.read(candidate)['manifest']['package_id']
         register_atlas(service, atlas_id, store.base)
         pubs = Publications(store)
-        content = pubs.review(candidate, {'decision': 'accept', 'kind': 'synthetic', 'actor': 'Fixture',
+        content = review_acceptance(pubs, candidate, {'decision': 'accept', 'kind': 'synthetic', 'actor': 'Fixture',
             'reason': 'Existing READY', 'accepted_at': '2026-11-13T01:00:00Z', 'base_publication': None}, profile)
         database = 'admin/atlas-' + uuid.UUID(atlas_id).hex
         ready = pubs.publish(content, lambda commit: {**projection(commit), 'database': database})
@@ -433,7 +431,7 @@ def test_queued_configuration_keeps_project(tmp_path):
         assert result.result.data['frozen']['graph'] == {'url': graph['url'], 'database': database}
 
 
-@pytest.mark.parametrize('drift', ['location', 'repository', 'graph'])
+@pytest.mark.parametrize('drift', ['location', 'repository', 'graph', 'missing'])
 def test_project_binding_change_fails_before_execution(tmp_path, drift):
     from knowledge_atlas.core.git_store import GitStore
     from knowledge_atlas.operations import database, register_atlas
@@ -450,11 +448,14 @@ def test_project_binding_change_fails_before_execution(tmp_path, drift):
         request_id=str(uuid.uuid4()), payload={'release': str(release)}))
 
     relocated = tmp_path / 'relocated'
-    if drift == 'graph':
+    if drift in ('graph', 'missing'):
         with database(service) as db:
             row = db.execute('SELECT configuration FROM operations WHERE operation_id=?', (operation.operation_id,)).fetchone()
             frozen = json.loads(row[0])
-            frozen['project_binding']['graph_database'] = 'admin/reassigned'
+            if drift == 'missing':
+                del frozen['project_binding']
+            else:
+                frozen['project_binding']['graph_database'] = 'admin/reassigned'
             db.execute('UPDATE operations SET configuration=? WHERE operation_id=?',
                        (json.dumps(frozen), operation.operation_id))
     else:
@@ -469,7 +470,9 @@ def test_project_binding_change_fails_before_execution(tmp_path, drift):
     assert result.state == 'failed'
     assert result.error['code'] == ('graph_atlas_conflict' if drift == 'graph' else 'atlas_conflict')
     assert not (result.evidence / 'started').exists()
-
+    with pytest.raises(AtlasError, match='atlas_conflict'):
+        resume(service, operation.operation_id, str(uuid.uuid4()))
+    assert inspect_operation(service, operation.operation_id).attempt == 1
 
 
 def test_queued_destination_symlink_cannot_redirect_worker_lock(tmp_path):

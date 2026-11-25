@@ -83,7 +83,7 @@ def test_type_decision_requires_explicit_valid_input_before_provider(tmp_path, m
     decision = {'candidate':'a'*40,'actor':'Curator','decision_id':'decision-one','action':'accept',
                 'reason':'Explicit reason','recorded_at':'2026-11-13T00:00:00Z', **change}
     with pytest.raises(AtlasError) as error:
-        execute_native({'request':{'action':'type.decide','payload':decision}, 'configuration':{},
+        execute_native({'service_root':str(tmp_path/'service'), 'vector_cache':str(tmp_path/'service/vectors'), 'request':{'action':'type.decide','payload':decision}, 'configuration':{},
             'atlas_path':str(tmp_path/'atlas'),'evidence':str(tmp_path/'evidence')})
     assert error.value.code == 'invalid_request'
     assert not (tmp_path/'atlas').exists()
@@ -100,7 +100,7 @@ def test_deciding_a_completed_type_question_returns_a_domain_error(tmp_path, mon
     monkeypatch.setattr(GitStore, 'read', lambda self, oid: selected)
     monkeypatch.setattr(model_config, 'ConfiguredModels', lambda **kw: None)
     with pytest.raises(AtlasError) as caught:
-        execute_native({'atlas_path': str(tmp_path), 'configuration':{}, 'evidence':str(tmp_path),
+        execute_native({'service_root':str(tmp_path/'service'), 'vector_cache':str(tmp_path/'service/vectors'), 'atlas_path': str(tmp_path), 'configuration':{}, 'evidence':str(tmp_path),
             'request':{'action':'type.decide', 'payload':{'candidate':'a'*40, 'decision_id':'question',
                 'action':'reject', 'actor':'Fixture','reason':'Already handled','recorded_at':'2026-11-13T01:00:00Z'}}})
     assert caught.value.code == 'type_decision_unavailable' and caught.value.status == 422

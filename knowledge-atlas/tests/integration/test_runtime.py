@@ -78,6 +78,8 @@ def test_native_historical_projection_and_eligible_top_k(native_graph, tmp_path)
 def _check_native_projection(native_graph, tmp_path):
     from knowledge_atlas.core.git_store import GitStore
     from knowledge_atlas.core.publication import Publications
+    from runpy import run_path
+    review_acceptance = run_path(str(Path(__file__).resolve().parents[1] / "acceptance_fixture.py"))["review_acceptance"]
     from knowledge_atlas.core.native_projection import NativeProjection
     from knowledge_atlas.core.graph_stage import records_for
     from knowledge_atlas.core.reader import AtlasReader
@@ -102,7 +104,7 @@ def _check_native_projection(native_graph, tmp_path):
                 recorded_at=recorded_at, base_publication=published[-1][0])
         else:
             candidate = store.snapshot(wiki, extraction, {}, recorded_at=recorded_at)['commit']
-        content = pubs.review(candidate, {'decision':'accept','kind':'synthetic','actor':'Runtime qualification',
+        content = review_acceptance(pubs, candidate, {'decision':'accept','kind':'synthetic','actor':'Runtime qualification',
             'reason':'Retained PoC9 fixture, technical qualification only',
             'accepted_at':f'2026-11-{day}T01:00:00Z', 'base_publication':pubs.ready()}, profile)
         publication = pubs.publish(content, builder.build)

@@ -93,7 +93,7 @@ class NativeSourceTests(unittest.TestCase):
                 'sources':[{'source_id':'one','name':'note.md','content':'First observation.'},
                            {'source_id':'two','name':'note.md','content':'Second observation.'}],
                 'recorded_at':'2026-11-13T00:00:00Z'}}, 'configuration':{},
-                'atlas_path':str(root/'atlas'),'evidence':str(evidence)}
+                'service_root':str(root/'service'), 'vector_cache':str(root/'service/vectors'), 'atlas_path':str(root/'atlas'),'evidence':str(evidence)}
             with patch('knowledge_atlas.core.model_config.ConfiguredModels', DeterministicModel):
                 result = execute_native(payload)
             store = GitStore(root/'atlas')
@@ -146,8 +146,8 @@ class NativeSourceTests(unittest.TestCase):
                 'candidate':original, 'actor':'Fixture', 'kind':'synthetic', 'reason':'Correction',
                 'decided_at':'2026-11-13T01:00:00Z', 'instructions':'Append the explicit correction note.'})
             with patch('knowledge_atlas.core.model_config.ConfiguredModels', CorrectionModel):
-                result = execute_native({'request':asdict(request), 'configuration':{},
-                    'atlas_path':str(store.base),'evidence':str(evidence)})
+                result = execute_native({'request':asdict(request), 'configuration':{'attribution_channel':'python'},
+                    'service_root':str(root/'service'), 'vector_cache':str(root/'service/vectors'), 'atlas_path':str(store.base),'evidence':str(evidence)})
             revised = store.read(result.data['candidate'])
             self.assertNotEqual(result.data['candidate'], original)
             self.assertEqual(store.read(original), previous)
@@ -199,7 +199,7 @@ class NativeSourceTests(unittest.TestCase):
             payload = {'request':{'action':'type.decide','payload':{'candidate':before,
                 'decision_id':pending['decisions'][0]['id'],'action':'accept','actor':'Synthetic test fixture',
                 'reason':'Exercise explicit type decision without knowledge acceptance','recorded_at':'2026-11-13T01:00:00Z'}},
-                'configuration':{},'atlas_path':str(store.base),'evidence':str(evidence)}
+                'configuration':{},'service_root':str(root/'service'), 'vector_cache':str(root/'service/vectors'), 'atlas_path':str(store.base),'evidence':str(evidence)}
             with patch('knowledge_atlas.core.model_config.ConfiguredModels', AlignmentModel):
                 result = execute_native(payload)
             after = store.read(result.data['candidate'])

@@ -1,6 +1,7 @@
 """Exact per-inclusion Git receipts through GC, recursive checkout and portable recovery."""
 import pytest
 
+from acceptance_fixture import review_acceptance
 from knowledge_atlas.core import composition
 from knowledge_atlas.core.archive import export_atlas, restore_atlas
 from knowledge_atlas.core.git_store import git
@@ -27,7 +28,7 @@ def publish(store, candidate):
 def publish_parent(service, parent, layout, portable, expected=None):
     oid = candidate(configure(service, parent, layout, expected=expected))
     pubs = Publications(project_store(service, parent.base))
-    content = pubs.review(oid, {'decision': 'accept', 'kind': 'synthetic', 'actor': 'Fixture',
+    content = review_acceptance(pubs, oid, {'decision': 'accept', 'kind': 'synthetic', 'actor': 'Fixture',
         'reason': 'Review archived layout', 'accepted_at': '2026-11-13T02:00:00Z',
         'base_publication': expected}, portable[4])
     return pubs.publish(content, lambda oid:portable[5](oid, pubs.store))
@@ -60,10 +61,10 @@ def test_nested_receipt_export_without_current_child_ready(service, portable, tm
                           [content], 'Another valid publication of the same content')
     inclusions = []
     copies = []
-    decisions = []
     from test_decisions import context_for
     from knowledge_atlas.actions.decisions import decide_candidate, decision_inventory
     from knowledge_atlas.core.decision_receipts import DECISIONS
+    decisions = [entry['ref'] for entry in decision_inventory(leaf)]
     for branch, wrapper in [(left, first), (right, second)]:
         branch_pub = publish(branch, candidate(configure(service, branch, [include(leaf, 'leaf', wrapper)])))
         pending = candidate(configure(service, leaf, [], expected=first))

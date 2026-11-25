@@ -99,9 +99,9 @@ async function loadPage(id){
  return true;
 }
 function attribution(data){
- const kind=data.acceptance_kind==='synthetic'?'Synthetic demo acceptance':(data.acceptance_kind||'Unknown acceptance');
- const receipt=data.matching_decision_receipt?'Matching decision receipt present':'No matching decision receipt';
- return kind+' (caller-supplied) · Channel: '+(data.acceptance_channel||'unrecorded')+' · '+receipt;
+ if(!data.acceptance_channel||!data.acceptance_kind||!data.matching_decision_receipt)return 'Incomplete acceptance evidence';
+ const kind=data.acceptance_kind==='synthetic'?'Synthetic demo acceptance':data.acceptance_kind;
+ return kind+' (caller-supplied) · Channel: '+data.acceptance_channel+' · Matching decision receipt present';
 }
 function setAskBusy(busy){
  $('ask-submit').disabled=busy;
@@ -179,8 +179,7 @@ async function loadPublication(){
  const result=await read('wiki.pages',{},scope);
  if(!active())return false;
  const data=result.data;$('dates').replaceChildren();
- const dates=['Imported '+date(data.recorded_at),'Accepted '+date(data.effective_accepted_at||data.accepted_at)];
- if(data.effective_accepted_at)dates.push('Caller-recorded acceptance '+date(data.accepted_at));
+ const dates=['Imported '+date(data.recorded_at),'Accepted '+date(data.accepted_at)];
  for(const value of [...dates,attribution(data)])$('dates').append(node('span',value));
  $('sources').replaceChildren();for(const source of data.sources||[]){$('sources').append(node('p',(source.name||'Source')+' · Source date: '+date(source.source_time)+' · Imported: '+date(source.recorded_at)),details('Source provenance',source));}
  pageNames=new Map(data.pages.map(page=>[page.id,page.title]));pageLinks=new Map();for(const page of data.pages){if(pageLinks.has(page.path))pageLinks.set(page.path,null);else pageLinks.set(page.path,page.id);}text('page-count',String(data.pages.length));
@@ -204,7 +203,7 @@ async function refresh(){
  ready=freshReady;
  $('publication').replaceChildren();$('before').replaceChildren();$('timeline').replaceChildren();
  versionNames=new Map();
- for(const [index,entry] of history.entries()){const oid=entry.publication_commit;const label='Version '+(history.length-index)+(oid===freshReady?' · Latest':'')+' · '+date(entry.effective_accepted_at||entry.accepted_at);versionNames.set(oid,label);
+ for(const [index,entry] of history.entries()){const oid=entry.publication_commit;const label='Version '+(history.length-index)+(oid===freshReady?' · Latest':'')+' · '+date(entry.accepted_at);versionNames.set(oid,label);
   chooseOption($('publication'),oid,label);chooseOption($('before'),oid,label);
   const b=button(label+'\n'+attribution(entry),async()=>{selected=oid;$('publication').value=oid;if(await loadPublication()&&isCurrent(scope))showPanel('read',true);});b.dataset.publication=oid;b.setAttribute('aria-current',String(oid===selected));$('timeline').append(b);}
 

@@ -4,6 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 import uuid
+from acceptance_fixture import review_acceptance
 from knowledge_atlas.core.git_store import GitStore
 from knowledge_atlas.core.publication import Publications
 from knowledge_atlas.core.graph_stage import records_for, GraphStage, key
@@ -75,7 +76,7 @@ class KnowledgeTests(unittest.TestCase):
             recorded_at='2026-11-10T00:01:00Z', base_publication=publication)
 
     def review(self, candidate, publication=None):
-        return Publications(self.store).review(candidate, {'decision': 'accept', 'kind': 'synthetic',
+        return review_acceptance(Publications(self.store), candidate, {'decision': 'accept', 'kind': 'synthetic',
             'actor': 'Synthetic test reviewer', 'reason': 'Controlled integration fixture, not human acceptance',
             'accepted_at': '2026-11-10T00:02:00Z', 'base_publication': publication}, self.profile)
 

@@ -4,7 +4,7 @@ import json
 from ..contracts import ActionResult, AtlasError
 from ..core.git_store import GitStore, _repo, _json, _commit, git
 from ..core.publication import Publications
-from ..core.decision_receipts import decision_inventory, matching_decision_receipt, review_inventory
+from ..core.decision_receipts import decision_inventory, review_inventory
 from ..operations import register_atlas, database
 from ..project_registry import list_projects, project_store, resolve_project
 
@@ -63,15 +63,29 @@ def atlas_status(context):
     # durable even when a later decision comments on the same candidate.
     receipts = sorted((entry['receipt'] for entry in decision_inventory(store)),
                       key=lambda r: (datetime.fromisoformat(r['decided_at'].replace('Z', '+00:00')), r['decision_id']))
+    published = set()
+    current = ready
+    while current:
+        publication = pubs.read(current)
+        published.add(publication['content_commit'])
+        current = publication['previous_publication']
+    accepted = {r['accepted_content'] for r in receipts if r['action'] == 'accept'}
     for receipt in receipts:
         candidate = receipt['candidate']
-        if candidate in statuses:
-            statuses[candidate] = {'accept':'accepted', 'reject':'rejected', 'revise':'revised'}[receipt['action']]
-    for _, review in review_inventory(store):
-        if review.get('candidate_commit') in statuses:
-            statuses[review['candidate_commit']] = 'accepted'
+        if candidate in statuses and receipt['action'] != 'accept':
+            statuses[candidate] = {'reject':'rejected', 'revise':'revised'}[receipt['action']]
+    for content, review in review_inventory(store):
+        candidate = review['candidate_commit']
+        if candidate not in statuses or statuses[candidate] == 'accepted':
+            continue
+        if content in published:
+            statuses[candidate] = 'accepted'
+        elif content in accepted:
+            statuses[candidate] = 'accepted_pending_publication'
+        elif statuses[candidate] != 'accepted_pending_publication':
+            statuses[candidate] = 'accepted_pending_decision'
     return ActionResult(data={'atlas_id':identity, 'path':str(context.atlas_path),
-                             'matching_decision_receipt':matching_decision_receipt(store, pubs.read(ready) if ready else None),
+                             'matching_decision_receipt':bool(ready),
                              'candidate_statuses':statuses,
                              'active_operations':active, 'runtime_configured':context.service.runtime is not None,
                              'candidates':candidates, 'accepted_content':refs('refs/poc9/reviews/')},

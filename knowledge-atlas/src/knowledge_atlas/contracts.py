@@ -37,6 +37,18 @@ class AtlasError(RuntimeError):
         super().__init__(message if message.startswith(code + ': ') else f'{code}: {message}')
 
 
+ATTRIBUTION_CHANNELS = frozenset(('http', 'mcp', 'viewer', 'python'))
+
+
+def require_canonical_uuid(value):
+    import uuid
+    try:
+        if str(uuid.UUID(value)) != value:
+            raise ValueError
+    except (ValueError, TypeError, AttributeError) as error:
+        raise ValueError('canonical lower-case, hyphenated UUID required') from error
+
+
 @dataclass(frozen=True)
 class ActionRequest:
     action: str
@@ -50,15 +62,14 @@ class ActionRequest:
 
     def __post_init__(self):
         import re
-        import uuid
         from datetime import datetime
         if not isinstance(self.action, str) or not self.action or not isinstance(self.payload, dict):
             raise AtlasError('invalid_request', 'action and object payload required')
         if self.request_id is not None:
             try:
-                uuid.UUID(self.request_id)
+                require_canonical_uuid(self.request_id)
             except (ValueError, TypeError, AttributeError) as error:
-                raise AtlasError('invalid_request', 'request_id must be a UUID') from error
+                raise AtlasError('invalid_request', 'request_id must be a canonical UUID') from error
         for oid in (self.expected_publication, self.publication):
             if oid is not None and (not isinstance(oid, str) or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', oid)):
                 raise AtlasError('invalid_request', 'exact publication OID required')

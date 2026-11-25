@@ -26,7 +26,7 @@ The operation engine, public service transports and domain actions are implement
 provenance, unresolved relations and grouped type questions. `candidate.decide`
 requires `candidate`, `action` (`accept` or `reject`), `actor`, `kind` (`human` or
 `synthetic`), `reason` and timezone-aware `decided_at`, in addition to the common
-request UUID and expected READY. The UUID is the durable decision ID.
+lower-case, hyphenated request UUID and expected READY. The UUID is the durable decision ID.
 
 Decisions live in immutable `refs/knowledge-atlas/decisions/<UUID>` commits with
 `atlas-decision.json`. Each receipt retains the candidate tree and package closure;
@@ -35,22 +35,19 @@ Rejection records a decision against that candidate. A fresh decision UUID can s
 Inspection survives loss of the service database. Caller-supplied attribution is
 recorded as supplied; a `human` flag is not proof of human identity.
 
-Acceptance uses PoC9's existing review path, then its projection/publication path.
-The result identifies accepted content separately from READY. A projection failure
-returns `accepted_pending_publication`, its error and the previous READY, which
-remains unchanged. Explicit `operation.resume` with a fresh UUID may continue this
-otherwise succeeded operation: canonical reconciliation reuses the existing receipt
-and accepted content before attempting projection. A lost acknowledgement after
-publication resolves to the existing publication, including when later history has
-advanced. No duplicate acceptance or automatic model retry is implied.
+Each accepted review records its original actor, decision kind, reason, time,
+request identity, digest and arrival channel. An interrupted operation can leave
+`accepted_pending_decision` after the review, or `accepted_pending_publication`
+after its decision receipt. Replaying the identical mutation through another
+client returns the original operation and attempt count. Once the worker is
+inactive, call `operation.resume` with its operation ID and a fresh canonical
+request UUID. Reconciliation uses the recorded acceptance in the original
+project. Retrying that same resume UUID returns the same operation. When the
+recorded effect cannot establish safe continuation, resume reports `unsafe_resume`.
 
 Each new candidate records its base publication, including an explicit null for the first candidate. Regenerate and inspect a pre-upgrade candidate that lacks this binding. A stale base returns `stale_proposal` or `stale_publication`. Backdated acceptances return `invalid_acceptance_time`. Earlier source versions that lack a per-source recording time use the retained Wiki compilation time where available.
-If an older release accepted a far-future date, submit the next review against the
-current READY with the correct current time. The service uses the old publication's
-own `published_at` as its acceptance time when the claimed date exceeded that clock by
-more than five minutes. The original Git receipt and publication ID remain available.
-For a future-dated review still pending publication, issue a fresh acceptance with
-the corrected time against the current base.
+History reads and archive restore require the recorded acceptance to follow its
+predecessor and fall within the five-minute allowance at publication.
 
 `candidate.revise` creates a new candidate with attributed receipt, using either
 `entries` for explicit structured changes, or `sources`, `remove_source_ids` and/or

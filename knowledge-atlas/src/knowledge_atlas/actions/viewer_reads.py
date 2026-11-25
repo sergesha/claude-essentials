@@ -28,10 +28,8 @@ def explore(context, reader):
         data = {'pages':[{k:v for k,v in p.items() if k!='content'} for p in pages],
             'sources':sources,'recorded_at':snapshot['manifest']['recorded_at'],
             'accepted_at':reader.receipt['accepted_at'],'acceptance_kind':reader.receipt['acceptance_kind'],
-            'acceptance_channel':reader.receipt.get('acceptance_channel','unrecorded'),
+            'acceptance_channel':reader.receipt['acceptance_channel'],
             'matching_decision_receipt':reader.matching_decision_receipt()}
-        if 'effective_accepted_at' in reader.receipt:
-            data['effective_accepted_at'] = reader.receipt['effective_accepted_at']
         return ActionResult(data=data, publication=reader.publication)
     if action=='wiki.read':
         rid=payload.get('page_id'); record=reader.records.get(rid)

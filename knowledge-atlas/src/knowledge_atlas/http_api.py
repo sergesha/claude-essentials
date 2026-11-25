@@ -10,7 +10,7 @@ import re
 import threading
 from . import __version__
 from .api_models import parse_request, schema
-from .contracts import ActionContext, AtlasError
+from .contracts import ATTRIBUTION_CHANNELS, ActionContext, AtlasError
 from .operations import initialize_service_storage, Dispatcher, inspect_operation, resume, submit
 from .locks import FileLock
 from .providers.base import ProviderError
@@ -126,7 +126,7 @@ class LocalApp:
                                 app.submissions += 1
                             try:
                                 channel = self.headers.get('Atlas-Channel', 'http')
-                                if channel not in ('http', 'mcp', 'viewer', 'python'):
+                                if channel not in ATTRIBUTION_CHANNELS:
                                     raise AtlasError('invalid_request', 'unknown attribution channel')
                                 service = replace(app.context, configuration={
                                     **app.context.configuration, 'attribution_channel': channel})

@@ -3,6 +3,7 @@ from dataclasses import replace
 import json
 from pathlib import Path
 import pytest
+from acceptance_fixture import review_acceptance
 from knowledge_atlas.contracts import ActionContext, ActionRequest, ServiceContext, AtlasError
 from knowledge_atlas.core.git_store import GitStore
 from knowledge_atlas.core.graph_stage import records_for, GraphStage
@@ -22,7 +23,7 @@ def published(tmp_path,monkeypatch):
     candidate=propose_records(store,base,entries,actor='Fixture',method='Explicit retained fixture',
         reason='Read contract',recorded_at='2026-11-13T00:00:00Z')
     profile=json.loads((_assets()/'embedding-profile.json').read_text())
-    content=Publications(store).review(candidate,{'decision':'accept','actor':'Fixture','kind':'synthetic',
+    content=review_acceptance(Publications(store), candidate,{'decision':'accept','actor':'Fixture','kind':'synthetic',
         'reason':'Read contract','accepted_at':'2026-11-13T01:00:00Z','base_publication':None},profile)
     publication=Publications(store).publish(content,lambda oid:{**projection(oid),'graph_commit':oid,
         'search_checkpoint':oid,'database':'admin/fixture'})
@@ -134,7 +135,7 @@ def registered_history(published):
     candidate = propose_records(store, content, [], actor='Fixture', method='Explicit retained fixture',
         reason='Advance READY', recorded_at='2026-11-14T00:00:00Z', base_publication=first)
     profile = json.loads((_assets() / 'embedding-profile.json').read_text())
-    accepted = pubs.review(candidate, {'decision': 'accept', 'actor': 'Fixture', 'kind': 'synthetic',
+    accepted = review_acceptance(pubs, candidate, {'decision': 'accept', 'actor': 'Fixture', 'kind': 'synthetic',
         'reason': 'Advance READY', 'accepted_at': '2026-11-14T01:00:00Z', 'base_publication': first}, profile)
     ready = pubs.publish(accepted, lambda oid: {
         **projection(oid), 'graph_commit': oid, 'search_checkpoint': oid, 'database': binding.graph_database})
@@ -204,3 +205,13 @@ def test_historical_read_retains_project_owned_graph(published, registered_histo
     assert result.publication == first != ready
     assert result.data['status'] == 'conditional'
     assert queried == [(old_database, content)]
+
+@pytest.mark.parametrize('action', ['history', 'wiki.pages'])
+def test_selected_reads_reject_a_missing_acceptance_decision(published, action):
+    from knowledge_atlas.core.decision_receipts import decision_inventory
+    from knowledge_atlas.core.git_store import git
+    store, publication = published[:2]
+    entry, = decision_inventory(store)
+    git(store.root, 'update-ref', '-d', entry['ref'])
+    with pytest.raises(AtlasError, match='publication_unavailable.*decision'):
+        read_action(read_context(published, action, {}, publication=publication))

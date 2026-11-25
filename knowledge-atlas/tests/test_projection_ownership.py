@@ -7,6 +7,7 @@ from unittest.mock import Mock
 
 import pytest
 from knowledge_atlas import native_pipeline
+from acceptance_fixture import review_acceptance
 from knowledge_atlas.contracts import ActionContext, ActionRequest, AtlasError, ServiceContext
 from knowledge_atlas.core.git_store import GitStore
 from knowledge_atlas.core.publication import Publications
@@ -25,7 +26,7 @@ def setup_atlas(path, service, graph):
     binding = register_atlas(service, manifest['package_id'], path)
     pub = Publications(store)
     profile = json.loads((_assets()/'embedding-profile.json').read_text())
-    accepted = pub.review(candidate, {'decision':'accept','kind':'synthetic','actor':'Fixture',
+    accepted = review_acceptance(pub, candidate, {'decision':'accept','kind':'synthetic','actor':'Fixture',
         'reason':'Ownership test','accepted_at':'2026-11-13T01:00:00Z','base_publication':None}, profile)
     request = ActionRequest('publication.build', atlas_id=binding.atlas_id, payload={'content':accepted})
     configuration = project_configuration(replace(service, configuration={'graph':graph}), binding)

@@ -6,6 +6,7 @@ from pathlib import Path
 import uuid
 import zipfile
 import pytest
+from acceptance_fixture import review_acceptance
 from knowledge_atlas.core.archive import export_atlas, restore_atlas
 from knowledge_atlas.core.git_store import GitStore, git
 from knowledge_atlas.core.publication import Publications
@@ -54,7 +55,7 @@ def portable(tmp_path,monkeypatch):
     monkeypatch.setattr(decisions,'_assets',lambda:assets)
     monkeypatch.setattr(decisions,'build_projection',lambda context,content:projection(content))
     store=GitStore(tmp_path/'atlas');candidate=snapshot(store)
-    content=Publications(store).review(candidate,{'decision':'accept','kind':'synthetic','actor':'Fixture',
+    content=review_acceptance(Publications(store), candidate,{'decision':'accept','kind':'synthetic','actor':'Fixture',
         'reason':'Controlled archive fixture','accepted_at':'2026-11-13T01:00:00Z','base_publication':None},profile)
     publication=Publications(store).publish(content,projection)
     return store,tokenizer,formatter,publication,profile,projection
@@ -82,7 +83,7 @@ def test_decision_roundtrip_without_service_db(portable,tmp_path):
     with_decisions(portable,tmp_path)
     path=tmp_path/'atlas.zip'; manifest=archive(portable,path)
     assert manifest['format']==3
-    assert len(manifest['decisions']['entries'][manifest['root_package_id']])==3
+    assert len(manifest['decisions']['entries'][manifest['root_package_id']])==4
     restored=restore_atlas(path,tmp_path/'restored')
     assert {item['receipt']['action'] for item in decision_inventory(restored)}=={'accept','reject','revise'}
     assert decision_inventory(restored)==decision_inventory(portable[0])
@@ -469,14 +470,15 @@ def test_full_inventory_preserves_decision_ref_order(portable, tmp_path):
     candidate = propose_records(store, content, [], actor='Fixture', method='Review', reason='Archive',
                                 recorded_at='2026-11-13T02:00:00Z', base_publication=publication)
     ids = ['aaaaaaaa-0000-4000-8000-000000000001', 'bbbbbbbb-0000-4000-8000-000000000002']
+    accepted_id = decision_inventory(store)[0]['receipt']['decision_id']
     for identifier in ids:
         ctx = context_for(tmp_path, store, candidate, 'reject', publication)
         decide_candidate(replace(ctx, request=replace(ctx.request, request_id=identifier)))
-    assert [e['receipt']['decision_id'] for e in decision_inventory(store)] == ids
+    assert [e['receipt']['decision_id'] for e in decision_inventory(store)] == sorted([accepted_id, *ids])
     path = tmp_path/'decisions.zip'
     archive(portable, path)
     restored = restore_atlas(path, tmp_path/'restored')
-    assert [e['receipt']['decision_id'] for e in decision_inventory(restored)] == ids
+    assert [e['receipt']['decision_id'] for e in decision_inventory(restored)] == sorted([accepted_id, *ids])
 
 
 def test_restore_checks_uuid_publication_content_binding(portable, tmp_path):
@@ -504,11 +506,11 @@ def test_restore_root_publication_owner(portable, tmp_path, monkeypatch, wrong_o
     child_commit = snapshot(child)
     from test_packages import layout, selection
     child_pubs = Publications(child)
-    child_content = child_pubs.review(child_commit, {'decision':'accept','kind':'synthetic','actor':'Fixture',
+    child_content = review_acceptance(child_pubs, child_commit, {'decision':'accept','kind':'synthetic','actor':'Fixture',
         'reason':'Review child','accepted_at':'2026-11-13T01:00:00Z','base_publication':None}, profile)
     child_publication = child_pubs.publish(child_content, lambda oid:projection(oid, child))
     proposed = layout(store, selection(store, child, child_publication, 'materials'))
-    content = pubs.review(proposed, {'decision': 'accept', 'kind': 'synthetic', 'actor': 'Fixture',
+    content = review_acceptance(pubs, proposed, {'decision': 'accept', 'kind': 'synthetic', 'actor': 'Fixture',
         'reason': 'Review child publication', 'accepted_at': '2026-11-13T03:00:00Z',
         'base_publication': previous}, profile)
     ready = pubs.publish(content, projection)
@@ -553,10 +555,10 @@ def test_staged_child_history_is_verified(portable, tmp_path, damage):
     child_pubs = Publications(child)
     decision = {'decision':'accept', 'kind':'synthetic', 'actor':'Fixture', 'reason':'Archive test',
                 'base_publication':None, 'accepted_at':'2026-11-13T02:00:00Z'}
-    content = child_pubs.review(proposal, decision, profile)
+    content = review_acceptance(child_pubs, proposal, decision, profile)
     wrapper = child_pubs.publish(content, lambda oid:projection(oid, child))
     parent_proposal = layout(parent, selection(parent, child, wrapper))
-    parent_content = Publications(parent).review(parent_proposal, {**decision, 'base_publication':previous}, profile)
+    parent_content = review_acceptance(Publications(parent), parent_proposal, {**decision, 'base_publication':previous}, profile)
     Publications(parent).publish(parent_content, projection)
     # Retain a child decision in its own namespace.
     decide_candidate(context_for(tmp_path, child, layout(child), 'reject', wrapper))
@@ -624,7 +626,7 @@ def test_export_inventory_matches_mirrored_refs(portable, tmp_path, monkeypatch)
     path = tmp_path/'raced.zip'
     archive(portable, path)
     restored = restore_atlas(path, tmp_path/'restored')
-    assert len(decision_inventory(restored)) == 1
+    assert len(decision_inventory(restored)) == 2
 
 
 @pytest.mark.parametrize(('location', 'fields'), [
@@ -643,7 +645,7 @@ def test_invalid_projection_receipts_rejected_before_archive_exposure(portable, 
         owner = GitStore(tmp_path/'child')
         pubs = Publications(owner)
         proposal = snapshot(owner)
-        content = pubs.review(proposal, {'decision':'accept','kind':'synthetic','actor':'Fixture',
+        content = review_acceptance(pubs, proposal, {'decision':'accept','kind':'synthetic','actor':'Fixture',
             'reason':'Review child','accepted_at':'2026-11-13T01:00:00Z','base_publication':None}, profile)
         selected = pubs.publish(content, lambda oid: projection(oid, owner))
         pending = layout(root, selection(root, owner, selected))
@@ -696,3 +698,28 @@ def test_invalid_projection_receipts_rejected_before_archive_exposure(portable, 
     if location == 'child':
         with pytest.raises(ValueError, match='projection is not ready'):
             root.read(pending)
+
+
+def test_restore_rejects_missing_acceptance_ref_even_with_matching_outer_inventory(portable, tmp_path):
+    store = portable[0]
+    original = tmp_path / 'current.zip'
+    manifest = archive(portable, original)
+    project = manifest['root_package_id']
+    entry, = manifest['decisions']['entries'][project]
+    git(store.root, 'update-ref', '-d', entry['ref'])
+    bundle = tmp_path / 'missing.bundle'
+    git(store.root, 'bundle', 'create', str(bundle), '--all')
+    member = next(p['bundle'] for p in manifest['packages'] if p['package_id'] == project)
+    payload = bundle.read_bytes()
+    manifest['sha256'][member] = hashlib.sha256(payload).hexdigest()
+    manifest['decisions']['entries'][project] = []
+    damaged = tmp_path / 'damaged.zip'
+    with zipfile.ZipFile(original) as source, zipfile.ZipFile(damaged, 'w') as dest:
+        for name in source.namelist():
+            dest.writestr(name, json.dumps(manifest) if name == 'archive.json' else
+                          payload if name == member else source.read(name))
+    before = damaged.read_bytes()
+    with pytest.raises(ValueError, match='decision'):
+        restore_atlas(damaged, tmp_path / 'restored')
+    assert not (tmp_path / 'restored').exists()
+    assert damaged.read_bytes() == before
