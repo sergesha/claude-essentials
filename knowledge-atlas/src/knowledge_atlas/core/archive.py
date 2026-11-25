@@ -3,7 +3,7 @@
 Bundles preserve canonical commits; the restored provider cache is disposable.
 Native graph/search projections must subsequently be rebuilt.
 """
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import hashlib
 import io
 import os
@@ -14,13 +14,17 @@ import re
 import tempfile
 import zipfile
 import zlib
-from .git_store import GitStore, git, _json
+from .git_store import GitStore, git, _json, package_identity
+from ..storage import FORMAT
 from .publication import Publications
-from .decision_receipts import decision_inventory
-from .embedding_provider import EmbeddingProvider, canonical, raw_vectors, cache_artifact
+from .graph_stage import records_for
+from .vector_chunks import chunks_for
+from .decision_receipts import DECISIONS, decision_inventory
+from .composition import retain_child_publication
+from .embedding_provider import EmbeddingProvider, canonical, artifact_key, cache_artifact
 
 
-# Limits apply to both supported archive formats, including archive.json.
+# Limits include archive.json.
 MAX_ARCHIVE_BYTES = 512 * 1024**2
 MAX_MEMBER_BYTES = 256 * 1024**2
 MAX_EXPANDED_BYTES = 1024**3
@@ -135,13 +139,15 @@ def _read_members(archive, work):
             if copied != entry.file_size:
                 raise ValueError('archive manifest size mismatch')
             manifest = json.loads(buffer.getvalue())
-            if not isinstance(manifest, dict) or manifest.get('format') not in (1, 2):
+            if not isinstance(manifest, dict) or type(manifest.get('format')) is not int or manifest['format'] != FORMAT:
                 raise ValueError('unsupported archive format')
             hashes = manifest.get('sha256')
             if not isinstance(hashes, dict) or hashes.keys() != inventory.keys():
                 raise ValueError('archive member inventory mismatch')
-            if manifest['format'] == 2 and (not isinstance(manifest.get('decisions'), dict)
-                    or manifest['decisions'].get('version') != 1):
+            if (not isinstance(manifest.get('decisions'), dict)
+                    or type(manifest['decisions'].get('version')) is not int
+                    or manifest['decisions']['version'] != 1
+                    or not isinstance(manifest['decisions'].get('entries'), dict)):
                 raise ValueError('missing or unsupported decision inventory')
             files = {}
             for index, (name, entry) in enumerate(inventory.items()):
@@ -155,51 +161,165 @@ def _read_members(archive, work):
             return manifest, files
 
 
+def _history_packages(store, ready, *, verify_publication=None):
+    packages = {}
+    pending = []
+    scheduled = set()
+    repositories = set()
+
+    def schedule(owner, commit, kind):
+        # A restored child can carry its own location map for nested packages.
+        # Keep that resolution context when walking the rest of its history.
+        repository = (owner.root, owner.base, kind)
+        if (repository, commit) in scheduled:
+            return
+        refs = ('--all',) if repository not in repositories else ()
+        repositories.add(repository)
+        for oid in git(owner.root, 'rev-list', commit, *refs).splitlines():
+            if (repository, oid) not in scheduled:
+                scheduled.add((repository, oid))
+                pending.append((owner, oid, kind))
+
+    schedule(store, ready, 'atlas')
+    while pending:
+        owner, commit, kind = pending.pop()
+        nodes = owner.repository_closure(commit, kind=kind)
+        if verify_publication and kind == 'atlas' and git(owner.root, 'ls-tree', '--name-only', commit, 'publication.json'):
+            verify_publication(owner, commit, nodes[0][1]['package_id'])
+        for child, node in nodes:
+            package = packages.setdefault(node['package_id'], {'path': child.root, 'kind':node['kind'], 'pins': set(), 'receipts': set()})
+            if package['kind'] != node['kind']:
+                raise ValueError('conflicting archive package roles')
+            content = node['commit']
+            package['pins'].add((child.root, content))
+            schedule(child, content, node['kind'])
+            for row in node.get('inclusions', ()):
+                wrapper = row['publication']
+                package['receipts'].add((wrapper, content))
+                # A wrapper can be unreachable from every advertised child ref.
+                schedule(child, wrapper, 'atlas')
+    return packages
+
+
+def _verify_archived_publication(store, publication, identity, profile, assets, db):
+    snapshot = store.read(publication)
+    receipt = Publications(store)._read_receipt(publication, snapshot['manifest'])
+    if snapshot['manifest']['package_id'] != identity:
+        raise ValueError('publication package identity mismatch')
+    previous = receipt['previous_publication']
+    if previous and not git(store.root, 'ls-tree', '--name-only', previous, 'publication.json'):
+        raise ValueError('previous publication receipt is missing')
+    committed_profile = json.loads(git(store.root, 'show', publication + ':embedding-profile.json'))
+    if committed_profile != profile or receipt['profile_id'] != profile['profile_id']:
+        raise ValueError('archived publication profile mismatch')
+    records = records_for(snapshot, receipt['content_commit'])
+    chunks = chunks_for(records, *assets)
+    expected = {hashlib.sha256(('title: none | text: ' + chunk['text']).encode()).hexdigest()
+                for chunk in chunks}
+    artifacts = receipt.get('vector_artifacts')
+    if (not isinstance(artifacts, dict) or artifacts.keys() != expected
+            or type(receipt.get('chunk_count')) is not int or receipt['chunk_count'] != len(chunks)
+            or type(receipt.get('record_count')) is not int or receipt['record_count'] != len(records)):
+        raise ValueError('incomplete archived vector evidence')
+    for digest, artifact in artifacts.items():
+        try:
+            key = artifact_key(artifact)
+        except (KeyError, TypeError, AttributeError, OverflowError) as error:
+            raise ValueError('invalid archived vector artifact') from error
+        if (digest != artifact['input_sha256'] or artifact['role'] != 'document'
+                or artifact['profile'] != profile['profile']):
+            raise ValueError('archived document vector mismatch')
+        cache_artifact(db, key, artifact)
+
+
+def _staged_inventory(store, ready, paths, assets, cache):
+    if not ready or Publications(store).ready() != ready:
+        raise ValueError('archive READY mismatch')
+    provider = EmbeddingProvider(assets[0], cache, 'http://127.0.0.1:1')
+    with closing(provider.connect()) as db, db:
+        def verify(owner, revision, identity):
+            _verify_archived_publication(owner, revision, identity, provider.profile, assets, db)
+        packages = _history_packages(store, ready, verify_publication=verify)
+    if packages.keys() != paths.keys():
+        raise ValueError('archive repository inventory mismatch')
+    decisions = {}
+    for identity, package in packages.items():
+        owner = store.at_repository(paths[identity])
+        for wrapper, content in sorted(package['receipts']):
+            retain_child_publication(owner, wrapper, content)
+        if package['kind'] == 'atlas':
+            current = Publications(owner).ready()
+            if current:
+                Publications(owner).read(current, expected_package_id=identity)
+            decisions[identity] = decision_inventory(owner)
+    return decisions
+
+
+def _qualified_profile(profile):
+    from ..runtime import _assets
+    if profile != json.loads((_assets()/'embedding-profile.json').read_text()):
+        raise ValueError('qualified archive embedding profile required')
+
+
+def _merge_copy_decisions(repo, sources):
+    """Keep decisions from each local copy of the same UUID in the bundled namespace."""
+    def refs(path):
+        lines = git(path, 'for-each-ref', '--format=%(refname) %(objectname)', DECISIONS)
+        return dict(line.split() for line in lines.splitlines())
+    retained = refs(repo)
+    for source in sources:
+        for ref, oid in refs(source).items():
+            if ref in retained:
+                if retained[ref] != oid:
+                    raise ValueError('conflicting decision refs for the same package UUID')
+                continue
+            if not GitStore._has_commits(repo, oid):
+                git(repo, 'fetch', str(source), oid)
+            git(repo, 'update-ref', ref, oid)
+            retained[ref] = oid
+
+
 def export_atlas(store, destination, *, tokenizer, formatter):
     destination=Path(destination)
     if destination.exists():raise ValueError('archive destination exists')
     publications=Publications(store)
     ready=publications.ready()
     if ready is None:raise ValueError('no published atlas to export')
-    decisions=decision_inventory(store)
-    packages={};pending=[];scheduled=set();repositories=set()
-    def retain_history(path,commit):
-        refs=('--all',) if path not in repositories else ()
-        repositories.add(path)
-        for oid in git(path,'rev-list',commit,*refs).splitlines():
-            if (path,oid) not in scheduled:
-                scheduled.add((path,oid));pending.append((path,oid))
-    retain_history(store.root,ready)
-    while pending:
-        path,commit=pending.pop()
-        for node in store.closure(commit,root=path):
-            package=packages.setdefault(node['package_id'],{'path':node['path'],'pins':set()})
-            package['pins'].add((node['path'],node['commit']))
-            if (node['path'],node['commit']) not in scheduled:
-                retain_history(node['path'],node['commit'])
-    root_id=json.loads(git(store.root,'show',ready+':package.json'))['package_id']
+    packages = _history_packages(store, ready)
+    root_id=package_identity(store.root, ready)
     profile=json.loads(git(store.root,'show',ready+':embedding-profile.json'))
+    _qualified_profile(profile)
     asset_paths = {'tokenizer.json': Path(tokenizer), 'chunking.py': Path(formatter)}
     if len(packages) + len(asset_paths) + 2 > MAX_ARCHIVE_ENTRIES:
         raise ValueError('too many archive entries')
     with tempfile.TemporaryDirectory() as temporary:
         work=Path(temporary);members={};inventory=[]
+        paths = {}
         for index,(identity,package) in enumerate(packages.items()):
             repo=work/str(index)
             git(work,'clone','--mirror','--no-hardlinks',str(package['path']),str(repo))
             for number,(source,commit) in enumerate(sorted(package['pins'])):
-                git(repo,'fetch',str(source),commit)
+                if not GitStore._has_commits(repo, commit):
+                    git(repo,'fetch',str(source),commit)
                 git(repo,'update-ref','refs/poc9/archive-pins/'+str(number),commit)
+            copies = {path for path, _ in package['pins']} - {package['path']}
+            if copies and package['kind'] == 'atlas':
+                _merge_copy_decisions(repo, sorted(copies))
+            paths[identity] = repo
             name='root.bundle' if identity==root_id else str(index)+'.bundle'
-            bundle=work/name
-            git(repo,'bundle','create',str(bundle),'--all')
-            members[name]=bundle
             inventory.append({'package_id':identity,'bundle':name,
-                'head':git(package['path'],'rev-parse','HEAD')})
+                'head':git(repo,'rev-parse','HEAD')})
+        mirror = GitStore(work, archive_locations=paths).at_repository(paths[root_id])
         members.update(asset_paths)
         profile_path = work / 'embedding-profile.json'
         profile_path.write_text(canonical(profile) + '\n', encoding='utf-8')
         members['embedding-profile.json'] = profile_path
+        decisions = _staged_inventory(mirror, ready, paths, (profile_path, tokenizer, formatter), work/'vectors')
+        for package in inventory:
+            name = package['bundle']
+            bundle = work/name
+            git(paths[package['package_id']], 'bundle', 'create', str(bundle), '--all')
+            members[name] = bundle
         destination.parent.mkdir(parents=True,exist_ok=True)
         with tempfile.NamedTemporaryFile(dir=destination.parent) as staged:
             hashes = {}
@@ -219,7 +339,7 @@ def export_atlas(store, destination, *, tokenizer, formatter):
                     raise ValueError('tokenizer digest mismatch')
                 if hashes['chunking.py'] != profile['profile']['formatter_sha256']:
                     raise ValueError('formatter digest mismatch')
-                manifest = {'format':2, 'root_package_id':root_id, 'ready':ready, 'packages':inventory,
+                manifest = {'format':FORMAT, 'root_package_id':root_id, 'ready':ready, 'packages':inventory,
                             'decisions':{'version':1,'entries':decisions}, 'sha256':hashes}
                 metadata = canonical(manifest).encode()
                 if len(metadata) > min(MAX_MEMBER_BYTES, MAX_MANIFEST_BYTES, MAX_EXPANDED_BYTES - total):
@@ -231,6 +351,19 @@ def export_atlas(store, destination, *, tokenizer, formatter):
             # Publish only a complete ZIP; a competing export cannot replace it.
             os.link(staged.name, destination)
     return manifest
+
+
+def seed_retained_vectors(pubs, db, *, expected_package_id=None):
+    current = pubs.ready()
+    seen = set()
+    while current:
+        if current in seen:
+            raise ValueError('publication history cycle')
+        seen.add(current)
+        receipt = pubs.read(current, expected_package_id=expected_package_id)
+        for artifact in receipt['vector_artifacts'].values():
+            cache_artifact(db, artifact_key(artifact), artifact)
+        current = receipt['previous_publication']
 
 
 def restore_atlas(archive, destination):
@@ -268,38 +401,35 @@ def restore_atlas(archive, destination):
             relative='atlas' if package['package_id']==manifest['root_package_id'] else 'modules/'+str(index)
             repo=base/relative;repo.mkdir(parents=True)
             git(repo,'init','-q','-b','restore-unborn')
+            heads = git(repo, 'bundle', 'list-heads', str(bundle), 'HEAD').split()
+            if heads != [package['head'], 'HEAD']:
+                raise ValueError('archive bundle HEAD mismatch')
             git(repo,'fetch',str(bundle),'refs/*:refs/*')
             # Data HEAD is separate from READY: future writes must still use publication CAS.
-            git(repo,'checkout','-B','data',package['head'])
-            locations[package['package_id']]=relative
+            branches = git(repo, 'for-each-ref', '--points-at', package['head'],
+                           '--format=%(refname:strip=2)', 'refs/heads/').splitlines()
+            if 'data' in branches:
+                git(repo, 'checkout', 'data')
+            else:
+                git(repo, 'checkout', '--detach', package['head'])
+            identity = package_identity(repo, 'HEAD')
+            if identity != package['package_id']:
+                raise ValueError('archive package identity mismatch')
+            locations[identity] = relative
         _json(base/'package-locations.json',locations)
         assets=base/'assets';assets.mkdir()
         for name in assets_required:
             members[name].rename(assets/name)
-        store=GitStore(base);pubs=Publications(store)
-        if pubs.ready()!=manifest['ready']:raise ValueError('archive READY mismatch')
-        provider=EmbeddingProvider(assets/'embedding-profile.json',base/'vectors','http://127.0.0.1:1')
-        current=pubs.ready();seen=set()
-        with provider.connect() as db:
-            while current:
-                if current in seen:raise ValueError('publication history cycle')
-                seen.add(current);receipt=pubs.read(current)
-                for artifact in receipt['vector_artifacts'].values():
-                    profile_id=hashlib.sha256(canonical(artifact['profile']).encode()).hexdigest()
-                    if artifact['profile_id']!=profile_id or artifact['role'] not in ('document','query'):
-                        raise ValueError('vector artifact identity mismatch')
-                    if hashlib.sha256(artifact['input'].encode()).hexdigest()!=artifact['input_sha256']:
-                        raise ValueError('vector input digest mismatch')
-                    raw_vectors([artifact['raw768']],1)
-                    key=hashlib.sha256(canonical([profile_id,artifact['role'],artifact['input']]).encode()).hexdigest()
-                    # Archive members and Git receipts have already been verified.
-                    # Integrity metadata is local; canonical artifact bytes stay unchanged.
-                    cache_artifact(db,key,artifact)
-                current=receipt['previous_publication']
-        # Validate all retained pins, including unpublished proposals, before exposing restore.
-        for commit in git(store.root,'rev-list','--all').splitlines():store.closure(commit)
-        decisions=decision_inventory(store)
-        if manifest['format']==2 and manifest['decisions'].get('entries')!=decisions:
+        paths = {identity: base / relative for identity, relative in locations.items()}
+        store = GitStore(base, archive_locations=paths)
+        profile = json.loads((assets/'embedding-profile.json').read_text())
+        _qualified_profile(profile)
+        if (manifest['sha256']['tokenizer.json'] != profile['profile']['endpoint']['tokenizer_sha256']
+                or manifest['sha256']['chunking.py'] != profile['profile']['formatter_sha256']):
+            raise ValueError('archive profile asset mismatch')
+        decisions = _staged_inventory(store, manifest['ready'], paths,
+                                      (assets/'embedding-profile.json', assets/'tokenizer.json', assets/'chunking.py'), base/'vectors')
+        if canonical(manifest['decisions']['entries']) != canonical(decisions):
             raise ValueError('archive decision inventory does not match retained objects and refs')
         base.rename(destination)
     return GitStore(destination)

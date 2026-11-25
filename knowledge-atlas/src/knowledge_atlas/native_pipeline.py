@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import uuid
 from urllib.parse import urlsplit
 
 from .contracts import ActionRequest, ActionResult, AtlasError
@@ -25,7 +26,9 @@ def run_native(context):
     context.evidence.mkdir(parents=True, exist_ok=True)
     payload = {'request':asdict(context.request), 'atlas_path':str(context.atlas_path),
                'evidence':str(context.evidence), 'configuration':context.configuration,
-               'runtime_root':str(identity.runtime_root), 'operation_id':context.operation_id}
+               'service_root':str(context.service.service_root),
+               'runtime_root':str(identity.runtime_root), 'operation_id':context.operation_id,
+               'vector_cache':str(context.service.service_root / 'vectors')}
     environment = {**os.environ, 'PYTHONPATH':str(Path(__file__).resolve().parent.parent),
                    'KNOWLEDGE_ATLAS_WIKI_ROOT':str(identity.runtime_root/'wiki'),
                    'POC9_EXTRACT_BIN':str(identity.runtime_root/'extract/target/debug/poc9-extract')}
@@ -43,16 +46,71 @@ def run_native(context):
     return ActionResult(**result)
 
 
+def _native_store(service, request, payload):
+    from .operations import atlas_path, operation_project, read_registry, retained_request
+    from .project_registry import (graph_endpoint, project_database, project_store, repository_identity,
+                                   resolve_project, verify_graph_owner)
+
+    path = Path(payload['atlas_path'])
+    binding = None
+    if payload.get('operation_id') is not None:
+        with read_registry(service) as db:
+            if db is None:
+                raise AtlasError('invalid_configuration', 'native execution requires its service registry')
+            row = db.execute('SELECT * FROM operations WHERE operation_id=?', (payload['operation_id'],)).fetchone()
+            if row is None or row['state'] != 'running' or row['evidence'] != payload['evidence'] or row['atlas_path'] != str(path):
+                raise AtlasError('atlas_conflict', 'native dispatch differs from its running operation', 409)
+            original = retained_request(row)
+            if original.action == 'archive.restore':
+                # Rebuild precedes registration. The running restore owns its destination.
+                if (request.action != 'publication.rebuild' or atlas_path(service, original) != path
+                        or repository_identity(path) != request.atlas_id):
+                    raise AtlasError('atlas_conflict', 'native rebuild differs from the restored project', 409)
+                graph = projection_graph(payload['configuration'])
+                name = project_database(uuid.UUID(request.atlas_id))
+                if name != graph['database']:
+                    raise AtlasError('graph_atlas_conflict', 'native rebuild differs from the restored database', 409)
+                endpoint = graph_endpoint(graph['url'])
+                owner = db.execute('SELECT atlas_id FROM projection_owners WHERE endpoint=? AND database_name=?',
+                                   (endpoint, name)).fetchone()
+                if owner is None or owner['atlas_id'] != request.atlas_id:
+                    raise AtlasError('graph_atlas_conflict', 'native rebuild lacks its prepared projection owner', 409)
+                return project_store(service, path)
+            frozen = json.loads(row['configuration'])
+            if request.atlas_id != original.atlas_id or payload['configuration'] != frozen['configuration']:
+                raise AtlasError('atlas_conflict', 'native dispatch differs from its frozen project configuration', 409)
+            binding = operation_project(service, original, path, frozen)
+    if binding is None:
+        binding = resolve_project(service, request.atlas_id)
+    if binding.path != path:
+        raise AtlasError('atlas_conflict', 'native dispatch differs from the registered project path', 409)
+    if request.action in ('publication.build', 'publication.rebuild'):
+        graph = projection_graph(payload['configuration'])
+        if graph['database'] != binding.graph_database:
+            raise AtlasError('graph_atlas_conflict', 'native projection differs from the registered database', 409)
+        with read_registry(service) as db:
+            verify_graph_owner(db, graph_endpoint(graph['url']), binding.graph_database, binding.atlas_id, require_owner=True)
+    return project_store(service, path)
+
+
 def execute_native(payload):
     from .actions.sources import prepare_sources
-    from .core.git_store import GitStore, git
+    from .core.git_store import git
     from .core.ingest import ingest
     from .core.model_config import ConfiguredModels
     from .core.publication import Publications
     from .core.relations import propose_resolution, TypeDecisionUnavailable
     request = ActionRequest(**payload['request'])
     evidence = Path(payload['evidence'])
-    store = GitStore(payload['atlas_path'])
+    from .contracts import ServiceContext
+    root = payload.get('service_root')
+    if not isinstance(root, str) or not Path(root).is_absolute() or str(Path(root).resolve()) != root:
+        raise AtlasError('invalid_configuration', 'native execution requires the absolute service root')
+    service = ServiceContext(Path(root), configuration=payload['configuration'])
+    cache = service.service_root / 'vectors'
+    if payload.get('vector_cache') != str(cache) or cache.resolve() != cache:
+        raise AtlasError('invalid_configuration', 'native execution requires the service vector-cache location')
+    store = _native_store(service, request, payload)
     pubs = Publications(store)
     data = request.payload
     if request.action in ('publication.build', 'publication.rebuild'):
@@ -68,8 +126,8 @@ def execute_native(payload):
         selected = pubs.read(request.expected_publication)['content_commit'] if request.expected_publication else git(store.root,'rev-parse','HEAD')
         if revision:
             from .actions.decisions import _binding, _check_base
-            from .contracts import ActionContext, ServiceContext
-            context = ActionContext(ServiceContext(evidence/'service'), request, store.base, evidence, payload['configuration'])
+            from .contracts import ActionContext
+            context = ActionContext(service, request, store.base, evidence, payload['configuration'])
             _check_base(store, _binding(context, 'revise'))
             selected = data['candidate']
             if not data.get('sources') and not data.get('remove_source_ids') and not data.get('instructions'):
@@ -126,46 +184,38 @@ def projection_graph(configuration):
 
 
 def claim_projection_database(context):
-    from .core.git_store import GitStore, git
-    from .core.publication import Publications
+    from .core.git_store import GitStore
     from .operations import database
+    from .project_registry import (graph_endpoint, project_database, project_id, repository_identity,
+                                   verify_graph_owner)
 
     graph = projection_graph(context.configuration)
-    address = urlsplit(graph['url'])
-    endpoint = f'http://{address.hostname}:{address.port or 80}' + address.path.rstrip('/')
+    endpoint = graph_endpoint(graph['url'])
     name = graph['database']
     store = GitStore(context.atlas_path)
-    identity = json.loads(git(store.root, 'show', 'HEAD:package.json'))['package_id']
-    conflict = 'the configured graph database belongs to another atlas'
+    identity = repository_identity(store.base)
+    binding = context.project_binding
+    if binding is None:
+        raise AtlasError('graph_atlas_conflict', 'projection requires a current project binding', 409)
+    if ((context.request.atlas_id is not None and project_id(context.request.atlas_id) != identity)
+            or binding.atlas_id != identity or binding.path != store.base):
+        raise AtlasError('atlas_conflict', 'the projection repository differs from the selected atlas', 409)
+    if binding.graph_database != name or name != project_database(uuid.UUID(identity)):
+        raise AtlasError('graph_atlas_conflict', 'the projection database differs from the selected atlas binding', 409)
+
     with database(context.service) as db:
         db.execute('BEGIN IMMEDIATE')
-        db.execute('''CREATE TABLE IF NOT EXISTS projection_owners (
-            endpoint TEXT NOT NULL, database_name TEXT NOT NULL, atlas_id TEXT NOT NULL,
-            PRIMARY KEY (endpoint, database_name))''')
-        registered = db.execute('SELECT path FROM atlases WHERE atlas_id=?', (identity,)).fetchone()
-        if registered and Path(registered['path']) != store.base and Path(registered['path']).exists():
-            raise AtlasError('atlas_conflict', 'this UUID is already open at another existing location', 409)
-        owner = db.execute('SELECT atlas_id FROM projection_owners WHERE endpoint=? AND database_name=?',
+        registered = db.execute('SELECT path,graph_database FROM atlases WHERE atlas_id=?', (identity,)).fetchone()
+        if registered:
+            if Path(registered['path']) != store.base and Path(registered['path']).exists():
+                raise AtlasError('atlas_conflict', 'this UUID is already registered at another existing location', 409)
+            if registered['graph_database'] != name:
+                raise AtlasError('graph_atlas_conflict', 'the projection database differs from the registered binding', 409)
+        verify_graph_owner(db, endpoint, name, identity)
+        owner = db.execute('SELECT 1 FROM projection_owners WHERE endpoint=? AND database_name=?',
                            (endpoint, name)).fetchone()
         if owner:
-            if owner['atlas_id'] != identity:
-                raise AtlasError('graph_atlas_conflict', conflict, 409)
             return
-        # Pre-upgrade registrations may have published before a binding existed.
-        # Reads and package opens never claim a database. Restores retain the UUID.
-        for row in db.execute('SELECT path FROM atlases WHERE atlas_id<>?', (identity,)):
-            other = GitStore(row['path'])
-            if not (other.root/'.git').is_dir():
-                continue
-            pubs = Publications(other)
-            ready = pubs.ready()
-            if ready:
-                receipt = pubs.read(ready)
-                mapping = other.base/'rebuilt-projections.json'
-                if mapping.exists():
-                    receipt = json.loads(mapping.read_text()).get(ready) or receipt
-                if receipt.get('database') == name:
-                    raise AtlasError('graph_atlas_conflict', conflict, 409)
         db.execute('INSERT INTO projection_owners VALUES (?,?,?)', (endpoint, name, identity))
 
 
@@ -183,10 +233,17 @@ def project_native(payload, store):
     assets = store.base/'assets'
     tokenizer = assets/'tokenizer.json' if assets.exists() else runtime/'model/tokenizer.json'
     formatter = assets/'chunking.py' if assets.exists() else runtime/'chunking.py'
-    builder = NativeProjection(store, native, tokenizer, formatter, store.base/'vectors')
+    cache = Path(payload['vector_cache'])
+    builder = NativeProjection(store, native, tokenizer, formatter, cache)
     try:
         if rebuilding:
-            from .core.archive import rebuild_projections
+            import sqlite3
+            from .core.archive import rebuild_projections, seed_retained_vectors
+            from .core.embedding_provider import initialize_cache
+            from .core.publication import Publications
+            initialize_cache(cache)
+            with sqlite3.connect(cache / 'vectors.sqlite3') as db:
+                seed_retained_vectors(Publications(store), db)
             return ActionResult(data=rebuild_projections(store, builder), evidence=[payload['evidence']])
         return ActionResult(data=builder.build(content), evidence=[payload['evidence']])
     finally:

@@ -2,7 +2,9 @@
 
 The provider seam retains PoC9's two purposes: a native Wiki MCP tool-using agent and structured Utopia/admission calls. `runtime/wiki-agent-codex.py`, `runtime/relation-model-codex.py` and `runtime/model-profiles.json` retain the PoC9 transport and explicit stage profiles. The wrapper supplies explicit executable selection, stage identity and durable per-call evidence; it does not replace native Wiki editing or Utopia parsing.
 
-Profiles select `provider`, `model`, `effort` and `guidance` independently for `wiki`, `open`, `phrase`, `proposal`, `review_extension` and `grounded_answer`. The supplied defaults belong to Codex only. Changing one stage changes that stage's reuse identity without changing unrelated profiles. Optional Wiki task guidance is delivered to the native MCP agent alongside the unchanged upstream guide; it does not edit that guide. The caller's host does not choose a provider implicitly.
+Profiles select `provider`, `model`, `effort` and `guidance` independently for `wiki`, `open`, `phrase`, `proposal`, `review_extension` and `grounded_answer`. The shipped `runtime/model-profiles.json` names Codex explicitly for all six stages and supplies the defaults when you omit profile configuration. To override them, supply all six stages with an explicit provider in each. Incomplete profiles fail validation before a provider is invoked.
+
+Changing one stage changes that stage's reuse identity without changing unrelated profiles. Optional Wiki task guidance is delivered to the native MCP agent alongside the unchanged upstream guide; it does not edit that guide. The caller's host does not choose a provider implicitly.
 
 Codex uses its existing native authentication. Atlas does not copy login credentials. Calls record the actual CLI version, adapter hash and effective stage profile; failures retain stdout/stderr and request evidence without automatic model retries. Native system/user messages retain PoC9's instruction-file adaptation. Wiki calls retain its guide/search/read/create/edit/append/lint tool loop and explicit completion status.
 

@@ -1,0 +1,167 @@
+"""Resolve the service's durable UUID, repository and projection bindings."""
+from dataclasses import dataclass
+from pathlib import Path
+from urllib.parse import urlsplit
+import uuid
+
+from .contracts import AtlasError, ServiceContext
+from .core.git_store import GitStore, git, package_identity, project_manifest
+from .core.composition import validate_layout
+
+
+@dataclass(frozen=True)
+class ProjectBinding:
+    atlas_id: str
+    path: Path
+    graph_database: str
+    git_url: str | None
+
+
+def project_id(value: str | None) -> str:
+    try:
+        return str(uuid.UUID(value))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise AtlasError('invalid_request', 'atlas_id must be a UUID') from error
+
+
+def repository_identity(path: Path) -> str:
+    """Read the committed identity without materializing any included packages."""
+    store = GitStore(path)
+    try:
+        if not (store.root / '.git').exists():
+            raise ValueError('missing native Git repository')
+        head = git(store.root, 'rev-parse', 'HEAD')
+        identity = package_identity(store.root, head)
+        manifest = project_manifest(store.root, head)
+        validate_layout(store.root, head, manifest['modules'])
+        manifest_identity = manifest['package_id']
+    except (ValueError, KeyError, TypeError, AttributeError, OSError) as error:
+        raise AtlasError('invalid_atlas', 'native atlas repository identity is unavailable', 422) from error
+    if manifest_identity != identity:
+        raise AtlasError('atlas_conflict', 'repository package and manifest UUIDs disagree', 409)
+    return identity
+
+
+def project_database(identity: uuid.UUID):
+    return 'admin/atlas-' + identity.hex
+
+
+def _registry_binding(row):
+    return ProjectBinding(row['atlas_id'], Path(row['path']),
+                          row['graph_database'], row['git_url'])
+
+
+def list_projects(service: ServiceContext) -> list[ProjectBinding]:
+    """Read the inventory, including unavailable registrations. Resolve a binding before use."""
+    from .operations import read_registry
+
+    with read_registry(service) as db:
+        if db is None:
+            return []
+        return [_registry_binding(row) for row in db.execute('SELECT * FROM atlases ORDER BY path, atlas_id')]
+
+
+def resolve_project(service: ServiceContext, atlas_id: str) -> ProjectBinding:
+    from .operations import read_registry, validate_atlas_path
+
+    atlas_id = project_id(atlas_id)
+    with read_registry(service) as db:
+        row = db.execute('SELECT * FROM atlases WHERE atlas_id=?', (atlas_id,)).fetchone() if db is not None else None
+    if row is None:
+        raise AtlasError('atlas_not_found', 'atlas UUID is not registered in this service', 404)
+    path = Path(row['path'])
+    try:
+        resolved = validate_atlas_path(service, path)
+        identity = repository_identity(path)
+    except AtlasError as error:
+        if error.code != 'invalid_atlas':
+            raise
+        raise AtlasError('atlas_conflict', 'the registered repository identity is unavailable', 409) from error
+    if path != resolved or identity != atlas_id:
+        raise AtlasError('atlas_conflict', 'the registered path or repository UUID disagrees with the binding', 409)
+    return _registry_binding(row)
+
+
+def project_store(service: ServiceContext, path: Path) -> GitStore:
+    """Resolve receipt-bearing atlas modules against this operation's service."""
+    from functools import cache
+
+    @cache
+    def resolve(atlas_id):
+        return resolve_project(service, atlas_id).path / 'atlas'
+
+    return GitStore(path, resolve_atlas=resolve)
+
+
+def project_configuration(service: ServiceContext, binding: ProjectBinding) -> dict:
+    graph = service.configuration.get('graph', {})
+    if not isinstance(graph, dict):
+        raise AtlasError('invalid_configuration', 'graph configuration must be an object', 422)
+    return {**service.configuration, 'graph': {**graph, 'database': binding.graph_database}}
+
+
+def graph_endpoint(url):
+    address = urlsplit(url)
+    return f'http://{address.hostname}:{address.port or 80}' + address.path.rstrip('/')
+
+
+def verify_graph_owner(db, endpoint, database_name, atlas_id, *, require_owner=False):
+    reserved = db.execute('SELECT atlas_id FROM atlases WHERE graph_database=?', (database_name,)).fetchone()
+    owner = db.execute('SELECT atlas_id FROM projection_owners WHERE endpoint=? AND database_name=?',
+                       (endpoint, database_name)).fetchone()
+    if any(row is not None and row['atlas_id'] != atlas_id for row in (reserved, owner)):
+        raise AtlasError('graph_atlas_conflict', 'the graph database belongs to another atlas', 409)
+    if require_owner and reserved is None:
+        raise AtlasError('graph_atlas_conflict', 'the selected graph database has no verified project owner', 409)
+
+
+def _verified_location(service, atlas_id, path):
+    from .operations import validate_atlas_path
+
+    path = validate_atlas_path(service, path)
+    if repository_identity(path) != atlas_id:
+        raise AtlasError('atlas_conflict', 'repository UUID disagrees with the registration', 409)
+    return path
+
+
+def _registration_binding(db, service, atlas_id, path):
+    row = db.execute('SELECT * FROM atlases WHERE atlas_id=?', (atlas_id,)).fetchone()
+    if row and Path(row['path']) != path and Path(row['path']).exists():
+        raise AtlasError('atlas_conflict', 'this UUID is already registered at another existing location', 409)
+    if db.execute('SELECT 1 FROM atlases WHERE path=? AND atlas_id<>?', (str(path), atlas_id)).fetchone():
+        raise AtlasError('atlas_conflict', 'this location is registered for another UUID', 409)
+    graph = service.configuration.get('graph', {})
+    endpoint = graph_endpoint(graph['url']) if isinstance(graph, dict) and graph.get('url') else None
+    name = row['graph_database'] if row else project_database(uuid.UUID(atlas_id))
+    store = GitStore(path)
+    verify_graph_owner(db, endpoint, name, atlas_id)
+    try:
+        locator = git(store.root, 'config', '--local', '--get', 'remote.origin.url') or None
+    except ValueError:
+        locator = None
+    return ProjectBinding(atlas_id, path, name, locator)
+
+
+def register_project(service, atlas_id, path):
+    from .operations import database
+
+    atlas_id = project_id(atlas_id)
+    path = _verified_location(service, atlas_id, path)
+    with database(service) as db:
+        db.execute('BEGIN IMMEDIATE')
+        binding = _registration_binding(db, service, atlas_id, path)
+        db.execute('''INSERT INTO atlases (atlas_id,path,graph_database,git_url) VALUES (?,?,?,?)
+                  ON CONFLICT(atlas_id) DO UPDATE SET path=excluded.path,
+                      graph_database=excluded.graph_database, git_url=excluded.git_url''',
+                   (binding.atlas_id, str(binding.path), binding.graph_database, binding.git_url))
+    return binding
+
+
+def prepare_restored_project(service, path):
+    """Select projection storage while keeping a failed restore out of the inventory."""
+    from .operations import database, validate_atlas_path
+
+    path = validate_atlas_path(service, path)
+    identity = repository_identity(path)
+    with database(service) as db:
+        return _registration_binding(db, service, identity, path)

@@ -1,4 +1,6 @@
 """Native qualification is opt-in and never inferred from controlled fixtures."""
+from contextlib import contextmanager
+from functools import partial
 import pytest
 
 
@@ -32,7 +34,18 @@ def tmp_path(request, tmp_path_factory):
 
 
 @pytest.fixture
-def native_graph(runtime_configuration, tmp_path, monkeypatch):
+def native_graph_session(monkeypatch):
+    return partial(_native_graph, monkeypatch=monkeypatch)
+
+
+@pytest.fixture
+def native_graph(runtime_configuration, tmp_path, native_graph_session):
+    with native_graph_session(runtime_configuration, tmp_path) as graph:
+        yield graph
+
+
+@contextmanager
+def _native_graph(runtime_configuration, tmp_path, monkeypatch):
     """Launch only this test's pinned native processes; retain pytest artifacts."""
     import json
     import os
@@ -46,7 +59,9 @@ def native_graph(runtime_configuration, tmp_path, monkeypatch):
     package = Path(__file__).resolve().parents[2]
     if runtime_configuration.get('archive'):
         from knowledge_atlas.core.archive import restore_atlas
+        from knowledge_atlas.core.embedding_provider import merge_verified_cache
         restore_atlas(runtime_configuration['archive'], tmp_path/'atlas')
+        merge_verified_cache(tmp_path/'atlas/vectors', tmp_path/'service/vectors')
     ports = []
     for _ in range(3):
         with socket.socket() as sock:
@@ -78,7 +93,7 @@ def native_graph(runtime_configuration, tmp_path, monkeypatch):
         raw = launch('gemma', [python,str(package/'runtime/gemma-service.py')])
         wait(raw, f'http://127.0.0.1:{raw_port}/health')
         bridge = launch('bridge',[python,str(package/'runtime/embedding-provider.py'),
-            '--profile',str(package/'runtime/embedding-profile.json'), '--cache',str(tmp_path/'atlas/vectors'),
+            '--profile',str(package/'runtime/embedding-profile.json'), '--cache',str(tmp_path/'service/vectors'),
             '--endpoint',f'http://127.0.0.1:{raw_port}', '--port',str(bridge_port)])
         wait(bridge, f'http://127.0.0.1:{bridge_port}/stats')
         initialized = launch('graph-init',base+['init'])
@@ -101,7 +116,7 @@ def native_graph(runtime_configuration, tmp_path, monkeypatch):
             server = launch('graph-restart-'+str(len(processes)),base+['serve'])
             wait(server, graph.url+'/api/v1/health')
         yield {'runtime':runtime, 'graph':graph, 'atlas':tmp_path/'atlas',
-               'crash_restart_graph':crash_restart_graph, 'switch_cache':switch_cache,
+               'cache':tmp_path/'service/vectors', 'crash_restart_graph':crash_restart_graph, 'switch_cache':switch_cache,
                'bridge':f'http://127.0.0.1:{bridge_port}', 'raw':f'http://127.0.0.1:{raw_port}'}
     finally:
         for process in reversed(processes):

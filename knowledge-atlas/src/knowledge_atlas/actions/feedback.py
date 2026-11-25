@@ -3,7 +3,8 @@ from dataclasses import replace
 from datetime import datetime
 import json
 from ..contracts import ActionRequest, ActionResult, AtlasError
-from ..core.git_store import GitStore, git
+from ..project_registry import project_store
+from ..core.git_store import git
 from ..core.publication import Publications
 from ..core.feedback import record_case_outcome
 from ..core.knowledge import propose_records
@@ -18,7 +19,7 @@ def feedback_action(context):
         if datetime.fromisoformat(data['recorded_at'].replace('Z','+00:00')).tzinfo is None: raise ValueError()
     except ValueError as error:
         raise AtlasError('invalid_request','recorded_at requires a timezone') from error
-    store = GitStore(context.atlas_path); pubs = Publications(store)
+    store = project_store(context.service, context.atlas_path); pubs = Publications(store)
     expected = context.request.expected_publication
     if expected is None or pubs.ready() != expected:
         raise AtlasError('stale_publication','select current READY before proposing feedback',409)

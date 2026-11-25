@@ -1,0 +1,96 @@
+From 13adef3c445b5a2b276d962b40a9156d55b774b1 Mon Sep 17 00:00:00 2001
+From: Jan Wielemaker <jan@swi-prolog.org>
+Date: Wed, 11 Nov 2026 10:50:17 +0100
+Subject: [PATCH] FIXED: www_open_url/1: pass the URL to the browser without
+ the shell
+
+The browser was started using shell/1 with the URL between double
+quotes, where the shell still expands $(...) and backquotes.  The
+browser is now started using process_create/3.  URLs that start with a
+"-" are rejected.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01Y7pJ6ouLn1iv91aufPC5X7
+---
+ library/www_browser.pl | 49 ++++++++++++++++++++++++++++--------------
+ 1 file changed, 33 insertions(+), 16 deletions(-)
+
+diff --git a/library/www_browser.pl b/library/www_browser.pl
+index 1c48a81734..a8d6d314f8 100644
+--- a/library/www_browser.pl
++++ b/library/www_browser.pl
+@@ -38,6 +38,8 @@
+             expand_url_path/2           % +Spec, -URL
+           ]).
+ :- autoload(library(lists),[member/2]).
++:- autoload(library(apply),[maplist/3]).
++:- autoload(library(error),[domain_error/2]).
+ 
+ :- if(exists_source(library(process))).
+ :- autoload(library(process), [process_create/3]).
+@@ -83,6 +85,10 @@
+ 
+ www_open_url(Spec) :-                   % user configured
+     expand_url_path(Spec, URL),
++    (   sub_atom(URL, 0, _, _, -)       % would be processed as an option
++    ->  domain_error(url, URL)
++    ;   true
++    ),
+     open_url(URL).
+ 
+ open_url(URL) :-
+@@ -125,27 +131,38 @@
+ %!  run_command(+Command, +Args, +Background)
+ %
+ %   Run OS command Command using Args,   silencing  the error output
+-%   because many browsers are rather verbose.
++%   because many browsers are rather verbose.  The arguments are passed
++%   without using the shell, such that a URL cannot inject commands.
+ 
+ :- if(current_predicate(process_create/3)).
+ run_command(Command, Args, fg) :-
+     !,
+-    process_create(path(Command), Args, [stderr(null)]).
+-:- endif.
+-:- if(current_prolog_flag(unix, true)).
+-run_command(Command, [Arg], fg) :-
+-    format(string(Cmd), "\"~w\" \"~w\" &> /dev/null", [Command, Arg]),
+-    shell(Cmd).
+-run_command(Command, [Arg], bg) :-
+-    format(string(Cmd), "\"~w\" \"~w\" &> /dev/null &", [Command, Arg]),
+-    shell(Cmd).
+-:- else.
+-run_command(Command, [Arg], fg) :-
+-    format(string(Cmd), "\"~w\" \"~w\"", [Command, Arg]),
+-    shell(Cmd).
+-run_command(Command, [Arg], bg) :-
+-    format(string(Cmd), "\"~w\" \"~w\" &", [Command, Arg]),
++    process_create(path(Command), Args,
++                   [ stdin(null), stdout(null), stderr(null) ]).
++run_command(Command, Args, bg) :-
++    process_create(path(Command), Args,
++                   [ stdin(null), stdout(null), stderr(null),
++                     detached(true)
++                   ]).
++:- elif(current_prolog_flag(unix, true)).
++run_command(Command, Args, Mode) :-
++    maplist(shell_quote, [Command|Args], Quoted),
++    atomic_list_concat(Quoted, ' ', Cmd0),
++    (   Mode == bg
++    ->  atom_concat(Cmd0, ' >/dev/null 2>&1 &', Cmd)
++    ;   atom_concat(Cmd0, ' >/dev/null 2>&1', Cmd)
++    ),
+     shell(Cmd).
++
++%   shell_quote(+Text, -Quoted)
++%
++%   Quote Text for the POSIX shell using single quotes.  A single quote
++%   is written as '\''.
++
++shell_quote(Text, Quoted) :-
++    atomic_list_concat(Parts, '\'', Text),
++    atomic_list_concat(Parts, '\'\\\'\'', Escaped),
++    atomic_list_concat(['\'', Escaped, '\''], Quoted).
+ :- endif.
+ 
+ %!  known_browser(+FileBaseName, -Compatible)

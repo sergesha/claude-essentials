@@ -7,6 +7,8 @@ import platform
 from pathlib import Path
 import shutil
 import subprocess
+import tempfile
+import urllib.request
 
 from .contracts import RuntimeConfig, RuntimeIdentity
 
@@ -65,11 +67,14 @@ def _check_hash(path: Path, expected: str, component: str):
         raise RuntimeMismatch(component, 'artifact_mismatch', 'SHA-256 does not match pinned identity')
 
 
+SWI_BROWSER = 'native-tools/swipl/lib/swipl/library/www_browser.pl'
+
+
 def _required_artifacts(target: str) -> tuple[str, ...]:
     suffix = '.dylib' if target == 'macos-arm64' else '.so'
     return ('terminusdb/terminusdb', 'native-tools/swipl/bin/swipl', 'extract/target/debug/poc9-extract',
             'terminusdb/src/rust/librust' + suffix, 'wiki/mcp/local_server.py',
-            'wiki/mcp/vaultfs/sqlite.py', 'chunking.py')
+            'wiki/mcp/vaultfs/sqlite.py', 'chunking.py', SWI_BROWSER)
 
 
 def _python_packages(root: Path) -> dict[str, str]:
@@ -98,6 +103,10 @@ def _source_inventory(root: Path, name: str, directory: str) -> dict:
 
 
 def validate_runtime(config: RuntimeConfig) -> RuntimeIdentity:
+    return _validate_runtime(config, check_model=True)
+
+
+def _validate_runtime(config: RuntimeConfig, *, check_model: bool) -> RuntimeIdentity:
     root = config.runtime_root.expanduser().resolve()
     target = platform_target()
     manifest = _json(config.manifest or root / 'runtime.json', 'manifest')
@@ -106,8 +115,9 @@ def validate_runtime(config: RuntimeConfig) -> RuntimeIdentity:
     if manifest.get('platform') != target:
         raise RuntimeMismatch('platform', 'artifact_mismatch', f'expected {target}')
     artifacts = _json(_assets() / 'gemma-runtime-artifacts.json', 'pinned model artifacts')
-    for name, digest in artifacts['artifacts'].items():
-        _check_hash(root / 'model' / name, digest, 'model/' + name)
+    if check_model:
+        for name, digest in artifacts['artifacts'].items():
+            _check_hash(root / 'model' / name, digest, 'model/' + name)
     profile = _json(root / 'embedding-profile.json', 'embedding profile')
     expected = _json(_assets() / 'embedding-profile.json', 'pinned embedding profile')
     if profile != expected:
@@ -118,6 +128,8 @@ def validate_runtime(config: RuntimeConfig) -> RuntimeIdentity:
         if components.get(name) != pins[name]['revision']:
             raise RuntimeMismatch(name, 'artifact_mismatch', 'pinned source revision required')
     required = _required_artifacts(target)
+    browser_pin = _json(_assets() / 'patches/manifest.json', 'pinned patches')['swipl']
+    _check_hash(root / SWI_BROWSER, browser_pin['after_sha256'], SWI_BROWSER)
     recorded = manifest.get('artifacts', {})
     for name in required:
         digest = recorded.get(name)
@@ -137,11 +149,47 @@ def validate_runtime(config: RuntimeConfig) -> RuntimeIdentity:
     return RuntimeIdentity(root, target, components, profile['profile_id'])
 
 
+def _acquire(url: str, destination: Path, digest: str, *, partial: Path | None = None):
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    output = (tempfile.NamedTemporaryFile(dir=destination.parent, delete=False)
+              if partial is None else partial.open('xb'))
+    with output:
+        partial = Path(output.name)
+        try:
+            with urllib.request.urlopen(url, timeout=120) as source:
+                shutil.copyfileobj(source, output)
+            output.flush()
+            _check_hash(partial, digest, destination.name)
+            partial.replace(destination)
+        except (OSError, ValueError) as exc:
+            raise RuntimeMismatch(destination.name, 'acquisition_failed', f'{url}: {exc}') from exc
+        finally:
+            partial.unlink(missing_ok=True)
+
+
+def acquire_model(root: Path, *, partial: Path | None = None):
+    """Acquire only the pinned weights and tokenizer; completed files can be reused."""
+    pins = _json(_assets() / 'components.json', 'pinned components')['embedding']
+    model = _json(_assets() / 'gemma-runtime-artifacts.json', 'model artifacts')
+    for name, digest in model['artifacts'].items():
+        path = root / 'model' / name
+        if path.resolve() != path:
+            raise RuntimeMismatch(name, 'invalid_location', 'unexpected symlink in model destination')
+        if path.exists():
+            _check_hash(path, digest, name)
+        else:
+            url = f"https://huggingface.co/{pins['model']}/resolve/{pins['revision']}/{name}"
+            _acquire(url, path, digest, partial=partial)
+
+
 def prepare_runtime(config: RuntimeConfig) -> RuntimeIdentity:
     """Acquire pinned sources in a fresh external tree and retain failed build logs."""
+    return _build_runtime(config)
+
+
+def _build_runtime(config: RuntimeConfig, *, image_revision: str | None = None) -> RuntimeIdentity:
     import os
     import tarfile
-    import urllib.request
 
     root = config.runtime_root.expanduser().resolve()
     target = platform_target()
@@ -171,38 +219,48 @@ def prepare_runtime(config: RuntimeConfig) -> RuntimeIdentity:
         if result.returncode:
             raise RuntimeMismatch(component, 'build_failed', f'exit {result.returncode}; retained log: {log}')
 
-    def acquire(url, destination, digest):
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        partial = destination.with_name(destination.name + '.partial')
-        try:
-            with urllib.request.urlopen(url, timeout=120) as source, partial.open('wb') as output:
-                shutil.copyfileobj(source, output)
-            _check_hash(partial, digest, destination.name)
-            partial.replace(destination)
-        except RuntimeMismatch:
-            raise
-        except (OSError, ValueError) as exc:
-            raise RuntimeMismatch(destination.name, 'acquisition_failed', str(exc)) from exc
-
     def clone(name, url, revision, destination):
-        run(name, [tools['git'], 'clone', '--no-checkout', url, destination])
+        if image_revision:
+            # Only the selected commit and its tree belong in a distributed checkout.
+            run(name, [tools['git'], 'init', destination])
+            run(name, [tools['git'], 'fetch', '--no-tags', '--depth=1', url, revision], destination)
+        else:
+            run(name, [tools['git'], 'clone', '--no-checkout', url, destination])
         run(name, [tools['git'], 'checkout', '--detach', revision], destination)
         actual = subprocess.check_output([tools['git'], '-C', str(destination), 'rev-parse', 'HEAD'], text=True).strip()
         if actual != revision:
             raise RuntimeMismatch(name, 'artifact_mismatch', 'source checkout differs from pin')
 
+    def apply_patch(name, patch, directory):
+        run(name, [tools['git'], 'apply', patch], directory)
+        if image_revision:
+            for line in patch.read_text().splitlines():
+                if line.startswith('+++ b/'):
+                    path = directory / line.removeprefix('+++ b/')
+                    comment = {'.pl': '%', '.rs': '//', '.lock': '#', '.toml': '#', '.txt': '#'}[path.suffix]
+                    with path.open('a') as modified:
+                        modified.write(f'\n{comment} Modified by Knowledge Atlas; see runtime/patches/{patch.name}.\n')
+
     for name, directory in (('wiki_llm', 'wiki'), ('terminusdb', 'terminusdb'), ('vectorlink', 'vectorlink')):
         clone(name, pins[name]['repository'], pins[name]['revision'], root / directory)
-    for name in ('terminusdb', 'vectorlink'):
+    for name, directory in (('wiki_llm', 'wiki'), ('terminusdb', 'terminusdb'), ('vectorlink', 'vectorlink')):
         patch = assets / 'patches' / patches[name]['patch']
         _check_hash(patch, patches[name]['sha256'], name + ' patch')
-        run(name, [tools['git'], 'apply', patch], root / name)
+        apply_patch(name, patch, root / directory)
 
     swi_archive = root / 'downloads/swipl-10.0.2.tar.gz'
-    acquire('https://www.swi-prolog.org/download/stable/src/swipl-10.0.2.tar.gz', swi_archive,
+    _acquire('https://www.swi-prolog.org/download/stable/src/swipl-10.0.2.tar.gz', swi_archive,
             'e42cc098f7b8a6051c4f79a99b55162d467098aba60f69649bdc7583f0734b57')
     with tarfile.open(swi_archive) as archive:
         archive.extractall(root / 'sources', filter='data')
+    source = root / 'sources/swipl-10.0.2'
+    browser = source / 'library/www_browser.pl'
+    browser_pin = patches['swipl']
+    patch = assets / 'patches' / browser_pin['patch']
+    _check_hash(patch, browser_pin['sha256'], 'SWI browser patch')
+    _check_hash(browser, browser_pin['before_sha256'], 'SWI browser source')
+    run('swipl', [tools['git'], 'apply', patch], source)
+    _check_hash(browser, browser_pin['after_sha256'], 'patched SWI browser source')
     swi = root / 'native-tools/swipl'
     run('swipl', [tools['cmake'], '-S', root / 'sources/swipl-10.0.2', '-B', root / 'swipl-build',
                   '-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release', f'-DCMAKE_INSTALL_PREFIX={swi}',
@@ -225,10 +283,11 @@ def prepare_runtime(config: RuntimeConfig) -> RuntimeIdentity:
     _check_hash(crates[0], patches['lance']['crate_sha256'], 'lance crate')
     lance_patch = assets / 'patches' / patches['lance']['patch']
     _check_hash(lance_patch, patches['lance']['sha256'], 'lance patch')
-    run('lance', [tools['git'], 'apply', lance_patch], sources[0])
+    apply_patch('lance', lance_patch, sources[0])
     build_options = (['--config', 'profile.dev.package.lance-bitpacking.codegen-units=1']
                      if target == 'linux-arm64' else [])
-    run('terminusdb', [tools['cargo'], 'build', '--locked', '-p', 'terminusdb-dylib', '--lib',
+    cargo_messages = ['--message-format=json-render-diagnostics'] if image_revision else []
+    run('terminusdb', [tools['cargo'], 'build', '--locked', *cargo_messages, '-p', 'terminusdb-dylib', '--lib',
                        *build_options], rust)
     suffix = '.dylib' if target == 'macos-arm64' else '.so'
     shutil.copy2(root / ('cargo-target/debug/libterminusdb_dylib' + suffix), rust / ('librust' + suffix))
@@ -240,16 +299,15 @@ def prepare_runtime(config: RuntimeConfig) -> RuntimeIdentity:
     shutil.copytree(native, root / 'extract')
     extract_env = environment.pop('CARGO_TARGET_DIR')
     try:
-        run('utopia_extract', [tools['cargo'], 'build', '--locked'], root / 'extract')
+        run('utopia_extract', [tools['cargo'], 'build', '--locked', *cargo_messages], root / 'extract')
     finally:
         environment['CARGO_TARGET_DIR'] = extract_env
     model = _json(assets / 'gemma-runtime-artifacts.json', 'model artifacts')
-    for name, digest in model['artifacts'].items():
-        url = f"https://huggingface.co/{pins['embedding']['model']}/resolve/{pins['embedding']['revision']}/{name}"
-        acquire(url, root / 'model' / name, digest)
+    if image_revision is None:
+        acquire_model(root)
     shutil.copy2(assets / 'embedding-profile.json', root / 'embedding-profile.json')
     shutil.copy2(assets / 'chunking.py', root / 'chunking.py')
-    run('python', ['uv', 'venv', '--python', '3.12.14', root / 'python'])
+    run('python', ['uv', 'venv', '--python', '3.12.16', root / 'python'])
     python = root / 'python/bin/python'
     run('python', ['uv', 'pip', 'install', '--python', python,
         '-r', root / 'wiki/mcp/requirements.lock',
@@ -262,5 +320,8 @@ def prepare_runtime(config: RuntimeConfig) -> RuntimeIdentity:
                 'sources': {name: _source_inventory(root, name, directory)
                             for name, directory in (('wiki_llm', 'wiki'), ('terminusdb', 'terminusdb'), ('vectorlink', 'vectorlink'))},
                 'toolchains': toolchains, 'python_packages': _python_packages(root), 'artifacts': {name: _hash(root / name) for name in required}}
+    if image_revision:
+        from . import __version__
+        manifest.update(atlas_version=__version__, source_revision=image_revision)
     (config.manifest or root / 'runtime.json').write_text(json.dumps(manifest, indent=2) + '\n')
-    return validate_runtime(config)
+    return _validate_runtime(config, check_model=image_revision is None)

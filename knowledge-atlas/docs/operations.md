@@ -2,13 +2,17 @@
 
 The service keeps operation bookkeeping in its external data directory. Canonical atlas identity, content, decisions and publication history remain in PoC9-compatible Git packages. Deleting an operation database does not delete canonical knowledge; portable archive recovery is a separate operation.
 
-`atlas.create` requires an unused external destination and returns the native package UUID. `atlas.open` validates an existing package and registers that same UUID. Relocation preserves identity. `atlas.status` separates READY publication, accepted content, pending candidate references, active operations and runtime configuration. A newly created atlas has no READY publication.
+`atlas.create` requires an unused external destination and returns its new UUID.
+`archive.restore` registers the recovered UUID after projection replay succeeds.
+`atlas.list` lists registered projects and their READY states. `atlas.open` verifies
+the registered repository for the supplied UUID. `atlas.status` separates READY
+publication, accepted content, pending candidates and active operations.
 
-Mutations require a client-generated UUID `request_id` and the expected READY publication (null for an empty atlas). The service persists the request and freezes configuration before queueing. Repeating an identical request UUID returns the original operation; changing its payload returns `request_conflict`. This deduplicates submission, not remote model billing.
+Mutations require a client-generated UUID `request_id` and the expected READY publication (null for an empty atlas). The service verifies the project and freezes its repository, graph binding and effective configuration before queueing. Repeating an identical request UUID returns the original operation; changing its payload returns `request_conflict`. This deduplicates submission, not remote model billing.
 
 Operations transition from `queued` to `running` and then `succeeded`, `failed` or `interrupted`. Domain results such as `pending_review` and accepted-but-not-published content are distinct from operation state. Each attempt retains its request/configuration, result or error, and stage evidence in a new directory. Input source content is part of the frozen JSON request; callers supply text, not a mutable file reference.
 
-A child worker holds the service writer lock and canonical atlas lock throughout mutation. Alias paths resolve to the same writer lock. A conflicting service receives `busy` rather than stealing an active lock. The dispatcher remains responsive to status requests while work runs. Client disconnection does not cancel accepted work.
+A child worker holds the service writer lock and canonical atlas lock throughout mutation. Alias paths resolve to the same writer lock. A conflicting service receives `busy` rather than stealing an active lock. The dispatcher runs one mutation at a time across all projects. Reads continue against each project’s available READY while work runs. Before calling a handler, the worker verifies that the queued repository UUID, location and graph binding still agree with the registry. Client disconnection does not cancel accepted work.
 
 After restart, an active attempt lock keeps an operation running; an inactive attempt becomes interrupted. No model call is automatically replayed. Explicit resume requires a new request UUID, an inactive attempt and handler-specific canonical reconciliation. It uses a fresh workspace and refuses `unsafe_resume` when safe continuation cannot be established. Completed, compatible stage artifacts may be copied by the domain recovery handler; an old agent workspace is never reused blindly.
 
@@ -22,7 +26,7 @@ The operation engine, public service transports and domain actions are implement
 provenance, unresolved relations and grouped type questions. `candidate.decide`
 requires `candidate`, `action` (`accept` or `reject`), `actor`, `kind` (`human` or
 `synthetic`), `reason` and timezone-aware `decided_at`, in addition to the common
-request UUID and expected READY. The UUID is the durable decision ID.
+lower-case, hyphenated request UUID and expected READY. The UUID is the durable decision ID.
 
 Decisions live in immutable `refs/knowledge-atlas/decisions/<UUID>` commits with
 `atlas-decision.json`. Each receipt retains the candidate tree and package closure;
@@ -31,22 +35,20 @@ Rejection records a decision against that candidate. A fresh decision UUID can s
 Inspection survives loss of the service database. Caller-supplied attribution is
 recorded as supplied; a `human` flag is not proof of human identity.
 
-Acceptance uses PoC9's existing review path, then its projection/publication path.
-The result identifies accepted content separately from READY. A projection failure
-returns `accepted_pending_publication`, its error and the previous READY, which
-remains unchanged. Explicit `operation.resume` with a fresh UUID may continue this
-otherwise succeeded operation: canonical reconciliation reuses the existing receipt
-and accepted content before attempting projection. A lost acknowledgement after
-publication resolves to the existing publication, including when later history has
-advanced. No duplicate acceptance or automatic model retry is implied.
+Each accepted review records its original actor, decision kind, reason, time,
+request identity, digest and arrival channel. An interrupted operation can leave
+`accepted_pending_decision` after the review, or `accepted_pending_publication`
+after its decision receipt. Replaying the identical mutation through another
+client returns the original operation and attempt count. Once the worker is
+inactive, call `operation.resume` with its operation ID and a fresh canonical
+request UUID. Resume accepts only this UUID and the target operation ID.
+Reconciliation uses the recorded acceptance in the original
+project. Retrying that same resume UUID returns the same operation. When the
+recorded effect cannot establish safe continuation, resume reports `unsafe_resume`.
 
 Each new candidate records its base publication, including an explicit null for the first candidate. Regenerate and inspect a pre-upgrade candidate that lacks this binding. A stale base returns `stale_proposal` or `stale_publication`. Backdated acceptances return `invalid_acceptance_time`. Earlier source versions that lack a per-source recording time use the retained Wiki compilation time where available.
-If an older release accepted a far-future date, submit the next review against the
-current READY with the correct current time. The service uses the old publication's
-own `published_at` as its acceptance time when the claimed date exceeded that clock by
-more than five minutes. The original Git receipt and publication ID remain available.
-For a future-dated review still pending publication, issue a fresh acceptance with
-the corrected time against the current base.
+History reads and archive restore require the recorded acceptance to follow its
+predecessor and fall within the five-minute allowance at publication.
 
 `candidate.revise` creates a new candidate with attributed receipt, using either
 `entries` for explicit structured changes, or `sources`, `remove_source_ids` and/or
@@ -55,12 +57,13 @@ kind, reason and decided_at. The original OID stays immutable. If an interrupted
 revision has no completed canonical receipt, resume refuses `unsafe_resume` rather
 than repeat an uncertain model effect; retained attempt evidence must be inspected.
 
-Projection uses the prepared runtime tokenizer/formatter and the original
-`NativeProjection` builder. Service configuration selects the local native graph as
-`graph: {"url": "http://127.0.0.1:<port>", "database": "admin/<database>"}`; request
-payloads cannot select executable commands. The embedding bridge and builder must
-share the atlas `vectors` cache. Native runtime launch and complete platform/host
-qualification are separate from the controlled publication-failure tests.
+Projection uses the prepared runtime tokenizer and formatter. Configure its local
+native endpoint with `graph: {"url": "http://127.0.0.1:<port>"}`. The registry
+assigns each new project a unique database derived from its UUID and reopens that
+exact binding on restart. A registry with missing or ambiguous ownership stops
+startup before workers run. Conflicts during project selection produce `graph_atlas_conflict` before a native projection write.
+The embedding bridge and builder must share a compatible cache. Native runtime
+and host qualification are recorded separately from controlled projection tests.
 
 ## Docker storage durability
 

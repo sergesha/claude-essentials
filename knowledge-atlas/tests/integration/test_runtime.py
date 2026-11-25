@@ -64,7 +64,7 @@ def test_native_gemma_profile_and_roles(runtime_configuration, tmp_path):
 
 
 def test_native_historical_projection_and_eligible_top_k(native_graph, tmp_path):
-    config = {k:str(native_graph[k]) for k in ('runtime','atlas')}
+    config = {k:str(native_graph[k]) for k in ('runtime','atlas','cache')}
     config['graph_url'] = native_graph['graph'].url
     script = "import json,runpy,sys; from pathlib import Path; runpy.run_path(sys.argv[1])['_check_native_projection'](json.loads(sys.argv[2]),Path(sys.argv[3]))"
     result = subprocess.run([str(native_graph['runtime']/'python/bin/python'), '-c', script,
@@ -78,19 +78,21 @@ def test_native_historical_projection_and_eligible_top_k(native_graph, tmp_path)
 def _check_native_projection(native_graph, tmp_path):
     from knowledge_atlas.core.git_store import GitStore
     from knowledge_atlas.core.publication import Publications
+    from runpy import run_path
+    review_acceptance = run_path(str(Path(__file__).resolve().parents[1] / "acceptance_fixture.py"))["review_acceptance"]
     from knowledge_atlas.core.native_projection import NativeProjection
     from knowledge_atlas.core.graph_stage import records_for
     from knowledge_atlas.core.reader import AtlasReader
     package = Path(__file__).resolve().parents[2]
     fixture = package/'tests/fixtures/evidence'
-    wiki = json.loads((fixture/'wiki-initial-final.json').read_text())
-    extraction = json.loads((fixture/'extractor-output.json').read_text())
+    wiki = json.loads((fixture/'wiki-current.json').read_text())
+    extraction = json.loads((fixture/'extraction-current.json').read_text())
     store = GitStore(native_graph['atlas'])
     pubs = Publications(store)
     profile = json.loads((package/'runtime/embedding-profile.json').read_text())
     from knowledge_atlas.core.graph_stage import GraphStage
     graph = GraphStage(native_graph['graph_url'], 'admin/qualification'); runtime = Path(native_graph['runtime'])
-    builder = NativeProjection(store, graph, runtime/'model/tokenizer.json', runtime/'chunking.py', store.base/'vectors')
+    builder = NativeProjection(store, graph, runtime/'model/tokenizer.json', runtime/'chunking.py', native_graph['cache'])
     published = []
     for day in (13,14):
         if day == 14: wiki['pages'][0]['content'] += '\nQualification update: inspection remains required.\n'
@@ -102,7 +104,7 @@ def _check_native_projection(native_graph, tmp_path):
                 recorded_at=recorded_at, base_publication=published[-1][0])
         else:
             candidate = store.snapshot(wiki, extraction, {}, recorded_at=recorded_at)['commit']
-        content = pubs.review(candidate, {'decision':'accept','kind':'synthetic','actor':'Runtime qualification',
+        content = review_acceptance(pubs, candidate, {'decision':'accept','kind':'synthetic','actor':'Runtime qualification',
             'reason':'Retained PoC9 fixture, technical qualification only',
             'accepted_at':f'2026-11-{day}T01:00:00Z', 'base_publication':pubs.ready()}, profile)
         publication = pubs.publish(content, builder.build)

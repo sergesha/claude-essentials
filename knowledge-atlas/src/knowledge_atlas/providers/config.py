@@ -12,22 +12,30 @@ OPERATIONS = ('wiki', 'open', 'phrase', 'proposal', 'review_extension', 'grounde
 
 
 def default_profiles() -> JsonObject:
-    profiles = json.loads((_assets() / 'model-profiles.json').read_text())
-    return {stage: {'provider': 'codex', **value} for stage, value in profiles.items()}
+    return json.loads((_assets() / 'model-profiles.json').read_text())
+
+
+def resolve_profiles(config: JsonObject) -> dict[str, StageProfile]:
+    if not isinstance(config, dict) or set(config) != set(OPERATIONS):
+        raise ProviderError('unsupported_configuration', 'configuration requires exactly six stage profiles')
+    return {stage: resolve_profile(config, stage) for stage in OPERATIONS}
 
 
 def resolve_profile(config: JsonObject, stage: str) -> StageProfile:
-    if stage not in OPERATIONS or stage not in config:
+    if stage not in OPERATIONS or not isinstance(config, dict) or stage not in config:
         raise ProviderError('unsupported_configuration', 'missing or unsupported stage: ' + stage)
     settings = config[stage]
     if not isinstance(settings, dict) or set(settings) - {'provider', 'model', 'effort', 'guidance'}:
         raise ProviderError('unsupported_configuration', 'unknown stage settings')
-    provider = settings.get('provider', 'codex')
+    provider = settings.get('provider')
+    if not isinstance(provider, str):
+        raise ProviderError('unsupported_configuration', 'an explicit provider is required for ' + stage)
     model = settings.get('model')
     effort = settings.get('effort')
     guidance = settings.get('guidance', '')
     efforts = {'codex': {'low', 'medium', 'high', 'xhigh'}, 'claude': {None, 'low', 'medium', 'high', 'max'}}
     if (provider not in efforts or not isinstance(model, str) or not model.strip()
+            or (effort is not None and not isinstance(effort, str))
             or effort not in efforts[provider] or not isinstance(guidance, str)):
         raise ProviderError('unsupported_configuration', 'invalid provider/model/effort/guidance for ' + stage)
     if (provider == 'claude' and model.startswith('gpt-')) or (provider == 'codex' and model.startswith('claude-')):

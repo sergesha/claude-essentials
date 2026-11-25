@@ -9,6 +9,25 @@ from .contracts import AtlasError,RuntimeConfig,ServiceContext
 from .locks import FileLock,is_locked
 from .http_api import create_app,write_private
 from .client import AtlasClient
+from .operations import initialize_service_storage
+from .providers.base import ProviderError
+from .providers.config import resolve_profiles
+
+
+def reject_removed_deployment_settings():
+    stale = [name for name in ('KNOWLEDGE_ATLAS_DEFAULT_PROJECT', 'KNOWLEDGE_ATLAS_DOCKER_PROJECT')
+             if name in os.environ]
+    config_root = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home() / '.config')
+    settings = config_root / 'knowledge-atlas/mcp.json'
+    if os.path.lexists(settings):
+        stale.append(str(settings))
+    if stale:
+        raise AtlasError(
+            'invalid_configuration',
+            'Remove the obsolete deployment settings ' + ', '.join(stale)
+            + '. For Docker MCP, call atlas.connect with payload.container_name.',
+            422,
+        )
 
 
 def load_config(path=None):
@@ -21,20 +40,29 @@ def load_config(path=None):
 def service_context(config):
     if not isinstance(config,dict) or set(config)-{'service_root','runtime','configuration'}:
         raise AtlasError('invalid_configuration','service_root, runtime and configuration are supported',422)
-    root=Path(config['service_root']).expanduser().resolve()
-    if root.is_relative_to(Path(__file__).resolve().parents[2]):
-        raise AtlasError('invalid_location','service data must live outside the plugin',422)
+    root=Path(config['service_root']).expanduser()
     runtime=config.get('runtime')
     if runtime:
         runtime=RuntimeConfig(Path(runtime['runtime_root']).expanduser().resolve(),
                               Path(runtime['manifest']).expanduser().resolve() if runtime.get('manifest') else None)
-    return ServiceContext(root,runtime,config.get('configuration',{}))
+    settings = config.get('configuration', {})
+    if not isinstance(settings, dict) or 'atlas_path' in settings:
+        raise AtlasError('invalid_configuration', 'unsupported service configuration or universal atlas_path', 422)
+    if 'profiles' in settings:
+        try:
+            resolve_profiles(settings['profiles'])
+        except ProviderError as error:
+            raise AtlasError('invalid_configuration', str(error), 422) from error
+    context = ServiceContext(root,runtime,settings)
+    if context.service_root.is_relative_to(Path(__file__).resolve().parents[2]):
+        raise AtlasError('invalid_location','service data must live outside the plugin',422)
+    return context
 
 
 def ensure_service(config):
     context=service_context(config)
     root=context.service_root
-    root.mkdir(parents=True,exist_ok=True,mode=0o700)
+    initialize_service_storage(context)
     deadline=time.monotonic()+20
     while True:
         try:

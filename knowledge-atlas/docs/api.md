@@ -2,29 +2,63 @@
 
 The shared handler registry is the domain boundary. HTTP, MCP and Python clients use the same implemented backend; these examples describe action requests.
 
-## Opening an instance
+## Connecting MCP to a service
 
-To open a running Compose instance, call `atlas_atlas_open` with
-`{"payload":{"project":"my-atlas"}}`. The service uses its configured atlas path.
-After a successful open, subsequent calls on the same MCP connection use that
-project. A new connection starts with the expressly configured default, if any.
-Another successful open with `payload.project` switches the connection to that
-project.
+To use Docker, call `atlas_atlas_connect` first on a fresh MCP connection:
 
-Omit arguments when the connection has a selected or configured Compose project
-or the MCP's native service configuration defines `configuration.atlas_path`.
-For an unbound native service, pass `{"payload":{"path":"/path/to/atlas"}}` on
-a connection without a Compose project. If the first open has no project or
-path and no configured atlas, the MCP returns `invalid_request` (422) with
-selection instructions before contacting a local service. An incompatible
-already-running native service returns `version_conflict` (409) when a native
-open is requested.
+```json
+{"payload":{"container_name":"atlas-atlas-1"}}
+```
 
-Pass the returned `data.atlas_id` to subsequent tools on the same connection.
-For example, `atlas_atlas_status` accepts `{"atlas_id":"<returned ID>"}`.
-The ID identifies an atlas within the selected instance. Direct HTTP and Python
-clients address a specific service. Use an empty request object for a bound
-service or supply `payload.path` for an unbound service.
+Use the exact name of an already running Atlas container as listed by
+`docker ps --format '{{.Names}}'`. The call verifies the authenticated Atlas API
+and matches the container's Atlas version to the plugin. It returns the full
+pinned Docker ID in `data.container_id` and the Atlas version in `data.version`.
+Start the deployment separately. If the container is replaced, open a new MCP
+connection and attach again. Use a separate MCP connection for each service, and
+poll operations on the connection that submitted them.
+
+For native use, call `atlas_atlas_list` without arguments. The first domain call
+starts or attaches to the configured native service and binds that connection.
+Python and HTTP callers address the service directly. Atlas MCP replies carry
+results and application errors in `structuredContent`. Any accompanying
+human-readable text is for display.
+
+## Selecting a project
+
+Call `atlas.list` on the service you want to use. Send `{}` to the HTTP action,
+call `client.atlas_list()` in Python, or call `atlas_atlas_list` in MCP without
+arguments. `data.projects` contains the registered `atlas_id`, a display `name`
+derived from the repository's directory name, the current `publication` ID or
+null, and a `status` of `ready`, `unpublished`, or `unavailable`.
+
+Open a registered project with `{"atlas_id":"<UUID>"}` or
+`client.atlas_open(atlas_id=atlas_id)`. The service verifies that the repository
+agrees with its registration, returns the UUID in `data.atlas_id`, and reports
+READY in `publication` if present. Missing or malformed UUIDs return
+`invalid_request` (400), an unknown UUID returns `atlas_not_found` (404), and a
+changed location or repository identity returns `atlas_conflict` (409).
+Use the selected UUID on every subsequent project request. Opening a second UUID
+leaves the first addressable on the same service.
+
+Supply external filesystem paths for explicit data management through
+`atlas.create` and `archive.restore`.
+
+## Configure a child layout
+
+`packages.configure` requires the parent `atlas_id`, a UUID `request_id`, an
+explicit `expected_publication` (null for an unpublished parent), and
+`payload.includes`. Each item contains the registered child UUID `package_id`,
+relative `mount`, and exact child wrapper OID `publication` as strings. Each request supplies the complete desired child list. The service derives the content commit and recording time.
+The Python method is `client.packages_configure(ConfigurePackages(includes=...),
+atlas_id=..., request_id=..., expected_publication=...)`.
+
+Poll the returned operation for `data.candidate`, `data.status` and
+`data.composition_diff`. Both the operation result and `candidate.inspect`
+expose `added` and `removed` arrays of selections plus a `changed` array of
+before/after selections at the same mount. Use `candidate.decide` to review
+the whole layout. See [Reviewed package composition](composition.md) for a
+complete request, clearing, moving, repinning and rolling back children.
 
 ## Source ingestion and update
 
@@ -132,7 +166,7 @@ when reconnecting. Keep tokens private. The service rejects browser origins.
 - `GET /v1/status`, `POST /v1/stop` with `{}`: explicit service lifecycle.
 
 Read the generated schema instead of maintaining another field catalogue.
-All action requests include `payload` (use `{}` for an empty payload). Mutations
+Actions with an empty payload may omit `payload`. Mutations
 carry a request UUID and expected publication; repeated identical requests return
 the same operation. Invalid input is 400, missing credential 401, missing entity
 404, conflict/stale/busy 409, unsupported input/configuration 422, and unavailable
@@ -188,10 +222,10 @@ those projection payloads remain intact in the Git-owned publication receipt.
 ### Review and answer metadata
 
 Publication history and the selected wiki expose the caller-supplied acceptance kind and
-channel. Older publications report an unrecorded channel. The `matching_decision_receipt`
-field indicates whether a retained decision agrees with the publication. A missing receipt
-is valid for pre-receipt history. An unsigned matching receipt establishes internal
-consistency. Before serving a publication, the reader checks that its Git parents
+channel. The service validates the exact decision ref, request digest, actor,
+kind, reason, channel and recorded acceptance time. Missing or inconsistent
+evidence makes the publication unavailable. A matching unsigned receipt
+establishes internal consistency. Before serving a publication, the reader checks that its Git parents
 identify the previous publication and the reviewed content. It also checks that
 the accepted content descends directly from the candidate named in the review
 and that the publication metadata agrees with that review. A publication that points to a
@@ -209,12 +243,8 @@ its projection. A timestamp more than five minutes ahead of the service clock re
 `invalid_acceptance_time`. For `candidate.decide` with action `accept`, this timestamp
 comes from `decided_at`.
 
-On older history, `as_known_at` selects the latest publication whose entire chain was
-eligible by the requested instant. If a legacy acceptance was more than five minutes
-ahead of its own `published_at`, selection uses that publication time. If a child was
-accepted earlier than an ancestor, it becomes visible with that ancestor. History and
-`wiki.pages` preserve the caller's `accepted_at` and include `effective_accepted_at`
-when the two instants differ.
-New reviews and pending publications must meet the base publication's effective
-cutoff. The service derives it from Git history and caches it locally for the
-exact publication ID. A restored atlas can reconstruct it from the archive.
+An `as_known_at` read selects the latest publication accepted by that instant.
+Acceptance times must be chronological along the publication chain. A retained
+acceptance more than five minutes ahead of its own publication time fails
+validation. History and `wiki.pages` expose the original recorded `accepted_at`.
+Domain validity remains optional.

@@ -3,9 +3,9 @@
     "knowledge-atlas": {
       "command": "sh",
       "args": [
-        "${CLAUDE_PLUGIN_ROOT}/scripts/launch.sh"
-      ],
-      "env": {"KNOWLEDGE_ATLAS_DEFAULT_PROJECT": "${user_config.project}"}
+        "${CLAUDE_PLUGIN_ROOT}/scripts/launch.sh",
+        "mcp"
+      ]
     }
   }
 }

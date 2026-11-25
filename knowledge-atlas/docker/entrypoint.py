@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """Supervise the existing local Atlas components inside one container."""
+from contextlib import ExitStack
+import fcntl
 import json
 import os
 from pathlib import Path
+import shutil
 import signal
 import subprocess
 import sys
@@ -10,10 +13,15 @@ import tempfile
 import time
 import urllib.request
 
-from knowledge_atlas.contracts import RuntimeConfig
-from knowledge_atlas.runtime import prepare_runtime, validate_runtime
+from knowledge_atlas.packaged_runtime import check_packaged_runtime, seed_packaged_runtime
 from knowledge_atlas.http_api import write_private
 from knowledge_atlas.client import AtlasClient
+from knowledge_atlas.contracts import AtlasError
+from knowledge_atlas.launcher import service_context
+from knowledge_atlas.operations import check_service_storage, initialize_service_storage, read_registry
+from knowledge_atlas.storage import check_graph_state, directory_lock
+from knowledge_atlas.providers.base import ProviderError
+from knowledge_atlas.providers.config import default_profiles, resolve_profiles
 
 PACKAGE = Path(__file__).resolve().parents[1]
 
@@ -64,7 +72,7 @@ class Supervisor:
 
 
 def needs_graph_init(state):
-    return not (Path(state) / 'db').exists()
+    return check_graph_state(state)
 
 
 def roots():
@@ -72,47 +80,98 @@ def roots():
             Path(os.environ.get('ATLAS_DATA_ROOT', '/data')))
 
 
-def migrate_runtime_interpreter(runtime, install_dir):
-    """Rebind a 0.3.0 uv venv to the same interpreter build in the image."""
-    if not install_dir:
+SEED = Path('/opt/atlas-seed')
+PROVIDERS = {'codex': '@openai/codex', 'claude': '@anthropic-ai/claude-code'}
+
+
+def ensure_provider(runtime, name):
+    """Install the selected vendor binary into this deployment using its integrity lock."""
+    if not isinstance(name, str) or name not in PROVIDERS:
+        raise ValueError('unsupported provider; choose codex or claude')
+    recipe = PACKAGE / 'docker/providers' / name
+    providers = runtime / 'providers'
+    providers.mkdir(exist_ok=True)
+    prefix = providers / name
+    relative = Path('node_modules/.bin') / name
+    with (providers / (name + '.lock')).open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if not prefix.exists():
+            with tempfile.TemporaryDirectory(dir=providers) as temporary:
+                staging = Path(temporary) / 'install'
+                shutil.copytree(recipe, staging)
+                subprocess.run(['npm', 'ci', '--include=optional', '--no-audit', '--no-fund',
+                                '--cache', str(Path(temporary) / 'cache')], cwd=staging, check=True)
+                verify_provider(staging / relative, name)
+                staging.rename(prefix)
+        else:
+            verify_provider(prefix / relative, name)
+    return prefix / relative
+
+
+def verify_provider(path, name):
+    recipe = PACKAGE / 'docker/providers' / name / 'package.json'
+    version = json.loads(recipe.read_text())['dependencies'][PROVIDERS[name]]
+    if path.is_file() and version in subprocess.check_output([path, '--version'], text=True).split():
         return
-    venv = runtime / 'python'
-    cfg = venv / 'pyvenv.cfg'
-    legacy = Path('/auth/.local/share/uv/python')
-    if not cfg.is_file():
-        return
-    config = cfg.read_text()
-    # Repair links first; a retry after interruption can still read the old cfg.
-    for link in (venv / 'bin').glob('python*'):
-        if not link.is_symlink():
-            continue
-        target = link.readlink()
-        if target.is_relative_to(legacy):
-            new_target = Path(install_dir) / target.relative_to(legacy)
-            if not new_target.is_file():
-                raise RuntimeError('replacement image lacks the prepared Python interpreter build')
-            with tempfile.TemporaryDirectory(dir=link.parent) as tmp:
-                replacement = Path(tmp) / 'python'
-                replacement.symlink_to(new_target)
-                os.replace(replacement, link)
-    if str(legacy) + '/' in config:
-        with tempfile.NamedTemporaryFile(mode='w', dir=venv, delete=False) as tmp:
-            tmp.write(config.replace(str(legacy) + '/', str(install_dir) + '/'))
-        os.replace(tmp.name, cfg)
+    raise RuntimeError(f'{name} {version} is required; run prepare with the configured profiles or use a fresh runtime volume')
+
+
+def read_profiles(path):
+    try:
+        profiles = json.loads(path.read_text())
+    except FileNotFoundError:
+        if path.is_symlink():
+            raise ValueError('profiles.json points to a missing file')
+        profiles = default_profiles()
+    try:
+        resolve_profiles(profiles)
+    except ProviderError as error:
+        raise ValueError(f'profiles.json contains invalid stage profiles: {error}') from error
+    return profiles
 
 
 def start():
     runtime, data = roots()
-    migrate_runtime_interpreter(runtime, os.environ.get('UV_PYTHON_INSTALL_DIR'))
-    validate_runtime(RuntimeConfig(runtime_root=runtime))
-    profiles = json.loads((data / 'profiles.json').read_text())
-    stages = {'wiki', 'open', 'phrase', 'proposal', 'review_extension', 'grounded_answer'}
-    if set(profiles) != stages or any(not isinstance(p, dict) or p.get('provider') not in {'codex', 'claude'}
-                                    or not p.get('model') for p in profiles.values()):
-        raise ValueError('profiles.json requires six explicit provider/model stage profiles')
-    data.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with ExitStack() as startup:
+        try:
+            startup.enter_context(directory_lock(data, blocking=False))
+        except BlockingIOError as error:
+            raise RuntimeError('another container is already supervising this data directory') from error
+        start_components(runtime, data)
+
+
+def start_components(runtime, data):
+    profiles = read_profiles(data / 'profiles.json')
     config = {'service_root': str(data / 'service'), 'runtime': {'runtime_root': str(runtime)},
-              'configuration': {'atlas_path': str(data / 'atlas'), 'profiles': profiles, 'graph': {'url': 'http://127.0.0.1:9403', 'database': 'admin/atlas'}}}
+              'configuration': {'project_data_root': str(data), 'profiles': profiles, 'graph': {'url': 'http://127.0.0.1:9403'}}}
+    service = service_context(config)
+    check_service_storage(service)
+    if needs_graph_init(data / 'graph'):
+        endpoint = config['configuration']['graph']['url']
+        with read_registry(service) as db:
+            if db is not None and db.execute('SELECT 1 FROM projection_owners WHERE endpoint=? LIMIT 1',
+                                             (endpoint,)).fetchone():
+                raise ValueError('managed graph storage is missing or incomplete for a retained projection')
+    retained_config = data / 'service-config.json'
+    if retained_config.is_symlink():
+        raise ValueError('unsupported retained service configuration')
+    if retained_config.exists():
+        try:
+            retained = service_context(json.loads(retained_config.read_text()))
+            if retained.service_root != service.service_root:
+                raise ValueError('different service root')
+        except (AtlasError, ValueError, KeyError, TypeError) as error:
+            raise ValueError('unsupported retained service configuration') from error
+    if not (service.service_root / 'operations.sqlite3').exists():
+        for entry in data.iterdir():
+            if entry.name in ('profiles.json', 'service'):
+                continue
+            if entry.is_symlink() or not entry.is_dir() or any(entry.iterdir()):
+                raise ValueError('unsupported deployment state without its service registry')
+    check_packaged_runtime(SEED, runtime)
+    for name in sorted({profile['provider'] for profile in profiles.values()}):
+        verify_provider(runtime / 'providers' / name / 'node_modules/.bin' / name, name)
+    initialize_service_storage(service)
     write_private(data / 'service-config.json', json.dumps(config))
     python = runtime / 'python/bin/python'
     profile = PACKAGE / 'runtime/embedding-profile.json'
@@ -128,7 +187,7 @@ def start():
         raw = supervisor.launch('gemma', [python, PACKAGE / 'runtime/gemma-service.py'], env)
         supervisor.ready(raw, 'http://127.0.0.1:9401/health')
         bridge = supervisor.launch('bridge', [python, PACKAGE / 'runtime/embedding-provider.py',
-            '--profile', profile, '--cache', data / 'atlas/vectors', '--endpoint', 'http://127.0.0.1:9401', '--port', '9402'], env)
+            '--profile', profile, '--cache', service.service_root / 'vectors', '--endpoint', 'http://127.0.0.1:9401', '--port', '9402'], env)
         supervisor.ready(bridge, 'http://127.0.0.1:9402/stats')
         graph = [python, PACKAGE / 'runtime/native-runtime.py', '--runtime', runtime,
                  '--state', data / 'graph', '--profile', profile, '--tokenizer', runtime / 'model/tokenizer.json',
@@ -152,7 +211,7 @@ def start():
                 if time.monotonic() >= deadline:
                     raise RuntimeError('Atlas service readiness timeout; inspect logs')
                 time.sleep(.2)
-        print('Knowledge Atlas ready; atlas path: ' + str(data / 'atlas'), flush=True)
+        print('Knowledge Atlas ready', flush=True)
         while True:
             supervisor.check()
             time.sleep(.5)
@@ -168,10 +227,18 @@ def main():
     if args == ['start']:
         start()
     elif args == ['prepare']:
-        runtime, _ = roots()
-        migrate_runtime_interpreter(runtime, os.environ.get('UV_PYTHON_INSTALL_DIR'))
-        print(prepare_runtime(RuntimeConfig(runtime_root=runtime)))
+        runtime, data = roots()
+        profiles = read_profiles(data / 'profiles.json')
+        identity = seed_packaged_runtime(SEED, runtime)
+        for name in sorted({p['provider'] for p in profiles.values()}):
+            ensure_provider(runtime, name)
+        print(identity)
     elif args[0] == 'exec' and len(args) > 1:
+        if args[1] in PROVIDERS:
+            runtime, _ = roots()
+            check_packaged_runtime(SEED, runtime)
+            binary = ensure_provider(runtime, args[1])
+            os.execv(binary, args[1:])
         os.execvp(args[1], args[1:])
     else:
         raise SystemExit('usage: entrypoint.py [start|prepare|exec COMMAND ...]')

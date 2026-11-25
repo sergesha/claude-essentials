@@ -8,8 +8,9 @@ license = "MIT"
 license-files = ["LICENSE"]
 dependencies = [
     "markdown-it-py==4.0.0",
-    "mcp==1.28.1",
+    "mcp==1.30.0",
     "pydantic==2.13.4",
+    "tokenizers==0.22.2",
 ]
 
 [dependency-groups]

@@ -36,3 +36,17 @@ test('relationship inspector leads with readable meaning rather than serialized 
  await g.inspect('relation',{id:'relation',from:'a',to:'b',type:'uses',representation:'controlled_relation',definition:{id:'uses',definition:'Employs a resource.',subject_role:'actor',object_role:'resource'}});
  assert.ok(document.getElementById('graph-inspector').children.some(x=>x.textContent==='Employs a resource.'));
 });
+
+test('a detached result cannot send its old record ID through a new graph context',async()=>{
+ const calls=[];
+ const {g,document}=setup(async(action,body)=>{
+  calls.push({action,body});
+  return {publication:'p',data:{hits:[{record:record('old-record')}]}};
+ });
+ await g.search('old');
+ const oldResult=document.getElementById('graph-results').children[0];
+ g.reset('next');
+ await oldResult.onclick();
+ assert.equal(calls.length,1);
+ assert.equal(g.model.publication,'next');
+});

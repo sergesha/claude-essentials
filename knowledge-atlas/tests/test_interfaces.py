@@ -44,12 +44,31 @@ def test_three_interfaces_preserve_results_and_errors(app,tmp_path):
         time.sleep(.05)
     assert operation.state=='succeeded',operation.error
     atlas_id=operation.result.data['atlas_id']
+    second=client.atlas_create(Location(path=str(tmp_path/'second')),request_id=str(uuid.uuid4()))
+    deadline=time.monotonic()+15
+    while second.state in ('queued','running'):
+        assert time.monotonic()<deadline
+        time.sleep(.05)
+        second=client.operation(second.operation_id)
+    assert second.state=='succeeded',second.error
+    second_id=second.result.data['atlas_id']
+
+    status,http=raw(app,'atlas.list',{})
+    assert status==200 and http==asdict(client.atlas_list())==call_tool(client,'atlas_atlas_list',None)
+    assert {row['atlas_id'] for row in http['data']['projects']}=={atlas_id,second_id}
+    for identity in (atlas_id,second_id,atlas_id):
+        selection={'atlas_id':identity}
+        status,http=raw(app,'atlas.open',selection)
+        assert status==200 and http==asdict(client.atlas_open(**selection))
+        assert http==call_tool(client,'atlas_atlas_open',selection)
+        assert http['data']['atlas_id']==identity
+
     request=ActionRequest('atlas.status',atlas_id=atlas_id)
     status,http=raw(app,request.action,asdict(request))
     python=asdict(client.call(request))
     mcp=call_tool(client,'atlas_atlas_status',asdict(request))
     assert status==200 and http==python==mcp
-    bad=ActionRequest('atlas.status',atlas_id='missing')
+    bad=ActionRequest('atlas.status',atlas_id=str(uuid.uuid4()))
     with pytest.raises(AtlasError) as python_error:client.call(bad)
     mcp_error=call_tool(client,'atlas_atlas_status',asdict(bad))
     assert python_error.value.code==mcp_error['error']['code']=='atlas_not_found'
@@ -76,21 +95,24 @@ def test_schema_is_shared_with_mcp(app):
     client=AtlasClient(app.context.service_root)
     schema=client.schema()
     tools=tools_for()
-    assert len(tools)==len(schema['actions'])
-    assert {tool['name'] for tool in tools}=={'atlas_'+name.replace('.','_') for name in schema['actions']}
-    assert all(tool['inputSchema']==schema['actions'][tool['name'][6:].replace('_','.')]['input']
-               for tool in tools if tool['name'] != 'atlas_atlas_open')
-    open_schema = next(tool['inputSchema'] for tool in tools if tool['name'] == 'atlas_atlas_open')
-    assert 'payload' not in open_schema.get('required', [])
-    assert 'project' in open_schema['$defs']['ProjectLocation']['properties']
+    domain_tools = {tool['name']: tool for tool in tools if tool['name'] != 'atlas_atlas_connect'}
+    assert set(domain_tools) == {'atlas_' + name.replace('.', '_') for name in schema['actions']}
+    for name, action in schema['actions'].items():
+        assert domain_tools['atlas_' + name.replace('.', '_')]['inputSchema'] == action['input']
+    assert 'packages.pin' not in schema['actions']
+    assert 'atlas_packages_pin' not in domain_tools
+    assert not hasattr(client, 'packages_pin')
+    assert 'atlas.connect' not in schema['actions']
+    connect = next(tool['inputSchema'] for tool in tools if tool['name'] == 'atlas_atlas_connect')
+    assert connect['required'] == ['payload']
+    assert set(connect['$defs']['ContainerLocation']['properties']) == {'container_name'}
 
 
-def test_open_uses_bound_atlas_without_payload(app, tmp_path):
+def test_mcp_opens_registered_uuid_without_configured_path(app, tmp_path):
     from knowledge_atlas.client import AtlasClient
     from knowledge_atlas.mcp_bridge import SessionClient, call_tool
     client = AtlasClient(app.context.service_root)
     path = tmp_path/'bound'
-    app.context.configuration['atlas_path'] = str(path)
     created = client.call(ActionRequest('atlas.create', request_id=str(uuid.uuid4()), payload={'path':str(path)}))
     deadline = time.monotonic() + 15
     while (record := client.operation(created.operation_id)).state in ('queued', 'running'):
@@ -98,57 +120,138 @@ def test_open_uses_bound_atlas_without_payload(app, tmp_path):
         time.sleep(.05)
     assert record.state == 'succeeded', record.error
     identity = record.result.data['atlas_id']
-    assert client.request('/v1/actions/atlas.open', {})['data']['atlas_id'] == identity
-    assert client.atlas_open().data['path'] == str(path)
-    config = tmp_path/'bound.json'
-    config.write_text(json.dumps({'service_root': str(app.context.service_root),
-                                  'configuration': {'atlas_path': str(path)}}))
+    config = tmp_path/'service.json'
+    config.write_text(json.dumps({'service_root': str(app.context.service_root)}))
     session = SessionClient(config, 'mcp')
-    assert call_tool(session, 'atlas_atlas_open', {})['data']['atlas_id'] == identity
+    assert call_tool(session, 'atlas_atlas_open', {'atlas_id': identity})['data']['atlas_id'] == identity
 
 
-def test_mcp_project_routing_is_per_session_and_switches_only_on_success(monkeypatch):
-    from knowledge_atlas import mcp_bridge
-    from knowledge_atlas.contracts import ActionResult
-    called = []
-    class Remote:
-        def __init__(self, project, channel):
-            self.project = project
+def test_native_list_without_docker(tmp_path, monkeypatch):
+    import os
+    from knowledge_atlas.client import AtlasClient
+    from knowledge_atlas.mcp_bridge import SessionClient, call_tool
 
-        def call(self, request):
-            called.append((self.project, request.action, request.payload))
-            if self.project == 'offline':
-                raise AtlasError('backend_unavailable', 'service unavailable', 503)
-            return ActionResult(data={'project':self.project})
-
-        def close(self):
-            pass
-    monkeypatch.setattr(mcp_bridge, 'ComposeClient', Remote)
-    session = mcp_bridge.SessionClient(None, 'mcp', 'initial')
-    def call(name, args):
-        return mcp_bridge.call_tool(session, 'atlas_atlas_'+name, args)
-    assert call('open', {})['data']['project'] == 'initial'
-    assert call('open', {'payload':{'project':'fde-knowledge-atlas'}})['data']['project'] == 'fde-knowledge-atlas'
-    assert called[-1] == ('fde-knowledge-atlas', 'atlas.open', {})
-    assert call('open', {'payload':{'project':'offline'}})['error']['code'] == 'backend_unavailable'
-    assert call('open', {})['data']['project'] == 'fde-knowledge-atlas'
-    assert call('status', {'atlas_id':'test'})['data']['project'] == 'fde-knowledge-atlas'
-    assert call('open', {'payload':{'project':'bad name'}})['error']['code'] == 'invalid_request'
-    assert mcp_bridge.SessionClient(None, 'mcp').project is None
+    root = tmp_path / 'native-service'
+    config = tmp_path / 'native.json'
+    config.write_text(json.dumps({'service_root': str(root)}))
+    docker = tmp_path / 'docker'
+    called = tmp_path / 'docker-called'
+    docker.write_text(f'#!/bin/sh\ntouch "{called}"\nexit 1\n')
+    docker.chmod(0o755)
+    monkeypatch.setenv('PATH', str(tmp_path) + os.pathsep + os.environ['PATH'])
+    session = SessionClient(config, 'mcp')
+    assert not root.exists()
+    try:
+        assert call_tool(session, 'atlas_atlas_list', None)['data'] == {'projects': []}
+        response = call_tool(session, 'atlas_atlas_connect', {'payload': {'container_name': 'other'}})
+        assert response['error']['status'] == 409
+        assert 'new MCP connection' in response['error']['message']
+        assert not called.exists()
+    finally:
+        if (root / 'discovery.json').exists():
+            AtlasClient(root).stop()
+        session.close()
 
 
-def test_mcp_saved_instance_matches_claude_plugin_setting(tmp_path, monkeypatch):
-    from knowledge_atlas.mcp_bridge import default_project
+@pytest.mark.parametrize('command', ['mcp', 'view', 'serve', 'status', 'stop'])
+@pytest.mark.parametrize('selector', ['KNOWLEDGE_ATLAS_DEFAULT_PROJECT', 'KNOWLEDGE_ATLAS_DOCKER_PROJECT', 'file'])
+def test_removed_deployment_settings_reject_before_dispatch(tmp_path, monkeypatch, capsys, command, selector):
+    import sys
+    from knowledge_atlas import cli, launcher, mcp_bridge
+    from knowledge_atlas.viewer import backend
+
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path))
     monkeypatch.delenv('KNOWLEDGE_ATLAS_DEFAULT_PROJECT', raising=False)
     monkeypatch.delenv('KNOWLEDGE_ATLAS_DOCKER_PROJECT', raising=False)
+    config_dir = tmp_path / 'knowledge-atlas'
+    saved = config_dir / 'mcp.json'
+    if selector == 'file':
+        config_dir.mkdir()
+        saved.write_text('opaque user settings')
+    else:
+        monkeypatch.setenv(selector, 'old-deployment')
+
+    def unexpected(*args, **kwargs):
+        pytest.fail('removed settings reached dispatch')
+
+    monkeypatch.setattr(launcher, 'load_config', unexpected)
+    monkeypatch.setattr(mcp_bridge, 'serve', unexpected)
+    monkeypatch.setattr(backend, 'MCPBackend', unexpected)
+    args = ['knowledge-atlas', command]
+    if command == 'view':
+        args += ['--atlas', str(uuid.uuid4())]
+    monkeypatch.setattr(sys, 'argv', args)
+    assert cli.main() == 1
+    captured = capsys.readouterr()
+    assert captured.out == ''
+    message = json.loads(captured.err)['message']
+    assert 'obsolete deployment settings' in message
+    assert (saved.name if selector == 'file' else selector) in message
+    assert 'old-deployment' not in message
+    if selector == 'file':
+        assert saved.read_text() == 'opaque user settings'
+    else:
+        assert not config_dir.exists()
+
+
+@pytest.mark.parametrize('profiles', [None, {}, {'wiki': {'provider': 'codex'}}])
+def test_native_config_refuses_supplied_incomplete_profiles(tmp_path, profiles):
+    from knowledge_atlas.launcher import service_context
+
+    config = {'service_root': str(tmp_path / 'service'), 'configuration': {'profiles': profiles}}
+    with pytest.raises(AtlasError, match='stage profiles') as error:
+        service_context(config)
+    assert error.value.code == 'invalid_configuration'
+    assert not (tmp_path / 'service').exists()
+
+
+def test_removed_mcp_selector_rejected_before_dispatch():
+    from knowledge_atlas.mcp_bridge import call_tool
+
+    class Client:
+        def call(self, request):
+            pytest.fail('removed payload selector reached dispatch')
+
+    response = call_tool(Client(), 'atlas_atlas_open',
+                         {'atlas_id': str(uuid.uuid4()), 'payload': {'project': 'old'}})
+    assert response['error']['code'] == 'invalid_request'
+
+
+def test_native_mcp_refuses_stale_settings_before_first_bind(tmp_path, monkeypatch):
+    from knowledge_atlas import mcp_bridge
+
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path))
-    assert default_project() is None
-    settings = tmp_path/'knowledge-atlas/mcp.json'
-    settings.parent.mkdir()
-    settings.write_text('{"project":"saved"}')
-    assert default_project() == 'saved'
-    monkeypatch.setenv('KNOWLEDGE_ATLAS_DEFAULT_PROJECT', 'configured-in-claude')
-    assert default_project() == 'configured-in-claude'
+    monkeypatch.setenv('KNOWLEDGE_ATLAS_DEFAULT_PROJECT', 'old-deployment')
+    monkeypatch.setattr(mcp_bridge, 'load_config', lambda *_: pytest.fail('stale settings reached native lookup'))
+    session = mcp_bridge.SessionClient(None, 'mcp')
+    result = mcp_bridge.call_tool(session, 'atlas_atlas_list', None)
+    assert result['error']['code'] == 'invalid_configuration'
+
+
+def test_native_mcp_session_does_not_follow_rewritten_discovery(app, tmp_path):
+    from knowledge_atlas.client import AtlasClient
+    from knowledge_atlas.http_api import create_app
+    from knowledge_atlas.mcp_bridge import SessionClient, call_tool
+
+    other = create_app(ServiceContext(tmp_path / 'other'))
+    other.start()
+    config = tmp_path / 'config.json'
+    config.write_text(json.dumps({'service_root': str(app.context.service_root)}))
+    session = SessionClient(config, 'mcp')
+    try:
+        assert call_tool(session, 'atlas_atlas_list', None)['data'] == {'projects': []}
+        operation = AtlasClient(other.context.service_root).call(ActionRequest(
+            'atlas.create', request_id=str(uuid.uuid4()), payload={'path': str(tmp_path / 'other-atlas')}))
+        assert operation.operation_id
+        discovery = app.context.service_root / 'discovery.json'
+        token = app.context.service_root / 'token'
+        discovery.write_bytes((other.context.service_root / 'discovery.json').read_bytes())
+        token.write_bytes((other.context.service_root / 'token').read_bytes())
+        poll = call_tool(session, 'atlas_operation_read', {'payload': {'operation_id': operation.operation_id}})
+        assert poll['error']['code'] == 'operation_not_found'
+    finally:
+        session.close()
+        other.stop(wait=True)
 
 
 def test_singleton_launcher_and_version_conflict(tmp_path):
@@ -170,9 +273,8 @@ def test_singleton_launcher_and_version_conflict(tmp_path):
             with pytest.raises(AtlasError,match='version_conflict'):ensure_service(config)
             session = SessionClient(config_path, 'mcp')
             missing = call_tool(session, 'atlas_atlas_open', {})['error']
-            assert (missing['code'], missing['status']) == ('invalid_request', 422)
-            assert 'payload.project' in missing['message'] and 'payload.path' in missing['message']
-            explicit = call_tool(session, 'atlas_atlas_open', {'payload': {'path': str(tmp_path/'atlas')}})
+            assert (missing['code'], missing['status']) == ('invalid_request', 400)
+            explicit = call_tool(session, 'atlas_atlas_open', {'atlas_id': str(uuid.uuid4())})
             assert explicit['error']['code'] == 'version_conflict'
         finally:path.write_text(actual)
         client.stop()
@@ -195,12 +297,12 @@ def test_mcp_sdk_discovers_tools_and_calls_same_service(tmp_path):
     ensure_service(config)
     async def run():
         params=StdioServerParameters(command=sys.executable,args=['-m','knowledge_atlas.cli','mcp','--config',str(path)])
-        async with stdio_client(params) as (reader,writer):
+        async with stdio_client(params, errlog=sys.__stderr__) as (reader,writer):
             async with ClientSession(reader,writer) as session:
                 await session.initialize()
                 listed=await session.list_tools()
                 assert any(t.name=='atlas_atlas_create' for t in listed.tools)
-                response=await session.call_tool('atlas_atlas_status',{'atlas_id':'missing','payload':{}})
+                response=await session.call_tool('atlas_atlas_status',{'atlas_id':str(uuid.uuid4()),'payload':{}})
                 assert response.isError
                 assert response.structuredContent['error']['code']=='atlas_not_found'
                 accepted=await session.call_tool('atlas_atlas_create',{'request_id':str(uuid.uuid4()),'payload':{'path':str(tmp_path/'atlas')}})
@@ -317,3 +419,38 @@ def test_status_marks_closed_http11_connections(app):
             assert json.load(response)['endpoint'] == app.endpoint
     finally:
         connection.close()
+
+
+@pytest.mark.parametrize('source', ['http', 'direct'])
+def test_idle_dispatch_sources(tmp_path, source):
+    import threading
+    from knowledge_atlas.client import AtlasClient
+    from knowledge_atlas.operations import inspect_operation, submit
+    from knowledge_atlas.http_api import create_app
+    app = create_app(ServiceContext(tmp_path / 'service'))
+    idle = threading.Event()
+    wait = app.dispatcher.wakeup.wait
+
+    # For HTTP, only an admission notification can wake the parked dispatcher
+    # before our deadline. Direct submissions rely on its regular timer.
+    def parked(timeout):
+        idle.set()
+        return wait(30 if source == 'http' else timeout)
+
+    app.dispatcher.wakeup.wait = parked
+    app.start()
+    try:
+        assert idle.wait(5)
+        request = ActionRequest('atlas.create', request_id=str(uuid.uuid4()),
+                                payload={'path': str(tmp_path / 'project')})
+        if source == 'http':
+            record = AtlasClient(app.context.service_root).call(request)
+        else:
+            record = submit(app.context, request)
+        deadline = time.monotonic() + 8
+        while record.state in ('queued', 'running') and time.monotonic() < deadline:
+            time.sleep(.1)
+            record = inspect_operation(app.context, record.operation_id)
+        assert record.state == 'succeeded', record
+    finally:
+        app.stop(wait=True)

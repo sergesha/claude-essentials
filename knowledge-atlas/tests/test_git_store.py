@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import pytest
 from knowledge_atlas.core.git_store import GitStore, git
 
 ROOT=Path(__file__).resolve().parent / 'fixtures'
@@ -10,8 +11,8 @@ class GitStoreTests(unittest.TestCase):
     def test_snapshot_pins_real_submodules_and_keeps_raw_wiki_and_extraction(self):
         with tempfile.TemporaryDirectory() as tmp:
             store=GitStore(Path(tmp)/'store')
-            wiki=json.loads((ROOT/'evidence/wiki-initial-final.json').read_text())
-            extraction=json.loads((ROOT/'evidence/extractor-output.json').read_text())
+            wiki=json.loads((ROOT/'evidence/wiki-current.json').read_text())
+            extraction=json.loads((ROOT/'evidence/extraction-current.json').read_text())
             result=store.snapshot(wiki,extraction,{'model_response':'retained response'},recorded_at='2026-11-09T21:00:00Z')
             self.assertIsNotNone(result)
             self.assertEqual(result['status'],'candidate')
@@ -29,7 +30,7 @@ class GitStoreTests(unittest.TestCase):
     def test_later_snapshot_does_not_change_old_time_or_contents(self):
         with tempfile.TemporaryDirectory() as tmp:
             store=GitStore(Path(tmp)/'store')
-            wiki=json.loads((ROOT/'evidence/wiki-initial-final.json').read_text())
+            wiki=json.loads((ROOT/'evidence/wiki-current.json').read_text())
             first=store.snapshot(wiki,{'statements':[]},{},recorded_at='2026-11-09T21:00:00Z')
             self.assertIsNotNone(first)
             newer=copy.deepcopy(wiki);newer['recorded_at']='2026-11-10T21:00:00Z'
@@ -38,3 +39,92 @@ class GitStoreTests(unittest.TestCase):
             self.assertEqual(store.read(first['commit'])['manifest']['recorded_at'],'2026-11-09T21:00:00Z')
             self.assertEqual(store.read(first['commit'])['wiki'],wiki)
             with self.assertRaises(ValueError):store.read('HEAD')
+
+
+def test_unmarked_empty_git_project_is_rejected_untouched(tmp_path):
+    import pytest
+    import uuid
+    from knowledge_atlas.project_registry import repository_identity
+    from knowledge_atlas.contracts import AtlasError
+    from knowledge_atlas.core.git_store import _commit
+    store = GitStore(tmp_path/'existing')
+    store.root.mkdir(parents=True)
+    git(store.root, 'init', '-qb', 'data')
+    owner = str(uuid.uuid4())
+    (store.root/'package.json').write_text(json.dumps({'package_id': owner}))
+    (store.root/'manifest.json').write_text(json.dumps({'package_id': owner, 'modules': {},
+        'status': 'candidate', 'proposal_base_publication': None, 'accepted_at': None,
+        'recorded_at':'2026-11-13T00:00:00Z'}))
+    commit = _commit(store.root, 'Unmarked empty project')
+    with pytest.raises(AtlasError, match='invalid_atlas'):
+        repository_identity(store.base)
+    with pytest.raises(ValueError):
+        store.read(commit)
+    assert git(store.root, 'rev-parse', 'HEAD') == commit
+    assert git(store.root, 'status', '--porcelain') == ''
+
+
+def test_recompilation_validates_both_owned_repositories_before_writes(tmp_path):
+    import pytest
+    from knowledge_atlas.core.git_store import _commit
+    from test_packages import snapshot
+    store = GitStore(tmp_path/'project')
+    original = store.read(snapshot(store))
+    knowledge = store.base/'modules/knowledge'
+    marker = json.loads((knowledge/'package.json').read_text())
+    del marker['atlas_format']
+    (knowledge/'package.json').write_text(json.dumps(marker))
+    _commit(knowledge, 'Unmarked knowledge repository')
+    source = store.base/'modules/sources'
+    before = [git(path, 'show-ref') for path in (store.root, source, knowledge)]
+    wiki = original['wiki']
+    wiki['sources'][0]['recorded_at'] = '2026-11-14T00:00:00Z'
+    with pytest.raises(ValueError):
+        store.snapshot(wiki, original['extraction'], {}, recorded_at='2026-11-14T00:00:00Z',
+                       relation_previous=original['relations'])
+    assert before == [git(path, 'show-ref') for path in (store.root, source, knowledge)]
+
+@pytest.mark.parametrize(('kind','damage'), [
+    ('knowledge','missing-wiki'), ('sources','project-manifest'), ('sources','source_id'),
+    ('knowledge','source_id'), ('knowledge','passage_version'), ('sources','non-array'),
+])
+def test_snapshot_rejects_wrong_writable_leaf_before_changing_files_or_refs(tmp_path, kind, damage):
+    from knowledge_atlas.core.git_store import _commit
+    from test_packages import snapshot
+
+    store = GitStore(tmp_path/'project')
+    original = store.read(snapshot(store))
+    source, knowledge = (store.base/'modules'/name for name in ('sources','knowledge'))
+    leaf = store.base/'modules'/kind
+    error = 'invalid ' + kind + ' content module'
+    if damage == 'source_id':
+        path = leaf/('provenance.json' if kind == 'sources' else 'wiki.json')
+        payload = json.loads(path.read_text())
+        rows = payload if kind == 'sources' else payload['sources']
+        del rows[0]['source_id']
+        path.write_text(json.dumps(payload))
+        error = 'source_id'
+    elif damage == 'non-array':
+        (leaf/'provenance.json').write_text('{}')
+        error = 'array of source records'
+    elif damage == 'passage_version':
+        (leaf/'extraction.json').write_text(json.dumps({'statements': [{}]}))
+        error = 'passage_version'
+    elif damage == 'missing-wiki':
+        (leaf/'wiki.json').unlink()
+    else:
+        (leaf/'manifest.json').write_bytes((store.root/'manifest.json').read_bytes())
+    _commit(leaf, 'Retain incompatible leaf HEAD')
+    repositories = [store.root, source, knowledge]
+
+    def state():
+        files = {path: path.read_bytes() for repo in repositories for path in repo.rglob('*')
+                 if '.git' not in path.relative_to(repo).parts and path.is_file()}
+        return files, [git(repo, 'show-ref') for repo in repositories]
+
+    before = state()
+    wiki = original['wiki']
+    wiki['sources'][0]['recorded_at'] = '2026-11-14T00:00:00Z'
+    with pytest.raises(ValueError, match=error):
+        store.snapshot(wiki, original['extraction'], {}, recorded_at='2026-11-14T00:00:00Z')
+    assert state() == before

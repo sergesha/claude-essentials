@@ -3,10 +3,14 @@ import base64
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import urllib.parse
 import urllib.request
 import urllib.error
+
+from .extract_stage import validate_retained_extraction
+from .wiki_stage import validate_source_records
 
 
 def key(kind,value):
@@ -22,6 +26,8 @@ def _local_records(snapshot,commit):
         extract={'entities':[], 'statements':[]}
     else:
         wiki=snapshot['wiki'];extract=snapshot['extraction']
+        validate_source_records(wiki['sources'])
+        validate_retained_extraction(extract)
     records=[];native_ids={};entities={}
     bundle=snapshot.get('relations')
     if bundle:
@@ -39,7 +45,7 @@ def _local_records(snapshot,commit):
     for source in wiki['sources']:
         k=key('source',source['filename']);native_ids[source['id']]='Record/'+k
         doc=record(k,'source',snapshot['sources'][source['filename']].decode('utf-8'),source)
-        doc['recorded_at'] = source.get('recorded_at') or wiki.get('recorded_at') or manifest['recorded_at']
+        doc['recorded_at'] = source['recorded_at']
         for field in ('source_time','valid_from','valid_to'):
             if source.get(field):doc[field]=source[field]
     for page in wiki['pages']:
@@ -63,7 +69,7 @@ def _local_records(snapshot,commit):
         qualifiers = statement.get('qualifiers') or []
         pairs = qualifiers.items() if isinstance(qualifiers, dict) else qualifiers
         moods = [pair[1] for pair in pairs if isinstance(pair, (tuple, list)) and len(pair) == 2 and pair[0] == 'mood']
-        payload = {**statement, 'modality': moods} if moods and extract.get('passage_version', 0) >= 1 else statement
+        payload = {**statement, 'modality': moods} if moods else statement
         doc=record(k,'statement',quoted,payload,links)
         statement_ids[index]=doc['@id']
         if bundle and relation_rows[index]['status']!='resolved':doc['status']='candidate'
@@ -143,16 +149,24 @@ def package_record_id(package_id,record_id):
 def records_for(snapshot,commit,*,namespace=None):
     """Compose pinned packages once, with package-qualified child identities."""
     nodes={};root_id=snapshot['manifest']['package_id']
-    def collect(data,oid,mount):
+    def collect(data,oid,mount,publication=None):
         identity=data['manifest']['package_id']
         if identity in nodes:
             if nodes[identity]['commit']!=oid:
                 raise ValueError('conflicting pins for package identity: '+identity)
             nodes[identity]['mounts'].add(mount)
         else:nodes[identity]={'snapshot':data,'commit':oid,'mounts':{mount}}
+        if publication is not None:
+            nodes[identity].setdefault('receipts', {})[mount] = publication
         for inclusion in data.get('included_packages',[]):
+            proofs = inclusion.get('inclusions', [])
+            receipts = {item['mount']: item['publication'] for item in proofs}
+            if (len(receipts) != len(proofs) or set(receipts) != set(inclusion['mounts'])
+                    or any(not isinstance(oid, str) or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', oid)
+                           for oid in receipts.values())):
+                raise ValueError('exact child publication required for every mount')
             for child_mount in inclusion['mounts']:
-                collect(inclusion['snapshot'],inclusion['commit'],mount+'/'+child_mount if mount else child_mount)
+                collect(inclusion['snapshot'],inclusion['commit'],mount+'/'+child_mount if mount else child_mount, receipts[child_mount])
     collect(snapshot,commit,'')
     records=[];semantic={}
     for identity,node in nodes.items():
@@ -169,6 +183,9 @@ def records_for(snapshot,commit,*,namespace=None):
                 payload.update(package_id=identity,package_commit=node['commit'],local_record_id=original_id,
                     mounts=sorted(node['mounts']),package_accepted_at=data['manifest'].get('accepted_at'),
                     atlas_accepted_at=snapshot['manifest'].get('accepted_at'))
+                if 'receipts' in node:
+                    payload['inclusions'] = [{'mount': path, 'publication': receipt}
+                                             for path, receipt in sorted(node['receipts'].items())]
                 for citation in payload.get('provenance',[]):
                     citation['record_id']=qualified_id(citation['record_id'])
                     citation.setdefault('source_package_id',identity)

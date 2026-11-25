@@ -3,58 +3,88 @@ from datetime import datetime
 import json
 import re
 import subprocess
-import uuid
+from ..contracts import ATTRIBUTION_CHANNELS, require_canonical_uuid
 from .git_store import git
 
 DECISIONS = 'refs/knowledge-atlas/decisions/'
 
 
+def validate_attribution(record):
+    if not isinstance(record, dict) or type(record.get('schema_version')) is not int or record['schema_version'] != 1:
+        raise ValueError('unsupported service decision record')
+    require_canonical_uuid(record.get('decision_id'))
+    if 'operation_id' in record:
+        require_canonical_uuid(record['operation_id'])
+    if record.get('attribution_channel') not in ATTRIBUTION_CHANNELS or record.get('kind') not in ('human', 'synthetic'):
+        raise ValueError('invalid decision attribution')
+    if any(not isinstance(record.get(key), str) or not record[key].strip() for key in ('actor', 'reason', 'decided_at')):
+        raise ValueError('missing decision attribution')
+    if datetime.fromisoformat(record['decided_at'].replace('Z', '+00:00')).tzinfo is None:
+        raise ValueError('decision timezone required')
+    if not isinstance(record.get('request_sha256'), str) or not re.fullmatch(r'[0-9a-f]{64}', record['request_sha256']):
+        raise ValueError('decision request digest required')
+
+
 def decision_inventory(store, *, decision_id=None):
-    selected = uuid.UUID(decision_id) if decision_id is not None else None
+    return _decision_entries(store, decision_id, verify_closure=True)
+
+
+def _decision_entries(store, decision_id, *, verify_closure):
     pattern = DECISIONS
-    options = []
-    if selected is not None:
-        # Legacy ref names retain the request's original case, braces and hyphens.
-        # A valid UUID has exactly 32 hex digits. Match them in order in Git so
-        # unrelated decisions never require object reads or closure validation.
-        pattern += '*' + '*'.join(selected.hex) + '*'
-        options.append('--ignore-case')
+    if decision_id is not None:
+        require_canonical_uuid(decision_id)
+        pattern += decision_id
     entries = []
-    for line in git(store.root,'for-each-ref',*options,'--format=%(refname) %(objectname)',pattern).splitlines():
+    for line in git(store.root, 'for-each-ref', '--format=%(refname) %(objectname)', pattern).splitlines():
         ref, oid = line.split()
-        if selected is not None:
-            try:
-                if uuid.UUID(ref.removeprefix(DECISIONS)) != selected:
-                    continue
-            except ValueError:
-                continue
+        if decision_id is not None and ref != pattern:
+            continue
         try:
-            store.read(oid)
+            if verify_closure:
+                store.read(oid)
             receipt = json.loads(git(store.root,'show',oid+':atlas-decision.json'))
-            uuid.UUID(receipt['decision_id'])
-            if receipt['schema_version'] != 1 or ref != DECISIONS+receipt['decision_id']:
+            validate_attribution(receipt)
+            if ref != DECISIONS+receipt['decision_id']:
                 raise ValueError('ref and receipt disagree')
-            if receipt['action'] not in ('accept','reject','revise') or receipt['kind'] not in ('human','synthetic'):
-                raise ValueError('invalid action or attribution')
-            if any(not isinstance(receipt.get(key),str) or not receipt[key].strip() for key in ('actor','reason','decided_at')):
-                raise ValueError('missing attribution')
-            if datetime.fromisoformat(receipt['decided_at'].replace('Z','+00:00')).tzinfo is None:
-                raise ValueError('decision timezone required')
-            if not re.fullmatch(r'[0-9a-f]{64}',receipt['request_sha256']): raise ValueError('request digest required')
+            if receipt['action'] not in ('accept','reject','revise'):
+                raise ValueError('invalid decision action')
             required = ['candidate','base_publication']
             if receipt['action'] == 'accept': required.append('accepted_content')
             if receipt['action'] == 'revise': required.append('revised_candidate')
+            parents = []
             for key in required:
                 referenced = receipt[key]
                 if key == 'base_publication' and referenced is None: continue
                 if not isinstance(referenced,str) or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}',referenced):
                     raise ValueError('exact referenced commit required')
-                store.read(referenced)
-                git(store.root,'merge-base','--is-ancestor',referenced,oid)
+                if verify_closure:
+                    snapshot = store.read(referenced)
+                    if key == 'accepted_content':
+                        from .publication import Publications
+                        review = Publications(store)._accepted_review(referenced, snapshot['manifest'])
+                        if not _matches_review(receipt, review):
+                            raise ValueError('decision disagrees with its accepted review')
+                if referenced not in parents:
+                    parents.append(referenced)
+            if git(store.root, 'show', '-s', '--format=%P', oid).split() != parents:
+                raise ValueError('decision parents disagree with its referenced effects')
+            changed = git(store.root, 'diff-tree', '-r', '--no-renames', '--ignore-submodules=none',
+                          '--name-only', receipt['candidate'], oid)
+            if changed != 'atlas-decision.json':
+                raise ValueError('decision tree differs from its reviewed candidate')
             entries.append({'ref':ref,'commit':oid,'receipt':receipt})
         except (ValueError,KeyError,TypeError,AttributeError,OSError) as error:
             raise ValueError('invalid decision '+ref+': '+str(error)) from error
     return entries
+
+
+def _matches_review(receipt, review):
+    return (receipt['action'] == review['decision'] == 'accept'
+            and receipt['candidate'] == review['candidate_commit']
+            and receipt['decided_at'] == review['accepted_at']
+            and receipt.get('operation_id') == review.get('operation_id')
+            and all(receipt[key] == review[key] for key in
+                    ('base_publication', 'decision_id', 'request_sha256', 'actor', 'kind', 'reason', 'attribution_channel')))
 
 
 def matching_decision_receipt(store, publication):
@@ -63,33 +93,34 @@ def matching_decision_receipt(store, publication):
     content = publication['content_commit']
     try:
         review = json.loads(git(store.root, 'show', content+':review.json'))
-        entries = decision_inventory(store, decision_id=review['decision_id'])
+        validate_attribution(review)
+        # The publication's owner already validates the package closure. Descending
+        # into it again here would recursively re-read included wrappers.
+        entries = _decision_entries(store, review['decision_id'], verify_closure=False)
         if len(entries) != 1:
             return False
         receipt = entries[0]['receipt']
-        return (receipt['action'] == review['decision'] == 'accept'
-                and receipt['accepted_content'] == content
-                and receipt['candidate'] == review['candidate_commit']
-                and receipt['base_publication'] == review['base_publication'] == publication['previous_publication']
-                and receipt['decided_at'] == review['accepted_at'] == publication['accepted_at']
+        return (_matches_review(receipt, review) and receipt['accepted_content'] == content
+                and receipt['base_publication'] == publication['previous_publication']
+                and receipt['decided_at'] == publication['accepted_at']
                 and receipt['kind'] == publication['acceptance_kind']
-                and receipt.get('attribution_channel', 'unrecorded') == review.get('attribution_channel', 'unrecorded')
-                and review.get('attribution_channel', 'unrecorded') == publication.get('acceptance_channel', 'unrecorded')
-                and all(receipt[key] == review[key] for key in
-                        ('decision_id', 'request_sha256', 'actor', 'kind', 'reason')))
+                and receipt['attribution_channel'] == publication['acceptance_channel'])
     except (ValueError, KeyError, TypeError, AttributeError):
         return False
 
 
 def review_inventory(store):
-    commits = git(store.root, 'for-each-ref', '--format=%(objectname)', 'refs/poc9/reviews/').splitlines()
+    commits = git(store.root, 'for-each-ref', '--format=%(refname) %(objectname)', 'refs/poc9/reviews/').splitlines()
     if not commits:
         return
-    # One Git process reads the immutable recovery evidence for all old reviews.
+    # Batch immutable review documents, including effects awaiting a decision.
     with subprocess.Popen(['git', '-C', str(store.root), 'cat-file', '--batch'],
                           stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as process:
         try:
-            for commit in commits:
+            for line in commits:
+                ref, commit = line.split()
+                if ref != 'refs/poc9/reviews/' + commit:
+                    raise ValueError('review reference disagrees with reviewed content')
                 process.stdin.write((commit + ':review.json\n').encode())
                 process.stdin.flush()
                 header = process.stdout.readline().split()
@@ -98,6 +129,7 @@ def review_inventory(store):
                 review = json.loads(process.stdout.read(int(header[2])))
                 if process.stdout.read(1) != b'\n':
                     raise ValueError('incomplete review document')
+                validate_attribution(review)
                 yield commit, review
         finally:
             process.stdin.close()

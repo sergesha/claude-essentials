@@ -10,8 +10,8 @@ import re
 import threading
 from . import __version__
 from .api_models import parse_request, schema
-from .contracts import ActionContext, AtlasError
-from .operations import Dispatcher, inspect_operation, resume, submit
+from .contracts import ATTRIBUTION_CHANNELS, ActionContext, AtlasError
+from .operations import initialize_service_storage, Dispatcher, inspect_operation, resume, submit
 from .locks import FileLock
 from .providers.base import ProviderError
 from .atomic import write_private
@@ -23,13 +23,19 @@ class LocalHTTPServer(ThreadingHTTPServer):
 
 def invoke(context,request):
     from .actions import register_handlers
-    from .actions.atlas import open_atlas,atlas_status
+    from .actions.atlas import list_atlases, open_atlas, atlas_status
     from .actions.decisions import inspect_candidate
     from .actions.packages import inspect_packages
     from .actions.reads import read_action
+    if request.action == 'atlas.list':
+        return 200,list_atlases(context,request)
+    if request.action == 'atlas.open' and request.payload:
+        raise AtlasError('invalid_request', 'atlas.open takes an atlas_id UUID and an empty or omitted payload')
     if request.action=='operation.read':
         return 200,inspect_operation(context,request.payload['operation_id'])
     if request.action=='operation.resume':
+        if request.payload.keys() != {'operation_id'}:
+            raise AtlasError('invalid_request', 'resume requires only the target operation_id')
         return 202,resume(context,request.payload['operation_id'],request.request_id)
     if request.action in register_handlers(context):return 202,submit(context,request)
     reads={'atlas.open':open_atlas,'atlas.status':atlas_status,'candidate.inspect':inspect_candidate,
@@ -53,7 +59,7 @@ class LocalApp:
         self.shutdown_lock=threading.Lock()
 
     def start(self):
-        self.context.service_root.mkdir(parents=True,exist_ok=True,mode=0o700)
+        initialize_service_storage(self.context)
         os.chmod(self.context.service_root,0o700)
         self.lock.__enter__()
         try:
@@ -122,11 +128,12 @@ class LocalApp:
                                 app.submissions += 1
                             try:
                                 channel = self.headers.get('Atlas-Channel', 'http')
-                                if channel not in ('http', 'mcp', 'viewer', 'python'):
+                                if channel not in ATTRIBUTION_CHANNELS:
                                     raise AtlasError('invalid_request', 'unknown attribution channel')
                                 service = replace(app.context, configuration={
                                     **app.context.configuration, 'attribution_channel': channel})
                                 status,result=invoke(service,request)
+                                app.dispatcher.wakeup.set()
                             finally:
                                 with app.admission:
                                     app.submissions -= 1

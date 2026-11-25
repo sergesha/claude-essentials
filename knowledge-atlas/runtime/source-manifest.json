@@ -177,7 +177,8 @@
     {
       "source": "model-profiles.json",
       "source_sha256": "96b3e164a0fcb4e06716f8bfc9284f8af742fa3510405103cd147982491cae31",
-      "destination": "runtime/model-profiles.json"
+      "destination": "runtime/model-profiles.json",
+      "adaptation": "Add an explicit Codex provider to all six shipped stages. Preserve the upstream model, effort and guidance values."
     },
     {
       "source": "scripts/wiki-agent-codex.py",

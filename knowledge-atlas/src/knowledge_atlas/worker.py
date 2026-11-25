@@ -3,9 +3,9 @@ from dataclasses import asdict, replace
 import json
 from pathlib import Path
 import traceback
-from .contracts import ActionContext, ActionRequest, ActionResult, AtlasError, RuntimeConfig
+from .contracts import ActionContext, ActionResult, AtlasError, RuntimeConfig
 from .locks import FileLock, AtlasLock
-from .operations import database, encoded, staged_restore_input, validate_atlas_path
+from .operations import initialize_service_storage, database, encoded, operation_project, retained_request, staged_restore_input, validate_atlas_path
 from .actions import register_handlers, register_recoveries
 
 
@@ -33,6 +33,7 @@ def run_attempt(context, handler):
 
 
 def run_next(service):
+    initialize_service_storage(service)
     try:
         with FileLock(service.service_root/'writer.lock'):
             _execute_next(service)
@@ -48,18 +49,25 @@ def _execute_next(service):
     with FileLock(evidence/'worker.lock'):
         with database(service) as db:
             db.execute("UPDATE operations SET state='running' WHERE operation_id=? AND state='queued'", (row['operation_id'],))
-        frozen = json.loads(row['configuration'])
-        runtime = frozen['runtime']
-        attempt_service = replace(service, configuration=frozen['configuration'], runtime=(RuntimeConfig(
-            Path(runtime['runtime_root']), Path(runtime['manifest']) if runtime['manifest'] else None) if runtime else None))
-        context = ActionContext(attempt_service, ActionRequest(**json.loads(row['request'])), Path(row['atlas_path']), evidence,
-                                frozen['configuration'], row['operation_id'],
-                                Path(row['previous_evidence']) if row['previous_evidence'] else None)
+        request = None
+        previous = Path(row['previous_evidence']) if row['previous_evidence'] else None
         try:
-            validate_atlas_path(service, context.atlas_path)
-            with AtlasLock(context.atlas_path):
-                handler = register_handlers(service).get(context.request.action)
-                if handler is None: raise AtlasError('unsupported_action', context.request.action, 422)
+            request = retained_request(row)
+            frozen = json.loads(row['configuration'])
+            runtime = frozen['runtime']
+            path = Path(row['atlas_path'])
+            # AtlasLock itself resolves aliases. Check the persisted location first.
+            if validate_atlas_path(service, path) != path:
+                raise AtlasError('atlas_conflict', 'the queued repository or destination path changed', 409)
+            with AtlasLock(path):
+                binding = operation_project(service, request, path, frozen)
+                attempt_service = replace(service, configuration=frozen['configuration'], runtime=(RuntimeConfig(
+                    Path(runtime['runtime_root']), Path(runtime['manifest']) if runtime['manifest'] else None)
+                    if runtime else None))
+                context = ActionContext(attempt_service, request, path, evidence, attempt_service.configuration,
+                                        row['operation_id'], previous, binding)
+                handler = register_handlers(service).get(request.action)
+                if handler is None: raise AtlasError('unsupported_action', request.action, 422)
                 result = run_attempt(context, handler)
                 if not isinstance(result, ActionResult): raise TypeError('handler must return ActionResult')
                 result_json = encoded(asdict(result))
@@ -72,7 +80,7 @@ def _execute_next(service):
             (evidence/'traceback.txt').write_text(traceback.format_exc())
             # A previous service version could already have queued an unsupported
             # restore resume. Its original bytes are still needed for inspection.
-            interrupted = (context.request.action == 'archive.restore' and context.previous_evidence is not None
+            interrupted = (request is not None and request.action == 'archive.restore' and previous is not None
                            and details['code'] == 'unsafe_resume')
             with database(service) as db:
                 db.execute("UPDATE operations SET state=?,error=? WHERE operation_id=?",
@@ -81,5 +89,5 @@ def _execute_next(service):
                 return
         # The state is durable before discarding bytes. An interrupted attempt
         # retains its original evidence until an operator reconciles the restore.
-        if context.request.action == 'archive.restore':
+        if request is not None and request.action == 'archive.restore':
             staged_restore_input(evidence).unlink(missing_ok=True)

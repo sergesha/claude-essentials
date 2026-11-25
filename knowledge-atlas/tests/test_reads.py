@@ -3,6 +3,7 @@ from dataclasses import replace
 import json
 from pathlib import Path
 import pytest
+from acceptance_fixture import review_acceptance
 from knowledge_atlas.contracts import ActionContext, ActionRequest, ServiceContext, AtlasError
 from knowledge_atlas.core.git_store import GitStore
 from knowledge_atlas.core.graph_stage import records_for, GraphStage
@@ -22,7 +23,7 @@ def published(tmp_path,monkeypatch):
     candidate=propose_records(store,base,entries,actor='Fixture',method='Explicit retained fixture',
         reason='Read contract',recorded_at='2026-11-13T00:00:00Z')
     profile=json.loads((_assets()/'embedding-profile.json').read_text())
-    content=Publications(store).review(candidate,{'decision':'accept','actor':'Fixture','kind':'synthetic',
+    content=review_acceptance(Publications(store), candidate,{'decision':'accept','actor':'Fixture','kind':'synthetic',
         'reason':'Read contract','accepted_at':'2026-11-13T01:00:00Z','base_publication':None},profile)
     publication=Publications(store).publish(content,lambda oid:{**projection(oid),'graph_commit':oid,
         'search_checkpoint':oid,'database':'admin/fixture'})
@@ -120,3 +121,109 @@ def test_publication_history_does_not_transport_embedding_payloads(published, mo
     assert loaded
     assert all(len(value['vector_artifacts']['vectors']) == 100_000 for value in loaded)
     assert all(len(value['native_export_excluded_ids']) == 10_000 for value in loaded)
+
+
+
+@pytest.fixture
+def registered_history(published):
+    from knowledge_atlas.operations import register_atlas
+
+    store, first, content, _, service, _ = published
+    pubs = Publications(store)
+    atlas_id = store.read(content)['manifest']['package_id']
+    binding = register_atlas(service, atlas_id, store.base)
+    candidate = propose_records(store, content, [], actor='Fixture', method='Explicit retained fixture',
+        reason='Advance READY', recorded_at='2026-11-14T00:00:00Z', base_publication=first)
+    profile = json.loads((_assets() / 'embedding-profile.json').read_text())
+    accepted = review_acceptance(pubs, candidate, {'decision': 'accept', 'actor': 'Fixture', 'kind': 'synthetic',
+        'reason': 'Advance READY', 'accepted_at': '2026-11-14T01:00:00Z', 'base_publication': first}, profile)
+    ready = pubs.publish(accepted, lambda oid: {
+        **projection(oid), 'graph_commit': oid, 'search_checkpoint': oid, 'database': binding.graph_database})
+    return binding, ready
+
+
+def set_rebuilt_database(store, publication, name):
+    receipt = Publications(store).read(publication)
+    (store.base / 'rebuilt-projections.json').write_text(
+        json.dumps({publication: {**receipt, 'database': name}}))
+
+
+@pytest.mark.parametrize(('selection', 'owner'), [('ready', 'foreign'), ('historical', 'foreign'),
+                                                 ('historical', 'unverified')])
+def test_selected_read_rejects_foreign_or_unverified_graph(published, registered_history,
+                                                          selection, owner, monkeypatch):
+    from knowledge_atlas.http_api import invoke
+    from knowledge_atlas.operations import register_atlas
+
+    store, first, _, _, service, docs = published
+    binding, ready = registered_history
+    database = 'admin/unverified'
+    if owner == 'foreign':
+        other = GitStore(store.base.with_name('other'))
+        identity = other.read(snapshot(other))['manifest']['package_id']
+        database = register_atlas(service, identity, other.base).graph_database
+    selected = first if selection == 'historical' else ready
+    set_rebuilt_database(store, selected, database)
+
+    queried = []
+
+    def documents(graph, commit):
+        queried.append((graph.database, commit))
+        return docs
+
+    monkeypatch.setattr(GraphStage, 'documents', documents)
+    request = ActionRequest('search', atlas_id=binding.atlas_id,
+                            publication=selected if selection == 'historical' else None,
+                            payload={'query': 'warping', 'mode': 'vector'})
+    with pytest.raises(AtlasError) as failure:
+        invoke(service, request)
+    assert (failure.value.code, failure.value.status, queried) == ('graph_atlas_conflict', 409, [])
+
+
+def test_historical_read_retains_project_owned_graph(published, registered_history, monkeypatch):
+    from knowledge_atlas.http_api import invoke
+    from knowledge_atlas.operations import database
+
+    store, first, content, lesson, service, docs = published
+    binding, ready = registered_history
+    old_database = binding.graph_database
+    set_rebuilt_database(store, first, old_database)
+    with database(service) as db:
+        db.execute('INSERT INTO projection_owners VALUES (?,?,?)',
+                   ('http://127.0.0.1:1', old_database, binding.atlas_id))
+
+    queried = []
+
+    def documents(graph, commit):
+        queried.append((graph.database, commit))
+        return docs
+
+    monkeypatch.setattr(GraphStage, 'documents', documents)
+    status, result = invoke(service, ActionRequest('knowledge.apply', atlas_id=binding.atlas_id,
+        publication=first, payload={'record_id': lesson, 'context': {}}))
+    assert status == 200
+    assert result.publication == first != ready
+    assert result.data['status'] == 'conditional'
+    assert queried == [(old_database, content)]
+
+@pytest.mark.parametrize('action', ['history', 'wiki.pages'])
+def test_selected_reads_reject_a_missing_acceptance_decision(published, action):
+    from knowledge_atlas.core.decision_receipts import decision_inventory
+    from knowledge_atlas.core.git_store import git
+    store, publication = published[:2]
+    entry, = decision_inventory(store)
+    git(store.root, 'update-ref', '-d', entry['ref'])
+    with pytest.raises(AtlasError, match='publication_unavailable.*decision'):
+        read_action(read_context(published, action, {}, publication=publication))
+
+
+def test_history_refuses_retired_effective_acceptance_time(published):
+    from knowledge_atlas.core.git_store import git
+    from knowledge_atlas.core.publication import commit_files
+    store, publication, content = published[:3]
+    receipt = Publications(store).read(publication)
+    substituted = {**receipt, 'effective_accepted_at': '2099-01-01T00:00:00Z'}
+    broken = commit_files(store.root, content, {'publication.json': substituted}, [content], 'Obsolete cutoff')
+    git(store.root, 'update-ref', Publications.ref, broken, publication)
+    with pytest.raises(AtlasError, match='publication_unavailable.*effective_accepted_at'):
+        read_action(read_context(published, 'history', {}))

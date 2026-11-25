@@ -4,6 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 import uuid
+from acceptance_fixture import review_acceptance
 from knowledge_atlas.core.git_store import GitStore
 from knowledge_atlas.core.publication import Publications
 from knowledge_atlas.core.graph_stage import records_for, GraphStage, key
@@ -64,8 +65,8 @@ class KnowledgeTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         self.store = GitStore(Path(self.tmp.name)/'store')
-        self.base = self.store.snapshot(json.loads((ROOT/'evidence/wiki-initial-final.json').read_text()),
-            json.loads((ROOT/'evidence/extractor-output.json').read_text()), {}, recorded_at='2026-11-10T00:00:00Z')['commit']
+        self.base = self.store.snapshot(json.loads((ROOT/'evidence/wiki-current.json').read_text()),
+            json.loads((ROOT/'evidence/extraction-current.json').read_text()), {}, recorded_at='2026-11-10T00:00:00Z')['commit']
         self.profile = json.loads((ROOT/'embedding-profile.json').read_text())
 
     def propose(self, base, entries, publication=None):
@@ -75,7 +76,7 @@ class KnowledgeTests(unittest.TestCase):
             recorded_at='2026-11-10T00:01:00Z', base_publication=publication)
 
     def review(self, candidate, publication=None):
-        return Publications(self.store).review(candidate, {'decision': 'accept', 'kind': 'synthetic',
+        return review_acceptance(Publications(self.store), candidate, {'decision': 'accept', 'kind': 'synthetic',
             'actor': 'Synthetic test reviewer', 'reason': 'Controlled integration fixture, not human acceptance',
             'accepted_at': '2026-11-10T00:02:00Z', 'base_publication': publication}, self.profile)
 

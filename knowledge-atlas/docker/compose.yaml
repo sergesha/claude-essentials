@@ -1,9 +1,6 @@
 services:
   atlas:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
-    image: knowledge-atlas:local
+    image: ghcr.io/sergesha/knowledge-atlas:0.4.0${ATLAS_IMAGE_DIGEST:+@${ATLAS_IMAGE_DIGEST}}
     platform: linux/arm64
     init: true
     environment:
@@ -22,5 +19,6 @@ services:
       retries: 3
 volumes:
   runtime:
+    name: ${ATLAS_RUNTIME_VOLUME:-${COMPOSE_PROJECT_NAME}_runtime}
   data:
   auth:

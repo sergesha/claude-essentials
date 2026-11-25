@@ -1,0 +1,80 @@
+{
+  "stage": "wiki",
+  "status": "candidate",
+  "recorded_at": "2026-11-09T20:55:00Z",
+  "accepted_at": null,
+  "sources": [
+    {
+      "filename": "review.txt",
+      "content": "Technician Ivo: In trial P-14, Luma produced fewer warped QL-7 brackets than Sora only with dried feedstock, a closed enclosure and ambient temperature 20-24 C. This is a conditional judgment about warping, not a strength guarantee. Reviewer Nia accepted this limited conclusion. A retelling of P-14 is not an independent trial. Independent trial P-22 used new samples and operator Ada under the same conditions and also favored Luma for warping.\nTechnician Kez: Sora is usually easier to clean; this is my attributed opinion, not an adopted lab recommendation. QL-7 parts took about 42-58 minutes in profile Z with 0.4 mm nozzle. Trial P-31 failed, but humidity was not measured and the cause is unknown. Lesson: record moisture and actual enclosure before transferring the warping judgment.\n",
+      "recorded_at": "2026-11-09T20:55:00Z",
+      "sha256": "43ef6a269e7c8491e8a2ff9032a09449570b154792551b0e915267bd06f23f83",
+      "source_time": null,
+      "valid_from": null,
+      "valid_to": null,
+      "source_id": "printlab-review",
+      "name": "review.txt",
+      "id": "c1f6ca63-c4f3-4444-8e0f-f54cb84b6787"
+    }
+  ],
+  "pages": [
+    {
+      "id": "49a0372c-b0d2-4459-8ce6-ebfc44c492ff",
+      "filename": "overview.md",
+      "title": "Overview",
+      "path": "/wiki/",
+      "content": "---\ntitle: Overview\ndescription: In trial P-14, Luma produced fewer warped QL-7 brackets than Sora.[^1]\ndate: '2026-11-25'\ntags:\n- overview\n- synthetic\n---\n\nIn trial P-14, Luma produced fewer warped QL-7 brackets than Sora.[^1]\n\nSee [[concepts/conditional-warping]].\n\n[^1]: review.txt",
+      "tags": [
+        "overview",
+        "synthetic"
+      ],
+      "file_type": "md",
+      "page_count": null,
+      "highlights": [],
+      "metadata": {
+        "description": "In trial P-14, Luma produced fewer warped QL-7 brackets than Sora.[^1]"
+      },
+      "date": "2026-11-25",
+      "content_truncated": false
+    },
+    {
+      "id": "b6c65708-8ba4-49cd-8a69-af15aff577d4",
+      "filename": "conditional-warping.md",
+      "title": "Conditional warping",
+      "path": "/wiki/concepts/",
+      "content": "---\ntitle: Conditional warping\ndescription: The lab requires technicians to record moisture before transferring the\n  warping judgment.[^1]\ndate: '2026-11-25'\ntags:\n- conditions\n- warping\n---\n\nThe lab requires technicians to record moisture before transferring the warping judgment.[^1]\n\n[^1]: review.txt",
+      "tags": [
+        "conditions",
+        "warping"
+      ],
+      "file_type": "md",
+      "page_count": null,
+      "highlights": [],
+      "metadata": {
+        "description": "The lab requires technicians to record moisture before transferring the warping judgment.[^1]"
+      },
+      "date": "2026-11-25",
+      "content_truncated": false
+    }
+  ],
+  "references": [
+    {
+      "source_id": "49a0372c-b0d2-4459-8ce6-ebfc44c492ff",
+      "target_id": "c1f6ca63-c4f3-4444-8e0f-f54cb84b6787",
+      "reference_type": "cites",
+      "page": null
+    },
+    {
+      "source_id": "b6c65708-8ba4-49cd-8a69-af15aff577d4",
+      "target_id": "c1f6ca63-c4f3-4444-8e0f-f54cb84b6787",
+      "reference_type": "cites",
+      "page": null
+    }
+  ],
+  "native_responses": {
+    "status": "completed",
+    "fixture": "deterministic native stdio MCP create calls"
+  },
+  "compiler": "native-mcp-agent",
+  "wiki_revision": "aac3e6493306b7fff3b09cb181ca93918e93d0e6"
+}

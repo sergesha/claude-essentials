@@ -1,10 +1,17 @@
 # Installation
 
-Start with [Docker installation](../docker/README.md) on qualified ARM64 systems,
-then [launch the local viewer](viewer.md). Native preparation remains supported
-and is documented below.
+The [Docker guide](../docker/README.md) describes the versioned GHCR pull and
+the explicit, same-source ARM64 local build. Check that the selected release
+has a qualified image digest before using its pull command. The 0.4.0 image
+is pending qualification.
 
-The Knowledge Atlas 0.1.0 backend has completed the documented technical qualification. Both host lifecycles have passed on the prepared macOS runtime. Prepared Linux runtime checks and both Codex and Claude packaged lifecycles also pass. See the verification notes for native host checks and environment limits. The initial targets are macOS arm64 and Ubuntu 24.04/glibc arm64; Windows is excluded.
+## Native installation without Docker
+
+On supported macOS or Linux, install uv, the native build prerequisites below,
+and the vendor CLI for each selected provider. From the package directory run
+`uv sync --locked` and use the resulting `.venv/bin/knowledge-atlas` command
+(or activate `.venv` for the examples below). Native preparation, component
+startup and MCP operation run directly on the host.
 
 The runtime recipe packages PoC9's retained native build: Wiki-LLM's local SQLite/MCP mode, the unchanged Utopia extraction library through its existing Rust wrapper, patched TerminusDB/embedded VectorLink/Lance, and the exact Gemma Q4 artifacts. It does not require Redis, PostgreSQL or the full Utopia server. Source revisions, patches and acquisition provenance are in `runtime/components.json`, `runtime/patches/manifest.json` and `runtime/source-manifest.json`.
 
@@ -50,12 +57,17 @@ relative launcher path. Codex CLI 0.167.0 passed placeholder strings literally
 to `sh` during native qualification, although [OpenAI's desktop MCP packaging guide](https://developers.openai.com/plugins/deploy/desktop-only) documents `${PLUGIN_ROOT}`.
 Claude uses `${CLAUDE_PLUGIN_ROOT}`.
 
-For a running Docker deployment, pass `payload.project` to `atlas.open` on
-the first call of a new connection. You can optionally set a default. Claude
-Code exposes `project` in the plugin settings. Codex reads
-`{"project":"my-atlas"}` from `~/.config/knowledge-atlas/mcp.json` (under
-`$XDG_CONFIG_HOME` when set). Installation and startup leave this optional file
-for the user to create. See the [Docker guide](../docker/README.md#use-the-installed-plugin).
+For Docker, call `atlas_atlas_connect` with the exact running Docker container
+name in `payload.container_name` on a fresh MCP connection. List its registered
+projects with `atlas_atlas_list` without arguments, then open a project with its
+`atlas_id` UUID. See the [Docker guide](../docker/README.md#use-the-installed-plugin).
+
+When upgrading, clear the old Compose selectors from the host environment and
+move any obsolete `${XDG_CONFIG_HOME:-~/.config}/knowledge-atlas/mcp.json` to a
+backup location. Entry points that see either old selector variable
+(`KNOWLEDGE_ATLAS_DEFAULT_PROJECT` or `KNOWLEDGE_ATLAS_DOCKER_PROJECT`) or the
+obsolete file reject the launch. Atlas leaves the file in place.
+Stop a Docker deployment with `docker stop EXACT_CONTAINER_NAME`.
 
 For a native service, set `KNOWLEDGE_ATLAS_CONFIG` to an external service JSON
 file. Both hosts use the same service configuration:
@@ -65,15 +77,15 @@ file. Both hosts use the same service configuration:
   "service_root": "/absolute/path/to/service",
   "runtime": {"runtime_root": "/absolute/path/to/prepared-runtime"},
   "configuration": {
-    "graph": {"url": "http://127.0.0.1:6363", "database": "admin/atlas"}
+    "graph": {"url": "http://127.0.0.1:6363"}
   }
 }
 ```
 
 Add a `configuration.profiles` object containing all six stage profiles (the
-contents of the profiles JSON, not a filename). Omission selects the retained
-Codex defaults. Follow [provider configuration](providers.md) for stage profiles and native
-CLI authentication. The graph/embedding runtime must be prepared and running;
+contents of the profiles JSON). Each stage must name its provider. If you
+omit the object, Atlas uses the six shipped Codex profiles. See the provider
+guide for stage settings and native CLI authentication. [Provider configuration](providers.md) The graph/embedding runtime must be prepared and running;
 service startup alone does not qualify those components. The host used to call a
 tool does not override the configured processing provider.
 
@@ -83,7 +95,8 @@ knowledge-atlas status --config /absolute/path/to/service.json
 knowledge-atlas stop --config /absolute/path/to/service.json
 ```
 
-`mcp` starts or attaches on demand and reserves stdout for MCP. `serve` runs in
+A native domain call starts or attaches to the service on demand. `mcp` reserves
+stdout for MCP. `serve` runs in
 the foreground. Without a configuration file, metadata-only service data defaults
 to `${XDG_DATA_HOME:-~/.local/share}/knowledge-atlas/service`; native processing
 still requires explicit prepared runtime configuration. Shutdown returns busy
@@ -101,7 +114,7 @@ a new version; automatic downgrade or data rewrite is not performed.
 | Gemma | Exact Q4 model, tokenizer and qualified runtime | The PoC used a separate embedding container; the optional Atlas Docker image packages this same runtime. |
 | Redis / PostgreSQL | Not needed by the selected atlas backend | Their availability as images does not establish a need for them here. |
 
-Native deployment remains available on macOS/Linux alongside the qualified optional
+Native deployment remains available on macOS/Linux alongside the optional
 Docker deployment. ACP is deferred; neither ACP nor Docker is required for native
 operation with the two supported provider paths.
 This decision does not claim native installation is faster or cheaper. Actual
@@ -114,23 +127,26 @@ Use the prepared runtime Python to run `runtime/gemma-service.py` with
 a free local port. This is the CPU embedding service used by PoC9, with pinned
 assets and no Redis dependency. It binds only to loopback and never downloads
 weights during startup. Then run `runtime/embedding-provider.py` with `--profile`,
-`--cache` (the target atlas's `vectors/` directory), `--endpoint` (Gemma URL), and
+`--cache` (`vectors/` under the configured `service_root`, shared by its projects), `--endpoint` (Gemma URL), and
 `--port`. Set `PYTHONPATH` to the installed package's `src/` when using these
-source-tree scripts.
+source-tree scripts. A fresh native setup can start the bridge first. The service
+recognizes its current, integrity-checked cache on startup. Reattach the same
+service root to retain project UUIDs, graph bindings and verified vectors.
+An unsupported service or cache format stops startup and leaves its contents intact.
 
 Run `runtime/native-runtime.py` with `--runtime`, a separate `--state`, `--profile`,
 `--tokenizer`, the bridge URL as `--provider`, and a free `--port`; use `init` once,
 then `serve`. Initialization writes a private random administrator key to
 `<state>/admin.key`. Set `KNOWLEDGE_ATLAS_GRAPH_KEY_FILE` to its absolute path in
 the environment that starts the Atlas service and any direct graph clients.
-Back up this file with the graph database. On the first `serve` of a 0.3.0 state
-directory, stop existing graph writers first. The launcher changes only the
-offline database's administrator password and saves the new key before serving.
-Wait for HTTP 200 from `/api/v1/health` before publication/indexing.
+Back up the key with the graph's `atlas-format.json`, database and VectorLink
+state. A matching release requires that complete set on restart. A keyless or
+unmarked database stops startup with its original files intact. Rerun `init`
+after an interrupted fresh initialization to complete current owned staging.
+Wait for HTTP 200 from `/api/v1/health` before publication or indexing.
 `/api/info` can respond while the embedded engine is still initializing.
-Keep the bridge cache bound to the atlas being projected; use separate component
-state/ports for another independently running atlas. Runtime preparation and
-service launch do not silently start or share this atlas-specific cache.
+All projects in one service share its bridge cache and have distinct graph
+databases. Use separate service and graph storage for independent deployments.
 
 ## Linux qualification in Docker
 
@@ -174,4 +190,4 @@ and [Claude authentication instructions](https://code.claude.com/docs/en/authent
 
 ## Recommended Docker installation
 
-The local image and Compose deployment are described in [the Docker guide](../docker/README.md). This opt-in path uses persistent volumes and stdio MCP attachment without publishing ports. Native launch remains available; consult the verification report for the actual deployment evidence and remaining prerequisites.
+The versioned pull, explicit local build, pinned model download and vendor login commands are described in [the Docker guide](../docker/README.md). This opt-in path uses persistent volumes and stdio MCP attachment without publishing ports. Native launch remains available; consult the verification report for the actual deployment evidence and remaining prerequisites.

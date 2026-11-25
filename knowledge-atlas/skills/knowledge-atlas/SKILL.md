@@ -12,16 +12,18 @@ is `atlas_atlas_status`. Omit `payload` for calls with no payload fields.
 
 ## Operate
 
-1. For a named Compose project, open with `atlas_atlas_open` and
-   `{"payload":{"project":"PROJECT"}}`. Subsequent tools use that project on
-   the same MCP connection. On a new connection, pass the project again unless
-   it is configured as the default. Omit arguments for a selected or configured
-   Compose project, or for a native service with a configured atlas path. Use
-   `payload.path` for an unbound native service on a connection without a Compose
-   project. Retain the returned `atlas_id` for subsequent calls on that
-   connection. Read its
-   current READY publication before preparing a mutation. Keep the user's
-   source IDs stable; omitted sources remain, explicit removals are versioned.
+1. For Docker, first call `atlas_atlas_connect` with
+   `{"payload":{"container_name":"EXACT_RUNNING_CONTAINER_NAME"}}`. This
+   attaches to an already running container and returns its verified
+   `container_id` and Atlas `version`. For native use, start with
+   `atlas_atlas_list` without arguments. Each MCP connection binds one service.
+   Use a new MCP connection to attach to another service.
+   Call `atlas_atlas_list` without arguments to find registered projects.
+   Verify the chosen project with `atlas_atlas_open` and
+   `{"atlas_id":"REGISTERED_PROJECT_UUID"}`. Supply that UUID on subsequent
+   project calls. Read its current READY publication before preparing a
+   mutation. Keep the user's source IDs stable. Omitted sources remain and
+   explicit removals are versioned.
 2. Submit with a fresh request UUID and the reviewed `expected_publication`.
    Poll `atlas_operation_read` using the returned operation ID. A succeeded
    ingestion produces a candidate, not accepted knowledge.
@@ -53,7 +55,7 @@ is `atlas_atlas_status`. Omit `payload` for calls with no payload fields.
 | --- | --- |
 | Correct or withdraw knowledge | `knowledge.revise` proposes a candidate; inspect dependent impact and review it. |
 | Record experience | `feedback.record` retains the exact applied publication and raw JSON report text. |
-| Compose knowledge | `packages.pin` proposes an exact child pin; upgrades and rollback require candidate review. |
+| Compose knowledge | `packages.configure` proposes the complete child layout. Select exact child publications and review the parent candidate. |
 | Recover history | Export then restore to an unused location; restored reads require native rebuild. |
 | Interrupted work | Inspect operation/evidence, then explicit compatible resume; uncertain effects are not automatically replayed. |
 

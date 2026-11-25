@@ -1,0 +1,269 @@
+{
+  "passage_version": 1,
+  "entities": [
+    {
+      "kind": "machine",
+      "name": "Luma",
+      "named": true
+    },
+    {
+      "kind": "machine",
+      "name": "Sora",
+      "named": true
+    },
+    {
+      "kind": "role",
+      "name": "technicians",
+      "named": false
+    }
+  ],
+  "statements": [
+    {
+      "ended": null,
+      "object": "Sora",
+      "phrase": "produced fewer warped brackets than",
+      "qualifiers": [
+        [
+          "in",
+          "P-14"
+        ]
+      ],
+      "quote": "In trial P-14, Luma produced fewer warped QL-7 brackets than Sora.",
+      "subject": "Luma",
+      "value": null,
+      "when": null,
+      "wiki_page": "/wiki/overview.md"
+    },
+    {
+      "ended": null,
+      "object": "technicians to record moisture",
+      "phrase": "requires",
+      "qualifiers": [
+        [
+          "mood",
+          "requires"
+        ]
+      ],
+      "quote": "The lab requires technicians to record moisture before transferring the warping judgment.",
+      "subject": "the lab",
+      "value": null,
+      "when": null,
+      "wiki_page": "/wiki/concepts/conditional-warping.md"
+    }
+  ],
+  "names": [],
+  "time": [],
+  "skipped": 0,
+  "truncated": false,
+  "model_calls": [
+    {
+      "page_request": {
+        "operation": "open",
+        "messages": [
+          {
+            "content": "You read one passage of a document and write down what it states, in the passage's own words. Output one JSON object and nothing else, shaped like this:\n\n{\"e\": [[\"name or description\", \"kind word\", 1]],\n\"s\": [[\"the sentence that states it, verbatim\", \"subject name\", \"relation phrase as written\", \"object name\", null, {\"to\": \"name of a listed thing\", \"amount\": \"$2 million\"}, \"when it holds or happened, as written\", \"when it ended, as written\"]],\n\"n\": [[\"name as listed in e\", \"another name\", \"the sentence that uses it, verbatim\"]],\n\"t\": [[\"now\", \"label as written\", \"the date as written\", {\"y\": 2011, \"m\": 3, \"d\": 4}, null]]}\n\n1. \"e\" lists the things the passage talks about, one entry each: [name, kind, named]. Every thing a statement refers to is listed here once, under exactly the name the statements use. named = 1 for a proper name or a fixed term: the name of one particular person, organization, product, place, document, law or event, or a term that means the same thing in any document (a disease, a drug, an industry, a product category, an indicator), written as the passage writes it, without citation words (\"the Harbor Treaty signed on May 3, 1998\" is named \"Harbor Treaty\"). named = 0 for a role or a generic phrase whose referent this passage decides, however particular it is here: \"the company\", \"the enterprises visited\", \"patients\", \"各部门\", \"the northern wing\" are described things, named by the words that say what they are. kind is what the thing is, in two or three words, as the passage says it. A name never carries a figure: \"about 40 hectares of farmland\" is the thing \"farmland\" with a statement \"area\" = \"about 40 hectares\". List each thing once.\n2. \"s\" lists the statements, one entry each: [quote, subject, phrase, object, value, qualifiers, when, ended]. quote comes first: the sentence of the passage that states it, copied verbatim, one sentence, and when two sentences are needed, the one that carries the link; the rest of the entry is written from that sentence. subject and object are names, written exactly as listed in \"e\" or in the list of things already recorded, with the same spelling every time. Exactly one of object and value is set; the other is null.\nA statement with an object links two things. phrase is how the passage says the link, lowercase, in the passage's own words; do not translate it into any vocabulary of your own. It is the verb with the words that belong to it, so that subject —phrase→ object reads as a sentence on its own (\"acquired\", \"was designed by\", \"is the captain of\", \"went into partnership with\", \"细化解读\"), never a bare verb cut from a longer verb phrase (\"went\", \"细化\"). Several verbs sharing one object make one statement whose phrase carries them all (\"designed and built\"); one verb with several objects makes one statement per object. The object is what the verb acts on, and a described thing that is the subject or the object is listed like any other (\"the coating should not be used on surfaces exposed to seawater\" gives coating —should not be used on→ surfaces exposed to seawater, a described thing); words that say where, how, why, with what or for whom go in qualifiers under the passage's own role word. A named thing mentioned in a qualifier is still listed and the qualifier names it; a generic phrase that appears in a qualifier alone is words there, not a listed thing: \"各部门要走进学校、社区等基层单位开展宣传活动\" gives 各部门 —开展→ 宣传活动 with {\"走进\": \"学校、社区等基层单位\"}, and neither 学校 nor 社区 is listed.\nA statement with a value is what the passage says about one thing by itself: a figure with its units, a percentage, an amount, a count, a title, a status. phrase is how the passage says what is measured or stated (\"area\", \"was completed\", \"joined\", \"占地面积\"); value is the literal as written. Wording that names or describes something is not a value: that something goes in \"e\" and is linked by a statement with an object. \"1,200 beekeepers joined\" is the thing \"beekeepers\" with \"joined\" = \"1,200\". Write every figure the passage states.\nA list is one statement per member, and so is a subject or object that joins several things (\"the city and the county funded the bridge\" is two statements).\n3. Nothing in a sentence is dropped. When more than two things take part, or the link carries a figure, a title, a condition or a comparison, put the main pair in subject and object and the rest in qualifiers: an object keyed by a word or two for each part's role, whose values are the name of a listed thing or the words as written. \"the city council awarded the paving contract to Brightway Builders for $2 million\" gives city council —awarded→ paving contract with {\"to\": \"Brightway Builders\", \"amount\": \"$2 million\"}; \"Jane Doe is interim headmaster of Hillside School\" gives Jane Doe —is headmaster of→ Hillside School with {\"title\": \"interim headmaster\"}. A statement with a value takes qualifiers the same way: \"the plant cut water use by 12% compared to 2019\" gives the plant \"cut water use\" = \"12%\" with {\"compared to\": \"2019\"}. A statement the passage does not assert as holding but requires, plans, expects, forecasts or makes conditional carries a qualifier keyed \"mood\" whose value is the passage's own words for that (\"要\", \"should\", \"will\", \"is expected to\", \"if the merger closes\"); the phrase stays as written. A verb that reports (announced, said, revealed) is not a mood: what was announced is stated. qualifiers is null when there are none.\n4. When a description has another thing folded into it, also write the statement that unfolds it: \"hospitals accredited by the Joint Commission\" also gives Joint Commission —accredited→ hospitals. Do not unfold a description that only names what it belongs to or is about: \"the northern wing of the palace\" and \"the use of the coating\" give no statement, the palace and the coating are part of the description.\n5. when is the words that say when the statement holds, happened or began, and ended is the words that say when it stopped, each copied exactly as written (\"March 4, 2011\", \"去年冬天\", \"by the end of next season\"). Never compute, convert or normalise a date, and never write one the passage does not. Each is null when the passage gives none.\nWords that say when go in when or ended and nowhere else, never in the phrase, the object, the value or a qualifier; also when they count from now or from another event (\"三个月后\", \"last week\", \"six months after the launch\") and when the statement is planned. If that leaves no value, the value is the word for what happened (\"发布\"). A statement with no time of its own, under a heading that names one time and nothing else (\"## 2025年第三季度\"), takes the heading's words as when.\n6. Every \"s\" and \"n\" entry carries its own quote, copied verbatim from the passage: the first slot of an \"s\" entry, the last slot of an \"n\" entry.\n7. \"n\" lists other names, one entry each: [name as listed, other name, quote] — a short form, a former name, a spelling in another script that this passage uses for a thing in \"e\" or a thing already recorded. Only names actually written in the passage; never a pronoun or a description.\n8. \"t\" lists the dates the passage states about the document itself, one entry each: [kind, label, words, from, to]. kind is \"now\" for the moment the text speaks from (a dateline, the date a report was submitted or published, a meeting's date), \"date\" for any other labelled date (a cut-off, an effective date, a deadline), \"period\" for a named period with stated bounds. label and words are copied as written; from and to transcribe the numbers the words state (y, m, d), to only for a period. A date inside a sentence about something that happened is that statement's when and is not listed. [] when there are none.\n9. State nothing the passage does not state, and state each thing once: with a value or with an object, not both. The Document line, the opening of the document and the list of things already recorded only say where the passage comes from; write nothing about them. If the passage states nothing, output {\"e\":[],\"s\":[],\"n\":[],\"t\":[]}.\n\nExample. The passage \"The city council awarded the paving contract to Brightway Builders for $2 million on March 4, 2011.\" gives:\n{\"e\": [[\"city council\", \"council\", 0], [\"paving contract\", \"contract\", 0], [\"Brightway Builders\", \"builders\", 1]],\n\"s\": [[\"The city council awarded the paving contract to Brightway Builders for $2 million on March 4, 2011.\", \"city council\", \"awarded\", \"paving contract\", null, {\"to\": \"Brightway Builders\", \"amount\": \"$2 million\"}, \"March 4, 2011\", null]],\n\"n\": [],\n\"t\": []}",
+            "role": "system"
+          },
+          {
+            "content": "Document: /wiki/overview.md\n\nPassage:\n---\ntitle: Overview\ndescription: In trial P-14, Luma produced fewer warped QL-7 brackets than Sora.[^1]\ndate: '2026-11-25'\ntags:\n- overview\n- synthetic\n---\n\nIn trial P-14, Luma produced fewer warped QL-7 brackets than Sora.[^1]\n\nSee [[concepts/conditional-warping]].\n\n[^1]: review.txt",
+            "role": "user"
+          }
+        ]
+      },
+      "filename": "/wiki/overview.md",
+      "cache_key": "a48cb9b7afffe0b6819bc7641166c1457dc83187c1bfb71d52ba3bc0a2803a4b",
+      "cache_contract": {
+        "model_profile": null,
+        "native_sha256": "44ae5ee1b275e3a299b9ff6b4828e38e97cf8a64b3d5a04b01a05813702b065c",
+        "codec_version": "statement-ref-v1",
+        "passage_version": 1
+      },
+      "reused": false,
+      "mode": "full",
+      "cache_reason": "reuse_disabled",
+      "request": {
+        "operation": "open",
+        "messages": [
+          {
+            "content": "You read one passage of a document and write down what it states, in the passage's own words. Output one JSON object and nothing else, shaped like this:\n\n{\"e\": [[\"name or description\", \"kind word\", 1]],\n\"s\": [[\"the sentence that states it, verbatim\", \"subject name\", \"relation phrase as written\", \"object name\", null, {\"to\": \"name of a listed thing\", \"amount\": \"$2 million\"}, \"when it holds or happened, as written\", \"when it ended, as written\"]],\n\"n\": [[\"name as listed in e\", \"another name\", \"the sentence that uses it, verbatim\"]],\n\"t\": [[\"now\", \"label as written\", \"the date as written\", {\"y\": 2011, \"m\": 3, \"d\": 4}, null]]}\n\n1. \"e\" lists the things the passage talks about, one entry each: [name, kind, named]. Every thing a statement refers to is listed here once, under exactly the name the statements use. named = 1 for a proper name or a fixed term: the name of one particular person, organization, product, place, document, law or event, or a term that means the same thing in any document (a disease, a drug, an industry, a product category, an indicator), written as the passage writes it, without citation words (\"the Harbor Treaty signed on May 3, 1998\" is named \"Harbor Treaty\"). named = 0 for a role or a generic phrase whose referent this passage decides, however particular it is here: \"the company\", \"the enterprises visited\", \"patients\", \"各部门\", \"the northern wing\" are described things, named by the words that say what they are. kind is what the thing is, in two or three words, as the passage says it. A name never carries a figure: \"about 40 hectares of farmland\" is the thing \"farmland\" with a statement \"area\" = \"about 40 hectares\". List each thing once.\n2. \"s\" lists the statements, one entry each: [quote, subject, phrase, object, value, qualifiers, when, ended]. quote comes first: the sentence of the passage that states it, copied verbatim, one sentence, and when two sentences are needed, the one that carries the link; the rest of the entry is written from that sentence. subject and object are names, written exactly as listed in \"e\" or in the list of things already recorded, with the same spelling every time. Exactly one of object and value is set; the other is null.\nA statement with an object links two things. phrase is how the passage says the link, lowercase, in the passage's own words; do not translate it into any vocabulary of your own. It is the verb with the words that belong to it, so that subject —phrase→ object reads as a sentence on its own (\"acquired\", \"was designed by\", \"is the captain of\", \"went into partnership with\", \"细化解读\"), never a bare verb cut from a longer verb phrase (\"went\", \"细化\"). Several verbs sharing one object make one statement whose phrase carries them all (\"designed and built\"); one verb with several objects makes one statement per object. The object is what the verb acts on, and a described thing that is the subject or the object is listed like any other (\"the coating should not be used on surfaces exposed to seawater\" gives coating —should not be used on→ surfaces exposed to seawater, a described thing); words that say where, how, why, with what or for whom go in qualifiers under the passage's own role word. A named thing mentioned in a qualifier is still listed and the qualifier names it; a generic phrase that appears in a qualifier alone is words there, not a listed thing: \"各部门要走进学校、社区等基层单位开展宣传活动\" gives 各部门 —开展→ 宣传活动 with {\"走进\": \"学校、社区等基层单位\"}, and neither 学校 nor 社区 is listed.\nA statement with a value is what the passage says about one thing by itself: a figure with its units, a percentage, an amount, a count, a title, a status. phrase is how the passage says what is measured or stated (\"area\", \"was completed\", \"joined\", \"占地面积\"); value is the literal as written. Wording that names or describes something is not a value: that something goes in \"e\" and is linked by a statement with an object. \"1,200 beekeepers joined\" is the thing \"beekeepers\" with \"joined\" = \"1,200\". Write every figure the passage states.\nA list is one statement per member, and so is a subject or object that joins several things (\"the city and the county funded the bridge\" is two statements).\n3. Nothing in a sentence is dropped. When more than two things take part, or the link carries a figure, a title, a condition or a comparison, put the main pair in subject and object and the rest in qualifiers: an object keyed by a word or two for each part's role, whose values are the name of a listed thing or the words as written. \"the city council awarded the paving contract to Brightway Builders for $2 million\" gives city council —awarded→ paving contract with {\"to\": \"Brightway Builders\", \"amount\": \"$2 million\"}; \"Jane Doe is interim headmaster of Hillside School\" gives Jane Doe —is headmaster of→ Hillside School with {\"title\": \"interim headmaster\"}. A statement with a value takes qualifiers the same way: \"the plant cut water use by 12% compared to 2019\" gives the plant \"cut water use\" = \"12%\" with {\"compared to\": \"2019\"}. A statement the passage does not assert as holding but requires, plans, expects, forecasts or makes conditional carries a qualifier keyed \"mood\" whose value is the passage's own words for that (\"要\", \"should\", \"will\", \"is expected to\", \"if the merger closes\"); the phrase stays as written. A verb that reports (announced, said, revealed) is not a mood: what was announced is stated. qualifiers is null when there are none.\n4. When a description has another thing folded into it, also write the statement that unfolds it: \"hospitals accredited by the Joint Commission\" also gives Joint Commission —accredited→ hospitals. Do not unfold a description that only names what it belongs to or is about: \"the northern wing of the palace\" and \"the use of the coating\" give no statement, the palace and the coating are part of the description.\n5. when is the words that say when the statement holds, happened or began, and ended is the words that say when it stopped, each copied exactly as written (\"March 4, 2011\", \"去年冬天\", \"by the end of next season\"). Never compute, convert or normalise a date, and never write one the passage does not. Each is null when the passage gives none.\nWords that say when go in when or ended and nowhere else, never in the phrase, the object, the value or a qualifier; also when they count from now or from another event (\"三个月后\", \"last week\", \"six months after the launch\") and when the statement is planned. If that leaves no value, the value is the word for what happened (\"发布\"). A statement with no time of its own, under a heading that names one time and nothing else (\"## 2025年第三季度\"), takes the heading's words as when.\n6. Every \"s\" and \"n\" entry carries its own quote, copied verbatim from the passage: the first slot of an \"s\" entry, the last slot of an \"n\" entry.\n7. \"n\" lists other names, one entry each: [name as listed, other name, quote] — a short form, a former name, a spelling in another script that this passage uses for a thing in \"e\" or a thing already recorded. Only names actually written in the passage; never a pronoun or a description.\n8. \"t\" lists the dates the passage states about the document itself, one entry each: [kind, label, words, from, to]. kind is \"now\" for the moment the text speaks from (a dateline, the date a report was submitted or published, a meeting's date), \"date\" for any other labelled date (a cut-off, an effective date, a deadline), \"period\" for a named period with stated bounds. label and words are copied as written; from and to transcribe the numbers the words state (y, m, d), to only for a period. A date inside a sentence about something that happened is that statement's when and is not listed. [] when there are none.\n9. State nothing the passage does not state, and state each thing once: with a value or with an object, not both. The Document line, the opening of the document and the list of things already recorded only say where the passage comes from; write nothing about them. If the passage states nothing, output {\"e\":[],\"s\":[],\"n\":[],\"t\":[]}.\n\nExample. The passage \"The city council awarded the paving contract to Brightway Builders for $2 million on March 4, 2011.\" gives:\n{\"e\": [[\"city council\", \"council\", 0], [\"paving contract\", \"contract\", 0], [\"Brightway Builders\", \"builders\", 1]],\n\"s\": [[\"The city council awarded the paving contract to Brightway Builders for $2 million on March 4, 2011.\", \"city council\", \"awarded\", \"paving contract\", null, {\"to\": \"Brightway Builders\", \"amount\": \"$2 million\"}, \"March 4, 2011\", null]],\n\"n\": [],\n\"t\": []}",
+            "role": "system"
+          },
+          {
+            "content": "Document: /wiki/overview.md\n\nPassage:\n---\ntitle: Overview\ndescription: In trial P-14, Luma produced fewer warped QL-7 brackets than Sora.[^1]\ndate: '2026-11-25'\ntags:\n- overview\n- synthetic\n---\n\nIn trial P-14, Luma produced fewer warped QL-7 brackets than Sora.[^1]\n\nSee [[concepts/conditional-warping]].\n\n[^1]: review.txt",
+            "role": "user"
+          }
+        ]
+      },
+      "request_sha256": "f0b0ccf4c1ca8f670c9cab1d8d3b1bf92374c5cb12213cf23a67c6d069ef260b",
+      "response": {
+        "e": [
+          [
+            "Luma",
+            "machine",
+            1
+          ],
+          [
+            "Sora",
+            "machine",
+            1
+          ]
+        ],
+        "s": [
+          [
+            "In trial P-14, Luma produced fewer warped QL-7 brackets than Sora.",
+            "Luma",
+            "produced fewer warped brackets than",
+            "Sora",
+            null,
+            {
+              "in": "P-14"
+            },
+            null,
+            null
+          ]
+        ],
+        "n": [],
+        "t": []
+      },
+      "native_response": "{\"e\": [[\"Luma\", \"machine\", 1], [\"Sora\", \"machine\", 1]], \"s\": [[\"In trial P-14, Luma produced fewer warped QL-7 brackets than Sora.\", \"Luma\", \"produced fewer warped brackets than\", \"Sora\", null, {\"in\": \"P-14\"}, null, null]], \"n\": [], \"t\": []}",
+      "parsed": {
+        "entities": [
+          {
+            "kind": "machine",
+            "name": "Luma",
+            "named": true
+          },
+          {
+            "kind": "machine",
+            "name": "Sora",
+            "named": true
+          }
+        ],
+        "names": [],
+        "skipped": 0,
+        "statements": [
+          {
+            "ended": null,
+            "object": "Sora",
+            "phrase": "produced fewer warped brackets than",
+            "qualifiers": [
+              [
+                "in",
+                "P-14"
+              ]
+            ],
+            "quote": "In trial P-14, Luma produced fewer warped QL-7 brackets than Sora.",
+            "subject": "Luma",
+            "value": null,
+            "when": null
+          }
+        ],
+        "time": [],
+        "truncated": false
+      },
+      "elapsed_seconds": 0.008320458990056068
+    },
+    {
+      "page_request": {
+        "operation": "open",
+        "messages": [
+          {
+            "content": "You read one passage of a document and write down what it states, in the passage's own words. Output one JSON object and nothing else, shaped like this:\n\n{\"e\": [[\"name or description\", \"kind word\", 1]],\n\"s\": [[\"the sentence that states it, verbatim\", \"subject name\", \"relation phrase as written\", \"object name\", null, {\"to\": \"name of a listed thing\", \"amount\": \"$2 million\"}, \"when it holds or happened, as written\", \"when it ended, as written\"]],\n\"n\": [[\"name as listed in e\", \"another name\", \"the sentence that uses it, verbatim\"]],\n\"t\": [[\"now\", \"label as written\", \"the date as written\", {\"y\": 2011, \"m\": 3, \"d\": 4}, null]]}\n\n1. \"e\" lists the things the passage talks about, one entry each: [name, kind, named]. Every thing a statement refers to is listed here once, under exactly the name the statements use. named = 1 for a proper name or a fixed term: the name of one particular person, organization, product, place, document, law or event, or a term that means the same thing in any document (a disease, a drug, an industry, a product category, an indicator), written as the passage writes it, without citation words (\"the Harbor Treaty signed on May 3, 1998\" is named \"Harbor Treaty\"). named = 0 for a role or a generic phrase whose referent this passage decides, however particular it is here: \"the company\", \"the enterprises visited\", \"patients\", \"各部门\", \"the northern wing\" are described things, named by the words that say what they are. kind is what the thing is, in two or three words, as the passage says it. A name never carries a figure: \"about 40 hectares of farmland\" is the thing \"farmland\" with a statement \"area\" = \"about 40 hectares\". List each thing once.\n2. \"s\" lists the statements, one entry each: [quote, subject, phrase, object, value, qualifiers, when, ended]. quote comes first: the sentence of the passage that states it, copied verbatim, one sentence, and when two sentences are needed, the one that carries the link; the rest of the entry is written from that sentence. subject and object are names, written exactly as listed in \"e\" or in the list of things already recorded, with the same spelling every time. Exactly one of object and value is set; the other is null.\nA statement with an object links two things. phrase is how the passage says the link, lowercase, in the passage's own words; do not translate it into any vocabulary of your own. It is the verb with the words that belong to it, so that subject —phrase→ object reads as a sentence on its own (\"acquired\", \"was designed by\", \"is the captain of\", \"went into partnership with\", \"细化解读\"), never a bare verb cut from a longer verb phrase (\"went\", \"细化\"). Several verbs sharing one object make one statement whose phrase carries them all (\"designed and built\"); one verb with several objects makes one statement per object. The object is what the verb acts on, and a described thing that is the subject or the object is listed like any other (\"the coating should not be used on surfaces exposed to seawater\" gives coating —should not be used on→ surfaces exposed to seawater, a described thing); words that say where, how, why, with what or for whom go in qualifiers under the passage's own role word. A named thing mentioned in a qualifier is still listed and the qualifier names it; a generic phrase that appears in a qualifier alone is words there, not a listed thing: \"各部门要走进学校、社区等基层单位开展宣传活动\" gives 各部门 —开展→ 宣传活动 with {\"走进\": \"学校、社区等基层单位\"}, and neither 学校 nor 社区 is listed.\nA statement with a value is what the passage says about one thing by itself: a figure with its units, a percentage, an amount, a count, a title, a status. phrase is how the passage says what is measured or stated (\"area\", \"was completed\", \"joined\", \"占地面积\"); value is the literal as written. Wording that names or describes something is not a value: that something goes in \"e\" and is linked by a statement with an object. \"1,200 beekeepers joined\" is the thing \"beekeepers\" with \"joined\" = \"1,200\". Write every figure the passage states.\nA list is one statement per member, and so is a subject or object that joins several things (\"the city and the county funded the bridge\" is two statements).\n3. Nothing in a sentence is dropped. When more than two things take part, or the link carries a figure, a title, a condition or a comparison, put the main pair in subject and object and the rest in qualifiers: an object keyed by a word or two for each part's role, whose values are the name of a listed thing or the words as written. \"the city council awarded the paving contract to Brightway Builders for $2 million\" gives city council —awarded→ paving contract with {\"to\": \"Brightway Builders\", \"amount\": \"$2 million\"}; \"Jane Doe is interim headmaster of Hillside School\" gives Jane Doe —is headmaster of→ Hillside School with {\"title\": \"interim headmaster\"}. A statement with a value takes qualifiers the same way: \"the plant cut water use by 12% compared to 2019\" gives the plant \"cut water use\" = \"12%\" with {\"compared to\": \"2019\"}. A statement the passage does not assert as holding but requires, plans, expects, forecasts or makes conditional carries a qualifier keyed \"mood\" whose value is the passage's own words for that (\"要\", \"should\", \"will\", \"is expected to\", \"if the merger closes\"); the phrase stays as written. A verb that reports (announced, said, revealed) is not a mood: what was announced is stated. qualifiers is null when there are none.\n4. When a description has another thing folded into it, also write the statement that unfolds it: \"hospitals accredited by the Joint Commission\" also gives Joint Commission —accredited→ hospitals. Do not unfold a description that only names what it belongs to or is about: \"the northern wing of the palace\" and \"the use of the coating\" give no statement, the palace and the coating are part of the description.\n5. when is the words that say when the statement holds, happened or began, and ended is the words that say when it stopped, each copied exactly as written (\"March 4, 2011\", \"去年冬天\", \"by the end of next season\"). Never compute, convert or normalise a date, and never write one the passage does not. Each is null when the passage gives none.\nWords that say when go in when or ended and nowhere else, never in the phrase, the object, the value or a qualifier; also when they count from now or from another event (\"三个月后\", \"last week\", \"six months after the launch\") and when the statement is planned. If that leaves no value, the value is the word for what happened (\"发布\"). A statement with no time of its own, under a heading that names one time and nothing else (\"## 2025年第三季度\"), takes the heading's words as when.\n6. Every \"s\" and \"n\" entry carries its own quote, copied verbatim from the passage: the first slot of an \"s\" entry, the last slot of an \"n\" entry.\n7. \"n\" lists other names, one entry each: [name as listed, other name, quote] — a short form, a former name, a spelling in another script that this passage uses for a thing in \"e\" or a thing already recorded. Only names actually written in the passage; never a pronoun or a description.\n8. \"t\" lists the dates the passage states about the document itself, one entry each: [kind, label, words, from, to]. kind is \"now\" for the moment the text speaks from (a dateline, the date a report was submitted or published, a meeting's date), \"date\" for any other labelled date (a cut-off, an effective date, a deadline), \"period\" for a named period with stated bounds. label and words are copied as written; from and to transcribe the numbers the words state (y, m, d), to only for a period. A date inside a sentence about something that happened is that statement's when and is not listed. [] when there are none.\n9. State nothing the passage does not state, and state each thing once: with a value or with an object, not both. The Document line, the opening of the document and the list of things already recorded only say where the passage comes from; write nothing about them. If the passage states nothing, output {\"e\":[],\"s\":[],\"n\":[],\"t\":[]}.\n\nExample. The passage \"The city council awarded the paving contract to Brightway Builders for $2 million on March 4, 2011.\" gives:\n{\"e\": [[\"city council\", \"council\", 0], [\"paving contract\", \"contract\", 0], [\"Brightway Builders\", \"builders\", 1]],\n\"s\": [[\"The city council awarded the paving contract to Brightway Builders for $2 million on March 4, 2011.\", \"city council\", \"awarded\", \"paving contract\", null, {\"to\": \"Brightway Builders\", \"amount\": \"$2 million\"}, \"March 4, 2011\", null]],\n\"n\": [],\n\"t\": []}",
+            "role": "system"
+          },
+          {
+            "content": "Document: /wiki/concepts/conditional-warping.md\n\nPassage:\n---\ntitle: Conditional warping\ndescription: The lab requires technicians to record moisture before transferring the\n  warping judgment.[^1]\ndate: '2026-11-25'\ntags:\n- conditions\n- warping\n---\n\nThe lab requires technicians to record moisture before transferring the warping judgment.[^1]\n\n[^1]: review.txt",
+            "role": "user"
+          }
+        ]
+      },
+      "filename": "/wiki/concepts/conditional-warping.md",
+      "cache_key": "050494d3ce5fb5574fa7e78c8a1925aadc1ba47fe1a1eda361262ca6a70fe1e0",
+      "cache_contract": {
+        "model_profile": null,
+        "native_sha256": "44ae5ee1b275e3a299b9ff6b4828e38e97cf8a64b3d5a04b01a05813702b065c",
+        "codec_version": "statement-ref-v1",
+        "passage_version": 1
+      },
+      "reused": false,
+      "mode": "full",
+      "cache_reason": "reuse_disabled",
+      "request": {
+        "operation": "open",
+        "messages": [
+          {
+            "content": "You read one passage of a document and write down what it states, in the passage's own words. Output one JSON object and nothing else, shaped like this:\n\n{\"e\": [[\"name or description\", \"kind word\", 1]],\n\"s\": [[\"the sentence that states it, verbatim\", \"subject name\", \"relation phrase as written\", \"object name\", null, {\"to\": \"name of a listed thing\", \"amount\": \"$2 million\"}, \"when it holds or happened, as written\", \"when it ended, as written\"]],\n\"n\": [[\"name as listed in e\", \"another name\", \"the sentence that uses it, verbatim\"]],\n\"t\": [[\"now\", \"label as written\", \"the date as written\", {\"y\": 2011, \"m\": 3, \"d\": 4}, null]]}\n\n1. \"e\" lists the things the passage talks about, one entry each: [name, kind, named]. Every thing a statement refers to is listed here once, under exactly the name the statements use. named = 1 for a proper name or a fixed term: the name of one particular person, organization, product, place, document, law or event, or a term that means the same thing in any document (a disease, a drug, an industry, a product category, an indicator), written as the passage writes it, without citation words (\"the Harbor Treaty signed on May 3, 1998\" is named \"Harbor Treaty\"). named = 0 for a role or a generic phrase whose referent this passage decides, however particular it is here: \"the company\", \"the enterprises visited\", \"patients\", \"各部门\", \"the northern wing\" are described things, named by the words that say what they are. kind is what the thing is, in two or three words, as the passage says it. A name never carries a figure: \"about 40 hectares of farmland\" is the thing \"farmland\" with a statement \"area\" = \"about 40 hectares\". List each thing once.\n2. \"s\" lists the statements, one entry each: [quote, subject, phrase, object, value, qualifiers, when, ended]. quote comes first: the sentence of the passage that states it, copied verbatim, one sentence, and when two sentences are needed, the one that carries the link; the rest of the entry is written from that sentence. subject and object are names, written exactly as listed in \"e\" or in the list of things already recorded, with the same spelling every time. Exactly one of object and value is set; the other is null.\nA statement with an object links two things. phrase is how the passage says the link, lowercase, in the passage's own words; do not translate it into any vocabulary of your own. It is the verb with the words that belong to it, so that subject —phrase→ object reads as a sentence on its own (\"acquired\", \"was designed by\", \"is the captain of\", \"went into partnership with\", \"细化解读\"), never a bare verb cut from a longer verb phrase (\"went\", \"细化\"). Several verbs sharing one object make one statement whose phrase carries them all (\"designed and built\"); one verb with several objects makes one statement per object. The object is what the verb acts on, and a described thing that is the subject or the object is listed like any other (\"the coating should not be used on surfaces exposed to seawater\" gives coating —should not be used on→ surfaces exposed to seawater, a described thing); words that say where, how, why, with what or for whom go in qualifiers under the passage's own role word. A named thing mentioned in a qualifier is still listed and the qualifier names it; a generic phrase that appears in a qualifier alone is words there, not a listed thing: \"各部门要走进学校、社区等基层单位开展宣传活动\" gives 各部门 —开展→ 宣传活动 with {\"走进\": \"学校、社区等基层单位\"}, and neither 学校 nor 社区 is listed.\nA statement with a value is what the passage says about one thing by itself: a figure with its units, a percentage, an amount, a count, a title, a status. phrase is how the passage says what is measured or stated (\"area\", \"was completed\", \"joined\", \"占地面积\"); value is the literal as written. Wording that names or describes something is not a value: that something goes in \"e\" and is linked by a statement with an object. \"1,200 beekeepers joined\" is the thing \"beekeepers\" with \"joined\" = \"1,200\". Write every figure the passage states.\nA list is one statement per member, and so is a subject or object that joins several things (\"the city and the county funded the bridge\" is two statements).\n3. Nothing in a sentence is dropped. When more than two things take part, or the link carries a figure, a title, a condition or a comparison, put the main pair in subject and object and the rest in qualifiers: an object keyed by a word or two for each part's role, whose values are the name of a listed thing or the words as written. \"the city council awarded the paving contract to Brightway Builders for $2 million\" gives city council —awarded→ paving contract with {\"to\": \"Brightway Builders\", \"amount\": \"$2 million\"}; \"Jane Doe is interim headmaster of Hillside School\" gives Jane Doe —is headmaster of→ Hillside School with {\"title\": \"interim headmaster\"}. A statement with a value takes qualifiers the same way: \"the plant cut water use by 12% compared to 2019\" gives the plant \"cut water use\" = \"12%\" with {\"compared to\": \"2019\"}. A statement the passage does not assert as holding but requires, plans, expects, forecasts or makes conditional carries a qualifier keyed \"mood\" whose value is the passage's own words for that (\"要\", \"should\", \"will\", \"is expected to\", \"if the merger closes\"); the phrase stays as written. A verb that reports (announced, said, revealed) is not a mood: what was announced is stated. qualifiers is null when there are none.\n4. When a description has another thing folded into it, also write the statement that unfolds it: \"hospitals accredited by the Joint Commission\" also gives Joint Commission —accredited→ hospitals. Do not unfold a description that only names what it belongs to or is about: \"the northern wing of the palace\" and \"the use of the coating\" give no statement, the palace and the coating are part of the description.\n5. when is the words that say when the statement holds, happened or began, and ended is the words that say when it stopped, each copied exactly as written (\"March 4, 2011\", \"去年冬天\", \"by the end of next season\"). Never compute, convert or normalise a date, and never write one the passage does not. Each is null when the passage gives none.\nWords that say when go in when or ended and nowhere else, never in the phrase, the object, the value or a qualifier; also when they count from now or from another event (\"三个月后\", \"last week\", \"six months after the launch\") and when the statement is planned. If that leaves no value, the value is the word for what happened (\"发布\"). A statement with no time of its own, under a heading that names one time and nothing else (\"## 2025年第三季度\"), takes the heading's words as when.\n6. Every \"s\" and \"n\" entry carries its own quote, copied verbatim from the passage: the first slot of an \"s\" entry, the last slot of an \"n\" entry.\n7. \"n\" lists other names, one entry each: [name as listed, other name, quote] — a short form, a former name, a spelling in another script that this passage uses for a thing in \"e\" or a thing already recorded. Only names actually written in the passage; never a pronoun or a description.\n8. \"t\" lists the dates the passage states about the document itself, one entry each: [kind, label, words, from, to]. kind is \"now\" for the moment the text speaks from (a dateline, the date a report was submitted or published, a meeting's date), \"date\" for any other labelled date (a cut-off, an effective date, a deadline), \"period\" for a named period with stated bounds. label and words are copied as written; from and to transcribe the numbers the words state (y, m, d), to only for a period. A date inside a sentence about something that happened is that statement's when and is not listed. [] when there are none.\n9. State nothing the passage does not state, and state each thing once: with a value or with an object, not both. The Document line, the opening of the document and the list of things already recorded only say where the passage comes from; write nothing about them. If the passage states nothing, output {\"e\":[],\"s\":[],\"n\":[],\"t\":[]}.\n\nExample. The passage \"The city council awarded the paving contract to Brightway Builders for $2 million on March 4, 2011.\" gives:\n{\"e\": [[\"city council\", \"council\", 0], [\"paving contract\", \"contract\", 0], [\"Brightway Builders\", \"builders\", 1]],\n\"s\": [[\"The city council awarded the paving contract to Brightway Builders for $2 million on March 4, 2011.\", \"city council\", \"awarded\", \"paving contract\", null, {\"to\": \"Brightway Builders\", \"amount\": \"$2 million\"}, \"March 4, 2011\", null]],\n\"n\": [],\n\"t\": []}",
+            "role": "system"
+          },
+          {
+            "content": "Document: /wiki/concepts/conditional-warping.md\n\nPassage:\n---\ntitle: Conditional warping\ndescription: The lab requires technicians to record moisture before transferring the\n  warping judgment.[^1]\ndate: '2026-11-25'\ntags:\n- conditions\n- warping\n---\n\nThe lab requires technicians to record moisture before transferring the warping judgment.[^1]\n\n[^1]: review.txt",
+            "role": "user"
+          }
+        ]
+      },
+      "request_sha256": "dc493fa46b9445ba09abe7c2202aa61f28356d0e42d799e7014ddae4a41c20b0",
+      "response": {
+        "e": [
+          [
+            "technicians",
+            "role",
+            0
+          ]
+        ],
+        "s": [
+          [
+            "The lab requires technicians to record moisture before transferring the warping judgment.",
+            "the lab",
+            "requires",
+            "technicians to record moisture",
+            null,
+            {
+              "mood": "requires"
+            },
+            null,
+            null
+          ]
+        ],
+        "n": [],
+        "t": []
+      },
+      "native_response": "{\"e\": [[\"technicians\", \"role\", 0]], \"s\": [[\"The lab requires technicians to record moisture before transferring the warping judgment.\", \"the lab\", \"requires\", \"technicians to record moisture\", null, {\"mood\": \"requires\"}, null, null]], \"n\": [], \"t\": []}",
+      "parsed": {
+        "entities": [
+          {
+            "kind": "role",
+            "name": "technicians",
+            "named": false
+          }
+        ],
+        "names": [],
+        "skipped": 0,
+        "statements": [
+          {
+            "ended": null,
+            "object": "technicians to record moisture",
+            "phrase": "requires",
+            "qualifiers": [
+              [
+                "mood",
+                "requires"
+              ]
+            ],
+            "quote": "The lab requires technicians to record moisture before transferring the warping judgment.",
+            "subject": "the lab",
+            "value": null,
+            "when": null
+          }
+        ],
+        "time": [],
+        "truncated": false
+      },
+      "elapsed_seconds": 0.006796207977458835
+    }
+  ],
+  "cache": {
+    "reused_pages": 0,
+    "model_pages": 2,
+    "enabled": false
+  }
+}

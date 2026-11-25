@@ -15,8 +15,27 @@ def short_id(value):
     return value.split('/data/')[-1]
 
 
+def projection_receipt(store, publication, receipt):
+    """Apply a verified local rebuild to the selected Git publication."""
+    rebuilt_path = store.base / 'rebuilt-projections.json'
+    if not rebuilt_path.exists():
+        return dict(receipt)
+    rebuilt_map = json.loads(rebuilt_path.read_text())
+    if not isinstance(rebuilt_map, dict):
+        raise ValueError('invalid rebuilt projection inventory')
+    if publication not in rebuilt_map:
+        return dict(receipt)
+    rebuilt = rebuilt_map[publication]
+    if (not isinstance(rebuilt, dict) or rebuilt.get('content_commit') != receipt['content_commit']
+            or rebuilt.get('profile_id') != receipt['profile_id']
+            or rebuilt.get('ready') is not True or not rebuilt.get('graph_commit')
+            or rebuilt.get('search_checkpoint') != rebuilt['graph_commit']):
+        raise ValueError('rebuilt projection does not match published content')
+    return {**receipt, **{field: rebuilt[field] for field in ('database', 'graph_commit', 'search_checkpoint')}}
+
+
 class AtlasReader:
-    def __init__(self, store, url, policy, publication=None, *, as_known_at=None):
+    def __init__(self, store, url, policy, publication=None, *, as_known_at=None, verify_database=None):
         if publication is not None and as_known_at is not None:
             raise ValueError('choose publication or as_known_at, not both')
         self.store, self.pubs, self.policy = store, Publications(store), policy
@@ -34,15 +53,8 @@ class AtlasReader:
             current = receipt['previous_publication']
         when = instant(as_known_at) if as_known_at is not None else None
         selected = None
-        visible_from = None
         for oid, receipt in reversed(self.chain.items()):
-            # A child incorporates its ancestors and cannot be visible earlier.
-            accepted = acceptance_instant(receipt)
-            visible_from = max(visible_from, accepted) if visible_from is not None else accepted
-            receipt.pop('effective_accepted_at', None)  # Derived from the chain at read time.
-            if visible_from != instant(receipt['accepted_at']):
-                receipt['effective_accepted_at'] = visible_from.isoformat()
-            if when is not None and visible_from <= when:
+            if when is not None and acceptance_instant(receipt) <= when:
                 selected = oid
         if when is not None:
             if selected is None:
@@ -50,25 +62,17 @@ class AtlasReader:
             self.publication = selected
         if self.publication not in self.chain:
             raise ValueError('slice is not in published history')
-        self.receipt = dict(self.chain[self.publication])
-        rebuilt_path = store.base/'rebuilt-projections.json'
-        rebuilt_map = json.loads(rebuilt_path.read_text()) if rebuilt_path.exists() else {}
-        if self.publication in rebuilt_map:
-            rebuilt = rebuilt_map[self.publication]
-            if (not rebuilt or rebuilt.get('content_commit') != self.receipt['content_commit']
-                    or rebuilt.get('profile_id') != self.receipt['profile_id']
-                    or rebuilt.get('ready') is not True
-                    or not rebuilt.get('graph_commit')
-                    or rebuilt.get('search_checkpoint') != rebuilt['graph_commit']):
-                raise ValueError('rebuilt projection does not match published content')
-            # Local derived locations cannot replace acceptance or Git history.
-            for field in ('database','graph_commit','search_checkpoint'):
-                self.receipt[field] = rebuilt[field]
+        self.receipt = projection_receipt(store, self.publication, self.chain[self.publication])
+        database_name = self.receipt['database']
+        if verify_database is not None:
+            verify_database(database_name)
         self.records = self._records(self.publication)
-        self.graph = GraphStage(url, self.receipt['database'])
+        self.graph = GraphStage(url, database_name)
 
     def matching_decision_receipt(self, publication=None):
-        return matching_decision_receipt(self.store, self.chain[publication or self.publication])
+        if not matching_decision_receipt(self.store, self.chain[publication or self.publication]):
+            raise ValueError('publication lacks its matching acceptance decision')
+        return True
 
     def _records(self, publication):
         if publication not in self.chain:
@@ -342,8 +346,6 @@ class AtlasReader:
                 entry = {'publication_commit': current, 'accepted_at': receipt['accepted_at'],
                          'acceptance_kind': receipt['acceptance_kind'], 'acceptance_channel': receipt['acceptance_channel'],
                          'record': records[record_id], 'matching_decision_receipt': self.matching_decision_receipt(current)}
-                if 'effective_accepted_at' in receipt:
-                    entry['effective_accepted_at'] = receipt['effective_accepted_at']
                 result.append(entry)
             current = self.chain[current]['previous_publication']
         return result

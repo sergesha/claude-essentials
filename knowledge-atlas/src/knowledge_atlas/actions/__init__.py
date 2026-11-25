@@ -6,9 +6,9 @@ def register_handlers(context):
     from .atlas import create_atlas
     from .sources import submit_sources, decide_type
     from .decisions import decide_candidate, revise_candidate
-    from .packages import pin_package
+    from .packages import configure_packages
     from .feedback import feedback_action
-    return {'archive.export':export_archive, 'archive.restore':restore_archive, 'feedback.record': feedback_action, 'knowledge.revise': feedback_action, 'packages.pin': pin_package, 'candidate.decide': decide_candidate, 'candidate.revise': revise_candidate, 'atlas.create': create_atlas, 'sources.submit': submit_sources, 'type.decide': decide_type, **context.handlers}
+    return {'archive.export':export_archive, 'archive.restore':restore_archive, 'feedback.record': feedback_action, 'knowledge.revise': feedback_action, 'packages.configure': configure_packages, 'candidate.decide': decide_candidate, 'candidate.revise': revise_candidate, 'atlas.create': create_atlas, 'sources.submit': submit_sources, 'type.decide': decide_type, **context.handlers}
 
 
 def register_recoveries(context):

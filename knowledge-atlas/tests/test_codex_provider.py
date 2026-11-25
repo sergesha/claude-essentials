@@ -34,6 +34,34 @@ def test_profile_resolution_does_not_probe_host(monkeypatch):
     assert resolve_profile(default_profiles(), 'open').provider == 'codex'
 
 
+@pytest.mark.parametrize('invalid', ['missing-stage', 'missing-provider', 'extra-stage'])
+def test_supplied_profiles_checked_before_any_provider_invocation(monkeypatch, invalid):
+    from knowledge_atlas.core import model_config
+
+    config = default_profiles()
+    if invalid == 'missing-stage':
+        del config['grounded_answer']
+    elif invalid == 'missing-provider':
+        del config['grounded_answer']['provider']
+    else:
+        config['unknown'] = config['wiki'].copy()
+    monkeypatch.setattr(model_config, 'provider_for',
+                        lambda *_: pytest.fail('provider invoked with invalid stage profiles'))
+    with pytest.raises(ProviderError) as error:
+        model_config.ConfiguredModels(config=config)
+    assert error.value.code == 'unsupported_configuration'
+
+
+def test_removed_command_transport_cannot_be_selected(tmp_path):
+    from knowledge_atlas.core.model_config import ConfiguredModels
+    from knowledge_atlas.providers.codex import CodexProvider
+
+    binary, _ = fake_codex(tmp_path)
+    with pytest.raises(TypeError, match='command'):
+        ConfiguredModels(command=lambda *_: pytest.fail('obsolete command transport invoked'),
+                         providers={'codex': CodexProvider(str(binary))}, evidence=tmp_path / 'calls')
+
+
 def fake_codex(tmp_path, *, failure=False):
     import json
     import sys
@@ -92,11 +120,13 @@ def test_configured_models_uses_provider_and_retains_stage_identity(tmp_path):
     assert json.loads(capture.read_text())['system'] == 'SYSTEM'
 
 
-def test_configured_call_rejects_cli_change_after_profile_freeze(tmp_path):
+def test_configured_models_default_to_shipped_stages_and_freeze_cli_identity(tmp_path):
     from knowledge_atlas.core.model_config import ConfiguredModels
     from knowledge_atlas.providers.codex import CodexProvider
     binary, _ = fake_codex(tmp_path)
-    models = ConfiguredModels(config=default_profiles(), providers={'codex': CodexProvider(str(binary))}, evidence=tmp_path / 'calls')
+    models = ConfiguredModels(providers={'codex': CodexProvider(str(binary))}, evidence=tmp_path / 'calls')
+    assert models.config == default_profiles()
+    assert not hasattr(models, 'wiki_argv')
     binary.write_text(binary.read_text().replace('codex fixture 1', 'codex fixture 2'))
     with pytest.raises(ProviderError) as error:
         models({'operation':'phrase','messages':[{'role':'system','content':'SYSTEM'},{'role':'user','content':'USER'}]})

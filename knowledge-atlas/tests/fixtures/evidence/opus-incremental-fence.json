@@ -1,0 +1,67 @@
+{
+  "previous_statements": [
+    [
+      "**Luma** is one of the two options compared in the [QL-7 Bracket Trials](ql-7-bracket-trials.md).",
+      "Luma",
+      "is one of the two options compared in",
+      "QL-7 Bracket Trials",
+      null,
+      null,
+      null,
+      null
+    ],
+    [
+      "In trial P-14, Luma produced fewer warped QL-7 brackets than [Sora](sora.md), but only with dried feedstock, a closed enclosure and an ambient temperature of 20-24 C.[^1]",
+      "Luma",
+      "produced fewer warped QL-7 brackets than",
+      "Sora",
+      null,
+      {
+        "in": "trial P-14",
+        "only with": "dried feedstock, a closed enclosure and an ambient temperature of 20-24 C"
+      },
+      null,
+      null
+    ],
+    [
+      "Independent trial P-22 also favored Luma for warping under the same conditions.[^1]",
+      "trial P-22",
+      "also favored",
+      "Luma",
+      null,
+      {
+        "for": "warping",
+        "under": "the same conditions",
+        "conditions": "dried feedstock, a closed enclosure and an ambient temperature of 20-24 C",
+        "type": "Independent"
+      },
+      null,
+      null
+    ],
+    [
+      "| Strength | No strength guarantee is made[^1] |",
+      "Luma",
+      "Strength",
+      null,
+      "No strength guarantee is made",
+      null,
+      null,
+      null
+    ],
+    [
+      "| Cleaning | Kez's opinion is that Sora is usually easier to clean (not an adopted recommendation)[^2] |",
+      "Sora",
+      "is usually easier to clean",
+      null,
+      "usually easier to clean",
+      {
+        "according to": "Kez",
+        "basis": "Kez's opinion",
+        "status": "not an adopted recommendation"
+      },
+      null,
+      null
+    ]
+  ],
+  "raw_response": "```json\n{\"e\": [[\"Luma\", \"option\", 1], [\"QL-7 Bracket Trials\", \"trials\", 1], [\"Sora\", \"option\", 1], [\"trial P-14\", \"trial\", 1], [\"trial P-22\", \"trial\", 1], [\"Kez\", \"person\", 1], [\"source\", \"source\", 0], [\"what kind of item Luma is\", \"item kind\", 0], [\"trial outcomes\", \"outcomes\", 0]],\n\"s\": [{\"ref\": 0}, [\"The source does not describe what kind of item Luma is (e.g., machine or material); it records only its trial outcomes.\", \"source\", \"does not describe\", \"what kind of item Luma is\", null, {\"e.g.\": \"machine or material\"}, null, null], [\"The source does not describe what kind of item Luma is (e.g., machine or material); it records only its trial outcomes.\", \"source\", \"records only\", \"trial outcomes\", null, {\"of\": \"Luma\"}, null, null], {\"ref\": 1}, {\"ref\": 2}, [\"| Warping vs. Sora | Fewer warped QL-7 brackets, only under the three stated conditions[^1] |\", \"Luma\", \"Warping vs. Sora\", null, \"Fewer warped QL-7 brackets, only under the three stated conditions\", null, null, null], [\"| Replication | Supported by independent trial P-22[^1] |\", \"Luma\", \"Replication\", null, \"Supported by independent trial P-22\", null, null, null], {\"ref\": 3}, [\"| Cleaning | Kez's opinion is that Sora is usually easier to clean (not an adopted recommendation)[^1] |\", \"Sora\", \"Cleaning\", null, \"usually easier to clean\", {\"says\": \"Kez\", \"basis\": \"Kez's opinion\", \"status\": \"not an adopted recommendation\"}, null, null]],\n\"n\": [],\n\"t\": [[\"now\", \"date\", \"2026-11-25\", {\"y\": 2026, \"m\": 11, \"d\": 25}, null]]}\n```"
+}

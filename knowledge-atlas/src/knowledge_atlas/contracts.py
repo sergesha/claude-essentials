@@ -1,7 +1,10 @@
 """Shared configuration types; constructing one never probes a runtime."""
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .project_registry import ProjectBinding
 
 JsonObject = dict[str, Any]
 OperationId = str
@@ -34,6 +37,18 @@ class AtlasError(RuntimeError):
         super().__init__(message if message.startswith(code + ': ') else f'{code}: {message}')
 
 
+ATTRIBUTION_CHANNELS = frozenset(('http', 'mcp', 'viewer', 'python'))
+
+
+def require_canonical_uuid(value):
+    import uuid
+    try:
+        if str(uuid.UUID(value)) != value:
+            raise ValueError
+    except (ValueError, TypeError, AttributeError) as error:
+        raise ValueError('canonical lower-case, hyphenated UUID required') from error
+
+
 @dataclass(frozen=True)
 class ActionRequest:
     action: str
@@ -47,15 +62,17 @@ class ActionRequest:
 
     def __post_init__(self):
         import re
-        import uuid
         from datetime import datetime
         if not isinstance(self.action, str) or not self.action or not isinstance(self.payload, dict):
             raise AtlasError('invalid_request', 'action and object payload required')
         if self.request_id is not None:
             try:
-                uuid.UUID(self.request_id)
+                require_canonical_uuid(self.request_id)
             except (ValueError, TypeError, AttributeError) as error:
-                raise AtlasError('invalid_request', 'request_id must be a UUID') from error
+                raise AtlasError('invalid_request', 'request_id must be a canonical UUID') from error
+        if self.action == 'operation.resume' and any(value is not None for value in (
+                self.atlas_id, self.expected_publication, self.publication, self.as_known_at, self.valid_at)):
+            raise AtlasError('invalid_request', 'operation.resume accepts only a target operation and request UUID')
         for oid in (self.expected_publication, self.publication):
             if oid is not None and (not isinstance(oid, str) or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', oid)):
                 raise AtlasError('invalid_request', 'exact publication OID required')
@@ -97,7 +114,10 @@ class ServiceContext:
     recoveries: dict = field(default_factory=dict, repr=False)
 
     def __post_init__(self):
-        self.service_root = Path(self.service_root).expanduser().resolve()
+        root = Path(self.service_root).expanduser()
+        if root.is_symlink():
+            raise AtlasError('unsupported_storage', 'unsupported linked service root', 422)
+        self.service_root = root.resolve()
 
 
 @dataclass
@@ -109,8 +129,12 @@ class ActionContext:
     configuration: JsonObject
     operation_id: str | None = None
     previous_evidence: Path | None = None
+    project_binding: 'ProjectBinding | None' = None
 
     @classmethod
     def for_read(cls, service, request):
-        from .operations import atlas_path
-        return cls(service, request, atlas_path(service, request), service.service_root, service.configuration)
+        from .project_registry import project_configuration, resolve_project
+
+        binding = resolve_project(service, request.atlas_id)
+        return cls(service, request, binding.path, service.service_root,
+                   project_configuration(service, binding), project_binding=binding)

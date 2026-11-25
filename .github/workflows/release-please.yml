@@ -2,21 +2,288 @@ name: release-please
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      atlas_created: ${{ steps.release.outputs['knowledge-atlas--release_created'] }}
+      atlas_sha: ${{ steps.release.outputs['knowledge-atlas--sha'] }}
+      atlas_tag: ${{ steps.release.outputs['knowledge-atlas--tag_name'] }}
+      atlas_version: ${{ steps.release.outputs['knowledge-atlas--version'] }}
     steps:
-      # Maintains one release PR per package (bumps version + CHANGELOG from
-      # Conventional Commits), and on merge tags the release (<package>-vX.Y.Z)
-      # and creates a GitHub Release. Config: release-please-config.json,
-      # state: .release-please-manifest.json.
-      - uses: googleapis/release-please-action@v4
+      # Maintain and publish one release PR per package.
+      - id: release
+        uses: googleapis/release-please-action@v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  atlas-image:
+    needs: release-please
+    if: needs.release-please.outputs.atlas_created == 'true'
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: knowledge-atlas-image-${{ needs.release-please.outputs.atlas_version }}
+      cancel-in-progress: false
+    env:
+      ATLAS_REPOSITORY: ghcr.io/sergesha/knowledge-atlas
+      ATLAS_REVISION: ${{ needs.release-please.outputs.atlas_sha }}
+      ATLAS_TAG: ${{ needs.release-please.outputs.atlas_tag }}
+      ATLAS_VERSION: ${{ needs.release-please.outputs.atlas_version }}
+    outputs:
+      digest: ${{ steps.existing.outputs.digest || steps.publish.outputs.digest }}
+      config_id: ${{ steps.existing.outputs.config_id || steps.publish.outputs.config_id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.atlas_sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/plugin-image-security/setup-docker
+      - name: Verify release source
+        run: |
+          set -euo pipefail
+          [[ "$ATLAS_REVISION" =~ ^[a-f0-9]{40}$ && "$ATLAS_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test "$ATLAS_TAG" = "knowledge-atlas-v$ATLAS_VERSION"
+          test "$(git rev-parse HEAD)" = "$ATLAS_REVISION"
+          git fetch --no-tags origin "refs/tags/$ATLAS_TAG"
+          test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$ATLAS_REVISION"
+          test "$(python3 -c 'import tomllib; print(tomllib.load(open("knowledge-atlas/pyproject.toml", "rb"))["project"]["version"])')" = "$ATLAS_VERSION"
+          mkdir "$RUNNER_TEMP/atlas-publication"
+          printf '%s\n' "$ATLAS_TAG $ATLAS_REVISION $ATLAS_VERSION $GITHUB_SHA" > "$RUNNER_TEMP/atlas-publication/release.txt"
+      - name: Recover publication receipts from earlier attempts
+        if: github.run_attempt > 1
+        uses: actions/download-artifact@v4
+        with:
+          pattern: atlas-publication-*
+          path: ${{ runner.temp }}/atlas-prior-publication
+      - name: Authenticate the publisher to GHCR
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          export DOCKER_CONFIG="$RUNNER_TEMP/atlas-registry"
+          install -d -m 0700 "$DOCKER_CONFIG"
+          printf '%s\n' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: Check existing Atlas version
+        id: existing
+        run: |
+          set -euo pipefail
+          export DOCKER_CONFIG="$RUNNER_TEMP/atlas-registry"
+          evidence="$RUNNER_TEMP/atlas-publication"
+          image="$ATLAS_REPOSITORY:$ATLAS_VERSION"
+          # Raw inspection reads only the authenticated version's top-level manifest.
+          if ! docker buildx imagetools inspect "$image" --raw > "$evidence/existing.json" 2> "$evidence/lookup.log"; then
+            cat "$evidence/lookup.log" >&2
+            if [[ "$(< "$evidence/lookup.log")" == "ERROR: $image: not found" ]]; then
+              exit 0
+            fi
+            exit 1
+          fi
+          digest="sha256:$(sha256sum < "$evidence/existing.json" | cut -d ' ' -f 1)"
+          image="$ATLAS_REPOSITORY@$digest"
+          config_id="$(jq -er '.config.digest | select(test("^sha256:[0-9a-f]{64}$"))' "$evidence/existing.json")"
+          printf 'digest=%s\nconfig_id=%s\n' "$digest" "$config_id" > "$evidence/existing-identity.txt"
+          docker buildx imagetools inspect "$image" --format '{{json .Image}}' > "$evidence/existing-config.json"
+          jq -e --arg version "$ATLAS_VERSION" --arg revision "$ATLAS_REVISION" '
+            .os == "linux" and .architecture == "arm64"
+            and .config.Labels["org.opencontainers.image.source"] == "https://github.com/sergesha/claude-essentials"
+            and .config.Labels["org.opencontainers.image.version"] == $version
+            and .config.Labels["org.opencontainers.image.revision"] == $revision
+          ' "$evidence/existing-config.json" > "$evidence/existing-labels-match.txt"
+          for receipt in "$RUNNER_TEMP"/atlas-prior-publication/*/publication.json; do
+            if test -f "$receipt" && jq -e --arg digest "$digest" --arg id "$config_id" \
+                --arg version "$ATLAS_VERSION" --arg revision "$ATLAS_REVISION" --arg tag "$ATLAS_TAG" '
+                  .digest == $digest and .config_id == $id and .version == $version
+                  and .revision == $revision and .tag == $tag and .platform == "linux/arm64"
+                ' "$receipt" >/dev/null; then
+              cp "$receipt" "$evidence/publication.json"
+              printf 'digest=%s\nconfig_id=%s\n' "$digest" "$config_id" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+          echo "Atlas version already resolves to $digest. It has no matching publication receipt." >&2
+          exit 1
+      - name: Build the exact release source
+        id: build
+        if: steps.existing.outputs.digest == ''
+        run: |
+          set -euo pipefail
+          df -h "$RUNNER_TEMP"
+          free -h
+          docker buildx build --load --platform linux/arm64 --tag atlas-release-candidate:local \
+            --build-arg ATLAS_VERSION="$ATLAS_VERSION" \
+            --build-arg ATLAS_REVISION="$ATLAS_REVISION" -f knowledge-atlas/docker/Dockerfile knowledge-atlas
+          printf 'image=%s\n' "$(docker image inspect --format '{{.Id}}' atlas-release-candidate:local)" >> "$GITHUB_OUTPUT"
+      - name: Exercise the packaged Atlas application
+        if: steps.existing.outputs.digest == ''
+        env:
+          IMAGE_ID: ${{ steps.build.outputs.image }}
+        run: |
+          python3 knowledge-atlas/scripts/verify-release-image.py --local-id "$IMAGE_ID" \
+            --version "$ATLAS_VERSION" --revision "$ATLAS_REVISION"
+      - uses: ./.github/actions/plugin-image-security
+        if: steps.existing.outputs.digest == ''
+        with:
+          producer: knowledge-atlas
+          image: ${{ steps.build.outputs.image }}
+          platform: linux/arm64
+          out: ${{ runner.temp }}/atlas-security
+          revision: ${{ needs.release-please.outputs.atlas_sha }}
+      - name: Publish verified Atlas image
+        id: publish
+        if: steps.existing.outputs.digest == ''
+        env:
+          IMAGE_ID: ${{ steps.build.outputs.image }}
+        run: |
+          set -euo pipefail
+          export DOCKER_CONFIG="$RUNNER_TEMP/atlas-registry"
+          evidence="$RUNNER_TEMP/atlas-publication"
+          image="$ATLAS_REPOSITORY:$ATLAS_VERSION"
+          if docker buildx imagetools inspect "$image" --raw > "$evidence/pre-push.json" 2> "$evidence/pre-push.log"; then
+            echo "Atlas version appeared during the build. Publication stopped." >&2
+            exit 1
+          fi
+          if [[ "$(< "$evidence/pre-push.log")" != "ERROR: $image: not found" ]]; then
+            cat "$evidence/pre-push.log" >&2
+            exit 1
+          fi
+          docker tag "$IMAGE_ID" "$image"
+          GITHUB_SHA="$(git rev-parse HEAD)" python3 tools/image_security/gate.py verify \
+            --image "$image" --platform linux/arm64 --revision "$ATLAS_REVISION" --out "$RUNNER_TEMP/atlas-security"
+          docker push "$image" | tee "$evidence/push.log"
+          digest="$(awk -v tag="$ATLAS_VERSION:" '$1 == tag && $2 == "digest:" && $4 == "size:" && NF == 5 {print $3}' "$evidence/push.log")"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          docker buildx imagetools inspect "$ATLAS_REPOSITORY@$digest" --raw > "$evidence/manifest.json"
+          manifest_digest="sha256:$(sha256sum < "$evidence/manifest.json" | cut -d ' ' -f 1)"
+          test "$manifest_digest" = "$digest"
+          config_id="$(jq -er '.config.digest | select(test("^sha256:[0-9a-f]{64}$"))' "$evidence/manifest.json")"
+          test "$config_id" = "$IMAGE_ID"
+          docker buildx imagetools inspect "$image" --raw > "$evidence/post-push-tag.json"
+          tag_digest="sha256:$(sha256sum < "$evidence/post-push-tag.json" | cut -d ' ' -f 1)"
+          if [[ "$tag_digest" != "$digest" ]]; then
+            printf 'Atlas version points to %s instead of pushed manifest %s.\n' "$tag_digest" "$digest" \
+              | tee "$evidence/tag-mismatch.txt" >&2
+            exit 1
+          fi
+          jq -n --arg digest "$digest" --arg id "$config_id" \
+            --arg version "$ATLAS_VERSION" --arg revision "$ATLAS_REVISION" --arg tag "$ATLAS_TAG" \
+            '{digest: $digest, config_id: $id, version: $version, revision: $revision, tag: $tag, platform: "linux/arm64"}' \
+            > "$evidence/publication.json"
+          printf 'digest=%s\nconfig_id=%s\n' "$digest" "$config_id" >> "$GITHUB_OUTPUT"
+      - name: Collect pre-push verification results
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/atlas-publication"
+          shopt -s nullglob
+          for report in "$RUNNER_TEMP"/atlas-security/reports/verify-*.json; do
+            cp "$report" "$RUNNER_TEMP/atlas-publication/"
+          done
+      - name: Retain publication and pre-push evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: atlas-publication-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/atlas-publication/
+          if-no-files-found: error
+
+  atlas-verify:
+    needs: [release-please, atlas-image]
+    runs-on: ubuntu-24.04-arm
+    env:
+      ATLAS_IMAGE: ghcr.io/sergesha/knowledge-atlas@${{ needs.atlas-image.outputs.digest }}
+      ATLAS_CONFIG_ID: ${{ needs.atlas-image.outputs.config_id }}
+      ATLAS_REVISION: ${{ needs.release-please.outputs.atlas_sha }}
+      ATLAS_VERSION: ${{ needs.release-please.outputs.atlas_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.atlas_sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/plugin-image-security/setup-docker
+      - name: Anonymous pull and authenticated application handshake
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/atlas-delivery"
+          python3 knowledge-atlas/scripts/verify-release-image.py --image "$ATLAS_IMAGE" \
+            --version "$ATLAS_VERSION" --revision "$ATLAS_REVISION" | tee "$RUNNER_TEMP/atlas-delivery/identity.json"
+          jq -e --arg id "$ATLAS_CONFIG_ID" '.config_id == $id' "$RUNNER_TEMP/atlas-delivery/identity.json" >/dev/null
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          version: "0.13.9"
+      - name: Qualify the pulled image's native pipeline
+        working-directory: knowledge-atlas
+        run: |
+          set -euo pipefail
+          fixture="$(mktemp -d "$RUNNER_TEMP/atlas-fixture.XXXXXX")"
+          output="$RUNNER_TEMP/atlas-delivery"
+          mkdir "$fixture/bin" "$output/native-parent"
+          chmod a+rx "$fixture"
+          chmod a+w "$output/native-parent"
+          uv export --locked --only-dev --no-emit-project --format requirements-txt -o "$fixture/test-deps.txt"
+          uv pip install --python 3.12 --require-hashes --only-binary :all: \
+            --target "$fixture/dependencies" -r "$fixture/test-deps.txt"
+          cp "$(command -v uv)" "$fixture/bin/uv"
+          cat > "$fixture/bin/pytest" <<'PY'
+          #!/opt/knowledge-atlas/.venv/bin/python
+          import sys
+          sys.path.insert(0, "/fixture/dependencies")
+          import pytest
+          raise SystemExit(pytest.main(sys.argv[1:]))
+          PY
+          chmod +x "$fixture/bin/pytest"
+          volume="atlas-runtime-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          docker volume create "$volume" >/dev/null
+          trap 'docker volume rm "$volume" >/dev/null' EXIT
+          docker run --rm -i --pull=never --platform linux/arm64 --mount "type=volume,src=$volume,dst=/runtime" \
+            --entrypoint /opt/knowledge-atlas/.venv/bin/python "$ATLAS_IMAGE" - <<'PY' 2>&1 | tee "$output/prepare.log"
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+          import sys
+          import tempfile
+
+          from knowledge_atlas.providers.config import default_profiles
+
+          with tempfile.TemporaryDirectory() as data:
+              profiles = {stage: {**profile, "provider": "codex"} for stage, profile in default_profiles().items()}
+              (Path(data) / "profiles.json").write_text(json.dumps(profiles))
+              subprocess.run(
+                  [sys.executable, "/opt/knowledge-atlas/docker/entrypoint.py", "prepare"],
+                  check=True, env={**os.environ, "ATLAS_DATA_ROOT": data},
+              )
+          PY
+          docker run --rm -i --init --pull=never --platform linux/arm64 --network none \
+            --mount "type=volume,src=$volume,dst=/runtime" \
+            --mount "type=bind,src=$PWD/tests,dst=/opt/knowledge-atlas/tests,readonly" \
+            --mount "type=bind,src=$fixture,dst=/fixture,readonly" \
+            --mount "type=bind,src=$output/native-parent,dst=/output" \
+            --entrypoint /bin/sh "$ATLAS_IMAGE" -es <<'SH' 2>&1 | tee "$output/native.log"
+          export PATH="/fixture/bin:$PATH" UV_CACHE_DIR=/tmp/atlas-uv
+          export UV_OFFLINE=1 UV_PYTHON_DOWNLOADS=never PYTHONDONTWRITEBYTECODE=1
+          export PYTEST_ADDOPTS="-p no:cacheprovider"
+          export UV_PROJECT_ENVIRONMENT=/opt/knowledge-atlas/.venv
+          printf '%s\n' '{"runtime_root":"/runtime"}' > /tmp/pulled-image-runtime.json
+          uv run --no-sync pytest -q tests/integration/test_multi_project_runtime.py \
+            --runtime-config /tmp/pulled-image-runtime.json --evidence-dir /output/native
+          SH
+          test -s "$output/native-parent/native/multi-project.json"
+      - name: Retain clean image verification
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: atlas-delivery-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/atlas-delivery/
+          if-no-files-found: error

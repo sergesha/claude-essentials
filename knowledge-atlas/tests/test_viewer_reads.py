@@ -3,6 +3,7 @@ import json
 import pytest
 from test_reads import published, read_context
 from test_decisions import projection
+from acceptance_fixture import review_acceptance
 from knowledge_atlas.actions.reads import read_action
 from knowledge_atlas.core.publication import Publications
 from knowledge_atlas.core.reader import AtlasReader
@@ -17,7 +18,7 @@ def test_pages_use_selected_publication_after_ready_advances(published):
     candidate=revise_compilation(store,content,[],wiki,original['extraction'],{},actor='Fixture',
         method='Fixture',reason='Changed page',recorded_at='2026-11-14T00:00:00Z',base_publication=first)
     from knowledge_atlas.runtime import _assets
-    accepted=Publications(store).review(candidate,{'decision':'accept','actor':'Test','kind':'synthetic',
+    accepted=review_acceptance(Publications(store), candidate,{'decision':'accept','actor':'Test','kind':'synthetic',
         'reason':'new version','accepted_at':'2026-11-14T01:00:00Z','base_publication':first},
         json.loads((_assets()/'embedding-profile.json').read_text()))
     Publications(store).publish(accepted,projection)
@@ -26,6 +27,7 @@ def test_pages_use_selected_publication_after_ready_advances(published):
     result=read_action(read_context(published,'wiki.read',{'page_id':page['id']},publication=first))
     assert result.publication==first
     assert result.data['page']['content']!='Changed later page.'
+    assert pages.data['acceptance_channel'] == 'python' and pages.data['matching_decision_receipt']
     assert pages.data['accepted_at']=='2026-11-13T01:00:00Z'
     assert pages.data['recorded_at']=='2026-11-13T00:00:00Z'
     with pytest.raises(AtlasError):
@@ -98,8 +100,12 @@ def test_composed_pages_retain_distinct_canonical_ids(published,tmp_path):
     snapshot=store.read(content)
     child=GitStore(tmp_path/'child')
     child_commit=child.snapshot(snapshot['wiki'],snapshot['extraction'],{},recorded_at='2026-11-14T00:00:00Z')['commit']
-    candidate=store.pin_package(content,child,child_commit,mount='shared/child',recorded_at='2026-11-14T00:00:00Z',base_publication=first)
-    accepted=Publications(store).review(candidate,{'decision':'accept','actor':'Test','kind':'synthetic',
+    from test_packages import layout, publish, selection
+    from knowledge_atlas.project_registry import register_project
+    selected_child = selection(store, child, publish(child, child_commit))
+    register_project(published[4], selected_child['package_id'], child.base)
+    candidate = layout(store, selected_child)
+    accepted=review_acceptance(Publications(store), candidate,{'decision':'accept','actor':'Test','kind':'synthetic',
         'reason':'composition','accepted_at':'2026-11-14T01:00:00Z','base_publication':first},
         json.loads((_assets()/'embedding-profile.json').read_text()))
     selected=Publications(store).publish(accepted,lambda oid:{**projection(oid),'graph_commit':oid,'search_checkpoint':oid,'database':'admin/fixture'})

@@ -66,10 +66,6 @@ def test_modal_assertion_keeps_native_mood_and_projects_modality(qualifiers):
     assert projected['modality'] == ['requires'] and projected['qualifiers'] == qualifiers
     assert item['text'] == original['quote'] and statement == original
     assert not any(item['kind'] == 'relation' for item in records)
-    del data['extraction']['passage_version']
-    data['relations'] = resolve_relations(data['extraction'])
-    legacy = next(item for item in records_for(data, 'a' * 40) if item['kind'] == 'statement')
-    assert json.loads(legacy['payload']) == original
 
 
 def test_navigation_only_edit_reuses_native_request_and_keeps_wiki(monkeypatch, tmp_path):

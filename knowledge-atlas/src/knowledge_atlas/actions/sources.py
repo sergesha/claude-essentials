@@ -2,13 +2,18 @@
 import hashlib
 from pathlib import Path
 from ..contracts import AtlasError
+from ..core.wiki_stage import validate_source_records
 
 
 def prepare_sources(items, remove_source_ids, previous_wiki, destination):
     if not isinstance(items, list) or not isinstance(remove_source_ids, list):
         raise AtlasError('invalid_request', 'sources and remove_source_ids must be arrays')
-    previous = {row.get('source_id', row['id'] if 'id' in row else row['filename']): row
-                for row in previous_wiki.get('sources', [])}
+    retained = previous_wiki.get('sources', [])
+    try:
+        validate_source_records(retained)
+    except ValueError as error:
+        raise AtlasError('invalid_source', str(error), 422) from error
+    previous = {row['source_id']: row for row in retained}
     removals = []
     for identity in remove_source_ids:
         if not isinstance(identity, str) or identity not in previous:

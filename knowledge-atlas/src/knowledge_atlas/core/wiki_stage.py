@@ -22,10 +22,25 @@ def _native_tools():
         value = str(vendor / part)
         if value not in sys.path:
             sys.path.insert(0, value)
-    from tools.write import WriteHandler
-    from tools.references import update_references, _WIKI_LINK_RE, _parse_wiki_links
+    from tools.references import update_references
     from vaultfs.sqlite import SqliteVaultFS
-    return vendor, WriteHandler, update_references, _WIKI_LINK_RE, _parse_wiki_links, SqliteVaultFS
+    return vendor, update_references, SqliteVaultFS
+
+
+def validate_source_records(sources):
+    """Require each retained source's public identity and recording time."""
+    if not isinstance(sources, list) or not all(isinstance(row, dict) for row in sources):
+        raise ValueError('retained sources require an array of source records')
+    for source in sources:
+        identity = source.get('source_id')
+        if not isinstance(identity, str) or not identity:
+            raise ValueError('retained source requires source_id')
+        try:
+            timestamp = datetime.fromisoformat(source['recorded_at'])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError('retained source requires recorded_at with a timezone') from error
+        if timestamp.tzinfo is None:
+            raise ValueError('retained source requires recorded_at with a timezone')
 
 
 class WikiStage:
@@ -44,13 +59,12 @@ class WikiStage:
         import os
         import uuid
         import shutil
-        VENDOR, WriteHandler, update_references, _WIKI_LINK_RE, _parse_wiki_links, SqliteVaultFS = _native_tools()
         if datetime.fromisoformat(recorded_at.replace('Z', '+00:00')).tzinfo is None:
             raise ValueError('recorded_at requires a timezone')
         previous = previous or {}
-        records = {s['filename']: dict(s) for s in previous.get('sources', [])}
-        for record in records.values():
-            record.setdefault('recorded_at', previous.get('recorded_at', recorded_at))
+        prior_sources = previous.get('sources', [])
+        validate_source_records(prior_sources)
+        records = {s['filename']: dict(s) for s in prior_sources}
         removed_names = list(remove_sources)
         if len(set(removed_names)) != len(removed_names) or any(name not in records for name in removed_names):
             raise ValueError('explicit removal must name distinct existing sources')
@@ -64,6 +78,8 @@ class WikiStage:
             raise ValueError('source cannot be updated and removed together')
         changed_names = []
         for item, path, raw in inputs:
+            if not isinstance(item.get('source_id'), str) or not item['source_id']:
+                raise ValueError('source_id is required for native Wiki source input')
             old = records.get(path.name, {})
             temporal = {k:item[k] if k in item else old.get(k)
                         for k in ('source_time', 'valid_from', 'valid_to')}
@@ -75,7 +91,8 @@ class WikiStage:
             records[path.name] = {'filename':path.name, 'content':text,
                 'recorded_at':recorded_at if changed else old['recorded_at'],
                 'sha256':hashlib.sha256(raw).hexdigest(), **temporal,
-                **{key:item.get(key, old.get(key)) for key in ('source_id','name') if key in item or key in old},
+                'source_id':item['source_id'],
+                **({'name':item.get('name', old.get('name'))} if 'name' in item or 'name' in old else {}),
                 **({'id':records[path.name]['id']} if path.name in records else {})}
         # Validate restored source integrity before creating a workspace.
         for name, record in records.items():
@@ -87,6 +104,7 @@ class WikiStage:
         for page in previous.get('pages', []):
             if not page['path'].startswith('/wiki/') or '..' in Path(page['path']).parts:
                 raise ValueError('previous pages must stay under /wiki/')
+        VENDOR, update_references, SqliteVaultFS = _native_tools()
         workspace = self.workspace.resolve()
         artifacts = workspace/'.llmwiki'/'poc9'
         expected_sources=[{'filename':n, **{k:r.get(k) for k in ('sha256','source_time','valid_from','valid_to')}} for n,r in records.items()]
@@ -182,80 +200,3 @@ class WikiStage:
                 'wiki_revision':'aac3e6493306b7fff3b09cb181ca93918e93d0e6'}
         finally:
             await SqliteVaultFS.close()
-
-    async def run(self, sources, pages, *, recorded_at):
-        """Historical ready-page import compatibility; use run_agent for ingest.
-
-        Unknown source/valid time remains null. Recorded time never supplies
-        missing valid time or acceptance time. A failed workspace is retained.
-        """
-        VENDOR, WriteHandler, update_references, _WIKI_LINK_RE, _parse_wiki_links, SqliteVaultFS = _native_tools()
-        if datetime.fromisoformat(recorded_at.replace('Z', '+00:00')).tzinfo is None:
-            raise ValueError('recorded_at requires a timezone')
-        inputs = [(item, Path(item['path']), Path(item['path']).read_bytes()) for item in sources]
-        names = [path.name for _, path, _ in inputs]
-        if len(set(names)) != len(names):
-            raise ValueError('duplicate source filenames require distinct source names')
-        texts = [raw.decode('utf-8') for _, _, raw in inputs]
-        for page in pages:
-            parts = Path(page['path']).parts
-            if not page['path'].startswith('/wiki/') or '..' in parts:
-                raise ValueError('compiled pages must stay under /wiki/')
-        self.workspace.mkdir(parents=True, exist_ok=False)
-        native = SqliteVaultFS('poc9-local')
-        initialized = False
-        try:
-            await SqliteVaultFS.init(str(self.workspace))
-            initialized = True
-            kb_id = await native.ensure_workspace(self.workspace.name)
-            kb = await native.get_workspace()
-            writer = WriteHandler(native, kb)
-            source_records = []
-            for (item, path, raw), content in zip(inputs, texts):
-                (self.workspace / path.name).write_bytes(raw)
-                digest = hashlib.sha256(raw).hexdigest()
-                metadata = {'sha256':digest, 'source_time':item.get('source_time'),
-                            'valid_from':item.get('valid_from'), 'valid_to':item.get('valid_to')}
-                doc = await native.create_document(kb_id, path.name, path.name, '/',
-                    path.suffix.lstrip('.'), content, ['source'], metadata=metadata)
-                source_records.append({'id':doc['id'], 'filename':path.name, 'content':content, 'recorded_at':recorded_at,
-                                       **metadata})
-            responses = []
-            # Native create derives filenames from titles, not the requested path.
-            # Resolve model-declared links using that same pinned native behavior.
-            aliases = {}
-            for page in pages:
-                if page['path'].endswith('.md'):
-                    actual = writer._to_dir_path(page['path']) + writer._title_to_filename(page['title'])[0]
-                    requested = page['path'].removeprefix('/wiki/').lower()
-                    if requested in aliases and aliases[requested] != actual:
-                        raise ValueError('ambiguous requested Wiki page path')
-                    aliases[requested] = actual
-            for page in pages:
-                relative_dir = writer._to_dir_path(page['path']).removeprefix('/wiki/')
-                def resolve_link(match):
-                    targets = _parse_wiki_links(match.group(0), relative_dir)
-                    actual = aliases.get(targets[0].lower()) if targets else None
-                    if actual is None:
-                        return match.group(0)
-                    start = match.start(1) - match.start()
-                    end = match.end(1) - match.start()
-                    return match.group(0)[:start] + actual + match.group(0)[end:]
-                content = _WIKI_LINK_RE.sub(resolve_link, page['content'])
-                response = await writer.create(page['path'], page['title'], content,
-                    page.get('tags', []), recorded_at[:10], False)
-                responses.append(response)
-                if response.startswith('Error:'):
-                    raise ValueError(response)
-            docs = await native.list_documents_with_content(kb_id, path_glob='/wiki/*')
-            # Resolve links whose targets were created later in this compilation.
-            for doc in docs:
-                await update_references(native, kb_id, str(doc['id']), doc['content'], doc['path'])
-            return {'stage':'wiki', 'status':'candidate', 'recorded_at':recorded_at,
-                    'accepted_at':None, 'sources':source_records, 'pages':docs,
-                    'references':await native.get_reference_edges(kb_id),
-                    'native_responses':responses,
-                    'wiki_revision':'aac3e6493306b7fff3b09cb181ca93918e93d0e6'}
-        finally:
-            if initialized:
-                await SqliteVaultFS.close()

@@ -15,7 +15,7 @@ def digest(value):
 
 def test_native_crash_preserves_history_vectors_and_atomic_writes(native_graph,tmp_path):
     package=Path(__file__).resolve().parents[2]
-    config={k:str(native_graph[k]) for k in ('runtime','atlas')}
+    config={k:str(native_graph[k]) for k in ('runtime','atlas','cache')}
     config['graph_url']=native_graph['graph'].url
     script="import json,runpy,sys; from pathlib import Path; runpy.run_path(sys.argv[1])['_check_native_projection'](json.loads(sys.argv[2]),Path(sys.argv[3]))"
     run=subprocess.run([str(native_graph['runtime']/'python/bin/python'),'-c',script,
