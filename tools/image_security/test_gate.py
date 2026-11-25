@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import advisories as adv
 import gate
@@ -293,6 +293,50 @@ class GateTest(unittest.TestCase):
             self.assertIn(f"reports={out}/reports/", outputs.read_text())
 
 
+    def test_token_confined_to_fixed_github_request(self):
+        from urllib.error import HTTPError
+        token = "synthetic_test_value"
+        calls = []
+        class FakeOpener:
+            def open(self, request, timeout):
+                calls.append(request)
+                return io.BytesIO(b"{}")
+        with patch.dict(os.environ, {"GITHUB_TOKEN": token}), \
+             patch.object(gate, "build_opener", return_value=FakeOpener()) as opener, \
+             patch.object(gate, "download", return_value=b"public") as public:
+            self.assertEqual(gate.lookup_advisory("github", GHSA), b"{}")
+            request = calls[0]
+            self.assertEqual(request.full_url, "https://api.github.com/advisories/" + GHSA)
+            self.assertEqual(request.unredirected_hdrs["Authorization"], "Bearer " + token)
+            self.assertFalse(request.headers.get("Authorization"))
+            handler = opener.call_args.args[0]
+            for destination in ("https://example.com/leak", "https://api.github.com/another"):
+                self.assertIsNone(handler.redirect_request(request, None, 302, "", {}, destination))
+            self.assertEqual(gate.lookup_advisory("osv", OSV), b"public")
+            public.assert_called_once_with("https://api.osv.dev/v1/vulns/" + OSV)
+            with self.assertRaises(ValueError):
+                gate.lookup_advisory("github", "../elsewhere")
+            self.assertEqual(len(calls), 1)
+            self.assertNotIn("GITHUB_TOKEN", gate.docker_env())
+            self.assertNotIn("GITHUB_TOKEN", gate.scanner_env(self.root))
+            opener.return_value.open = Mock(side_effect=HTTPError(request.full_url, 403, token, {}, None))
+            record = adv.Aliases(gate.lookup_advisory).record("github", GHSA)
+            self.assertIn("403", record["error"])
+            self.assertNotIn(token, json.dumps(record))
+        for url in (*gate.KEV_SOURCES, gate.PINS["release"] + gate.PINS["assets"]["Darwin-arm64"]["name"],
+                    adv.SOURCES["osv"] + OSV):
+            response = io.BytesIO(b"public")
+            response.url = url
+            with patch.dict(os.environ, {"GITHUB_TOKEN": token}), \
+                 patch.object(gate, "urlopen", return_value=response) as fetch:
+                self.assertEqual(gate.download(url), b"public")
+                self.assertFalse(fetch.call_args.args[0].has_header("Authorization"))
+        with patch.dict(os.environ, {"GITHUB_TOKEN": ""}), \
+             patch.object(gate, "build_opener", return_value=FakeOpener()):
+            gate.lookup_advisory("github", GHSA)
+            self.assertFalse(calls[-1].has_header("Authorization"))
+
+
     def test_composite_action(self):
         from re import findall
         action = (Path(__file__).resolve().parents[2] / ".github/actions/plugin-image-security/action.yml").read_text()
@@ -302,6 +346,7 @@ class GateTest(unittest.TestCase):
         self.assertRegex(action, r"actions/upload-artifact@[a-f0-9]{40}")
         self.assertIn("if-no-files-found: error", action)
         self.assertNotIn("continue-on-error", action)
+        self.assertIn("GITHUB_TOKEN: ${{ github.token }}", action)
         self.assertIn("gate.py", action)
         self.assertIn(" scan ", action)
 

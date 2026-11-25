@@ -14,7 +14,8 @@ import sys
 import tarfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
-from urllib.request import Request, urlopen
+from urllib.error import HTTPError
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 import advisories as adv
 from advisories import demand, string
@@ -75,9 +76,48 @@ def download(url):
         return response.read()
 
 
+class RejectRedirect(HTTPRedirectHandler):
+    """A GitHub credential is valid only on the exact requested advisory URL."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def lookup_advisory(source, identifier):
+    if source == "osv":
+        return download(adv.SOURCES["osv"] + adv.advisory_id(identifier))
+    demand(source == "github" and adv.GHSA.fullmatch(identifier), "invalid GitHub advisory lookup")
+    url = adv.SOURCES["github"] + identifier
+    request = Request(url, headers={"User-Agent": "claude-essentials-image-security/1"})
+    token = os.environ.get("GITHUB_TOKEN")
+    if token:
+        demand(token.isascii() and token.isprintable() and not any(c.isspace() for c in token),
+               "invalid GitHub token encoding")
+        request.add_unredirected_header("Authorization", "Bearer " + token)
+    try:
+        with build_opener(RejectRedirect()).open(request, timeout=60) as response:
+            return response.read()
+    except HTTPError as exc:
+        # Persist only the status and rate-limit headers. A peer controls the reason text.
+        headers = {name: exc.headers.get(name) for name in
+                   ("X-RateLimit-Remaining", "X-RateLimit-Reset", "Retry-After") if exc.headers
+                   and str(exc.headers.get(name, "")).isdigit()}
+        limited = exc.code == 429 or (exc.code == 403 and
+                                      (headers.get("X-RateLimit-Remaining") == "0" or "rate limit" in str(exc).lower()))
+        exc.close()
+        raise HTTPError(url, exc.code, "rate limit exceeded" if limited else "GitHub advisory request failed",
+                        headers, None) from None
+    except (OSError, HTTPException, ValueError) as exc:
+        raise OSError(f"GitHub advisory transport failed ({type(exc).__name__})") from None
+
+
+def docker_env():
+    return {key: value for key, value in os.environ.items() if key != "GITHUB_TOKEN"}
+
+
 def inspect_image(ref):
     cmd = ["docker", "image", "inspect", "--", ref]
-    result = subprocess.run(cmd, capture_output=True, check=False, timeout=90)
+    result = subprocess.run(cmd, env=docker_env(), capture_output=True, check=False, timeout=90)
     demand(result.returncode == 0, result.stderr.decode(errors="replace").strip() or "docker inspect failed")
     images = json.loads(result.stdout)
     demand(isinstance(images, list) and len(images) == 1, "expected one local image")
@@ -104,7 +144,7 @@ def export_candidate(ref, target, directory):
     write_json(directory / "reports/candidate.json", candidate)
     check_candidate(candidate, target)
     result = subprocess.run(["docker", "image", "save", "--output", str(directory / "candidate.tar"),
-                             "--", candidate["id"]], capture_output=True, timeout=1800)
+                             "--", candidate["id"]], env=docker_env(), capture_output=True, timeout=1800)
     demand(result.returncode == 0, "docker save: " + result.stderr.decode(errors="replace"))
     return candidate
 
@@ -300,7 +340,7 @@ def scan(args, directory):
     write_json(reports / "decision.json", decision)
     errors, findings = [], decision["findings"]
     (directory / "tmp").mkdir()
-    aliases = adv.Aliases(lambda source, identifier: download(adv.SOURCES[source] + identifier))
+    aliases = adv.Aliases(lookup_advisory)
 
     def step(name, work):
         try:

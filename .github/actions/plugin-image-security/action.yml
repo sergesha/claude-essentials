@@ -19,6 +19,7 @@ runs:
     - id: scan
       shell: bash
       env:
+        GITHUB_TOKEN: ${{ github.token }}
         PRODUCER: ${{ inputs.producer }}
         IMAGE: ${{ inputs.image }}
         PLATFORM: ${{ inputs.platform }}
