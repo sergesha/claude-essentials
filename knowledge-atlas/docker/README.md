@@ -2,8 +2,8 @@
 
 The release target is Linux ARM64 on a native ARM64 Docker host. Image delivery
 requires a published, anonymously verified digest for the selected Atlas release.
-The 0.4.0 image and its native pipeline are pending qualification. Use the
-release's recorded image digest when available.
+The 0.4.0 public image passed anonymous pull and native pipeline qualification.
+Use its [recorded digest](../docs/verification.md#atlas-040-public-delivery).
 
 ## Pull the release image
 
@@ -13,7 +13,7 @@ Choose one project name for this service, its data and its provider login state.
 ```sh
 atlas_compose_file="$PWD/knowledge-atlas/docker/compose.yaml"
 atlas_compose() { docker compose -p atlas -f "$atlas_compose_file" "$@"; }
-export ATLAS_IMAGE_DIGEST='sha256:REPLACE_WITH_THE_QUALIFIED_RELEASE_DIGEST'
+export ATLAS_IMAGE_DIGEST='sha256:b8e5f1d2e7c02ffa2a22ce7f5812642f681af3a97385c9e3d32177e60d0b5653'
 atlas_compose pull atlas
 atlas_compose run --rm --no-deps atlas prepare
 ```
