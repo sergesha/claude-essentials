@@ -117,7 +117,9 @@ def prepared_identity_fixture(tmp_path, monkeypatch):
     components = {name: 'a' * 40 for name in ('wiki_llm', 'utopia_extract', 'terminusdb', 'vectorlink')}
     (assets / 'components.json').write_text(json.dumps({name: {'revision': value} for name, value in components.items()}))
     suffix = '.dylib' if platform_target() == 'macos-arm64' else '.so'
-    files = {'model/tokenizer.json': b'model fixture', 'terminusdb/terminusdb': b'entrypoint',
+    (assets / 'patches').mkdir()
+    (assets / 'patches/manifest.json').write_text(json.dumps({'swipl': {'after_sha256': digest(b'patched browser')}}))
+    files = {runtime.SWI_BROWSER: b'patched browser', 'model/tokenizer.json': b'model fixture', 'terminusdb/terminusdb': b'entrypoint',
              'native-tools/swipl/bin/swipl': b'swipl', 'extract/target/debug/poc9-extract': b'extractor',
              'terminusdb/src/rust/librust' + suffix: b'patched library',
              'wiki/mcp/local_server.py': b'wiki fixture', 'wiki/mcp/vaultfs/sqlite.py': b'vault fixture',
@@ -206,3 +208,14 @@ def test_native_prepare_without_docker(tmp_path, monkeypatch, capsys):
     assert cli.main() == 1
     assert json.loads(capsys.readouterr().err)['component'] == 'git'
     assert not (tmp_path / 'runtime').exists()
+
+def test_self_recorded_old_swi_browser_rejected(prepared_identity_fixture):
+    from knowledge_atlas import runtime
+    root, _ = prepared_identity_fixture
+    (root / runtime.SWI_BROWSER).write_bytes(b'old browser')
+    manifest = json.loads((root / 'runtime.json').read_text())
+    manifest['artifacts'][runtime.SWI_BROWSER] = runtime._hash(root / runtime.SWI_BROWSER)
+    (root / 'runtime.json').write_text(json.dumps(manifest))
+    with pytest.raises(RuntimeMismatch) as error:
+        validate_runtime(RuntimeConfig(root))
+    assert error.value.component == runtime.SWI_BROWSER

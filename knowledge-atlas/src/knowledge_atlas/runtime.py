@@ -67,11 +67,14 @@ def _check_hash(path: Path, expected: str, component: str):
         raise RuntimeMismatch(component, 'artifact_mismatch', 'SHA-256 does not match pinned identity')
 
 
+SWI_BROWSER = 'native-tools/swipl/lib/swipl/library/www_browser.pl'
+
+
 def _required_artifacts(target: str) -> tuple[str, ...]:
     suffix = '.dylib' if target == 'macos-arm64' else '.so'
     return ('terminusdb/terminusdb', 'native-tools/swipl/bin/swipl', 'extract/target/debug/poc9-extract',
             'terminusdb/src/rust/librust' + suffix, 'wiki/mcp/local_server.py',
-            'wiki/mcp/vaultfs/sqlite.py', 'chunking.py')
+            'wiki/mcp/vaultfs/sqlite.py', 'chunking.py', SWI_BROWSER)
 
 
 def _python_packages(root: Path) -> dict[str, str]:
@@ -125,6 +128,8 @@ def _validate_runtime(config: RuntimeConfig, *, check_model: bool) -> RuntimeIde
         if components.get(name) != pins[name]['revision']:
             raise RuntimeMismatch(name, 'artifact_mismatch', 'pinned source revision required')
     required = _required_artifacts(target)
+    browser_pin = _json(_assets() / 'patches/manifest.json', 'pinned patches')['swipl']
+    _check_hash(root / SWI_BROWSER, browser_pin['after_sha256'], SWI_BROWSER)
     recorded = manifest.get('artifacts', {})
     for name in required:
         digest = recorded.get(name)
@@ -248,6 +253,14 @@ def _build_runtime(config: RuntimeConfig, *, image_revision: str | None = None) 
             'e42cc098f7b8a6051c4f79a99b55162d467098aba60f69649bdc7583f0734b57')
     with tarfile.open(swi_archive) as archive:
         archive.extractall(root / 'sources', filter='data')
+    source = root / 'sources/swipl-10.0.2'
+    browser = source / 'library/www_browser.pl'
+    browser_pin = patches['swipl']
+    patch = assets / 'patches' / browser_pin['patch']
+    _check_hash(patch, browser_pin['sha256'], 'SWI browser patch')
+    _check_hash(browser, browser_pin['before_sha256'], 'SWI browser source')
+    run('swipl', [tools['git'], 'apply', patch], source)
+    _check_hash(browser, browser_pin['after_sha256'], 'patched SWI browser source')
     swi = root / 'native-tools/swipl'
     run('swipl', [tools['cmake'], '-S', root / 'sources/swipl-10.0.2', '-B', root / 'swipl-build',
                   '-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release', f'-DCMAKE_INSTALL_PREFIX={swi}',

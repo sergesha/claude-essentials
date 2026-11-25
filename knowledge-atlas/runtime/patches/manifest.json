@@ -19,5 +19,13 @@
     "revision": "aac3e6493306b7fff3b09cb181ca93918e93d0e6",
     "patch": "wiki-requirements.patch",
     "sha256": "5df01bc57d384877cb37d372f16531560aa77d4d40b3eef9729bce4f29d86ef3"
+  },
+  "swipl": {
+    "version": "10.0.2",
+    "upstream_fix": "13adef3c445b5a2b276d962b40a9156d55b774b1",
+    "patch": "swipl-browser.patch",
+    "sha256": "68e7aa13cd1ee91fd2109a0d663c317bd399bf1f63391890a2f5860dd80546f8",
+    "before_sha256": "48553cb33a4660f112a83e73097c4591ea5059864ac4235af3dc24e425cdab0f",
+    "after_sha256": "4964d0c2f14238baa85c98626e73168a8a9f2b2bf527e931cc42b25015f1ea38"
   }
 }
