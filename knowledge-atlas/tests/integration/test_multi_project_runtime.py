@@ -1,5 +1,6 @@
 """One production service with three independently routed native projections."""
 from contextlib import contextmanager, nullcontext
+from datetime import datetime, timezone
 import asyncio
 import hashlib
 import json
@@ -76,7 +77,7 @@ def completed(client, operation):
 
 def candidate(path, label, previous=None):
     store = GitStore(path)
-    now = '2026-11-14T01:00:00Z'
+    now = datetime.now(timezone.utc).isoformat()
     wiki = {'sources': [], 'pages': [{'id': 'page', 'path': '', 'filename': 'notes',
                                      'content': label}], 'references': []}
     extraction = {'entities': [], 'statements': []}
@@ -91,7 +92,7 @@ def candidate(path, label, previous=None):
 def decision(identity, proposed, previous=None):
     return mutation('candidate.decide', identity, expected=previous, candidate=proposed, action='accept',
                     actor='Fixture', kind='synthetic', reason='Independent native projection',
-                    decided_at='2026-11-14T02:00:00Z')
+                    decided_at=datetime.now(timezone.utc).isoformat())
 
 
 def published(result):
@@ -156,6 +157,8 @@ def search(client, identity, query, publication=None):
 
 def test_production_two_projects_independent_and_restart(runtime_configuration, native_graph_session,
                                                          tmp_path, monkeypatch):
+    # Composition records local time. Native xsd:dateTime output uses UTC.
+    monkeypatch.setenv('TZ', 'UTC-01')
     runtime = Path(runtime_configuration['runtime_root'])
     packaged = (runtime / 'runtime.json').resolve() == Path('/opt/atlas-seed/runtime.json')
     with tempfile.TemporaryDirectory(prefix='atlas-multiproject-') as private:

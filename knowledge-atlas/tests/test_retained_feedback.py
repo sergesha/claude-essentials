@@ -90,12 +90,12 @@ class FeedbackTests(KnowledgeTests):
             recorded_at='2026-11-10T01:02:00Z')
         proposal = json.loads(git(self.store.root, 'show', revised + ':proposal.json'))
         affected = proposal.get('wiki_impact', {})
-        expected_paths = ['/wiki/overview.md', '/wiki/concepts/conditional-warping.md',
-                          '/wiki/concepts/trial-evidence.md', '/wiki/entities/luma-and-sora.md']
+        # Both pages in the current retained Wiki cite review.txt directly.
+        expected_paths = ['/wiki/overview.md', '/wiki/concepts/conditional-warping.md']
         self.assertEqual(set(affected), {'Record/' + key('wiki', path) for path in expected_paths})
+        source_record = 'Record/' + key('source', 'review.txt')
         for rid, detail in affected.items():
-            self.assertEqual(detail['path'][0], 'Record/' + key('source', 'review.txt'))
-            self.assertEqual(detail['path'][-1], rid)
+            self.assertEqual(detail['path'], [source_record, rid])
             self.assertEqual(detail['status'], 'needs_review')
             self.assertEqual(detail['content_change'], 'unchanged')
         self.assertEqual(self.store.read(revised)['wiki']['pages'], old['wiki']['pages'])

@@ -1,5 +1,5 @@
 """Materialize accepted Git content in one native database, retaining old commits."""
-from datetime import datetime
+from datetime import datetime, timezone
 import hashlib
 import json
 import math
@@ -23,7 +23,11 @@ def canonical_record(record):
             result[field] = result[field].split('/data/')[-1]
     for field in ('recorded_at', 'accepted_at'):
         if field in result:
-            result[field] = datetime.fromisoformat(result[field].replace('Z', '+00:00')).isoformat()
+            instant = datetime.fromisoformat(result[field].replace('Z', '+00:00'))
+            # TerminusDB serializes offset-aware xsd:dateTime values in UTC.
+            if instant.tzinfo is not None:
+                instant = instant.astimezone(timezone.utc)
+            result[field] = instant.isoformat()
     return result
 
 
