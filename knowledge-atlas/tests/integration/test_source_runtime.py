@@ -27,12 +27,22 @@ class NativeSourceTests(unittest.TestCase):
                 second_source.write_text('The second trial used dry cleaning.')
                 initial = 'Wet cleaning in first trial.[^1]\nDry cleaning in second trial.[^2]\n\n[^1]: first.txt\n[^2]: second.txt'
                 corrected = 'Dry cleaning in second trial.[^2]\n\n[^2]: second.txt'
-                first = await WikiStage(root/'initial').run(
-                    [{'path':str(first_source)}, {'path':str(second_source)}],
-                    [{'path':'/wiki/','title':'Trials','content':initial,'tags':['trial']}],
-                    recorded_at='2026-11-13T00:00:00Z')
-                first['sources'][0].update(source_id='one', name='note.txt')
-                first['sources'][1].update(source_id='two', name='note.txt')
+                async def create_trial_page(request):
+                    async with stdio_client(StdioServerParameters(**request['mcp'])) as (read, write):
+                        async with ClientSession(read, write) as session:
+                            await session.initialize()
+                            result = await session.call_tool('create', {
+                                'knowledge_base': request['knowledge_base'], 'path': '/wiki/',
+                                'title': 'Trials', 'content': initial, 'tags': ['trial'],
+                            })
+                            self.assertFalse(result.isError, result)
+                            self.assertNotIn('Error:', str(result))
+                    return {'status': 'completed'}
+
+                first = await WikiStage(root/'initial').run_agent([
+                    {'path': str(first_source), 'source_id': 'one', 'name': 'note.txt'},
+                    {'path': str(second_source), 'source_id': 'two', 'name': 'note.txt'},
+                ], create_trial_page, recorded_at='2026-11-13T00:00:00Z')
                 async def agent(request):
                     self.assertEqual(request['removed_sources'], ['first.txt'])
                     async with stdio_client(StdioServerParameters(**request['mcp'])) as (read,write):
@@ -56,6 +66,7 @@ class NativeSourceTests(unittest.TestCase):
                 self.assertNotIn('Wet cleaning', second['pages'][0]['content'])
                 self.assertIn('Dry cleaning', second['pages'][0]['content'])
                 self.assertIn('Wet cleaning', first['pages'][0]['content'])
+                self.assertEqual(second['pages'][0]['id'], first['pages'][0]['id'])
                 self.assertEqual(second['sources'][0]['id'], first['sources'][1]['id'])
                 self.assertEqual(second['sources'][0]['recorded_at'], first['recorded_at'])
                 self.assertFalse((root/'update/first.txt').exists())
@@ -111,6 +122,7 @@ class NativeSourceTests(unittest.TestCase):
             self.assertTrue(all(row['recorded_at'] == saved['wiki']['recorded_at'] for row in saved['wiki']['sources']))
             self.assertEqual(saved['manifest']['status'],'candidate')
             self.assertIsNone(Publications(store).ready())
+            self.assertEqual(saved['extraction']['passage_version'], 1)
             self.assertEqual(len(saved['extraction']['model_calls']),1)
             self.assertTrue((evidence/'native/execution.json').is_file())
 
@@ -145,7 +157,7 @@ class NativeSourceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve(); evidence = root/'attempt'; evidence.mkdir()
             store = GitStore(root/'atlas')
-            wiki = json.loads((Path(__file__).resolve().parents[1]/'fixtures/evidence/wiki-initial-final.json').read_text())
+            wiki = json.loads((Path(__file__).resolve().parents[1]/'fixtures/evidence/wiki-current.json').read_text())
             original = store.snapshot(wiki, {'entities':[], 'statements':[]}, {}, recorded_at='2026-11-13T00:00:00Z')['commit']
             previous = store.read(original)
             request = ActionRequest('candidate.revise', atlas_id=register_native_project(root, store), request_id=str(uuid.uuid4()), payload={
@@ -158,6 +170,8 @@ class NativeSourceTests(unittest.TestCase):
             self.assertNotEqual(result.data['candidate'], original)
             self.assertEqual(store.read(original), previous)
             self.assertIn('Explicit correction note', revised['wiki']['pages'][0]['content'])
+            self.assertEqual(revised['wiki']['sources'], previous['wiki']['sources'])
+            self.assertEqual(revised['wiki']['pages'][0]['id'], previous['wiki']['pages'][0]['id'])
             self.assertIsNone(Publications(store).ready())
 
     def test_native_process_failure_retains_evidence_without_host_calls(self):
@@ -186,25 +200,26 @@ class NativeSourceTests(unittest.TestCase):
         from unittest.mock import patch
         from knowledge_atlas.native_pipeline import execute_native
         from knowledge_atlas.core.git_store import GitStore
+        from knowledge_atlas.core.graph_stage import records_for
         from knowledge_atlas.core.publication import Publications
         from knowledge_atlas.core.relations import resolve_relations
-        raw = {'statements':[{'subject':'Archive','object':'Entry','value':None,'phrase':'indexes',
-                             'quote':'Archive indexes Entry.','qualifiers':[],'when':None,'ended':None}]}
+        fixture = Path(__file__).resolve().parents[1]/'fixtures/evidence'
+        raw = json.loads((fixture/'extraction-current.json').read_text())
         def pending_model(request):
             if request['operation'] == 'phrase': return {'b':[[0,None,None]]}
-            if request['operation'] == 'proposal': return {'p':[{'kind':'property','key':'indexes','label':'indexes',
-                'definition':'Archive maintains a lookup index for entry; subject archive, object entry.',
+            if request['operation'] == 'proposal': return {'p':[{'kind':'property','key':'outperforms','label':'outperforms',
+                'definition':'One machine performs better than another in the stated criterion.',
                 'value':False,'domains':[],'ranges':[],'s':[0],'k':[],'q':[]}], 'existing':[]}
             return {'decision':'human','uncertain':True,'reason':'Needs explicit type decision','question':'Is lookup distinct?'}
         class AlignmentModel:
             def __init__(self, **_): pass
             def __call__(self, request):
                 if request['operation'] != 'phrase': raise AssertionError(request['operation'])
-                return {'b':[[0,'indexes','forward']]}
+                return {'b':[[0,'outperforms','forward']]}
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve(); evidence=root/'attempt'; evidence.mkdir()
             store = GitStore(root/'atlas')
-            wiki = json.loads((Path(__file__).resolve().parents[1]/'fixtures/evidence/wiki-initial-final.json').read_text())
+            wiki = json.loads((fixture/'wiki-current.json').read_text())
             pending = resolve_relations(raw, pending_model)
             before = store.snapshot(wiki,raw,{},recorded_at='2026-11-13T00:00:00Z',relation_bundle=pending)['commit']
             payload = {'request':{'action':'type.decide','atlas_id':register_native_project(root, store),'payload':{'candidate':before,
@@ -216,5 +231,10 @@ class NativeSourceTests(unittest.TestCase):
             after = store.read(result.data['candidate'])
             self.assertEqual(after['relations']['relations'][0]['status'],'resolved')
             self.assertEqual(after['manifest']['status'],'candidate')
-            self.assertEqual(store.read(before)['relations']['relations'][0]['status'],'needs_human')
+            original = store.read(before)
+            self.assertEqual(original['relations']['relations'][0]['status'], 'needs_human')
+            modal = next(r for r in records_for(original, before) if r['kind'] == 'statement'
+                         and json.loads(r['payload']).get('modality') == ['requires'])
+            retained = next(r for r in records_for(after, result.data['candidate']) if r['@id'] == modal['@id'])
+            self.assertEqual(retained['payload'], modal['payload'])
             self.assertIsNone(Publications(store).ready())

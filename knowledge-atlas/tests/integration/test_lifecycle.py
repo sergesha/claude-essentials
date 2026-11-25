@@ -94,8 +94,8 @@ async def _cycle(package, config_path, native, root, host, profiles):
         child = GitStore(root/'child')
         created_child = await call('atlas.create', {'path':str(child.base)}, mutation=True)
         atlas_id = child_id = created_child['data']['atlas_id']
-        wiki = json.loads((package/'tests/fixtures/evidence/wiki-initial-final.json').read_text())
-        extraction = json.loads((package/'tests/fixtures/evidence/extractor-output.json').read_text())
+        wiki = json.loads((package/'tests/fixtures/evidence/wiki-current.json').read_text())
+        extraction = json.loads((package/'tests/fixtures/evidence/extraction-current.json').read_text())
         first_child = child.snapshot(wiki, extraction, {}, recorded_at=now())['commit']
         reviewed_child = await accept(first_child)
         child_publications = [ready]

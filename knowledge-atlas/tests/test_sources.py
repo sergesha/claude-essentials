@@ -17,8 +17,8 @@ def test_duplicate_filenames_keep_distinct_source_ids(tmp_path):
 
 
 def test_omission_preserves_explicit_removal_reconciles(tmp_path):
-    previous = {'sources':[{'source_id':'one','filename':'old-one.txt'},
-                           {'source_id':'two','filename':'old-two.txt'}]}
+    previous = {'sources':[{'source_id':'one','filename':'old-one.txt', 'recorded_at':'2026-11-12T00:00:00Z'},
+                           {'source_id':'two','filename':'old-two.txt', 'recorded_at':'2026-11-12T00:00:00Z'}]}
     omission = prepare_sources([], [], previous, tmp_path/'omission')
     assert omission['remove_sources'] == []
     removal = prepare_sources([], ['one'], previous, tmp_path/'removal')
@@ -29,7 +29,7 @@ def test_omission_preserves_explicit_removal_reconciles(tmp_path):
 
 
 def test_source_update_keeps_prior_internal_name_and_explicit_null(tmp_path):
-    previous = {'sources':[{'source_id':'one','filename':'retained.txt'}]}
+    previous = {'sources':[{'source_id':'one','filename':'retained.txt', 'recorded_at':'2026-11-12T00:00:00Z'}]}
     prepared = prepare_sources([{'source_id':'one','name':'new.md','content':'Updated.', 'valid_to':None}], [], previous, tmp_path/'input')
     assert Path(prepared['sources'][0]['path']).name == 'retained.txt'
     assert prepared['sources'][0]['valid_to'] is None
@@ -47,10 +47,10 @@ def test_source_submission_reports_missing_runtime_without_model_calls(tmp_path)
     assert error.value.code == 'runtime_unavailable'
 
 
-def test_imported_filename_cannot_collide_with_new_source_id(tmp_path):
+def test_retained_filename_cannot_collide_with_new_source_id(tmp_path):
     import hashlib
     existing = hashlib.sha256(b'new').hexdigest()+'.txt'
-    previous = {'sources':[{'source_id':'old','filename':existing}]}
+    previous = {'sources':[{'source_id':'old','filename':existing, 'recorded_at':'2026-11-12T00:00:00Z'}]}
     with pytest.raises(AtlasError, match='source_name_conflict'):
         prepare_sources([{'source_id':'new','name':'note.txt','content':'new bytes'}], [], previous, tmp_path/'input')
     assert not (tmp_path/'input').exists()
@@ -61,7 +61,7 @@ def test_completed_wiki_reuse_cannot_ignore_source_removal(tmp_path):
     import json
     from knowledge_atlas.core.ingest import ingest
     from knowledge_atlas.core.git_store import GitStore
-    wiki = json.loads((Path(__file__).parent/'fixtures/evidence/wiki-initial-final.json').read_text())
+    wiki = json.loads((Path(__file__).parent/'fixtures/evidence/wiki-current.json').read_text())
     removed = wiki['sources'][0]['filename']
     with pytest.raises(ValueError, match='removal'):
         asyncio.run(ingest(GitStore(tmp_path/'atlas'), tmp_path/'evidence', [],
@@ -114,3 +114,17 @@ def test_deciding_a_completed_type_question_returns_a_domain_error(tmp_path, mon
             'request':{'action':'type.decide', 'atlas_id':atlas_id, 'payload':{'candidate':'a'*40, 'decision_id':'question',
                 'action':'reject', 'actor':'Fixture','reason':'Already handled','recorded_at':'2026-11-13T01:00:00Z'}}})
     assert caught.value.code == 'type_decision_unavailable' and caught.value.status == 422
+
+
+@pytest.mark.parametrize('field', ['source_id', 'recorded_at'])
+def test_prepare_sources_requires_retained_identity_and_time(tmp_path, field):
+    import json
+
+    previous = json.loads((Path(__file__).parent/'fixtures/evidence/wiki-current.json').read_text())
+    source = previous['sources'][0]
+    del source[field]
+    destination = tmp_path/'input'
+    with pytest.raises((AtlasError, ValueError), match=field):
+        prepare_sources([], [], previous, destination)
+    assert not destination.exists()
+    assert field not in source

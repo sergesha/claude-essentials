@@ -15,8 +15,8 @@ class PackageTests(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         self.home=Path(self.tmp.name)
-        self.wiki=json.loads((ROOT/'evidence/wiki-initial-final.json').read_text())
-        self.extraction=json.loads((ROOT/'evidence/extractor-output.json').read_text())
+        self.wiki=json.loads((ROOT/'evidence/wiki-current.json').read_text())
+        self.extraction=json.loads((ROOT/'evidence/extraction-current.json').read_text())
         self.parent=GitStore(self.home/'parent');self.child=GitStore(self.home/'child')
         self.base=self.snapshot(self.parent,0)
         self.wrapper=publish(self.child,self.snapshot(self.child,1))

@@ -65,8 +65,8 @@ class KnowledgeTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
         self.store = GitStore(Path(self.tmp.name)/'store')
-        self.base = self.store.snapshot(json.loads((ROOT/'evidence/wiki-initial-final.json').read_text()),
-            json.loads((ROOT/'evidence/extractor-output.json').read_text()), {}, recorded_at='2026-11-10T00:00:00Z')['commit']
+        self.base = self.store.snapshot(json.loads((ROOT/'evidence/wiki-current.json').read_text()),
+            json.loads((ROOT/'evidence/extraction-current.json').read_text()), {}, recorded_at='2026-11-10T00:00:00Z')['commit']
         self.profile = json.loads((ROOT/'embedding-profile.json').read_text())
 
     def propose(self, base, entries, publication=None):

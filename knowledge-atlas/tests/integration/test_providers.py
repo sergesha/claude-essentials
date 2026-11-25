@@ -42,16 +42,19 @@ def _exercise(profiles, root):
     from knowledge_atlas.core.model_config import ConfiguredModels
     from knowledge_atlas.core.wiki_stage import WikiStage
     from knowledge_atlas.core.extract_stage import extract_wiki, native_call
-    source = root/'source.txt'
+    from knowledge_atlas.actions.sources import prepare_sources
     fixture = Path(__file__).resolve().parents[1]/'fixtures/fixtures/printlab/review.txt'
     text = fixture.read_text()
     excerpt = text[text.index('Trial P-31 failed'):text.index(' Lesson:')]
-    source.write_text(excerpt)
+    sources = prepare_sources([
+        {'source_id': 'printlab-p31', 'name': fixture.name, 'content': excerpt},
+    ], [], {}, root/'input')['sources']
     (root/'cli-discovery.json').write_text(json.dumps({name:shutil.which(name) for name in ('claude','codex')}))
     models = ConfiguredModels(config=profiles,evidence=root/'model-calls')
-    wiki=asyncio.run(WikiStage(root/'wiki').run_agent([{'path':str(source)}],models.wiki,
+    wiki=asyncio.run(WikiStage(root/'wiki').run_agent(sources, models.wiki,
         recorded_at='2026-11-13T00:00:00Z'))
     (root/'wiki.json').write_text(json.dumps(wiki,indent=2))
+    assert wiki['sources'][0]['source_id'] == 'printlab-p31'
     assert wiki['references'], 'native Wiki must retain source references'
     # One real generated page bounds this provider smoke; lifecycle covers all pages.
     page=next(p for p in wiki['pages'] if 'P-31' in p['content'])

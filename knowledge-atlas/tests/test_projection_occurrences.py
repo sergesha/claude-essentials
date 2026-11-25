@@ -9,7 +9,7 @@ def snapshot(count):
     statement={'subject':'the archive','object':'public release','value':None,
         'phrase':'has not approved','quote':'The archive has not approved public release.',
         'qualifiers':[],'when':None,'ended':None}
-    extraction={'entities':[{'name':'the archive','kind':'archive','named':False},
+    extraction={'passage_version':1, 'entities':[{'name':'the archive','kind':'archive','named':False},
         {'name':'public release','kind':'release','named':False}],
         'statements':[copy.deepcopy(statement) for _ in range(count)]}
     rows=[]
@@ -49,8 +49,25 @@ def test_source_recording_time_survives_later_decisions():
     data = snapshot(0)
     data['wiki']['recorded_at'] = '2026-11-12T00:00:00Z'
     data['wiki']['sources'] = [
-        {'id':'one', 'filename':'one.txt', 'recorded_at':'2026-11-11T00:00:00Z'},
-        {'id':'legacy', 'filename':'legacy.txt'}]
-    data['sources'] = {'one.txt': b'one', 'legacy.txt': b'legacy'}
-    times = {r['text']: r['recorded_at'] for r in records_for(data,'a'*40) if r['kind']=='source'}
-    assert times == {'one':'2026-11-11T00:00:00Z','legacy':'2026-11-12T00:00:00Z'}
+        {'id':'native-one', 'source_id':'one', 'filename':'one.txt',
+         'recorded_at':'2026-11-11T00:00:00Z'}]
+    data['sources'] = {'one.txt': b'one'}
+    source = next(r for r in records_for(data, 'a'*40) if r['kind']=='source')
+    assert source['@id'] == 'Record/'+key('source', 'one.txt')
+    assert source['recorded_at'] == '2026-11-11T00:00:00Z'
+    assert json.loads(source['payload'])['source_id'] == 'one'
+    assert not {'source_time', 'valid_from', 'valid_to'} & source.keys()
+
+
+def test_empty_and_composition_only_roots_project():
+    compiled = snapshot(0)
+    compiled.pop('relations')
+    compiled['extraction'] = {'entities': [], 'statements': []}
+    assert records_for(compiled, 'a'*40) == []
+    root = {'manifest': {**compiled['manifest'], 'package_id': 'parent', 'modules': {
+        'child': {'kind': 'atlas'},
+    }}, 'included_packages': [{
+        'snapshot': compiled, 'commit': 'b'*40, 'mounts': ['child'],
+        'inclusions': [{'mount': 'child', 'publication': 'c'*40}],
+    }]}
+    assert records_for(root, 'a'*40) == []

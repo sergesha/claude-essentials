@@ -19,8 +19,8 @@ class PublicationTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.store = GitStore(Path(self.tmp.name) / 'store')
-        self.wiki = json.loads((ROOT / 'evidence/wiki-initial-final.json').read_text())
-        self.extract = json.loads((ROOT / 'evidence/extractor-output.json').read_text())
+        self.wiki = json.loads((ROOT / 'evidence/wiki-current.json').read_text())
+        self.extract = json.loads((ROOT / 'evidence/extraction-current.json').read_text())
         self.candidate = self.store.snapshot(self.wiki, self.extract, {}, recorded_at='2026-11-09T21:00:00Z')['commit']
         self.pub = Publications(self.store)
 

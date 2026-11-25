@@ -9,6 +9,9 @@ import urllib.parse
 import urllib.request
 import urllib.error
 
+from .extract_stage import validate_retained_extraction
+from .wiki_stage import validate_source_records
+
 
 def key(kind,value):
     return kind+'-'+hashlib.sha256(value.encode()).hexdigest()[:24]
@@ -23,6 +26,8 @@ def _local_records(snapshot,commit):
         extract={'entities':[], 'statements':[]}
     else:
         wiki=snapshot['wiki'];extract=snapshot['extraction']
+        validate_source_records(wiki['sources'])
+        validate_retained_extraction(extract)
     records=[];native_ids={};entities={}
     bundle=snapshot.get('relations')
     if bundle:
@@ -40,7 +45,7 @@ def _local_records(snapshot,commit):
     for source in wiki['sources']:
         k=key('source',source['filename']);native_ids[source['id']]='Record/'+k
         doc=record(k,'source',snapshot['sources'][source['filename']].decode('utf-8'),source)
-        doc['recorded_at'] = source.get('recorded_at') or wiki.get('recorded_at') or manifest['recorded_at']
+        doc['recorded_at'] = source['recorded_at']
         for field in ('source_time','valid_from','valid_to'):
             if source.get(field):doc[field]=source[field]
     for page in wiki['pages']:
@@ -64,7 +69,7 @@ def _local_records(snapshot,commit):
         qualifiers = statement.get('qualifiers') or []
         pairs = qualifiers.items() if isinstance(qualifiers, dict) else qualifiers
         moods = [pair[1] for pair in pairs if isinstance(pair, (tuple, list)) and len(pair) == 2 and pair[0] == 'mood']
-        payload = {**statement, 'modality': moods} if moods and extract.get('passage_version', 0) >= 1 else statement
+        payload = {**statement, 'modality': moods} if moods else statement
         doc=record(k,'statement',quoted,payload,links)
         statement_ids[index]=doc['@id']
         if bundle and relation_rows[index]['status']!='resolved':doc['status']='candidate'

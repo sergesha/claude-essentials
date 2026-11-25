@@ -37,8 +37,8 @@ class RelocationTests(unittest.TestCase):
         import tempfile
         from knowledge_atlas.core.git_store import GitStore
         fixtures = Path(__file__).parent / 'fixtures'
-        wiki = json.loads((fixtures / 'evidence/wiki-initial-final.json').read_text())
-        extraction = json.loads((fixtures / 'evidence/extractor-output.json').read_text())
+        wiki = json.loads((fixtures / 'evidence/wiki-current.json').read_text())
+        extraction = json.loads((fixtures / 'evidence/extraction-current.json').read_text())
         with tempfile.TemporaryDirectory() as temporary:
             original = Path(temporary) / 'original'
             store = GitStore(original)

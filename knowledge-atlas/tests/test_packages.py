@@ -17,7 +17,7 @@ from test_decisions import context_for, projection
 
 
 def snapshot(store, version=0):
-    wiki = json.loads((Path(__file__).parent/'fixtures/evidence/wiki-initial-final.json').read_text())
+    wiki = json.loads((Path(__file__).parent/'fixtures/evidence/wiki-current.json').read_text())
     return store.snapshot(wiki, {'entities':[], 'statements':[]}, {'version':version},
                           recorded_at='2026-11-13T00:00:00Z')['commit']
 

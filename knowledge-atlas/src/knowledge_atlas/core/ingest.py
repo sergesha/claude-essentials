@@ -4,8 +4,8 @@ import json
 import time
 import threading
 from pathlib import Path
-from .wiki_stage import WikiStage
-from .extract_stage import extract_wiki
+from .wiki_stage import WikiStage, validate_source_records
+from .extract_stage import extract_wiki, validate_retained_extraction
 from .relations import resolve_relations
 from .git_store import git
 from .publication import Publications, commit_files
@@ -40,6 +40,8 @@ async def ingest(store, evidence, sources, *, recorded_at, model, agent=None,
     save('model-calls',calls)
     try:
         previous=store.read(previous_commit) if previous_commit else None
+        if resume_extraction is not None:
+            validate_retained_extraction(resume_extraction)
         binding=None;metadata=None
         if previous:
             pubs=Publications(store);ready=pubs.ready();manifest=previous['manifest']
@@ -63,6 +65,7 @@ async def ingest(store, evidence, sources, *, recorded_at, model, agent=None,
                           'method':'Native Wiki/Utopia update','recorded_at':recorded_at}
         begin=time.monotonic()
         if resume_wiki is not None:
+            validate_source_records(resume_wiki['sources'])
             if remove_sources and (resume_wiki.get('removed_sources') != list(remove_sources)
                     or set(remove_sources) & {source['filename'] for source in resume_wiki.get('sources', [])}):
                 raise ValueError('completed Wiki reuse is incompatible with explicit source removal')

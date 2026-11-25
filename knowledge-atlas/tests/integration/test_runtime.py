@@ -85,8 +85,8 @@ def _check_native_projection(native_graph, tmp_path):
     from knowledge_atlas.core.reader import AtlasReader
     package = Path(__file__).resolve().parents[2]
     fixture = package/'tests/fixtures/evidence'
-    wiki = json.loads((fixture/'wiki-initial-final.json').read_text())
-    extraction = json.loads((fixture/'extractor-output.json').read_text())
+    wiki = json.loads((fixture/'wiki-current.json').read_text())
+    extraction = json.loads((fixture/'extraction-current.json').read_text())
     store = GitStore(native_graph['atlas'])
     pubs = Publications(store)
     profile = json.loads((package/'runtime/embedding-profile.json').read_text())

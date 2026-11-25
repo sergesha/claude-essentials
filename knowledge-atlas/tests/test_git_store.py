@@ -11,8 +11,8 @@ class GitStoreTests(unittest.TestCase):
     def test_snapshot_pins_real_submodules_and_keeps_raw_wiki_and_extraction(self):
         with tempfile.TemporaryDirectory() as tmp:
             store=GitStore(Path(tmp)/'store')
-            wiki=json.loads((ROOT/'evidence/wiki-initial-final.json').read_text())
-            extraction=json.loads((ROOT/'evidence/extractor-output.json').read_text())
+            wiki=json.loads((ROOT/'evidence/wiki-current.json').read_text())
+            extraction=json.loads((ROOT/'evidence/extraction-current.json').read_text())
             result=store.snapshot(wiki,extraction,{'model_response':'retained response'},recorded_at='2026-11-09T21:00:00Z')
             self.assertIsNotNone(result)
             self.assertEqual(result['status'],'candidate')
@@ -30,7 +30,7 @@ class GitStoreTests(unittest.TestCase):
     def test_later_snapshot_does_not_change_old_time_or_contents(self):
         with tempfile.TemporaryDirectory() as tmp:
             store=GitStore(Path(tmp)/'store')
-            wiki=json.loads((ROOT/'evidence/wiki-initial-final.json').read_text())
+            wiki=json.loads((ROOT/'evidence/wiki-current.json').read_text())
             first=store.snapshot(wiki,{'statements':[]},{},recorded_at='2026-11-09T21:00:00Z')
             self.assertIsNotNone(first)
             newer=copy.deepcopy(wiki);newer['recorded_at']='2026-11-10T21:00:00Z'

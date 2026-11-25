@@ -11,6 +11,15 @@ from .extraction_passage import extraction_passage
 from .extract_codec import CODEC_VERSION, COLLECTIONS, prepare_update_request, expand_statement_references
 
 ROOT = Path(__file__).resolve().parents[2]
+PASSAGE_VERSION = 1
+
+
+def validate_retained_extraction(extraction):
+    if any(extraction.get(field) for field in ('entities', 'statements', 'names', 'time', 'model_calls')):
+        version = extraction.get('passage_version')
+        if type(version) is not int or version != PASSAGE_VERSION:
+            raise ValueError(f'unsupported retained extraction passage_version: expected {PASSAGE_VERSION}')
+
 
 def native(mode, payload):
     binary=os.environ.get('POC9_EXTRACT_BIN',str(ROOT/'extract/target/debug/poc9-extract'))
@@ -69,9 +78,11 @@ def extract_wiki(wiki, model, *, previous=None, previous_wiki=None, model_profil
     if model_profile is not None and (not isinstance(model_profile,dict) or not model_profile):
         raise ValueError('model_profile must be a nonempty object or None')
     binary=Path(os.environ.get('POC9_EXTRACT_BIN',str(ROOT/'extract/target/debug/poc9-extract')))
+    if previous is not None:
+        validate_retained_extraction(previous)
     contract={'model_profile':copy.deepcopy(model_profile),
               'native_sha256':hashlib.sha256(binary.read_bytes()).hexdigest(),
-              'codec_version':CODEC_VERSION, 'passage_version':1}
+              'codec_version':CODEC_VERSION, 'passage_version':PASSAGE_VERSION}
     def digest(value):
         return hashlib.sha256(json.dumps(value,sort_keys=True,ensure_ascii=False,separators=(',',':')).encode()).hexdigest()
     previous_calls = {trace['filename']: trace for trace in (previous or {}).get('model_calls', [])
@@ -144,7 +155,7 @@ def extract_wiki(wiki, model, *, previous=None, previous_wiki=None, model_profil
             trace['elapsed_seconds']=time.monotonic()-started
         return filename,parsed,trace
 
-    result={'passage_version':1,'entities':[],'statements':[],'names':[],'time':[],'skipped':0,'truncated':False,'model_calls':[]}
+    result={'passage_version':PASSAGE_VERSION,'entities':[],'statements':[],'names':[],'time':[],'skipped':0,'truncated':False,'model_calls':[]}
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         completed=list(pool.map(process,jobs))
     for filename,parsed,trace in completed:

@@ -12,6 +12,8 @@ import subprocess
 import uuid
 from ..atomic import write_private
 from ..storage import FORMAT
+from .extract_stage import validate_retained_extraction
+from .wiki_stage import validate_source_records
 
 
 def git(repo,*args,binary=False,data=None):
@@ -132,7 +134,17 @@ class GitStore:
 
     def repository_closure(self, commit, *, kind='atlas'):
         """Return verified owners and their local content/receipt retention obligations."""
-        return self._closure(commit, root=None, by_repository=True, kind=kind)
+        closure = self._closure(commit, root=None, by_repository=True, kind=kind)
+        if self.archive_locations is not None:
+            # The archive history walk visits each retained leaf commit directly,
+            # including content whose owning candidate was never published.
+            if kind == 'sources':
+                validate_source_records(json.loads(git(self.root, 'show', commit+':provenance.json')))
+            elif kind == 'knowledge':
+                wiki = json.loads(git(self.root, 'show', commit+':wiki.json'))
+                validate_source_records(wiki['sources'])
+                validate_retained_extraction(json.loads(git(self.root, 'show', commit+':extraction.json')))
+        return closure
 
     def _closure(self, commit, *, root, by_repository, kind='atlas'):
         nodes = {}
@@ -192,6 +204,8 @@ class GitStore:
         from .relations import resolve_relations, validate_bundle
         if datetime.fromisoformat(recorded_at.replace('Z','+00:00')).tzinfo is None:
             raise ValueError('recorded_at requires timezone')
+        validate_source_records(wiki['sources'])
+        validate_retained_extraction(extraction)
         sources={}
         for s in wiki['sources']:
             name=s['filename']
@@ -272,11 +286,14 @@ class GitStore:
             identity=package_identity(path, oid)
             if identity!=mod['package_id']:raise ValueError('package identity mismatch')
             if kind=='sources':
+                validate_source_records(json.loads(git(path, 'show', oid+':provenance.json')))
                 result['sources']={name[4:]:git(path,'show',oid+':'+name,binary=True)
                     for name in git(path,'ls-tree','-r','--name-only',oid,'raw/').splitlines()}
             elif kind=='knowledge':
                 for name in ('wiki','extraction','evidence'):
                     result[name]=json.loads(git(path,'show',oid+':'+name+'.json'))
+                validate_source_records(result['wiki']['sources'])
+                validate_retained_extraction(result['extraction'])
                 if git(path,'ls-tree','--name-only',oid,'relations.json'):
                     result['relations']=json.loads(git(path,'show',oid+':relations.json'))
             elif mod.get('kind')=='atlas':

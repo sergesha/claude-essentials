@@ -15,7 +15,7 @@ from knowledge_atlas.actions.decisions import decide_candidate, inspect_candidat
 def candidate(tmp_path):
     store = GitStore(tmp_path/'atlas')
     fixtures = Path(__file__).parent/'fixtures'
-    wiki = json.loads((fixtures/'evidence/wiki-initial-final.json').read_text())
+    wiki = json.loads((fixtures/'evidence/wiki-current.json').read_text())
     oid = store.snapshot(wiki, {'entities':[],'statements':[]}, {}, recorded_at='2026-11-13T00:00:00Z')['commit']
     return store, oid
 
