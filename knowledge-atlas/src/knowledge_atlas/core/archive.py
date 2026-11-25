@@ -17,6 +17,7 @@ import zlib
 from .git_store import GitStore, git, _json
 from .publication import Publications
 from .decision_receipts import decision_inventory
+from .composition import composition_receipts, retain_child_publication
 from .embedding_provider import EmbeddingProvider, canonical, artifact_key, cache_artifact
 
 
@@ -155,6 +156,41 @@ def _read_members(archive, work):
             return manifest, files
 
 
+def _history_packages(store, ready):
+    packages = {}
+    pending = []
+    scheduled = set()
+    repositories = set()
+
+    def schedule(owner, commit):
+        # A restored child can carry its own location map for nested packages.
+        # Keep that resolution context when walking the rest of its history.
+        repository = (owner.root, owner.base)
+        if (repository, commit) in scheduled:
+            return
+        refs = ('--all',) if repository not in repositories else ()
+        repositories.add(repository)
+        for oid in git(owner.root, 'rev-list', commit, *refs).splitlines():
+            if (repository, oid) not in scheduled:
+                scheduled.add((repository, oid))
+                pending.append((owner, oid))
+
+    schedule(store, ready)
+    while pending:
+        owner, commit = pending.pop()
+        for child, node in owner.repository_closure(commit):
+            package = packages.setdefault(node['package_id'], {'path': child.root, 'pins': set(), 'receipts': set()})
+            content = node['commit']
+            package['pins'].add((child.root, content))
+            schedule(child, content)
+            for row in node.get('inclusions', ()):
+                wrapper = row['publication']
+                package['receipts'].add((wrapper, content))
+                # A wrapper can be unreachable from every advertised child ref.
+                schedule(child, wrapper)
+    return packages
+
+
 def export_atlas(store, destination, *, tokenizer, formatter):
     destination=Path(destination)
     if destination.exists():raise ValueError('archive destination exists')
@@ -162,21 +198,7 @@ def export_atlas(store, destination, *, tokenizer, formatter):
     ready=publications.ready()
     if ready is None:raise ValueError('no published atlas to export')
     decisions=decision_inventory(store)
-    packages={};pending=[];scheduled=set();repositories=set()
-    def retain_history(path,commit):
-        refs=('--all',) if path not in repositories else ()
-        repositories.add(path)
-        for oid in git(path,'rev-list',commit,*refs).splitlines():
-            if (path,oid) not in scheduled:
-                scheduled.add((path,oid));pending.append((path,oid))
-    retain_history(store.root,ready)
-    while pending:
-        path,commit=pending.pop()
-        for node in store.closure(commit,root=path):
-            package=packages.setdefault(node['package_id'],{'path':node['path'],'pins':set()})
-            package['pins'].add((node['path'],node['commit']))
-            if (node['path'],node['commit']) not in scheduled:
-                retain_history(node['path'],node['commit'])
+    packages = _history_packages(store, ready)
     root_id=json.loads(git(store.root,'show',ready+':package.json'))['package_id']
     profile=json.loads(git(store.root,'show',ready+':embedding-profile.json'))
     asset_paths = {'tokenizer.json': Path(tokenizer), 'chunking.py': Path(formatter)}
@@ -190,6 +212,9 @@ def export_atlas(store, destination, *, tokenizer, formatter):
             for number,(source,commit) in enumerate(sorted(package['pins'])):
                 git(repo,'fetch',str(source),commit)
                 git(repo,'update-ref','refs/poc9/archive-pins/'+str(number),commit)
+            bundled = store.at_repository(repo)
+            for publication, content in sorted(package['receipts']):
+                retain_child_publication(bundled, publication, content)
             name='root.bundle' if identity==root_id else str(index)+'.bundle'
             bundle=work/name
             git(repo,'bundle','create',str(bundle),'--all')
@@ -284,18 +309,31 @@ def restore_atlas(archive, destination):
             git(repo,'fetch',str(bundle),'refs/*:refs/*')
             # Data HEAD is separate from READY: future writes must still use publication CAS.
             git(repo,'checkout','-B','data',package['head'])
-            locations[package['package_id']]=relative
+            identity = json.loads(git(repo, 'show', 'HEAD:package.json'))['package_id']
+            if identity != package['package_id']:
+                raise ValueError('archive package identity mismatch')
+            locations[identity] = relative
         _json(base/'package-locations.json',locations)
         assets=base/'assets';assets.mkdir()
         for name in assets_required:
             members[name].rename(assets/name)
-        store=GitStore(base);pubs=Publications(store)
+        paths = {identity: base / relative for identity, relative in locations.items()}
+        store = GitStore(base, archive_locations=paths)
+        pubs = Publications(store)
         if pubs.ready()!=manifest['ready']:raise ValueError('archive READY mismatch')
         provider=EmbeddingProvider(assets/'embedding-profile.json',base/'vectors','http://127.0.0.1:1')
         with provider.connect() as db:
             seed_retained_vectors(pubs, db)
-        # Validate all retained pins, including unpublished proposals, before exposing restore.
-        for commit in git(store.root,'rev-list','--all').splitlines():store.closure(commit)
+        # Full-history bundles can include child proposals outside the root's current
+        # or historical layouts. Verify their edges from staged repositories as well.
+        receipts = set()
+        for repo in paths.values():
+            owner = store.at_repository(repo)
+            for commit in git(repo, 'rev-list', '--all').splitlines():
+                for row in composition_receipts(owner, commit):
+                    receipts.add((row['package_id'], row['publication'], row['commit']))
+        for identity, publication, content in sorted(receipts):
+            retain_child_publication(store.at_repository(paths[identity]), publication, content)
         decisions=decision_inventory(store)
         if manifest['format']==2 and manifest['decisions'].get('entries')!=decisions:
             raise ValueError('archive decision inventory does not match retained objects and refs')

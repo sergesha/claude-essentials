@@ -42,8 +42,9 @@ def _commit(path,message,paths=None):
 
 
 class GitStore:
-    def __init__(self,path,*,resolve_atlas=None):
+    def __init__(self,path,*,resolve_atlas=None,archive_locations=None):
         self.resolve_atlas = resolve_atlas
+        self.archive_locations = archive_locations
         self.base=Path(path).resolve()
         self.root=self.base/'atlas'
 
@@ -53,7 +54,7 @@ class GitStore:
         base = self.base
         if root.name == 'atlas' and (root.parent / 'package-locations.json').is_file():
             base = root.parent
-        store = GitStore(base, resolve_atlas=self.resolve_atlas)
+        store = GitStore(base, resolve_atlas=self.resolve_atlas, archive_locations=self.archive_locations)
         store.root = root
         return store
 
@@ -70,6 +71,12 @@ class GitStore:
         return self._module_store(parent, mod).root
 
     def _module_store(self, parent, mod):
+        if self.archive_locations is not None:
+            # During restore every edge must resolve inside the staged bundle inventory.
+            try:
+                return self.at_repository(self.archive_locations[mod['package_id']])
+            except KeyError as error:
+                raise ValueError('package missing from archive inventory') from error
         locations=self.base/'package-locations.json'
         mapping=json.loads(locations.read_text()) if locations.exists() else {}
         registered = mod.get('kind') == 'atlas' and 'publication' in mod and self.resolve_atlas is not None

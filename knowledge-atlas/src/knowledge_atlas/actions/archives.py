@@ -30,7 +30,10 @@ def export_archive(context):
             raise AtlasError('runtime_unavailable', 'prepared runtime assets required', 503)
         runtime = validate_runtime(context.service.runtime).runtime_root
         tokenizer, formatter = runtime/'model/tokenizer.json', runtime/'chunking.py'
-    manifest = export_atlas(store, Path(destination).expanduser().resolve(), tokenizer=tokenizer, formatter=formatter)
+    try:
+        manifest = export_atlas(store, Path(destination).expanduser().resolve(), tokenizer=tokenizer, formatter=formatter)
+    except (ValueError, KeyError) as error:
+        raise AtlasError('invalid_archive', str(error), 422) from error
     return ActionResult(data={'path':destination, 'manifest':manifest}, publication=manifest['ready'])
 
 

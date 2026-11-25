@@ -456,3 +456,19 @@ def test_full_inventory_preserves_legacy_mixed_case_ref_order(portable, tmp_path
     archive(portable, path)
     restored = restore_atlas(path, tmp_path/'restored')
     assert [e['receipt']['decision_id'] for e in decision_inventory(restored)] == ids
+
+
+def test_restore_checks_uuid_publication_content_binding(portable, tmp_path):
+    source = tmp_path/'source.zip'
+    manifest = archive(portable, source)
+    # A substituted inventory label cannot assign an existing Git history to a new UUID.
+    manifest['root_package_id'] = str(uuid.uuid4())
+    root = next(item for item in manifest['packages'] if item['bundle'] == 'root.bundle')
+    root['package_id'] = manifest['root_package_id']
+    modified = tmp_path/'substituted.zip'
+    with zipfile.ZipFile(source) as original, zipfile.ZipFile(modified, 'w') as result:
+        for name in original.namelist():
+            result.writestr(name, json.dumps(manifest) if name == 'archive.json' else original.read(name))
+    with pytest.raises(ValueError, match='identity'):
+        restore_atlas(modified, tmp_path/'restored')
+    assert not (tmp_path/'restored').exists()

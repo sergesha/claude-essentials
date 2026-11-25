@@ -26,6 +26,16 @@ compatible document vectors travel together. The service SQLite database and
 host credentials are not required. Compatible format 1 archives remain readable;
 restoration never invents decision receipts absent from their Git history.
 
+An export is a full-history backup. It can include additional child history,
+unpublished proposals and records beyond the selected parent publication.
+Every reviewed child inclusion carries its exact publication wrapper and content
+commit, including nested selections and earlier parent layouts. Child READY may
+have moved. Restore resolves these bindings by UUID inside the bundled repositories.
+Original project paths, submodule checkouts and remote access are unnecessary.
+A missing wrapper or a mismatch between its reviewed content, UUID and gitlink
+causes restore to fail before the destination becomes visible. Older content-only
+pins keep their original commits and attribution.
+
 Restore validates hashes and package/decision closure before exposing canonical
 files. It then reuses PoC9's oldest-to-newest native projection rebuild, verifies
 profile, counts and vector artifacts against each original publication, and
@@ -62,10 +72,10 @@ Native qualification runs with:
 uv run pytest tests/integration/test_archive_runtime.py -q --runtime-config CONFIG.json
 ```
 
-The JSON supplies `runtime_root`, a compatible `archive` with at least two
-publications, `graph` (`url`, unused `database`), `embedding_port` (unused local
-port), and `raw_embedding_endpoint`. The prepared native graph must use that
-embedding port. The test starts and stops its own bridge, rebuilds and reads
-current/historical slices, checks zero document inference, and then checks one
-separate fresh query inference. Without this configuration it is explicitly
-skipped; controlled fixtures do not qualify a native platform or host.
+The JSON selects the prepared `runtime_root`. With an optional compatible
+`archive`, the test replays its current and historical publications. With
+only the runtime configured, it creates two reviewed parent publications
+pinning different child versions, exports the parent, and removes its temporary
+source repositories before recovery. Recovery uses a fresh graph database
+and the restored vector cache, verifies both publication slices, checks zero document
+inference during replay, and runs one fresh query inference.

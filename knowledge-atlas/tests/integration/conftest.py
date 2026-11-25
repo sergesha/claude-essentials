@@ -1,4 +1,6 @@
 """Native qualification is opt-in and never inferred from controlled fixtures."""
+from contextlib import contextmanager
+from functools import partial
 import pytest
 
 
@@ -32,7 +34,18 @@ def tmp_path(request, tmp_path_factory):
 
 
 @pytest.fixture
-def native_graph(runtime_configuration, tmp_path, monkeypatch):
+def native_graph_session(monkeypatch):
+    return partial(_native_graph, monkeypatch=monkeypatch)
+
+
+@pytest.fixture
+def native_graph(runtime_configuration, tmp_path, native_graph_session):
+    with native_graph_session(runtime_configuration, tmp_path) as graph:
+        yield graph
+
+
+@contextmanager
+def _native_graph(runtime_configuration, tmp_path, monkeypatch):
     """Launch only this test's pinned native processes; retain pytest artifacts."""
     import json
     import os

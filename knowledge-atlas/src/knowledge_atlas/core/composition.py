@@ -85,6 +85,16 @@ def composition_diff(before, after):
                         if old[path] != new[path]]}
 
 
+def composition_receipts(store: GitStore, commit: str) -> list[dict]:
+    """Return each verified child wrapper/content selection, including nested mounts."""
+    receipts = [
+        {'package_id': node['package_id'], 'commit': node['commit'], **inclusion}
+        for _, node in store.repository_closure(commit)
+        for inclusion in node.get('inclusions', ())
+    ]
+    return sorted(receipts, key=lambda row: row['mount'])
+
+
 def retain_child_publication(child: GitStore, publication: str, content_commit: str) -> None:
     """Pin the exact verified wrapper. Its Git parents retain the reviewed content."""
     Publications(child).verify_child_receipt(publication, content_commit)

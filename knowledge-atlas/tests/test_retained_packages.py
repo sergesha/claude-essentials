@@ -101,3 +101,12 @@ class PackageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'cycle'):
             self.child.pin_package(nested,self.parent,parent,mount='shared/back',recorded_at='2026-11-10T00:02:00Z')
 
+
+    def test_historical_pre_receipt_content_is_not_rewritten(self):
+        from knowledge_atlas.core import composition
+        historical = self.pin(self.base, self.first, 'materials')
+        original = git(self.parent.root, 'show', historical + ':manifest.json')
+        self.assertFalse(any('publication' in mod for mod in json.loads(original)['modules'].values()))
+        self.assertEqual(composition.composition_receipts(self.parent, historical), [])
+        self.assertEqual(git(self.parent.root, 'show', historical + ':manifest.json'), original)
+        self.assertEqual(self.parent.read(historical)['included_packages'][0]['commit'], self.first)

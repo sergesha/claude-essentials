@@ -53,6 +53,12 @@ requires that directory layout for ordinary recursive Git checkout. Atlas
 resolves registered children locally without checking out submodules. Historical
 layouts that predate per-inclusion receipts retain their original content pins.
 
+A recursive Git clone needs access to every recorded locator and pinned content
+commit. For recovery on another machine, an Atlas full-history archive carries
+the exact selected child publication objects as well. Restore maps their UUIDs
+to the recovered repositories, so earlier and current layouts can be read after
+the original locations disappear.
+
 ## Content-pin interface
 
 Knowledge Atlas uses PoC9's exact Git submodule pins. An inclusion identifies a
