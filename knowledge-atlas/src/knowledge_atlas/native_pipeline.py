@@ -25,6 +25,7 @@ def run_native(context):
     context.evidence.mkdir(parents=True, exist_ok=True)
     payload = {'request':asdict(context.request), 'atlas_path':str(context.atlas_path),
                'evidence':str(context.evidence), 'configuration':context.configuration,
+               'service_root':str(context.service.service_root),
                'runtime_root':str(identity.runtime_root), 'operation_id':context.operation_id,
                'vector_cache':str(context.service.service_root / 'vectors')}
     environment = {**os.environ, 'PYTHONPATH':str(Path(__file__).resolve().parent.parent),
@@ -53,7 +54,13 @@ def execute_native(payload):
     from .core.relations import propose_resolution, TypeDecisionUnavailable
     request = ActionRequest(**payload['request'])
     evidence = Path(payload['evidence'])
-    store = GitStore(payload['atlas_path'])
+    if 'service_root' in payload:
+        from .contracts import ServiceContext
+        from .project_registry import project_store
+        service = ServiceContext(Path(payload['service_root']), configuration=payload['configuration'])
+        store = project_store(service, Path(payload['atlas_path']))
+    else:
+        store = GitStore(payload['atlas_path'])
     pubs = Publications(store)
     data = request.payload
     if request.action in ('publication.build', 'publication.rebuild'):

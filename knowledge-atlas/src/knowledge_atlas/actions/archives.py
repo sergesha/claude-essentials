@@ -3,11 +3,10 @@ from dataclasses import replace
 from pathlib import Path
 from ..contracts import ActionResult, AtlasError
 from ..core.archive import export_atlas, restore_atlas
-from ..core.git_store import GitStore
 from ..core.publication import Publications
 from ..operations import external_archive_path, register_atlas, staged_restore_input
 from ..native_pipeline import run_native
-from ..project_registry import prepare_restored_project, project_configuration
+from ..project_registry import prepare_restored_project, project_configuration, project_store
 from ..runtime import validate_runtime
 
 
@@ -20,7 +19,7 @@ def export_archive(context):
     destination = context.request.payload.get('path')
     if not isinstance(destination, str) or not destination:
         raise AtlasError('invalid_request', 'archive output path required')
-    store = GitStore(context.atlas_path)
+    store = project_store(context.service, context.atlas_path)
     if Publications(store).ready() != context.request.expected_publication:
         raise AtlasError('stale_publication', 'expected publication is no longer READY', 409)
     assets = store.base/'assets'

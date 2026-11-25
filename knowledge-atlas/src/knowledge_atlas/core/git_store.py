@@ -14,8 +14,8 @@ import uuid
 from ..atomic import write_private
 
 
-def git(repo,*args,binary=False):
-    result=subprocess.run(['git','-C',str(repo),*args],capture_output=True)
+def git(repo,*args,binary=False,data=None):
+    result=subprocess.run(['git','-C',str(repo),*args],input=data,capture_output=True)
     if result.returncode:
         raise ValueError(f'Git {args[0]} failed (exit {result.returncode})')
     return result.stdout if binary else result.stdout.decode().strip()
@@ -42,22 +42,37 @@ def _commit(path,message,paths=None):
 
 
 class GitStore:
-    def __init__(self,path):
+    def __init__(self,path,*,resolve_atlas=None):
+        self.resolve_atlas = resolve_atlas
         self.base=Path(path).resolve()
         self.root=self.base/'atlas'
+
+    def at_repository(self, root):
+        """Keep this layout's resolver and archive remapping for a child repository."""
+        root = Path(root)
+        base = self.base
+        if root.name == 'atlas' and (root.parent / 'package-locations.json').is_file():
+            base = root.parent
+        store = GitStore(base, resolve_atlas=self.resolve_atlas)
+        store.root = root
+        return store
 
     def module_path(self, parent, mod):
         locations=self.base/'package-locations.json'
         mapping=json.loads(locations.read_text()) if locations.exists() else {}
         if mod['package_id'] in mapping:
             return (self.base/mapping[mod['package_id']]).resolve()
+        if mod.get('kind') == 'atlas' and 'publication' in mod and self.resolve_atlas:
+            return self.resolve_atlas(mod['package_id'])
+        if re.match(r'^[^/]+:', mod['url']):
+            raise ValueError('registered or archive-local repository required for Git locator')
         return (parent/mod['url']).resolve()
 
     def closure(self, commit, *, root=None):
         """Resolve pinned packages, preserving every inclusion of an identity."""
         nodes={}
 
-        def visit(path, oid, expected, mount, ancestors):
+        def visit(owner, path, oid, expected, mount, ancestors, publication=None):
             if not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}',oid):
                 raise ValueError('exact Git object ID required')
             if not path.is_dir():
@@ -75,25 +90,28 @@ class GitStore:
             key=(identity,oid)
             node=nodes.setdefault(key,{'package_id':identity,'commit':oid,'path':path,'mounts':[]})
             if mount not in node['mounts']:node['mounts'].append(mount)
+            if publication is not None:
+                from .publication import Publications
+                Publications(owner).verify_child_receipt(publication, oid)
+                node.setdefault('inclusions', []).append({'mount': mount, 'publication': publication})
             if not git(path,'ls-tree','--name-only',oid,'manifest.json'):
                 return
             manifest=json.loads(git(path,'show',oid+':manifest.json'))
             if manifest['package_id']!=identity:
                 raise ValueError('manifest package identity mismatch')
+            from .composition import validate_layout
+            validate_layout(path, oid, manifest['modules'])
             for mod in manifest['modules'].values():
-                entry=git(path,'ls-tree','-z',oid,'--',mod['mount'],binary=True)
-                try:
-                    meta,actual_mount=entry.rstrip(b'\0').split(b'\t')
-                    mode,kind,pinned=meta.decode().split()
-                except ValueError as exc:
-                    raise ValueError('manifest/gitlink mismatch') from exc
-                if (mode,kind,pinned,actual_mount.decode())!=('160000','commit',mod['commit'],mod['mount']):
-                    raise ValueError('manifest/gitlink mismatch')
-                child=self.module_path(path,mod)
+                child=owner.module_path(path,mod)
                 inclusion=mount+'/'+mod['mount'] if mount else mod['mount']
-                visit(child,mod['commit'],mod['package_id'],inclusion,ancestors|{identity})
+                visit(owner.at_repository(child),child,mod['commit'],mod['package_id'],inclusion,ancestors|{identity},mod.get('publication'))
 
-        visit(self.root if root is None else root,commit,None,'',set())
+        path = self.root if root is None else root
+        visit(self.at_repository(path),path,commit,None,'',set())
+        versions = {}
+        for node in nodes.values():
+            if versions.setdefault(node['package_id'], node['commit']) != node['commit']:
+                raise ValueError('conflicting pins for package identity: ' + node['package_id'])
         return list(nodes.values())
 
     def snapshot(self,wiki,extraction,evidence,*,recorded_at,relation_model=None,relation_bundle=None,relation_previous=None):
@@ -224,8 +242,11 @@ class GitStore:
                 key=(identity,oid)
                 if key not in included:
                     included[key]={'package_id':identity,'commit':oid,'scope':'all','mounts':[],
-                                   'snapshot':self._read_package(path,oid)}
+                                   'snapshot':self.at_repository(path)._read_package(path,oid)}
                 included[key]['mounts'].append(mod['mount'])
+                if 'publication' in mod:
+                    included[key].setdefault('inclusions', []).append(
+                        {'mount': mod['mount'], 'publication': mod['publication']})
         if git(repo,'ls-tree','--name-only',commit,'relations.json'):
             result['relations']=json.loads(git(repo,'show',commit+':relations.json'))
         if 'relations' in result:
@@ -240,5 +261,5 @@ class GitStore:
                 self.closure(commit,root=node['path'])
                 identity=json.loads(git(node['path'],'show',commit+':package.json'))['package_id']
                 if identity!=package_id:raise ValueError('historical package identity mismatch')
-                return self._read_package(node['path'],commit)
+                return self.at_repository(node['path'])._read_package(node['path'],commit)
         raise ValueError('package unavailable in selected atlas')

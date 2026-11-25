@@ -137,6 +137,11 @@ class AtlasClient:
     def packages_inspect(self,payload:models.Payload,**selection)->ActionResult:
         return self._typed('packages.inspect',payload,**selection)
 
+    def packages_configure(self, payload: models.ConfigurePackages, *, atlas_id: str,
+                           request_id: str, expected_publication: str | None) -> OperationRecord:
+        return self._typed('packages.configure', payload, atlas_id=atlas_id, request_id=request_id,
+                           expected_publication=expected_publication)
+
     def packages_pin(self,payload:models.Pin,**selection)->OperationRecord:
         return self._typed('packages.pin',payload,**selection)
 

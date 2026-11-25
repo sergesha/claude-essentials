@@ -6,7 +6,7 @@ from ..core.git_store import GitStore, _repo, _json, _commit, git
 from ..core.publication import Publications
 from ..core.decision_receipts import decision_inventory, matching_decision_receipt, review_inventory
 from ..operations import register_atlas, database
-from ..project_registry import list_projects, resolve_project
+from ..project_registry import list_projects, project_store, resolve_project
 
 
 def create_atlas(context):
@@ -47,7 +47,7 @@ def open_atlas(context):
 
 
 def atlas_status(context):
-    store = GitStore(context.atlas_path)
+    store = project_store(context.service, context.atlas_path)
     identity = json.loads(git(store.root, 'show', 'HEAD:package.json'))['package_id']
     def refs(prefix):
         return git(store.root, 'for-each-ref', '--format=%(objectname)', prefix).splitlines()

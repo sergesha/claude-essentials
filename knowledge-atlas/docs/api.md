@@ -42,6 +42,22 @@ leaves the first addressable on the same service.
 Supply external filesystem paths for explicit data management through
 `atlas.create` and `archive.restore`.
 
+## Configure a child layout
+
+`packages.configure` requires the parent `atlas_id`, a UUID `request_id`, an
+explicit `expected_publication` (null for an unpublished parent), and
+`payload.includes`. Each item contains the registered child UUID `package_id`,
+relative `mount`, and exact child wrapper OID `publication` as strings. The service derives the content commit and recording time.
+The Python method is `client.packages_configure(ConfigurePackages(includes=...),
+atlas_id=..., request_id=..., expected_publication=...)`.
+
+Poll the returned operation for `data.candidate`, `data.status` and
+`data.composition_diff`. Both the operation result and `candidate.inspect`
+expose `added` and `removed` arrays of selections plus a `changed` array of
+before/after selections at the same mount. Use `candidate.decide` to review
+the whole layout. See [Reviewed package composition](composition.md) for a
+complete request, clearing, moving, repinning and rolling back children.
+
 ## Source ingestion and update
 
 `sources.submit` takes the atlas UUID, a fresh request UUID, `expected_publication` and this payload:

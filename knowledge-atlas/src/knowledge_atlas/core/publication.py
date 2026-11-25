@@ -6,6 +6,7 @@ as synthetic; this module does not authenticate a human or evaluate truth.
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
+import re
 import os
 from pathlib import Path
 import subprocess
@@ -13,7 +14,7 @@ import tempfile
 from .git_store import git
 
 
-def commit_files(repo, base, files, parents, message, *, gitlinks=None):
+def commit_files(repo, base, files, parents, message, *, gitlinks=None, remove_paths=()):
     """Create immutable data objects without changing the working tree/index."""
     with tempfile.TemporaryDirectory() as tmp:
         env = dict(os.environ, GIT_INDEX_FILE=str(Path(tmp) / 'index'),
@@ -26,6 +27,8 @@ def commit_files(repo, base, files, parents, message, *, gitlinks=None):
                 raise ValueError(f'Git {args[0]} failed (exit {result.returncode})')
             return result.stdout.decode().strip()
         run('read-tree', base)
+        if remove_paths:
+            run('update-index', '--force-remove', '--', *remove_paths)
         for name, value in files.items():
             raw = value if isinstance(value,bytes) else (json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + '\n').encode()
             oid = run('hash-object', '-w', '--stdin', data=raw)
@@ -152,14 +155,29 @@ class Publications:
 
     def read(self, publication):
         snapshot = self.store.read(publication)
+        return self._read_receipt(publication, snapshot['manifest'])
+
+    def verify_child_receipt(self, publication, content_commit):
+        """Check an edge without recursively loading the same package closure again."""
+        if not isinstance(publication, str) or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', publication):
+            raise ValueError('exact child publication required')
+        wrapper = json.loads(git(self.store.root, 'show', publication + ':manifest.json'))
+        if self._read_receipt(publication, wrapper)['content_commit'] != content_commit:
+            raise ValueError('child publication/content mismatch')
+
+    def _read_receipt(self, publication, wrapper_manifest):
         receipt = json.loads(git(self.store.root, 'show', publication + ':publication.json'))
         parents = git(self.store.root, 'show', '-s', '--format=%P', publication).split()
         content = receipt['content_commit']
         previous = receipt['previous_publication']
         if parents != ([previous, content] if previous else [content]):
             raise ValueError('publication does not reference its accepted content and previous publication')
+        changed = git(self.store.root, 'diff-tree', '-r', '--no-renames', '--ignore-submodules=none',
+                      '--name-only', content, publication)
+        if changed != 'publication.json':
+            raise ValueError('publication tree differs from reviewed content')
         manifest = json.loads(git(self.store.root, 'show', content + ':manifest.json'))
-        if snapshot['manifest'] != manifest:
+        if wrapper_manifest != manifest:
             raise ValueError('publication requires accepted content')
         review = self._accepted_review(content, manifest)
         if (review['base_publication'] != previous

@@ -424,3 +424,13 @@ test('a definitive replay rejection after switching projects allows a fresh deci
  assert.equal(fresh.payload.instructions,'New correction against the updated publication');
  a.displayed(atlasA,newReady,aPage);
 });
+
+test('candidate inspection displays exact changed child receipts for review',async()=>{
+ const changes={added:[],removed:[],changed:[{before:{mount:'field',publication:'old-receipt'},after:{mount:'field',publication:'new-receipt'}}]};
+ const a=app(async()=>response({publication:'current',data:{before:{},snapshot:{},composition_diff:changes}}));
+ a.run("selected=ready='current';");
+ await a.run("inspect('layout-candidate')");
+ const section=a.elements.get('review').children.find(item=>item.children[0]?.textContent==='Child layout changes');
+ assert.ok(section);
+ assert.deepEqual(JSON.parse(section.children[1].textContent),changes);
+});

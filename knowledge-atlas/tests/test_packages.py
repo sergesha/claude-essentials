@@ -141,6 +141,7 @@ def test_inspection_pins_selected_publication_after_relocation(tmp_path, monkeyp
     selected = next(node for node in result.data['packages'] if node['package_id']==package_id)
     assert selected['commit'] == first
     assert selected['mounts'] == ['shared/child']
+    assert not selected.get('inclusions')  # Historical content-only pins have no receipt.
     assert selected['path'] == str(moved/'atlas')
     assert result.publication == publication
     json.dumps(result.data)

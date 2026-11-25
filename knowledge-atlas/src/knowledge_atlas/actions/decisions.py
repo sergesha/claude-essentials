@@ -6,7 +6,8 @@ import json
 import uuid
 
 from ..contracts import ActionRequest, ActionResult, AtlasError
-from ..core.git_store import GitStore, git
+from ..project_registry import project_store
+from ..core.git_store import git
 from ..core.publication import Publications, StaleProposal, InvalidAcceptanceTime, commit_files
 from ..core.knowledge import propose_records
 from ..core.decision_receipts import DECISIONS, review_inventory
@@ -101,7 +102,7 @@ def build_projection(context, content):
 
 
 def _result(context, entry):
-    store=GitStore(context.atlas_path); pubs=Publications(store); receipt=entry['receipt']
+    store=project_store(context.service, context.atlas_path); pubs=Publications(store); receipt=entry['receipt']
     data={'decision':receipt,'decision_commit':entry['commit'],'candidate':receipt.get('revised_candidate',receipt['candidate'])}
     publication=None
     effects={'decision':entry['commit']}
@@ -133,7 +134,7 @@ def decide_candidate(context):
     if context.request.payload.get('action') not in ('accept', 'reject'):
         raise AtlasError('invalid_request', 'candidate.decide accepts only accept or reject')
     binding=_binding(context,context.request.payload.get('action'))
-    store=GitStore(context.atlas_path)
+    store=project_store(context.service, context.atlas_path)
     existing=_existing(store,binding,context.request)
     if existing is not None: return _result(context,existing)
     _check_base(store,binding)
@@ -176,13 +177,13 @@ def _accepted_effect(store, binding, request):
 def replay_recorded_decision(context):
     action = 'revise' if context.request.action == 'candidate.revise' else context.request.payload.get('action')
     binding = _binding(context, action)
-    entry = _existing(GitStore(context.atlas_path), binding, context.request)
+    entry = _existing(project_store(context.service, context.atlas_path), binding, context.request)
     return _result(context, entry) if entry is not None else None
 
 
 def reconcile_decision(context):
     action='revise' if context.request.action=='candidate.revise' else context.request.payload.get('action')
-    binding=_binding(context,action); store=GitStore(context.atlas_path)
+    binding=_binding(context,action); store=project_store(context.service, context.atlas_path)
     entry=_existing(store,binding,context.request)
     if entry is not None: return _result(context,entry)
     if action=='accept':
@@ -196,7 +197,7 @@ def reconcile_decision(context):
 
 
 def revise_candidate(context):
-    binding=_binding(context,'revise'); store=GitStore(context.atlas_path)
+    binding=_binding(context,'revise'); store=project_store(context.service, context.atlas_path)
     existing=_existing(store,binding,context.request)
     if existing is not None: return _result(context,existing)
     _check_base(store,binding)
@@ -220,13 +221,16 @@ def _json_snapshot(value):
 
 
 def inspect_candidate(context):
-    store=GitStore(context.atlas_path); candidate=context.request.payload.get('candidate')
+    store=project_store(context.service, context.atlas_path); candidate=context.request.payload.get('candidate')
     ActionRequest('candidate.inspect',publication=candidate)
     if candidate is None: raise AtlasError('invalid_request','candidate is required')
     snapshot=store.read(candidate)
     base=snapshot['manifest'].get('proposal_base_content')
+    before = store.read(base) if base else None
+    from ..core.composition import composition_diff
+    changes = composition_diff(before['manifest']['modules'].values() if before else (), snapshot['manifest']['modules'].values())
     return ActionResult(data={'candidate':candidate,'snapshot':_json_snapshot(snapshot),'base_content':base,
-        'before':_json_snapshot(store.read(base)) if base else None,
+        'before':_json_snapshot(before), 'composition_diff': changes,
         'decisions':[entry['receipt'] for entry in decision_inventory(store) if entry['receipt']['candidate']==candidate],
         'type_questions':snapshot.get('relations',{}).get('decisions',[]),
         'unresolved':[row for row in snapshot.get('relations',{}).get('relations',[]) if row['status']!='resolved']},

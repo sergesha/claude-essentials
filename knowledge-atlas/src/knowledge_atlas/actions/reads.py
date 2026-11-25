@@ -2,14 +2,13 @@
 import json
 from urllib.parse import urlsplit
 from ..contracts import ActionRequest, ActionResult, AtlasError
-from ..core.git_store import GitStore
 from ..core.reader import AtlasReader
 from ..operations import database
-from ..project_registry import graph_endpoint, verify_graph_owner
+from ..project_registry import graph_endpoint, project_store, verify_graph_owner
 
 
 def selected_reader(context):
-    store = GitStore(context.atlas_path)
+    store = project_store(context.service, context.atlas_path)
     graph = context.configuration.get('graph', {})
     url = graph.get('url', '')
     if url:

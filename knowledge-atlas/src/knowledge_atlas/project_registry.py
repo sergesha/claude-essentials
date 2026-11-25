@@ -95,6 +95,17 @@ def resolve_project(service: ServiceContext, atlas_id: str) -> ProjectBinding:
     return _registry_binding(row)
 
 
+def project_store(service: ServiceContext, path: Path) -> GitStore:
+    """Resolve receipt-bearing atlas modules against this operation's service."""
+    from functools import cache
+
+    @cache
+    def resolve(atlas_id):
+        return resolve_project(service, atlas_id).path / 'atlas'
+
+    return GitStore(path, resolve_atlas=resolve)
+
+
 def project_configuration(service: ServiceContext, binding: ProjectBinding) -> dict:
     graph = service.configuration.get('graph', {})
     if not isinstance(graph, dict):

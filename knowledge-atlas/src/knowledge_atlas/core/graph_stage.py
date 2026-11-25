@@ -143,16 +143,19 @@ def package_record_id(package_id,record_id):
 def records_for(snapshot,commit,*,namespace=None):
     """Compose pinned packages once, with package-qualified child identities."""
     nodes={};root_id=snapshot['manifest']['package_id']
-    def collect(data,oid,mount):
+    def collect(data,oid,mount,publication=None):
         identity=data['manifest']['package_id']
         if identity in nodes:
             if nodes[identity]['commit']!=oid:
                 raise ValueError('conflicting pins for package identity: '+identity)
             nodes[identity]['mounts'].add(mount)
         else:nodes[identity]={'snapshot':data,'commit':oid,'mounts':{mount}}
+        if publication is not None:
+            nodes[identity].setdefault('receipts', {})[mount] = publication
         for inclusion in data.get('included_packages',[]):
+            receipts = {item['mount']: item['publication'] for item in inclusion.get('inclusions', [])}
             for child_mount in inclusion['mounts']:
-                collect(inclusion['snapshot'],inclusion['commit'],mount+'/'+child_mount if mount else child_mount)
+                collect(inclusion['snapshot'],inclusion['commit'],mount+'/'+child_mount if mount else child_mount, receipts.get(child_mount))
     collect(snapshot,commit,'')
     records=[];semantic={}
     for identity,node in nodes.items():
@@ -169,6 +172,9 @@ def records_for(snapshot,commit,*,namespace=None):
                 payload.update(package_id=identity,package_commit=node['commit'],local_record_id=original_id,
                     mounts=sorted(node['mounts']),package_accepted_at=data['manifest'].get('accepted_at'),
                     atlas_accepted_at=snapshot['manifest'].get('accepted_at'))
+                if 'receipts' in node:
+                    payload['inclusions'] = [{'mount': path, 'publication': receipt}
+                                             for path, receipt in sorted(node['receipts'].items())]
                 for citation in payload.get('provenance',[]):
                     citation['record_id']=qualified_id(citation['record_id'])
                     citation.setdefault('source_package_id',identity)

@@ -226,6 +226,8 @@ async function inspect(candidate){
  inspected={candidate,base:result.publication};setCandidate(candidate);$('proposal-list').value=candidate;
  showPanel('review');const box=$('review');renderChanges(box,wikiChanges(result.data.before,result.data.snapshot),'wiki');
  text('review-summary',(result.data.unresolved?.length||0)+' unresolved assertions · '+(result.data.type_questions?.length||0)+' type questions. Review these uncertainties before accepting.');
+ const layout=result.data.composition_diff;
+ if(layout&&Object.values(layout).some(items=>items.length))box.append(details('Child layout changes',layout));
  box.append(details('Complete before snapshot & evidence',result.data.before),details('Complete proposed snapshot & evidence',result.data.snapshot),details('Unresolved assertions & decisions',{unresolved:result.data.unresolved,decisions:result.data.decisions}));
  $('types').replaceChildren();
  for(const question of result.data.type_questions||[]){
