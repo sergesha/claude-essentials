@@ -270,3 +270,20 @@ class PublicationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'reviewed candidate'):
             self.pub.publish(copy, lambda _: self.fail('unexpected projection'))
         self.assertIsNone(self.pub.ready())
+
+    def test_completed_decision_wrapper_preserves_candidate_tree_and_effect_parents(self):
+        from knowledge_atlas.core.decision_receipts import decision_inventory
+        content = self.review()
+        publication = self.pub.publish(content, self.projection)
+        entry, = decision_inventory(self.store)
+        parents = git(self.store.root, 'show', '-s', '--format=%P', entry['commit']).split()
+        for damage in ('tree', 'parents'):
+            with self.subTest(damage=damage):
+                forged = commit_files(self.store.root, entry['commit'], {},
+                                      parents if damage == 'tree' else [entry['commit']],
+                                      'Malformed decision wrapper',
+                                      remove_paths=['manifest.json'] if damage == 'tree' else [])
+                git(self.store.root, 'update-ref', entry['ref'], forged)
+                with self.assertRaisesRegex(ValueError, 'decision'):
+                    self.pub.read(publication)
+                git(self.store.root, 'update-ref', entry['ref'], entry['commit'])

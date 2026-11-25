@@ -41,7 +41,8 @@ request identity, digest and arrival channel. An interrupted operation can leave
 after its decision receipt. Replaying the identical mutation through another
 client returns the original operation and attempt count. Once the worker is
 inactive, call `operation.resume` with its operation ID and a fresh canonical
-request UUID. Reconciliation uses the recorded acceptance in the original
+request UUID. Resume accepts only this UUID and the target operation ID.
+Reconciliation uses the recorded acceptance in the original
 project. Retrying that same resume UUID returns the same operation. When the
 recorded effect cannot establish safe continuation, resume reports `unsafe_resume`.
 

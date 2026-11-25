@@ -215,3 +215,15 @@ def test_selected_reads_reject_a_missing_acceptance_decision(published, action):
     git(store.root, 'update-ref', '-d', entry['ref'])
     with pytest.raises(AtlasError, match='publication_unavailable.*decision'):
         read_action(read_context(published, action, {}, publication=publication))
+
+
+def test_history_refuses_retired_effective_acceptance_time(published):
+    from knowledge_atlas.core.git_store import git
+    from knowledge_atlas.core.publication import commit_files
+    store, publication, content = published[:3]
+    receipt = Publications(store).read(publication)
+    substituted = {**receipt, 'effective_accepted_at': '2099-01-01T00:00:00Z'}
+    broken = commit_files(store.root, content, {'publication.json': substituted}, [content], 'Obsolete cutoff')
+    git(store.root, 'update-ref', Publications.ref, broken, publication)
+    with pytest.raises(AtlasError, match='publication_unavailable.*effective_accepted_at'):
+        read_action(read_context(published, 'history', {}))

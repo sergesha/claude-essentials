@@ -77,16 +77,22 @@ def test_completed_wiki_reuse_cannot_ignore_source_removal(tmp_path):
 ])
 def test_type_decision_requires_explicit_valid_input_before_provider(tmp_path, monkeypatch, change):
     from knowledge_atlas.native_pipeline import execute_native
+    from knowledge_atlas.contracts import ServiceContext
+    from knowledge_atlas.core.git_store import git
+    from test_project_registry import create_project
+    path = tmp_path/'atlas'
+    atlas_id = create_project(ServiceContext(tmp_path/'service'), path)
+    before = git(path/'atlas', 'show-ref')
     def unexpected_model(**_):
         pytest.fail('invalid type decision reached a provider')
     monkeypatch.setattr('knowledge_atlas.core.model_config.ConfiguredModels', unexpected_model)
     decision = {'candidate':'a'*40,'actor':'Curator','decision_id':'decision-one','action':'accept',
                 'reason':'Explicit reason','recorded_at':'2026-11-13T00:00:00Z', **change}
     with pytest.raises(AtlasError) as error:
-        execute_native({'service_root':str(tmp_path/'service'), 'vector_cache':str(tmp_path/'service/vectors'), 'request':{'action':'type.decide','payload':decision}, 'configuration':{},
+        execute_native({'service_root':str(tmp_path/'service'), 'vector_cache':str(tmp_path/'service/vectors'), 'request':{'action':'type.decide','atlas_id':atlas_id,'payload':decision}, 'configuration':{},
             'atlas_path':str(tmp_path/'atlas'),'evidence':str(tmp_path/'evidence')})
     assert error.value.code == 'invalid_request'
-    assert not (tmp_path/'atlas').exists()
+    assert git(path/'atlas', 'show-ref') == before
 
 
 def test_deciding_a_completed_type_question_returns_a_domain_error(tmp_path, monkeypatch):
@@ -94,13 +100,17 @@ def test_deciding_a_completed_type_question_returns_a_domain_error(tmp_path, mon
     from knowledge_atlas.core.git_store import GitStore
     from knowledge_atlas.native_pipeline import execute_native
     from test_projection_occurrences import snapshot
+    from knowledge_atlas.contracts import ServiceContext
+    from test_project_registry import create_project
+    path = tmp_path/'atlas'
+    atlas_id = create_project(ServiceContext(tmp_path/'service'), path)
     selected = snapshot(1)
     selected['relations']['decisions'] = [{'id':'question','indices':[0],
         'extraction_digest':selected['relations']['extraction_digest']}]
     monkeypatch.setattr(GitStore, 'read', lambda self, oid: selected)
     monkeypatch.setattr(model_config, 'ConfiguredModels', lambda **kw: None)
     with pytest.raises(AtlasError) as caught:
-        execute_native({'service_root':str(tmp_path/'service'), 'vector_cache':str(tmp_path/'service/vectors'), 'atlas_path': str(tmp_path), 'configuration':{}, 'evidence':str(tmp_path),
-            'request':{'action':'type.decide', 'payload':{'candidate':'a'*40, 'decision_id':'question',
+        execute_native({'service_root':str(tmp_path/'service'), 'vector_cache':str(tmp_path/'service/vectors'), 'atlas_path': str(path), 'configuration':{}, 'evidence':str(tmp_path),
+            'request':{'action':'type.decide', 'atlas_id':atlas_id, 'payload':{'candidate':'a'*40, 'decision_id':'question',
                 'action':'reject', 'actor':'Fixture','reason':'Already handled','recorded_at':'2026-11-13T01:00:00Z'}}})
     assert caught.value.code == 'type_decision_unavailable' and caught.value.status == 422

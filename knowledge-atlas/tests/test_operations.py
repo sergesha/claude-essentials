@@ -826,3 +826,23 @@ db.close()
         stop.touch()
         assert proc.wait(timeout=10) == 0
         proc.stdout.close()
+
+
+@pytest.mark.parametrize('selection', [
+    {'atlas_id': '92000000-0000-4000-8000-000000000001'}, {'expected_publication': '1'*40},
+    {'publication': '2'*40}, {'as_known_at': '2026-11-10T10:00:00Z'}, {'valid_at': '2026-11-10T10:00:00Z'},
+])
+def test_resume_refuses_changed_selectors_on_exact_retry(tmp_path, selection):
+    from knowledge_atlas.api_models import parse_request
+    from knowledge_atlas.http_api import invoke
+    from knowledge_atlas.operations import database
+    service = ServiceContext(tmp_path / 'service')
+    original = submit(service, request(path=str(tmp_path / 'project')))
+    with database(service) as db:
+        db.execute("UPDATE operations SET state='failed' WHERE operation_id=?", (original.operation_id,))
+    body = {'request_id': str(uuid.uuid4()), 'payload': {'operation_id': original.operation_id}}
+    status, resumed = invoke(service, parse_request('operation.resume', body))
+    assert status == 202 and resumed.attempt == 2
+    with pytest.raises(AtlasError, match='invalid_request|request_conflict'):
+        invoke(service, parse_request('operation.resume', {**body, **selection}))
+    assert invoke(service, parse_request('operation.resume', body))[1] == resumed

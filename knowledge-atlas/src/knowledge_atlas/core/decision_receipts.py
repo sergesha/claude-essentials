@@ -51,6 +51,7 @@ def _decision_entries(store, decision_id, *, verify_closure):
             required = ['candidate','base_publication']
             if receipt['action'] == 'accept': required.append('accepted_content')
             if receipt['action'] == 'revise': required.append('revised_candidate')
+            parents = []
             for key in required:
                 referenced = receipt[key]
                 if key == 'base_publication' and referenced is None: continue
@@ -63,7 +64,14 @@ def _decision_entries(store, decision_id, *, verify_closure):
                         review = Publications(store)._accepted_review(referenced, snapshot['manifest'])
                         if not _matches_review(receipt, review):
                             raise ValueError('decision disagrees with its accepted review')
-                git(store.root,'merge-base','--is-ancestor',referenced,oid)
+                if referenced not in parents:
+                    parents.append(referenced)
+            if git(store.root, 'show', '-s', '--format=%P', oid).split() != parents:
+                raise ValueError('decision parents disagree with its referenced effects')
+            changed = git(store.root, 'diff-tree', '-r', '--no-renames', '--ignore-submodules=none',
+                          '--name-only', receipt['candidate'], oid)
+            if changed != 'atlas-decision.json':
+                raise ValueError('decision tree differs from its reviewed candidate')
             entries.append({'ref':ref,'commit':oid,'receipt':receipt})
         except (ValueError,KeyError,TypeError,AttributeError,OSError) as error:
             raise ValueError('invalid decision '+ref+': '+str(error)) from error

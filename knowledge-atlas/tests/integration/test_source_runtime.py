@@ -6,6 +6,12 @@ import tempfile
 import unittest
 
 
+def register_native_project(root, store):
+    from knowledge_atlas.contracts import ServiceContext
+    from knowledge_atlas.project_registry import register_project, repository_identity
+    return register_project(ServiceContext(root/'service'), repository_identity(store.base), store.base).atlas_id
+
+
 @unittest.skipUnless(os.environ.get('KNOWLEDGE_ATLAS_WIKI_ROOT'), 'explicit native Wiki runtime required')
 class NativeSourceTests(unittest.TestCase):
     def test_removal_reconciles_native_page_without_changing_history(self):
@@ -86,10 +92,10 @@ class NativeSourceTests(unittest.TestCase):
                 return {'status':'completed'}
 
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp); evidence = root/'attempt'; evidence.mkdir()
+            root = Path(tmp).resolve(); evidence = root/'attempt'; evidence.mkdir()
             service = ServiceContext(root/'service')
-            create_atlas(ActionContext(service, ActionRequest('atlas.create'), root/'atlas', evidence, {}))
-            payload = {'request':{'action':'sources.submit','payload':{
+            created = create_atlas(ActionContext(service, ActionRequest('atlas.create'), root/'atlas', evidence, {}))
+            payload = {'request':{'action':'sources.submit','atlas_id':created.data['atlas_id'],'payload':{
                 'sources':[{'source_id':'one','name':'note.md','content':'First observation.'},
                            {'source_id':'two','name':'note.md','content':'Second observation.'}],
                 'recorded_at':'2026-11-13T00:00:00Z'}}, 'configuration':{},
@@ -137,12 +143,12 @@ class NativeSourceTests(unittest.TestCase):
                         test.assertNotIn('Error:', str(result))
                 return {'status':'completed'}
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp); evidence = root/'attempt'; evidence.mkdir()
+            root = Path(tmp).resolve(); evidence = root/'attempt'; evidence.mkdir()
             store = GitStore(root/'atlas')
             wiki = json.loads((Path(__file__).resolve().parents[1]/'fixtures/evidence/wiki-initial-final.json').read_text())
             original = store.snapshot(wiki, {'entities':[], 'statements':[]}, {}, recorded_at='2026-11-13T00:00:00Z')['commit']
             previous = store.read(original)
-            request = ActionRequest('candidate.revise', request_id=str(uuid.uuid4()), payload={
+            request = ActionRequest('candidate.revise', atlas_id=register_native_project(root, store), request_id=str(uuid.uuid4()), payload={
                 'candidate':original, 'actor':'Fixture', 'kind':'synthetic', 'reason':'Correction',
                 'decided_at':'2026-11-13T01:00:00Z', 'instructions':'Append the explicit correction note.'})
             with patch('knowledge_atlas.core.model_config.ConfiguredModels', CorrectionModel):
@@ -157,18 +163,23 @@ class NativeSourceTests(unittest.TestCase):
     def test_native_process_failure_retains_evidence_without_host_calls(self):
         from knowledge_atlas.contracts import ActionContext, ActionRequest, AtlasError, RuntimeConfig, ServiceContext
         from knowledge_atlas.actions.sources import submit_sources
+        from knowledge_atlas.actions.atlas import create_atlas
+        from knowledge_atlas.core.git_store import git
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             runtime = RuntimeConfig(Path(os.environ['KNOWLEDGE_ATLAS_WIKI_ROOT']).parent)
             service = ServiceContext(root/'service', runtime=runtime)
-            context = ActionContext(service, ActionRequest('sources.submit',payload={'recorded_at':'invalid'}),
+            created = create_atlas(ActionContext(service, ActionRequest('atlas.create'), root/'atlas', root/'attempt', {}))
+            refs = git(root/'atlas/atlas', 'show-ref')
+            context = ActionContext(service, ActionRequest('sources.submit',atlas_id=created.data['atlas_id'],
+                                                         payload={'recorded_at':'invalid'}),
                                     root/'atlas', root/'attempt', {})
             with self.assertRaises(AtlasError) as error:
                 submit_sources(context)
             self.assertEqual(error.exception.code,'invalid_request')
             self.assertTrue((root/'attempt/native-stderr.txt').is_file())
             self.assertTrue((root/'attempt/native-result.json').is_file())
-            self.assertFalse((root/'atlas').exists())
+            self.assertEqual(git(root/'atlas/atlas', 'show-ref'), refs)
 
     def test_type_handler_realigns_without_accepting_knowledge(self):
         import json
@@ -191,12 +202,12 @@ class NativeSourceTests(unittest.TestCase):
                 if request['operation'] != 'phrase': raise AssertionError(request['operation'])
                 return {'b':[[0,'indexes','forward']]}
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp); evidence=root/'attempt'; evidence.mkdir()
+            root = Path(tmp).resolve(); evidence=root/'attempt'; evidence.mkdir()
             store = GitStore(root/'atlas')
             wiki = json.loads((Path(__file__).resolve().parents[1]/'fixtures/evidence/wiki-initial-final.json').read_text())
             pending = resolve_relations(raw, pending_model)
             before = store.snapshot(wiki,raw,{},recorded_at='2026-11-13T00:00:00Z',relation_bundle=pending)['commit']
-            payload = {'request':{'action':'type.decide','payload':{'candidate':before,
+            payload = {'request':{'action':'type.decide','atlas_id':register_native_project(root, store),'payload':{'candidate':before,
                 'decision_id':pending['decisions'][0]['id'],'action':'accept','actor':'Synthetic test fixture',
                 'reason':'Exercise explicit type decision without knowledge acceptance','recorded_at':'2026-11-13T01:00:00Z'}},
                 'configuration':{},'service_root':str(root/'service'), 'vector_cache':str(root/'service/vectors'), 'atlas_path':str(store.base),'evidence':str(evidence)}

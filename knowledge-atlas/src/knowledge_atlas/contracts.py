@@ -70,6 +70,9 @@ class ActionRequest:
                 require_canonical_uuid(self.request_id)
             except (ValueError, TypeError, AttributeError) as error:
                 raise AtlasError('invalid_request', 'request_id must be a canonical UUID') from error
+        if self.action == 'operation.resume' and any(value is not None for value in (
+                self.atlas_id, self.expected_publication, self.publication, self.as_known_at, self.valid_at)):
+            raise AtlasError('invalid_request', 'operation.resume accepts only a target operation and request UUID')
         for oid in (self.expected_publication, self.publication):
             if oid is not None and (not isinstance(oid, str) or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', oid)):
                 raise AtlasError('invalid_request', 'exact publication OID required')

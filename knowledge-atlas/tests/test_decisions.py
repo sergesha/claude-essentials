@@ -492,3 +492,59 @@ def test_accepted_decision_inventory_requires_its_own_review(tmp_path, candidate
     git(store.root, 'update-ref', entry['ref'], broken)
     with pytest.raises(AtlasError, match='invalid_decision'):
         decisions.decision_inventory(store)
+
+
+@pytest.mark.parametrize('existing', [False, True])
+def test_native_dispatch_refuses_foreign_service_with_matching_cache(tmp_path, candidate, monkeypatch, existing):
+    from dataclasses import asdict
+    from knowledge_atlas import native_pipeline
+    from knowledge_atlas.operations import initialize_service_storage, register_atlas
+    store, oid = candidate
+    ctx = context_for(tmp_path, store, oid)
+    atlas_id = store.read(oid)['manifest']['package_id']
+    register_atlas(ctx.service, atlas_id, store.base)
+    foreign = ServiceContext(tmp_path / 'other-service')
+    if existing:
+        initialize_service_storage(foreign)
+    request = replace(ctx.request, action='publication.build', atlas_id=atlas_id, payload={'content':oid})
+    payload = {'request':asdict(request), 'configuration':{}, 'evidence':str(ctx.evidence),
+               'service_root':str(foreign.service_root), 'vector_cache':str(foreign.service_root/'vectors'),
+               'atlas_path':str(store.base)}
+    monkeypatch.setattr(native_pipeline, 'project_native', lambda *_: pytest.fail('foreign root reached projection'))
+    with pytest.raises(AtlasError, match='invalid_configuration|atlas_not_found|atlas_conflict'):
+        native_pipeline.execute_native(payload)
+    assert foreign.service_root.exists() == existing
+    assert not (foreign.service_root/'vectors').exists()
+
+
+def test_native_projection_uses_the_running_operations_own_registry(tmp_path, candidate, monkeypatch):
+    from dataclasses import asdict
+    from knowledge_atlas import native_pipeline
+    from knowledge_atlas.actions import decisions
+    from knowledge_atlas.contracts import ActionResult
+    from knowledge_atlas.operations import inspect_operation, register_atlas, submit
+    from knowledge_atlas.worker import run_next
+    store, oid = candidate
+    ctx = context_for(tmp_path, store, oid, 'accept')
+    service = ServiceContext(tmp_path/'primary-service', configuration={'graph':{'url':'http://127.0.0.1:1'}})
+    other = ServiceContext(tmp_path/'other-service', configuration=service.configuration)
+    identity = store.read(oid)['manifest']['package_id']
+    for owner in (service, other):
+        register_atlas(owner, identity, store.base)
+    def build(context, content):
+        native = replace(context, request=replace(context.request, action='publication.build', payload={'content':content}))
+        native_pipeline.claim_projection_database(native)
+        payload = {'request':asdict(native.request), 'configuration':native.configuration,
+                   'atlas_path':str(store.base), 'evidence':str(native.evidence), 'operation_id':native.operation_id}
+        with pytest.raises(AtlasError, match='running operation'):
+            native_pipeline.execute_native({**payload, 'service_root':str(other.service_root),
+                                           'vector_cache':str(other.service_root/'vectors')})
+        return native_pipeline.execute_native({**payload, 'service_root':str(service.service_root),
+                                              'vector_cache':str(service.service_root/'vectors')}).data
+    monkeypatch.setattr(decisions, 'build_projection', build)
+    monkeypatch.setattr(native_pipeline, 'project_native',
+                        lambda payload, store: ActionResult(data=projection(payload['request']['payload']['content'])))
+    op = submit(service, replace(ctx.request, atlas_id=identity))
+    run_next(service)
+    result = inspect_operation(service, op.operation_id)
+    assert result.result.data['status'] == 'published', result

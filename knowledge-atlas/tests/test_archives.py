@@ -723,3 +723,36 @@ def test_restore_rejects_missing_acceptance_ref_even_with_matching_outer_invento
         restore_atlas(damaged, tmp_path / 'restored')
     assert not (tmp_path / 'restored').exists()
     assert damaged.read_bytes() == before
+
+
+def test_native_restore_rebuild_requires_original_attempt_and_project_owner(portable, tmp_path, monkeypatch):
+    from dataclasses import asdict
+    from knowledge_atlas import native_pipeline
+    from knowledge_atlas.actions import archives
+    from knowledge_atlas.contracts import ActionRequest, ActionResult, AtlasError, ServiceContext
+    from knowledge_atlas.operations import inspect_operation, read_registry, submit
+    from knowledge_atlas.worker import run_next
+
+    source = tmp_path / 'fixture.zip'
+    archive(portable, source)
+    service = ServiceContext(tmp_path / 'service', configuration={'graph':{'url':'http://127.0.0.1:1'}})
+    request = ActionRequest('archive.restore', request_id=str(uuid.uuid4()),
+                            payload={'path': str(tmp_path / 'restored'), 'archive': str(source)})
+    def verify_subprocess(context):
+        with read_registry(service) as db:
+            assert not db.execute('SELECT 1 FROM atlases').fetchone()
+        native_pipeline.claim_projection_database(context)
+        payload = {'request': asdict(context.request), 'configuration': context.configuration,
+                   'service_root': str(service.service_root), 'vector_cache': str(service.service_root/'vectors'),
+                   'atlas_path': str(context.atlas_path), 'evidence': str(context.evidence),
+                   'operation_id': context.operation_id}
+        with pytest.raises(AtlasError, match='atlas_conflict|atlas_not_found|invalid_configuration'):
+            native_pipeline.execute_native({**payload, 'operation_id': str(uuid.uuid4())})
+        return native_pipeline.execute_native(payload)
+    monkeypatch.setattr(archives, 'run_native', verify_subprocess)
+    monkeypatch.setattr(native_pipeline, 'project_native', lambda payload, store: ActionResult(data={'ready':portable[3]}))
+    op = submit(service, request)
+    run_next(service)
+    result = inspect_operation(service, op.operation_id)
+    assert result.state == 'succeeded', result.error
+    assert result.result.publication == portable[3]

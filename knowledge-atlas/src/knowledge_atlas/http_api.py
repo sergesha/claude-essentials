@@ -34,6 +34,8 @@ def invoke(context,request):
     if request.action=='operation.read':
         return 200,inspect_operation(context,request.payload['operation_id'])
     if request.action=='operation.resume':
+        if request.payload.keys() != {'operation_id'}:
+            raise AtlasError('invalid_request', 'resume requires only the target operation_id')
         return 202,resume(context,request.payload['operation_id'],request.request_id)
     if request.action in register_handlers(context):return 202,submit(context,request)
     reads={'atlas.open':open_atlas,'atlas.status':atlas_status,'candidate.inspect':inspect_candidate,

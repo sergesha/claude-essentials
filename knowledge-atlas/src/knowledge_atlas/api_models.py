@@ -151,6 +151,19 @@ MODELS = {name:create_model(name.replace('.','_')+'Request', __config__=ConfigDi
                                       else Field(default_factory=payload))) for name,payload in PAYLOADS.items()}
 
 
+class ResumeRequest(MODELS['operation.resume']):
+    # Shared Python envelopes serialize absent selectors as null.
+    atlas_id: None = None
+    expected_publication: None = None
+    publication: None = None
+    as_known_at: None = None
+    valid_at: None = None
+    request_id: str
+
+
+MODELS['operation.resume'] = ResumeRequest
+
+
 def parse_request(action, body, *, models=MODELS):
     if action not in models:raise AtlasError('unsupported_action',action,422)
     try:

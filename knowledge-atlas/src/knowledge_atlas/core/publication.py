@@ -157,6 +157,8 @@ class Publications:
 
     @staticmethod
     def _require_ready_projection(receipt, content):
+        if 'effective_accepted_at' in receipt:
+            raise ValueError('unsupported effective_accepted_at in publication evidence')
         if (receipt.get('content_commit') != content or receipt.get('ready') is not True
                 or not receipt.get('graph_commit')
                 or receipt.get('search_checkpoint') != receipt['graph_commit']):

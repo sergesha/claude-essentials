@@ -46,6 +46,53 @@ def run_native(context):
     return ActionResult(**result)
 
 
+def _native_store(service, request, payload):
+    from .operations import atlas_path, operation_project, read_registry, retained_request
+    from .project_registry import (graph_endpoint, project_database, project_store, repository_identity,
+                                   resolve_project, verify_graph_owner)
+
+    path = Path(payload['atlas_path'])
+    binding = None
+    if payload.get('operation_id') is not None:
+        with read_registry(service) as db:
+            if db is None:
+                raise AtlasError('invalid_configuration', 'native execution requires its service registry')
+            row = db.execute('SELECT * FROM operations WHERE operation_id=?', (payload['operation_id'],)).fetchone()
+            if row is None or row['state'] != 'running' or row['evidence'] != payload['evidence'] or row['atlas_path'] != str(path):
+                raise AtlasError('atlas_conflict', 'native dispatch differs from its running operation', 409)
+            original = retained_request(row)
+            if original.action == 'archive.restore':
+                # Rebuild precedes registration. The running restore owns its destination.
+                if (request.action != 'publication.rebuild' or atlas_path(service, original) != path
+                        or repository_identity(path) != request.atlas_id):
+                    raise AtlasError('atlas_conflict', 'native rebuild differs from the restored project', 409)
+                graph = projection_graph(payload['configuration'])
+                name = project_database(uuid.UUID(request.atlas_id))
+                if name != graph['database']:
+                    raise AtlasError('graph_atlas_conflict', 'native rebuild differs from the restored database', 409)
+                endpoint = graph_endpoint(graph['url'])
+                owner = db.execute('SELECT atlas_id FROM projection_owners WHERE endpoint=? AND database_name=?',
+                                   (endpoint, name)).fetchone()
+                if owner is None or owner['atlas_id'] != request.atlas_id:
+                    raise AtlasError('graph_atlas_conflict', 'native rebuild lacks its prepared projection owner', 409)
+                return project_store(service, path)
+            frozen = json.loads(row['configuration'])
+            if request.atlas_id != original.atlas_id or payload['configuration'] != frozen['configuration']:
+                raise AtlasError('atlas_conflict', 'native dispatch differs from its frozen project configuration', 409)
+            binding = operation_project(service, original, path, frozen)
+    if binding is None:
+        binding = resolve_project(service, request.atlas_id)
+    if binding.path != path:
+        raise AtlasError('atlas_conflict', 'native dispatch differs from the registered project path', 409)
+    if request.action in ('publication.build', 'publication.rebuild'):
+        graph = projection_graph(payload['configuration'])
+        if graph['database'] != binding.graph_database:
+            raise AtlasError('graph_atlas_conflict', 'native projection differs from the registered database', 409)
+        with read_registry(service) as db:
+            verify_graph_owner(db, graph_endpoint(graph['url']), binding.graph_database, binding.atlas_id, require_owner=True)
+    return project_store(service, path)
+
+
 def execute_native(payload):
     from .actions.sources import prepare_sources
     from .core.git_store import git
@@ -56,7 +103,6 @@ def execute_native(payload):
     request = ActionRequest(**payload['request'])
     evidence = Path(payload['evidence'])
     from .contracts import ServiceContext
-    from .project_registry import project_store
     root = payload.get('service_root')
     if not isinstance(root, str) or not Path(root).is_absolute() or str(Path(root).resolve()) != root:
         raise AtlasError('invalid_configuration', 'native execution requires the absolute service root')
@@ -64,7 +110,7 @@ def execute_native(payload):
     cache = service.service_root / 'vectors'
     if payload.get('vector_cache') != str(cache) or cache.resolve() != cache:
         raise AtlasError('invalid_configuration', 'native execution requires the service vector-cache location')
-    store = project_store(service, Path(payload['atlas_path']))
+    store = _native_store(service, request, payload)
     pubs = Publications(store)
     data = request.payload
     if request.action in ('publication.build', 'publication.rebuild'):
