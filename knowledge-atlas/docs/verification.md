@@ -1,5 +1,55 @@
 # Knowledge Atlas verification
 
+## Atlas 0.4.0 public delivery
+
+[Release `knowledge-atlas-v0.4.0`](https://github.com/sergesha/claude-essentials/releases/tag/knowledge-atlas-v0.4.0)
+was published on November 25, 2026 from
+`d217cbf6402680471c5d0c3d8bdab8711aff9ef5`. Application and both plugin manifests
+report `0.4.0`. The public Linux ARM64 image is
+`ghcr.io/sergesha/knowledge-atlas:0.4.0` with immutable manifest digest:
+
+```text
+sha256:b8e5f1d2e7c02ffa2a22ce7f5812642f681af3a97385c9e3d32177e60d0b5653
+```
+
+The [release workflow](https://github.com/sergesha/claude-essentials/actions/runs/45694558026)
+completed successfully. Its publisher scanned configuration ID
+`sha256:ebf627fea120eb5c7233b9d4cf4ae163a1d3c4d7e5d445d6c49ead36984158a9`,
+verified that identity immediately before pushing, and matched it to the
+published manifest. Trivy 0.76.2 used its database updated at 19:00 UTC and
+fetched at 20:43 UTC on November 25, together with CISA KEV catalog
+`2026.11.25`. The retained report contains 163 findings, zero blocking findings
+and zero execution errors under the shared policy. This is a policy pass,
+not a claim that the image has no reported vulnerabilities.
+
+A separate clean hosted ARM64 job pulled the exact digest anonymously and
+verified application version, revision and configuration ID. Its packaged
+native multi-project test passed in 76.05 seconds, covering independent A/B
+projects, composition, historical graph/vector reads and admitted queued work
+across restart. The run retains `image-security-45694558026-1-knowledge-atlas-linux-arm64`,
+`atlas-publication-1` and `atlas-delivery-1` artifacts with the raw scan,
+pre-push verification, registry receipt and native results.
+
+Version-specific package checks passed before the version PR merged: seven
+focused tests, locked dependency synchronization, offline wheel/sdist builds,
+native plugin validation and an
+outside-source wheel installation. The wheel SHA-256 is
+`645991a4b4d74afd5af7236577623b7210dad19cb0e9fa82e5adaaf81e37ef0d`.
+Fresh Codex 0.172.0 and Claude Code 2.1.332 sessions each loaded the exact
+released plugin, advertised 26 tools and completed nine successful MCP calls
+against an independently installed matching native backend. Both
+opened three project UUIDs, checked statuses and decision receipts, retrieved
+owned and composed evidence, and exited normally. The optional missing-icon
+manifest warning remains nonblocking.
+
+The implementation tree preceding the version-only increment separately passed
+macOS and Linux native checks, both full provider SDK lifecycles, and installed-wheel
+Chrome verification. Project selector cancel/confirm transitions in Chrome were
+performed and confirmed by the user; publication admission and final Version 2
+were observed directly and checked against the backend. These checks do not
+claim migration of old data, a full deployment backup restore, broader
+architectures or a provider login in a new installation's empty auth volume.
+
 ## Integrated qualification
 
 Run the Python and viewer suites and build the distribution from a frozen Atlas
@@ -213,5 +263,5 @@ throughput, arbitrary pathfinding and graph comparison are not qualified.
 
 Current evidence supports a single-owner technical pilot. Comparative answer
 quality, repeatable clean upgrades, full deployment-state restore and broad
-platform support require further qualification. No hosted service, public image,
-ACP integration, remote HTTPS deployment or multiuser access is claimed.
+platform support require further qualification. The public ARM64 image is qualified above. No hosted service, ACP integration,
+remote HTTPS deployment or multiuser access is claimed.

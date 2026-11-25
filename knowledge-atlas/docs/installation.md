@@ -2,8 +2,8 @@
 
 The [Docker guide](../docker/README.md) describes the versioned GHCR pull and
 the explicit, same-source ARM64 local build. Check that the selected release
-has a qualified image digest before using its pull command. The 0.4.0 image
-is pending qualification.
+has a qualified image digest before using its pull command. The 0.4.0 public Linux ARM64 image and exact digest are recorded in
+[verification](verification.md#atlas-040-public-delivery).
 
 ## Native installation without Docker
 
