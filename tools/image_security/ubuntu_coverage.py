@@ -75,34 +75,52 @@ def ubuntu_record(raw, cve, release, sources, findings, proofs, errors):
         if package == key or package not in sources:
             continue
         priority = fields.get("Priority_" + package, fields.get("Priority"))
-        severity = {"critical": "CRITICAL", "high": "HIGH", "medium": "MEDIUM",
-                    "low": "LOW", "negligible": "LOW", "untriaged": "UNKNOWN"}.get(priority)
-        status, _, note = value.partition(" ")
-        note = note.strip()
-        fixed = note[1:-1] if status == "released" and note.startswith("(") and note.endswith(")") else ""
-        fix_status = {"needed": "affected", "in-progress": "affected", "deferred": "fix_deferred",
-                      "pending": "affected", "ignored": "will_not_fix", "released": "fixed"}.get(status)
         for binary in sources[package]:
             version = binary["source_version"]
             proof = dict(cve=cve, release=release, source_package=package, **binary, vendor_status=value,
                          priority=priority, sha256=digest(raw), applicability="unresolved")
             proofs.append(proof)
-            if status == "not-affected" and (not note or not re.search(r"\d", note)):
-                proof["applicability"] = "vendor not affected"
-                continue
-            if status == "released" and DEB.fullmatch(fixed) and compare_debian(version, fixed) >= 0:
-                proof["applicability"] = "fixed in installed version"
-                continue
-            if (not severity or not fix_status or (status == "released" and not DEB.fullmatch(fixed))
-                    or (status == "ignored" and not re.search(
-                        r"will not fix|won't fix|was (?:needed|deferred)|low priority|too intrusive",
-                        note, re.IGNORECASE))):
-                errors.append(f"{cve}: {release} {package} {version}, unresolved {value} ({priority})")
-                continue
-            proof["applicability"] = "affected"
-            findings.append({"VulnerabilityID": cve, "PkgName": package, "InstalledVersion": version,
-                             "FixedVersion": fixed, "Severity": severity, "Status": fix_status,
-                             "DataSource": {"ID": "ubuntu-cve-tracker"}, "VendorEvidence": proof})
+            assess_ubuntu_match(proof, findings, errors)
+
+
+def assess_ubuntu_match(proof, findings, errors):
+    cve, version, package = (proof[k] for k in ("cve", "source_version", "source_package"))
+    demand(CVE.fullmatch(cve) and proof["release"] == "noble" and DEB.fullmatch(version)
+           and DEB.fullmatch(proof["version"]) and proof["architecture"] and proof["name"] and package,
+           "invalid installed Ubuntu source or binary identity")
+    priority = proof["priority"]
+    severity = {"critical": "CRITICAL", "high": "HIGH", "medium": "MEDIUM",
+                "low": "LOW", "negligible": "LOW"}.get(priority, "UNKNOWN")
+    value = proof["vendor_status"]
+    status, _, note = value.partition(" ")
+    note = note.strip()
+    fixed = note[1:-1] if status == "released" and note.startswith("(") and note.endswith(")") else ""
+    clear_exclusion = note.lower() in {"", "(code not present)", "(code not compiled)", "(code not built)",
+                                      "(windows-specific)", "(windows only)", "(windows platform only)",
+                                      "(apple specific)", "(macos-specific)"}
+    if status == "not-affected" and clear_exclusion:
+        proof["applicability"] = "vendor not affected"
+        return
+    if status == "released" and DEB.fullmatch(fixed) and compare_debian(version, fixed) >= 0:
+        proof["applicability"] = "fixed in installed version"
+        return
+    known = {"needed": "affected", "in-progress": "affected", "deferred": "fix_deferred",
+             "pending": "affected", "released": "fixed"}
+    if status == "ignored" and re.search(r"will not fix|won't fix|was (?:needed|deferred)|low priority|too intrusive",
+                                          note, re.IGNORECASE):
+        known["ignored"] = "will_not_fix"
+    unsupported = status not in {*known, "needs-triage", "not-affected", "ignored"}
+    invalid_fix = status == "released" and not DEB.fullmatch(fixed)
+    uncertain = status not in known or invalid_fix
+    proof["applicability"] = "potentially affected" if uncertain else "affected"
+    if severity == "UNKNOWN" or unsupported or invalid_fix or (uncertain and severity == "HIGH"):
+        errors.append(f"{cve}: {proof['release']} {package} {version}, required severity/status/fix evidence: {value} ({priority})")
+    findings.append({"VulnerabilityID": cve, "PkgName": package, "InstalledVersion": version,
+                     "FixedVersion": fixed if not invalid_fix else "", "Severity": severity,
+                     "Status": "unknown" if uncertain else known[status],
+                     "DataSource": {"ID": "ubuntu-cve-tracker"}, "VendorEvidence": proof,
+                     "Copy": {key: proof[key] for key in ("source_package", "source_version", "name",
+                                                          "version", "architecture", "release")}})
 
 
 def ubuntu_snapshot(release, sources, output, result):

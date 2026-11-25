@@ -174,11 +174,17 @@ class Aliases:
         return {"cves": sorted(cves), "edges": edges, "status": state, "errors": errors}
 
 
-def evaluate(finding, kev, resolver):
+def evaluate(finding, kev, resolver, supplier_identity=False):
     errors, reasons = [], []
     fields = finding if isinstance(finding, dict) else {}
     primary = fields.get("VulnerabilityID")
-    aliases = resolver.resolve(primary, fields.get("VendorIDs", []))
+    local = fields.get("SupplierIdentity", {})
+    if (supplier_identity and isinstance(local, dict) and local.get("cves") == [] and
+            fields.get("DataSource", {}).get("ID") == "node-security-wg" and
+            str(local.get("record", "")).isdigit() and primary == "NODE-SECURITY-WG-" + local["record"]):
+        aliases = {"cves": [], "edges": [], "status": "no_published_cve", "errors": []}
+    else:
+        aliases = resolver.resolve(primary, fields.get("VendorIDs", []))
     errors.extend(aliases["errors"])
     matches = sorted(set(aliases["cves"]) & kev)
     severity = fields.get("Severity")

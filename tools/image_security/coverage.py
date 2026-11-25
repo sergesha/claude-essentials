@@ -35,6 +35,9 @@ def collect_coverage(producer, candidate, archive, report, reports):
         except (KeyError, OSError, ValueError, subprocess.SubprocessError) as exc:
             result["errors"].append(f"Ubuntu vendor status for {', '.join(result['ubuntu_sources'])}: {exc}")
     if "queries" in result:
-        check_suppliers(result, reports)
+        try:
+            check_suppliers(result, reports)
+        except (KeyError, TypeError, ValueError, OSError, EOFError, subprocess.SubprocessError) as exc:
+            result["errors"].append(f"supplier evidence collection: {exc}")
     result["complete"] = bool(result["components"]) and not result["errors"]
     return result

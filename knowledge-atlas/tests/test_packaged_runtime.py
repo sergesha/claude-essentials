@@ -210,3 +210,33 @@ def test_compiled_lance_tokenizer_redistributes_tantivy_attribution(tmp_path):
     assert 'The above copyright notice and this permission notice shall be included' in text
     assert 'Paul Masurel' in text
     assert 'Redistributions in binary form must reproduce the above copyright notice' in text
+
+
+def test_cargo_receipt_requires_compiled_bytes_for_both_shipped_outputs(tmp_path):
+    import json
+    import runpy
+    from pathlib import Path
+    import pytest
+
+    script = Path(__file__).resolve().parents[1] / 'docker/build-seed.py'
+    record_outputs = runpy.run_path(str(script))['record_native_outputs']
+    materials = tmp_path / 'materials'
+    materials.mkdir()
+    (materials / 'cargo-inventory.json').write_text('{"fixture": {}}')
+    logs = []
+    for name, kind, shipped in [('poc9-extract', 'bin', 'extract/target/debug/poc9-extract'),
+                                ('terminusdb_dylib', 'cdylib', 'terminusdb/src/rust/librust.so')]:
+        path = tmp_path / shipped
+        path.parent.mkdir(parents=True)
+        path.write_bytes(name.encode())
+        original = tmp_path / name
+        original.write_bytes(path.read_bytes())
+        logs.append({'reason': 'compiler-artifact', 'target': {'name': name, 'kind': [kind]},
+                     'manifest_path': str(tmp_path / 'Cargo.toml'), 'filenames': [str(original)]})
+    log = tmp_path / 'prepare.log'
+    log.write_text('\n'.join(map(json.dumps, logs)))
+    record_outputs(tmp_path, materials)
+    assert len(json.loads((materials / 'cargo-outputs.json').read_text())['outputs']) == 2
+    (tmp_path / 'terminusdb_dylib').write_bytes(b'other compiled object')
+    with pytest.raises(ValueError, match='differs from installed output'):
+        record_outputs(tmp_path, materials)

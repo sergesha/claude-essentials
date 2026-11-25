@@ -124,7 +124,7 @@ class GateTest(unittest.TestCase):
         return {"id": "sha256:" + ident, "platform": "linux/arm64", "diff_ids": [diff],
                 "source": gate.SOURCE, "revision": REV, "version": "1"}
 
-    def scan_fixture(self, out, scanner_error=False, qualified=True, extra_findings=(), encode_report=json.dumps):
+    def scan_fixture(self, out, scanner_error=False, qualified=True, extra_findings=(), encode_report=json.dumps, supplemental=()):
         def export(ref, platform, directory):
             return self.archive(directory / "candidate.tar")
 
@@ -147,7 +147,7 @@ class GateTest(unittest.TestCase):
             gate.write_json(path / "metadata.json", db(gate.now()))
 
         coverage = {"complete": qualified, "errors": [] if qualified else ["unqualified"],
-                    "components": [{"name": "sample", "version": "1.0"}], "findings": []}
+                    "components": [{"name": "sample", "version": "1.0"}], "findings": list(supplemental)}
         host = "Darwin-arm64"
         scanner_id = dict(gate.load_pins()["assets"][host], host=host, version=gate.VERSION)
         with patch.object(gate, "export_candidate", side_effect=export), \
@@ -158,6 +158,26 @@ class GateTest(unittest.TestCase):
              patch.object(gate, "collect_coverage", return_value=coverage):
             return gate.main(["scan", "--image", "image", "--producer", "sample",
                               "--platform", "linux/arm64", "--out", str(out)])
+
+    def test_copy_disposition_keeps_raw_reasons_and_independent_copy_blocking(self):
+        from image_inventory import pip_implementation
+        source = b"pkg_resources source"
+        proof = pip_implementation("setuptools", ["pkg_resources/__init__.py"], b"setuptools==70.3.0",
+                                   None, lambda _: source)
+        affected = dict(finding("CVE-2025-47273", "HIGH", "78.1.1"), PkgName="setuptools", InstalledVersion="70.3.0")
+        vendor = dict(affected, Copy={"name":"setuptools", "version":"70.3.0", "origin":"pip/_vendor/vendor.txt",
+                                      "implementation":proof})
+        regular = dict(affected, Copy={"name":"setuptools", "version":"70.3.0", "origin":"another/METADATA"})
+        fake = dict(affected, ImplementationDisposition={"status":"unaffected"})
+        out = self.root / "per-copy"
+        self.assertEqual(self.scan_fixture(out, extra_findings=[fake], supplemental=[vendor, regular]), 1)
+        raw, checked_vendor, checked_regular = gate.read_json(out / "reports/decision.json")["findings"]
+        self.assertEqual(raw["reasons"], ["HIGH with fix"])
+        self.assertEqual(checked_regular["reasons"], ["HIGH with fix"])
+        self.assertEqual(checked_vendor["reasons"], [])
+        self.assertEqual(checked_vendor["raw_reasons"], ["HIGH with fix"])
+        self.assertEqual(checked_vendor["finding"], vendor)
+        self.assertEqual(checked_vendor["origin"]["finding_index"], 0)
 
     def test_failed_scan_preserves_partial_results(self):
         out = self.root / "out"

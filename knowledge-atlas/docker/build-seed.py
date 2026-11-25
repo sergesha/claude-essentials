@@ -67,6 +67,40 @@ def collect_cargo_materials(cargo: Path, materials: Path, build_log: Path):
     (materials / 'cargo-inventory.json').write_text(json.dumps(provenance, indent=2))
 
 
+def record_native_outputs(root: Path, materials: Path):
+    targets = {"poc9-extract": ("bin", "extract/target/debug/poc9-extract"),
+               "terminusdb_dylib": ("cdylib", "terminusdb/src/rust/librust.so")}
+    outputs, links = {}, []
+    with (root / "prepare.log").open() as log:
+        for line in log:
+            if not line.startswith("{"):
+                continue
+            record = json.loads(line)
+            if record.get("reason") == "build-script-executed" and record.get("linked_libs"):
+                links.append({k: record[k] for k in ("package_id", "linked_libs")})
+            if record.get("reason") != "compiler-artifact":
+                continue
+            name = record["target"]["name"]
+            if name not in targets:
+                continue
+            kind, shipped = targets[name]
+            if kind not in record["target"]["kind"]:
+                continue
+            digest = runtime._hash(root / shipped)
+            matching = [f for f in record["filenames"] if runtime._hash(Path(f)) == digest]
+            if not matching:
+                raise ValueError(f"{name}: compiled artifact differs from installed output")
+            outputs[shipped] = {"name": name, "kind": kind, "manifest": record["manifest_path"],
+                                "filenames": matching, "sha256": digest}
+    if len(outputs) != len(targets):
+        raise ValueError("missing final Cargo compiler artifacts")
+    material = materials / "cargo-inventory.json"
+    receipt = {"outputs": outputs, "native_links": links, "inventory_sha256": runtime._hash(material),
+               "recipe_sha256": runtime._hash(Path(__file__)),
+               "compiled_count": len(json.loads(material.read_bytes()))}
+    (materials / "cargo-outputs.json").write_text(json.dumps(receipt, indent=2))
+
+
 def build():
     root = Path('/opt/atlas-seed')
     revision = os.environ['ATLAS_REVISION']
@@ -81,6 +115,7 @@ def build():
     shutil.copy2(root / 'downloads/swipl-10.0.2.tar.gz', materials)
     cargo = root / 'cargo-home'
     collect_cargo_materials(cargo, materials, root / 'prepare.log')
+    record_native_outputs(root, materials)
     lance, = cargo.glob('registry/src/*/lance-7.0.0')
     shutil.copytree(lance, materials / 'lance-7.0.0')
     # tus is loaded from its installed pack directory; Git metadata is not required there.

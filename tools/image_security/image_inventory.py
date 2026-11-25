@@ -4,6 +4,7 @@ import csv
 import hashlib
 import io
 import json
+import posixpath
 import re
 import subprocess
 import tarfile
@@ -14,8 +15,10 @@ from email.parser import BytesParser
 from pathlib import Path, PurePosixPath
 
 from advisories import demand
+import native_evidence as native_proof
 
 SOURCE = re.compile(r"([a-z0-9][a-z0-9.+-]*)(?: \(([^() ]+)\))?")
+NODE_LIMIT = 256 * 1024 * 1024
 LIMIT = 32 * 1024 * 1024
 
 
@@ -159,6 +162,8 @@ def inventory(producer, rootfs, report, result=None):
             result["ubuntu_sources"] = dict(sources)
         pyroots, installed = set(), set()
         wheel_owners = {}
+        sboms = {}
+        npm_root = "usr/local/lib/node_modules/npm/package.json"
         for path in files:
             if path.endswith(".dist-info/METADATA") and "/site-packages/" in path:
                 meta = BytesParser().parsebytes(read(path))
@@ -177,14 +182,24 @@ def inventory(producer, rootfs, report, result=None):
                 # Only package roots. npm also ships test fixtures, tool configuration and nested subpaths.
                 if not re.search(r"/node_modules/(?:@[^/]+/)?[^/]+/package\.json$", path):
                     continue
-                meta = json.loads(read(path))
-                if meta.get("name") and meta.get("version"):
+                try:
+                    meta = json.loads(read(path))
+                    demand(isinstance(meta, dict) and all(isinstance(meta.get(k), str) and meta[k].strip()
+                           for k in ("name", "version")), "invalid npm package identity")
+                    demand(path != npm_root or meta["name"] == "npm", "wrong npm root")
                     checked("npm", meta["name"], meta["version"], path, "node-pkg", "npm")
+                except (UnicodeError, ValueError) as exc:
+                    errors.append(f"{path}: {exc}")
             elif "/pip/_vendor/" in path and path.endswith("/vendor.txt"):
                 for line in read(path).decode().splitlines():
                     match = re.match(r"^([\w.-]+)==([\w.+-]+)", line.strip())
                     if match:
-                        row = component("vendored in pip", match[1], match[2], path)
+                        prefix = path.removesuffix("vendor.txt")
+                        bom = prefix + "bom.cdx.json"
+                        impl = pip_implementation(match[1], (p[len(prefix):] for p in files if p.startswith(prefix)),
+                                                  read(path), read(bom) if bom in files else None,
+                                                  lambda p: read(prefix + p))
+                        row = component("vendored in pip", match[1], match[2], path, implementation=impl)
                         query(row, {"ecosystem": "PyPI", "name": match[1]})
             elif "/ensurepip/_bundled/" in path and path.endswith(".whl"):
                 with zipfile.ZipFile(io.BytesIO(read(path))) as wheel:
@@ -195,7 +210,13 @@ def inventory(producer, rootfs, report, result=None):
                     for line in wheel.read(manifest).decode().splitlines():
                         match = re.match(r"^([\w.-]+)==([\w.+-]+)", line.strip())
                         if match:
-                            row = component("vendored in bootstrap wheel", match[1], match[2], path + "!" + manifest)
+                            prefix = "pip/_vendor/"
+                            bom = prefix + "bom.cdx.json"
+                            impl = pip_implementation(match[1], (p[len(prefix):] for p in wheel.namelist() if p.startswith(prefix)),
+                                                      wheel.read(manifest), wheel.read(bom) if bom in wheel.namelist() else None,
+                                                      lambda p: wheel.read(prefix + p))
+                            row = component("vendored in bootstrap wheel", match[1], match[2], path + "!" + manifest,
+                                            sha256=hashlib.sha256(read(path)).hexdigest(), implementation=impl)
                             query(row, {"ecosystem": "PyPI", "name": match[1]})
         for required in (("opt/knowledge-atlas/.venv/", "opt/atlas-seed/python/") if atlas else ("usr/local/",)):
             if not any(root.startswith(required) for root in pyroots):
@@ -205,8 +226,12 @@ def inventory(producer, rootfs, report, result=None):
                 errors.append("missing installed Python distribution " + required)
         native = result["native_outputs"]
         for path, member in files.items():
-            if member.size < 4 or not (member.mode & 0o111 or ".so" in PurePosixPath(path).name
-                                       or path.endswith(".a")):
+            if member.islnk():
+                member = files.get(member.linkname.removeprefix("./"), member)
+            if member.islnk():
+                errors.append(f"{path}: unresolved hardlink target {member.linkname}")
+                continue
+            if member.size < 4:
                 continue
             stream = tar.extractfile(member)
             header = stream.read(8)
@@ -215,7 +240,7 @@ def inventory(producer, rootfs, report, result=None):
             h = hashlib.sha256(header)
             for chunk in iter(lambda: stream.read(1024*1024), b""):
                 h.update(chunk)
-            item = {"path": path, "sha256": h.hexdigest(), "dpkg": owners.get(path) or owners.get(path.removeprefix("usr/")),
+            item = {"path": path, "sha256": h.hexdigest(), "size": member.size, "dpkg": owners.get(path) or owners.get(path.removeprefix("usr/")),
                     "wheel": wheel_owners.get(path)}
             native.append(item)
         native_paths = {n["path"] for n in native}
@@ -230,7 +255,11 @@ def inventory(producer, rootfs, report, result=None):
             errors.append("copied CPython binary or exact version header missing")
         else:
             version = versions.pop()
-            component("interpreter", "CPython", version, sorted(python), advisory_source="PSF")
+            for item in native:
+                if item["path"] in python:
+                    component("interpreter", "CPython", version, item["path"], sha256=item["sha256"],
+                              advisory_source="PSF")
+                    item["disposition"] = "identified CPython interpreter for PSF release check"
             result["python_version"] = version
         for required, pattern in (("OpenBLAS", r"(?i)openblas[^/]*\.so"), ("tokenizers", r"/tokenizers/[^/]+\.so"),
                                   ("numpy", r"/numpy/_core/[^/]+\.so")):
@@ -249,7 +278,7 @@ def inventory(producer, rootfs, report, result=None):
             else:
                 cargo = json.loads(read(material))
                 for path, identity in cargo.items():
-                    match = re.fullmatch(r"registry/src/[^/]+/(.+)-(\d+\.\d+\.\d+(?:[-+].+)?)", path)
+                    match = re.fullmatch(r"registry/src/[^/]+/([A-Za-z0-9_-]+)-(\d+\.\d+\.\d+(?:[-+].+)?)", path)
                     if match and re.fullmatch("[0-9a-f]{64}", identity.get("sha256", "")):
                         row = component("compiled Cargo crate", match[1], match[2], material, input=path,
                                         crate_sha256=identity["sha256"], applicability="conservative build superset")
@@ -263,72 +292,105 @@ def inventory(producer, rootfs, report, result=None):
                 if not cargo:
                     errors.append("empty Rust output inventory")
             result["retained_source_locks"] = sorted(p for p in files if p.endswith("/Cargo.lock"))
+            result["source_lock_packages"] = {}
+            for path in result["retained_source_locks"]:
+                lock = tomllib.loads(read(path).decode())
+                result["source_lock_packages"][path] = [[p["name"], p["version"]] for p in lock.get("package", [])]
         for path in files:
             if path.endswith(".json") and ".dist-info/sboms/" in path:
-                document = json.loads(read(path))
-                if document.get("bomFormat") != "CycloneDX":
-                    errors.append(f"unrecognized wheel SBOM {path}")
-                    continue
-                for dep in document.get("components", []):
-                    name, version = dep.get("name"), dep.get("version")
-                    if not name or not version:
-                        errors.append(f"missing bundled identity in {path}")
-                        continue
-                    row = component("wheel SBOM", name, version, path, purl=dep.get("purl"))
-                    if dep.get("purl", "").startswith("pkg:cargo/") and "download_url=" not in dep["purl"]:
-                        query(row, {"ecosystem": "crates.io", "name": name})
-                    elif name == "openssl":
-                        query(row, {"ecosystem": "GIT", "name": "https://github.com/openssl/openssl"}, "openssl-" + version)
-                    else:
-                        errors.append(f"{path}: unresolved upstream advisory identity {name} {version}")
-        opens = [p for p in native_paths if re.search(r"(?i)openblas[^/]*\.so", p)]
-        for path in opens:
-            site = path.rpartition("/numpy.libs/")[0]
-            config = site + "/numpy/__config__.py"
-            match = re.search(rb'"openblas configuration":\s*r?"OpenBLAS ([\w.+-]+)', read(config)) if config in files else None
-            if match:
-                version = match[1].decode()
-                row = component("bundled native library", "OpenBLAS", version, path, build_configuration=config)
-                if re.fullmatch(r"\d+\.\d+\.\d+", version):
-                    query(row, {"ecosystem": "GIT", "name": "https://github.com/OpenMathLib/OpenBLAS"}, "v" + version)
-                else:
-                    errors.append(f"{path}: scipy-openblas build {version} needs supplier revision/advisory mapping")
-            else:
-                errors.append(f"{path}: bundled OpenBLAS version unavailable")
+                try:
+                    site, name = path.rsplit("/site-packages/", 1)
+                    dist = name.split(".dist-info/", 1)[0]
+                    project, version = dist.rsplit("-", 1)
+                    owner = project.lower().replace("_", "-"), version
+                    raw = read(path)
+                    digest = hashlib.sha256(raw).hexdigest()
+                    result.setdefault("wheel_sboms", []).append({"path": path, "sha256": digest, "owner": owner})
+                    matched_member = any(item["path"].startswith(site + "/site-packages/") and
+                                         (binding := native_proof.WHEELS.get(item["sha256"])) and
+                                         binding[:2] == owner and binding[-1] == digest and
+                                         item["path"].endswith("/" + binding[2]) for item in native)
+                    if not matched_member:
+                        document = json.loads(raw)
+                        entries = document.get("components")
+                        demand(isinstance(entries, list) and entries, "empty or malformed SBOM")
+                        for dep in entries:
+                            if not isinstance(dep, dict) or not all(isinstance(dep.get(k), str) and dep[k]
+                                                                  for k in ("name", "version", "purl")):
+                                errors.append(f"{path}: malformed supplier-declared component")
+                                continue
+                            row = component("wheel SBOM", dep["name"], dep["version"], path, sha256=digest,
+                                            purl=dep["purl"], applicability="requires matching native output")
+                            if dep["purl"].startswith("pkg:cargo/") and "download_url=" not in dep["purl"]:
+                                query(row, {"ecosystem": "crates.io", "name": dep["name"]})
+                            elif dep["name"] == "openssl":
+                                result["queries"].append({"component": len(components)-1, "repository": "openssl/openssl",
+                                                          "tag": "openssl-" + dep["version"]})
+                            else:
+                                errors.append(f"{path}: unresolved upstream identity {dep['purl']}")
+                    native_proof.sbom_packages(raw, owner)
+                    sboms[(site + "/site-packages/", *owner, digest)] = raw
+                except (KeyError, ValueError, TypeError) as exc:
+                    errors.append(f"{path}: invalid wheel SBOM: {exc}")
         for item in native:
-            if item["wheel"] and any(part in item["path"] for part in ("tokenizers/", "onnxruntime/")):
-                name, version = item["wheel"]
-                row = component("native wheel output", name, version, item["path"], sha256=item["sha256"])
-                query(row, {"ecosystem": "PyPI", "name": name})
-                site = item["path"].split("/site-packages/")[0] + "/site-packages/"
-                if not any(p.startswith(site + name.replace("-", "_") + "-") and ".dist-info/sboms/" in p for p in files):
-                    errors.append(f"{item['path']}: {name} {version} lacks build-matched bundled dependency inventory")
-            elif ".libs/" in item["path"] and item["path"] not in opens:
-                errors.append(f"{item['path']}: wheel-bundled native library needs supplier build identity")
+            try:
+                native_proof.wheel_inputs(item, sboms, result) or native_proof.runtime_inputs(item, result)
+            except (TypeError, ValueError, KeyError) as exc:
+                errors.append(f"{item['path']}: {exc}")
+        if atlas and not any(c["origin"] == npm_root and c["kind"] == "npm" for c in components):
+            errors.append(f"missing checked npm root {npm_root}")
         if atlas:
             node = "usr/local/bin/node"
-            if node in native_paths and files[node].size <= 256*1024*1024:
-                binary = tar.extractfile(files[node]).read()
+            node_item = next((i for i in native if i["path"] == node), None)
+            if node_item and node_item["size"] <= NODE_LIMIT:
+                binary = tar.extractfile(files[node]).read(NODE_LIMIT + 1)
+                demand(len(binary) <= NODE_LIMIT, "oversized Node interpreter")
                 versions = set(re.findall(rb"https://nodejs.org/download/release/v([0-9.]+)/node-v\1\.tar\.gz\x00", binary))
                 if len(versions) == 1:
-                    component("interpreter", "Node.js", versions.pop().decode(), node)
+                    component("interpreter", "Node.js", versions.pop().decode(), node, sha256=node_item["sha256"],
+                              advisory_source="Node Security WG and official security releases")
+                    node_item["disposition"] = "identified Node interpreter for supplier release check"
                 else:
                     errors.append(f"{node}: missing unambiguous embedded release URL")
+            elif node in native_paths:
+                errors.append(f"{node}: exceeds Node version inspection limit")
             libs = [p for p in native_paths if re.search(r"/libswipl\.so\.\d+\.\d+\.\d+$", p)]
+            if len(libs) != 1:
+                errors.append("missing unambiguous SWI release library")
+            elif libs[0].endswith(".so.10.0.2"):
+                native_proof.swi_browser(files, read, result)
             for path in libs:
                 version = path.rpartition(".so.")[2]
-                row = component("SWI runtime", "SWI-Prolog", version, path)
-                query(row, {"ecosystem": "GIT", "name": "https://github.com/SWI-Prolog/swipl-devel"}, "V" + version)
+                lib = next(i for i in native if i["path"] == path)
+                row = component("SWI runtime", "SWI-Prolog", version, path, sha256=lib["sha256"])
+                source = "usr/share/doc/knowledge-atlas/swipl-10.0.2.tar.gz"
+                if version == "10.0.2" and source in files and hashlib.sha256(read(source)).hexdigest() == (
+                        "e42cc098f7b8a6051c4f79a99b55162d467098aba60f69649bdc7583f0734b57"):
+                    result["queries"].append({"component": len(components)-1,
+                                              "commit": "69e12af81c17ae5925f7555234c6575adf3a1e85"})
+                    if lib["sha256"] in ("9f76b6c7b6de7c30523513989c3a41a54205b0fb0560fcd6a47df39d0ad72e33",
+                                         "870cce6b87fd9b314b521cbd54af636cddc7127eec0e95b0c887295bfdfa8eef"):
+                        lib["disposition"] = "matched SWI build and release source"
+                    row["cpe"] = "swi-prolog:swi-prolog:10.0.2"
+                else:
+                    errors.append(f"{path}: source archive or release mapping unavailable")
             pack_paths = [p for p in files if re.search(r"/lib/swipl/pack/[^/]+/pack.pl$", p)]
-            if not pack_paths:
-                errors.append("missing SWI pack manifests")
+            if not any(p.endswith("/pack/tus/pack.pl") for p in pack_paths):
+                errors.append("missing expected SWI tus pack root")
             for path in pack_paths:
                 raw = read(path).decode()
                 version = re.search(r"^version\('([^']+)'\)\.", raw, re.M)
                 name = path.split("/")[-2]
                 if version:
-                    component("SWI pack", name, version[1], path)
-                errors.append(f"{path}: exact SWI pack revision and supported advisory coverage required")
+                    component("SWI pack", name, version[1], path, sha256=hashlib.sha256(read(path)).hexdigest())
+                prefix = path.removesuffix("pack.pl")
+                members = {p[len(prefix):]: hashlib.sha256(read(p)).hexdigest() for p in files if p.startswith(prefix)}
+                if name == "tus" and version and version[1] == "0.0.17" and members == native_proof.MATERIAL["tus"]:
+                    components[-1]["advisory_repository"] = "terminusdb-org/tus"
+                    result["queries"].append({"component": len(components)-1,
+                                              "commit": "033ab8fd46db0b7b29bdfc7f038cde30eac22a1d"})
+                else:
+                    errors.append(f"{path}: unresolved SWI pack source")
             manifest_path = "opt/atlas-seed/runtime.json"
             if manifest_path in files:
                 manifest = json.loads(read(manifest_path))
@@ -346,6 +408,8 @@ def inventory(producer, rootfs, report, result=None):
                         errors.append("Rust output SHA-256 differs from runtime build manifest: " + suffix)
             else:
                 errors.append("missing runtime output/build manifest")
+            if material in files and manifest_path in files:
+                qualify_cargo(result, files, read, cargo, material, manifest)
             for path in files:
                 if re.search(r"/corresponding-source/gmp-mpfr-sys-.*\.crate$", path):
                     raw = read(path)
@@ -353,8 +417,24 @@ def inventory(producer, rootfs, report, result=None):
                         names = [m.name for m in source if m.isfile() and m.name.endswith("/gmp-h.in")]
                     versions = {m[1] for p in names if (m := re.search(r"/gmp-(\d+\.\d+\.\d+)-c/", p))}
                     if len(versions) == 1:
-                        component("static library source", "GMP", versions.pop(), path, sha256=hashlib.sha256(raw).hexdigest())
-                        errors.append("GMP: verify shipped static build flags, backports and upstream advisory status")
+                        gmp = component("static library source", "GMP", versions.pop(), path,
+                                        sha256=hashlib.sha256(raw).hexdigest())
+                        graph = next((i for i in native if i["path"].endswith("/terminusdb/src/rust/librust.so")), None)
+                        if (graph and result.get("cargo_outputs", {}).get("static_gmp") and
+                                hashlib.sha256(raw).hexdigest() == "13eabc29d16e4a621b495e3919c71ebb7caaed24380955671e7d417370fea95d"):
+                            gmp.update(cpe="gmplib:gmp:6.2.1", origin=graph["path"], sha256=graph["sha256"],
+                                       input=path, input_sha256=hashlib.sha256(raw).hexdigest(),
+                                       patched_gmp="07a4142e4c5b476c09f89782be35fe13f955d18c6312f934d1b52340ffa4535d")
+                            copy = {"origin": graph["path"], "sha256": graph["sha256"], "input": path}
+                            result["findings"].append({"VulnerabilityID": "CVE-2021-43618", "PkgName": "GMP",
+                                "InstalledVersion": "6.2.1", "Severity": "HIGH", "Status": "unknown",
+                                "Evidence": {"cna_sha256": "7a6c68aa659b3d7c1aa4c72ed2dd355da80fa931ae06238e6dffaa4f6830cca6",
+                                             "patch_sha256": "278560197b7a9bfa1289ef1e555ef656aaff74fe59f6da086eab593846ab765f"},
+                                "DataSource": {"ID": "GMP supplier source"}, "Copy": copy,
+                                "ImplementationDisposition": {"status": "unaffected", "copy": copy,
+                                    "source": "mpz/inp_raw.c sha256 07a4142e4c5b476c09f89782be35fe13f955d18c6312f934d1b52340ffa4535d"}})
+                        else:
+                            errors.append("GMP: source and static link not matched to graph output")
                     else:
                         errors.append("GMP: unrecognized retained native source")
             if not any(c["name"] == "GMP" for c in components):
@@ -365,5 +445,158 @@ def inventory(producer, rootfs, report, result=None):
                 proof = workspace_evidence(target["Target"], target["Packages"], files, read)
                 if proof:
                     result["virtual_workspaces"].append(proof)
+        checked_packages = {c["name"] for c in components if c["kind"] == "dpkg" and c["trivy_listed"]}
+        # Resolve shared imports inside the candidate, never against host libraries.
+        native_by_path = {i["path"]: i for i in native}
+        library_names = defaultdict(list)
+        links = {m.name.removeprefix("./"): m.linkname for m in tar.getmembers() if m.issym()}
+        for path in native_by_path.keys() | links.keys():
+            if not re.fullmatch(r"(?:usr/)?lib(?:64)?/(?:[a-zA-Z0-9_-]+-linux-gnu/)?[^/]+", path):
+                continue
+            target = path
+            for _ in range(16):
+                if target not in links:
+                    break
+                link = links[target]
+                target = posixpath.normpath(posixpath.join(posixpath.dirname(target), link)).lstrip("/")
+                if target.startswith(("lib/", "lib64/")) and target not in native_by_path and target not in links:
+                    target = "usr/" + target
+            library = native_by_path.get(target)
+            if library and library["dpkg"] in checked_packages:
+                library_names[posixpath.basename(path)].append({k: library[k] for k in ("path", "sha256", "dpkg")})
+        for item in native:
+            needed = native_proof.reviewed_imports(item)
+            if needed:
+                item["dynamic_imports"] = {name: library_names[name] for name in needed}
+                missing = [name for name in needed if not library_names[name]]
+                if missing:
+                    errors.append(f"{item['path']}: missing inventoried OS imports {missing}")
+            if item["dpkg"] in checked_packages:
+                item.setdefault("disposition", "installed dpkg package in scanner inventory")
+            if "disposition" not in item:
+                item["disposition"] = "unresolved"
+                errors.append(f"{item['path']}: unresolved native output/build inputs")
         result["native_unowned"] = [n["path"] for n in native if not n["dpkg"]]
     return result
+
+
+def pip_implementation(name, paths, manifest, bom, read_member):
+    """Describe the implementation inside just this installed or zipped pip vendor root."""
+    normalized = {p.removeprefix("./") for p in paths}
+    proof = {"manifest_sha256": hashlib.sha256(manifest).hexdigest()}
+    if bom:
+        document = json.loads(bom)
+        proof["bom_sha256"] = hashlib.sha256(bom).hexdigest()
+        proof["bom_packages"] = [[d.get("name"), d.get("version"), d.get("purl")]
+                                 for d in document.get("components", []) if d.get("name") == name]
+    if name == "setuptools":
+        members = sorted(p for p in normalized if p.startswith(("pkg_resources/", "setuptools/")))
+        if "pkg_resources/__init__.py" in members and not any(p.startswith("setuptools/") for p in members):
+            proof.update(absent="setuptools/package_index", members=members, member_sha256={
+                "pkg_resources/__init__.py": hashlib.sha256(read_member("pkg_resources/__init__.py")).hexdigest()})
+    if name == "msgpack":
+        members = sorted(p for p in normalized if p.startswith("msgpack/"))
+        if "msgpack/fallback.py" in members and not any("_cmsgpack" in p or p.endswith((".so", ".pyd"))
+                                                        for p in members):
+            proof.update(absent="msgpack C extension", members=members, member_sha256={
+                "msgpack/fallback.py": hashlib.sha256(read_member("msgpack/fallback.py")).hexdigest()})
+    return proof
+
+
+def copy_disposition(row, copy):
+    absent = copy.get("implementation", {}).get("absent")
+    vendors = row.get("VendorIDs", [])
+    identifiers = {v for v in [row.get("VulnerabilityID"), *(vendors if isinstance(vendors, list) else [])]
+                   if isinstance(v, str)}
+    affected = {"setuptools/package_index": {"CVE-2025-47273", "GHSA-5rjg-fvgr-3xxf", "PYSEC-2025-49"},
+                "msgpack C extension": {"CVE-2026-114613", "GHSA-j586-36cw-2gc2", "GHSA-6v7p-g79w-8964"}}
+    if (copy.get("name") == "libgfortran" and copy.get("sha256") ==
+            "25899a29a06d3f2927021b4823d858558839fea0e7e759eedb8926fd0a339ea4" and
+            str(copy.get("origin")).endswith("/numpy.libs/libgfortran-e1b7dfc8-d8198c01.so.5.0.0") and
+            row.get("VulnerabilityID") in {"CVE-2026-114690", "CVE-2026-114691"}):
+        return {"status": "unaffected", "source": "CNA identifies libstdc++ implementation", "copy": copy}
+    expected = affected.get(absent, set())
+    if identifiers and identifiers <= expected:
+        return {"status": "unaffected", "source": "identified implementation absent", "copy": copy,
+                "advisory_ids": sorted(expected)}
+    return None
+
+
+def trivy_disposition(row, origin, inventory):
+    name, version = row.get("PkgName"), row.get("InstalledVersion")
+    if origin["type"] == "cargo":
+        evidence = inventory.get("cargo_outputs")
+        lock = inventory.get("source_lock_packages", {}).get(origin["target"], [])
+        source_targets = {"opt/atlas-seed/vectorlink/Cargo.lock", "usr/share/doc/knowledge-atlas/lance-7.0.0/Cargo.lock"}
+        if (origin["target"] in source_targets and evidence and [name, version] in lock and [name, version] not in evidence["compiled"]
+                and [name, version] not in evidence["active_lock_packages"]):
+            return {"status": "source only", "source": origin["target"], "package": [name, version],
+                    "output_hashes": evidence["output_hashes"], "inventory_sha256": evidence["inventory_sha256"]}
+        return None
+    package = origin.get("package") or {}
+    if origin["type"] != "python-pkg" or package.get("AnalyzedBy") != "sbom":
+        return None
+    ident = row.get("PkgIdentifier", {})
+    matches = [c for c in inventory.get("components", []) if c["name"].lower() == str(name).lower()
+               and c["version"] == version and c["kind"] in ("python", "wheel SBOM", "vendored in pip", "vendored in bootstrap wheel")]
+    if not matches or not ident.get("UID") or package.get("Identifier") != ident:
+        return None
+    # A grouped SBOM finding can only lose its release reason when every possible
+    # installed copy has matching BOM identity and proves the same implementation absent.
+    dispositions = [copy_disposition(row, c) for c in matches]
+    if (any([name, version, ident.get("PURL")] in c.get("implementation", {}).get("bom_packages", [])
+            for c in matches) and all(dispositions)):
+        return {"status": "unaffected", "source": "matched pip BOM components and all candidate copies",
+                "copies": matches, "advisory_ids": dispositions[0]["advisory_ids"]}
+    return None
+
+
+def qualify_cargo(result, files, read, cargo, material, manifest):
+    digest = hashlib.sha256(read(material)).hexdigest()
+    roots = ["extract/target/debug/poc9-extract", "terminusdb/src/rust/librust.so"]
+    native = {r["path"]: r for r in result["native_outputs"]}
+    outputs = {s: native.get("opt/atlas-seed/" + s, {}).get("sha256") for s in roots}
+    receipt_path = "usr/share/doc/knowledge-atlas/cargo-outputs.json"
+    historical = {"6d86df36625188c85359bcaf0bcd8868a22d5e0dae9f236715b068cef9cc5b93":
+                  "6f55884b6e3d0ed1ba7bc2d1d525f2337571640792ddfa106f6a844ae0581d4f",
+                  "ea03a77ae21244f8eed5b2d0d5cb8753fd6ca5a8562bbe30a0120327e975465f":
+                  "9841fc17d68e619114f5185a79a699bcb96b5ff0c79c586a6e5b2277d339151d"}
+    try:
+        demand(cargo and all(v and manifest["artifacts"].get(k) == v for k,v in outputs.items()),
+               "missing or inconsistent Cargo output identities")
+        if receipt_path in files:
+            receipt = json.loads(read(receipt_path))
+            recipe = "opt/knowledge-atlas/docker/build-seed.py"
+            trusted_recipe = Path(__file__).resolve().parents[2] / "knowledge-atlas/docker/build-seed.py"
+            demand(recipe in files and hashlib.sha256(read(recipe)).hexdigest() == receipt["recipe_sha256"]
+                   == hashlib.sha256(trusted_recipe.read_bytes()).hexdigest(), "unverified compiler receipt producer")
+            demand(receipt["inventory_sha256"] == digest and receipt["compiled_count"] == len(cargo)
+                   and set(receipt["outputs"]) == set(roots), "partial Cargo receipt")
+            for i, relative in enumerate(roots):
+                record = receipt["outputs"][relative]
+                name, kind = [("poc9-extract", "bin"), ("terminusdb_dylib", "cdylib")][i]
+                demand((record["name"], record["kind"], record["sha256"]) == (name, kind, outputs[relative])
+                       and record["filenames"] and record["manifest"].endswith("/Cargo.toml"),
+                       "mismatched compiler target")
+            static_gmp = any(r["package_id"].endswith("#gmp-mpfr-sys@1.5.3") and "static=gmp" in r["linked_libs"]
+                             for r in receipt["native_links"])
+        else:
+            demand(digest in historical and outputs[roots[1]] == historical[digest]
+                   and outputs[roots[0]] == "56ad65efc47ceeff5573cd27eb01b0006014e971f32e446d93b498d695351c70",
+                   "no matching output-bound compiler inventory")
+            static_gmp = True
+        locks = result["source_lock_packages"]
+        active = [p for folder in ("extract", "terminusdb/src/rust")
+                  for p in locks["opt/atlas-seed/" + folder + "/Cargo.lock"]]
+        demand(active and not any(c["kind"] == "Cargo build input" for c in result["components"]),
+               "unresolved Cargo build inputs")
+        compiled = [[c["name"], c["version"]] for c in result["components"] if c["kind"] == "compiled Cargo crate"]
+        demand("lance" in {n for n, _ in compiled} and "gmp-mpfr-sys" in {n for n, _ in compiled},
+               "compiled graph-library inputs absent")
+        demand(all(p in active for p in compiled), "compiled crate absent from both active build locks")
+        result["cargo_outputs"] = {"output_hashes": outputs, "inventory_sha256": digest, "compiled": compiled,
+                                   "active_lock_packages": active, "static_gmp": static_gmp}
+        for relative in roots:
+            native["opt/atlas-seed/" + relative]["disposition"] = "output-bound compiler inventory"
+    except (KeyError, TypeError, ValueError) as exc:
+        result["errors"].append(f"Cargo compiler/output coverage: {exc}")

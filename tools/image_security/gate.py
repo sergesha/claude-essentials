@@ -68,8 +68,12 @@ def load_pins():
 
 
 def policy_files():
-    return {name: sha256(HERE / name) for name in ("gate.py", "advisories.py", "coverage.py", "image_inventory.py",
-                                                   "ubuntu_coverage.py", "supplier_coverage.py", "trivy-pins.json")}
+    files = {name: sha256(HERE / name) for name in ("gate.py", "advisories.py", "coverage.py", "image_inventory.py",
+                                                   "ubuntu_coverage.py", "supplier_coverage.py", "native_evidence.py",
+                                                   "native-sources.json", "trivy-pins.json")}
+    builder = "knowledge-atlas/docker/build-seed.py"
+    files[builder] = sha256(HERE.parents[1] / builder)
+    return files
 
 
 def read_json(path):
@@ -361,8 +365,16 @@ def evaluate_report(report, candidate, evaluate, errors, virtual_workspaces=()):
                 os_inventory = True
             vulns = result.get("Vulnerabilities", [])
             demand(isinstance(vulns, list), "invalid vulnerabilities array")
-            for item in vulns:
-                evaluate(item, {"report": "trivy.json", "target": target, "type": typ, "result_index": index})
+            for row_index, item in enumerate(vulns):
+                origin = {"report": "trivy.json", "target": target, "type": typ,
+                          "result_index": index, "finding_index": row_index}
+                if isinstance(packages, list) and isinstance(item, dict) and item.get("PkgIdentifier"):
+                    matches = [p for p in packages if isinstance(p, dict) and
+                               p.get("Identifier") == item["PkgIdentifier"] and p.get("Name") == item.get("PkgName")
+                               and p.get("Version") == item.get("InstalledVersion")]
+                    if len(matches) == 1:
+                        origin["package"] = matches[0]
+                evaluate(item, origin)
             if result.get("ModifiedFindings"):
                 errors.append(f"unexpected modified or suppressed findings in target {index}")
         except ERRORS as exc:
@@ -430,7 +442,25 @@ def scan(args, directory):
 
     def evaluate(item, origin):
         try:
-            assessed = adv.evaluate(item, kev, aliases)
+            assessed = adv.evaluate(item, kev, aliases, supplier_identity=(origin["report"] == "coverage.json"))
+            implementation = None
+            if isinstance(item, dict):
+                try:
+                    from image_inventory import copy_disposition, trivy_disposition
+                    if origin["report"] == "trivy.json":
+                        implementation = trivy_disposition(item, origin, coverage)
+                    else:
+                        implementation = item.get("ImplementationDisposition") or copy_disposition(item, item.get("Copy", {}))
+                except (ImportError, OSError, TypeError, ValueError, AttributeError, KeyError) as exc:
+                    assessed["errors"].append(f"implementation evidence: {exc}")
+            if implementation and "advisory_ids" in implementation:
+                if not set(assessed["aliases"]["cves"]) <= set(implementation["advisory_ids"]):
+                    assessed["errors"].append("implementation evidence does not cover every resolved CVE")
+                    implementation = None
+            if implementation:
+                assessed["implementation_disposition"] = implementation
+                assessed["raw_reasons"] = assessed["reasons"]
+                assessed["reasons"] = []
             assessed["origin"] = origin
             findings.append(assessed)
         except ERRORS as exc:
@@ -458,8 +488,8 @@ def scan(args, directory):
     def assess_coverage():
         rows = coverage["findings"]
         demand(isinstance(rows, list), "invalid supplemental findings")
-        for item in rows:
-            evaluate(item, {"report": "coverage.json", "producer": args.producer})
+        for index, item in enumerate(rows):
+            evaluate(item, {"report": "coverage.json", "producer": args.producer, "finding_index": index})
         demand(isinstance(coverage["errors"], list), "invalid coverage errors")
         errors.extend(coverage["errors"])
         demand(coverage["complete"] is True and isinstance(coverage["components"], list) and
