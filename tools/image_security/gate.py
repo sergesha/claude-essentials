@@ -5,6 +5,7 @@ import gzip
 import hashlib
 from http.client import HTTPException
 import json
+import math
 import os
 import platform
 import re
@@ -72,6 +73,19 @@ def policy_files():
 
 def read_json(path):
     return json.loads(path.read_bytes())
+
+
+def read_trivy_report(path, errors):
+    # Preserve unrepresentable numeric tokens for diagnostics without changing the raw report.
+    def unrepresentable(token):
+        errors.append(f"{path.name}: unrepresentable JSON number {token}")
+        return {"unrepresentable_number": token}
+
+    def parse_float(token):
+        value = float(token)
+        return value if math.isfinite(value) else unrepresentable(token)
+
+    return json.loads(path.read_bytes(), parse_float=parse_float, parse_constant=unrepresentable)
 
 
 def write_json(path, value):
@@ -422,7 +436,7 @@ def scan(args, directory):
     raw = reports / "trivy.json"
     report = None
     if raw.exists():
-        report = step("Trivy JSON", lambda: read_json(raw))
+        report = step("Trivy JSON", lambda: read_trivy_report(raw, errors))
         if report is not None:
             step("Trivy evidence", lambda: evaluate_report(report, candidate or {}, evaluate, errors))
     else:
@@ -501,10 +515,12 @@ def verify(args, directory):
         db = decision["db"]
         demand(read_json(directory / "cache/db/metadata.json") == db["metadata"] and
                sha256(directory / "cache/db/trivy.db") == db["sha256"], "DB snapshot mismatch")
-        check_db(db["metadata"], now())
-        check_recent(db["fetched_at"], now())
-        check_recent(decision["kev"]["fetched_at"], now())
         demand(inspect_image(args.image) == candidate, "destination image identity mismatch")
+        checked_at = now()
+        record["at"] = checked_at.isoformat()
+        check_db(db["metadata"], checked_at)
+        check_recent(db["fetched_at"], checked_at)
+        check_recent(decision["kev"]["fetched_at"], checked_at)
         record.update(status="pass", image_id=candidate["id"], archive_sha256=decision["archive_sha256"])
     except ERRORS as exc:
         record["error"] = str(exc)

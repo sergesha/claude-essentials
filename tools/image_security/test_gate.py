@@ -124,18 +124,19 @@ class GateTest(unittest.TestCase):
         return {"id": "sha256:" + ident, "platform": "linux/arm64", "diff_ids": [diff],
                 "source": gate.SOURCE, "revision": REV, "version": "1"}
 
-    def scan_fixture(self, out, scanner_error=False, qualified=True, extra_findings=()):
+    def scan_fixture(self, out, scanner_error=False, qualified=True, extra_findings=(), encode_report=json.dumps):
         def export(ref, platform, directory):
             return self.archive(directory / "candidate.tar")
 
         def scanner(binary, directory):
             candidate = gate.read_json(directory / "reports/candidate.json")
-            gate.write_json(directory / "reports/trivy.json", {
+            report = {
                 "SchemaVersion": 2, "ArtifactType": "container_image", "Trivy": {"Version": gate.VERSION},
                 "Metadata": {"ImageID": candidate["id"], "DiffIDs": candidate["diff_ids"]},
                 "Results": [{"Class": "os-pkgs", "Type": "debian", "Target": "sample",
                              "Packages": [{"Name": "sample", "Version": "1.0"}],
-                             "Vulnerabilities": [finding(severity="CRITICAL")] if scanner_error else list(extra_findings)}]})
+                             "Vulnerabilities": [finding(severity="CRITICAL")] if scanner_error else list(extra_findings)}]}
+            (directory / "reports/trivy.json").write_text(encode_report(report))
             if scanner_error:
                 raise ValueError("scanner interrupted")
 
@@ -431,6 +432,61 @@ class GateTest(unittest.TestCase):
             self.assertIn("CISA KEV", f["reasons"])
             self.assertTrue(f["errors"])
         self.assertIn("CRITICAL", receipt["findings"][0]["reasons"])
+
+    def test_db_or_kev_expires_during_destination_inspection(self):
+        for source in ("db", "kev"):
+            with self.subTest(source=source):
+                out = self.root / source
+                with patch.object(gate, "now", return_value=NOW):
+                    self.assertEqual(self.scan_fixture(out), 0)
+                decision = out / "reports/decision.json"
+                receipt = gate.read_json(decision)
+                if source == "db":
+                    boundary = adv.timestamp(receipt["db"]["metadata"]["NextUpdate"])
+                else:
+                    boundary = NOW + timedelta(seconds=1)
+                    receipt["kev"]["fetched_at"] = (boundary - timedelta(hours=24)).isoformat()
+                    gate.write_json(decision, receipt)
+                instant = boundary - timedelta(seconds=1)
+                def inspect(ref):
+                    nonlocal instant
+                    instant = boundary + timedelta(seconds=1)
+                    return receipt["candidate"]
+                with patch.object(gate, "now", side_effect=lambda: instant), \
+                     patch.object(gate, "inspect_image", side_effect=inspect) as inspected:
+                    code = gate.main(["verify", "--image", "dst", "--platform", "linux/arm64",
+                                      "--revision", REV, "--out", str(out)])
+                inspected.assert_called_once_with("dst")
+                self.assertEqual(code, 2)
+                record = gate.read_json(next((out / "reports").glob("verify-*.json")))
+                self.assertIn("expired DB NextUpdate" if source == "db" else "preceding 24 hours", record["error"])
+
+    def test_overflowing_json_number_retains_raw_and_known_blockers(self):
+        out = self.root / "overflow"
+        rows = [finding(severity="CRITICAL"), float("inf"),
+                dict(finding(KEV), Custom={"scores": [-float("inf")]})]
+        def encode(report):
+            return json.dumps(report).replace("Infinity", "1e400")
+        self.assertEqual(self.scan_fixture(out, extra_findings=rows, encode_report=encode), 2)
+        raw = (out / "reports/trivy.json").read_bytes()
+        self.assertIn(b'1e400', raw)
+        self.assertIn(b'-1e400', raw)
+        decision = gate.read_json(out / "reports/decision.json")
+        self.assertEqual(decision["status"], "incomplete")
+        self.assertEqual(len(decision["findings"]), 3)
+        first, malformed, nested = decision["findings"]
+        self.assertIn("CRITICAL", first["reasons"])
+        self.assertTrue(malformed["errors"])
+        self.assertIn("1e400", json.dumps(malformed["finding"], allow_nan=False))
+        self.assertIn("-1e400", json.dumps(nested["finding"]["Custom"], allow_nan=False))
+        self.assertIn("CISA KEV", nested["reasons"])
+        self.assertEqual(decision["evidence"]["trivy.json"], hashlib.sha256(raw).hexdigest())
+        json.dumps(decision, allow_nan=False)
+        only_nested = self.root / "nested"
+        nested_row = dict(finding(), Custom={"scores": [float("inf")]})
+        self.assertEqual(self.scan_fixture(only_nested, extra_findings=[nested_row], encode_report=encode), 2)
+        incomplete = gate.read_json(only_nested / "reports/decision.json")
+        self.assertTrue(any("unrepresentable JSON number 1e400" in error for error in incomplete["errors"]))
 
     def test_composite_action(self):
         from re import findall
