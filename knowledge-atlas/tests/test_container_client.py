@@ -298,7 +298,7 @@ def test_container_client_passes_exact_arguments_and_open_uuid(docker, services)
         remote.close()
 
 
-def test_viewer_launch_opens_container_path_through_exact_transport(docker, services, tmp_path, monkeypatch):
+def test_viewer_launch_opens_container_uuid_through_exact_transport(docker, services, tmp_path, monkeypatch):
     from knowledge_atlas.viewer import backend, server
     from test_project_registry import create_project
 
@@ -324,13 +324,34 @@ def test_viewer_launch_opens_container_path_through_exact_transport(docker, serv
             seen.append('closed')
 
     monkeypatch.setattr(server, 'ViewerServer', Viewer)
-    backend.run_viewer(str(atlas), container_name=NAME, port=12345)
+    backend.run_viewer(identity, container_name=NAME, port=12345)
     assert seen == ['served', 'closed']
-    assert [argv[:4] for argv in commands()[1:]] == [
-        ['exec', '-i', FIRST_ID, REMOTE_PYTHON],
-        ['exec', '-i', FIRST_ID, REMOTE_PYTHON],
-    ]
-    assert commands()[-1][-1] == str(atlas)
+    inspect, exec_command = commands()
+    assert inspect[-2:] == ['--', NAME]
+    assert exec_command == ['exec', '-i', FIRST_ID, REMOTE_PYTHON,
+                            '-m', 'knowledge_atlas.cli', 'mcp', '--attach-existing', '--channel', 'viewer']
+
+
+def test_structured_application_error_survives_display_content():
+    from mcp.types import CallToolResult, TextContent
+    from knowledge_atlas.viewer.backend import _tool_result
+
+    error = {'error': {'code': 'atlas_not_found', 'message': 'unknown atlas', 'status': 404}}
+    reply = CallToolResult(structuredContent=error,
+                           content=[TextContent(type='text', text='Human-readable error')], isError=True)
+    assert _tool_result(reply) == error
+
+
+@pytest.mark.parametrize('value', [{'data': {'version': __version__}},
+                                  {'error': {'code': 'atlas_not_found', 'message': 'unknown atlas', 'status': 404}}])
+def test_text_only_atlas_replies_are_rejected(value):
+    from mcp.types import CallToolResult, TextContent
+    from knowledge_atlas.viewer.backend import _tool_result
+
+    reply = CallToolResult(content=[TextContent(type='text', text=json.dumps(value))], isError='error' in value)
+    with pytest.raises(AtlasError, match='invalid MCP response') as error:
+        _tool_result(reply)
+    assert error.value.code == 'backend_unavailable'
 
 
 @pytest.mark.parametrize('payload', [{}, {'container_name': 42},

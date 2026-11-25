@@ -1,18 +1,14 @@
 """Persistent stdio transport for the viewer and exact-container attachment."""
 import asyncio
 from datetime import timedelta
-import json
 import os
-from pathlib import Path
 import re
-import subprocess
 import sys
 import threading
-import uuid
 
 from .. import __version__
 from ..contracts import AtlasError
-from ..project_registry import repository_identity
+from ..project_registry import project_id
 
 
 CONTAINER_ID = re.compile(r'[0-9a-f]{64}')
@@ -27,8 +23,6 @@ def container_python(container_id):
 
 def _tool_result(result):
     value = result.structuredContent
-    if value is None:
-        value = json.loads(next((item.text for item in result.content if item.type == 'text'), 'null'))
     if not isinstance(value, dict) or (result.isError and 'error' not in value):
         raise AtlasError('backend_unavailable', 'invalid MCP response from the Atlas service', 503)
     return value
@@ -120,35 +114,17 @@ class MCPBackend:
             pending.close()
             raise AtlasError('backend_unavailable', 'Atlas MCP session stopped', 503) from error
         try:
-            return _tool_result(future.result(timeout=timeout))
+            result = future.result(timeout=timeout)
         except Exception as error:
             future.cancel()
             raise AtlasError('backend_unavailable', 'Atlas MCP session did not return a response', 503) from error
+        return _tool_result(result)
 
     def call(self, action, request):
         return self._call('atlas_' + action.replace('.', '_'), request)
 
     def verify_ready(self):
         return _ready_version(self._call(SERVICE_STATUS_TOOL, {}, timeout=15))
-
-    def open_atlas(self, selection):
-        try:
-            identity = str(uuid.UUID(str(selection)))
-        except ValueError:
-            if self.container_id:
-                command = ("from pathlib import Path; import sys; "
-                           "from knowledge_atlas.project_registry import repository_identity; "
-                           "print(repository_identity(Path(sys.argv[1]).expanduser()))")
-                try:
-                    resolved = subprocess.run([*container_python(self.container_id), '-c', command, str(selection)],
-                                              capture_output=True, text=True, check=True, timeout=30)
-                    identity = str(uuid.UUID(resolved.stdout.strip()))
-                except (OSError, subprocess.SubprocessError, ValueError) as error:
-                    raise AtlasError('backend_unavailable', 'cannot resolve the atlas path in the selected container', 503) from error
-            else:
-                identity = repository_identity(Path(selection).expanduser())
-        self.verify_atlas(identity)
-        return identity
 
     def verify_atlas(self, identity):
         response = self.call('atlas.open', {'atlas_id': identity})
@@ -167,12 +143,15 @@ class MCPBackend:
 
 def run_viewer(atlas, config=None, *, container_name=None, port=0):
     from ..container_client import resolve_container
+    from ..launcher import reject_removed_deployment_settings
     from .server import ViewerServer
 
+    atlas_id = project_id(atlas)
+    reject_removed_deployment_settings()
     container_id = resolve_container(container_name) if container_name is not None else None
     backend = MCPBackend(config, container_id=container_id)
     try:
-        atlas_id = backend.open_atlas(atlas)
+        backend.verify_atlas(atlas_id)
         server = ViewerServer(backend, atlas_id, port)
         print('Knowledge Atlas viewer: ' + server.launch_url, flush=True)
         print('Local session only. Relaunch creates a new browser secret.', flush=True)

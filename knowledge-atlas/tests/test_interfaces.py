@@ -139,7 +139,6 @@ def test_native_list_without_docker(tmp_path, monkeypatch):
     docker.write_text(f'#!/bin/sh\ntouch "{called}"\nexit 1\n')
     docker.chmod(0o755)
     monkeypatch.setenv('PATH', str(tmp_path) + os.pathsep + os.environ['PATH'])
-    monkeypatch.setenv('KNOWLEDGE_ATLAS_DEFAULT_PROJECT', 'saved-deployment')
     session = SessionClient(config, 'mcp')
     assert not root.exists()
     try:
@@ -154,35 +153,79 @@ def test_native_list_without_docker(tmp_path, monkeypatch):
         session.close()
 
 
-def test_removed_compose_settings_are_actionable(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize('command', ['mcp', 'view', 'serve', 'status', 'stop'])
+@pytest.mark.parametrize('selector', ['KNOWLEDGE_ATLAS_DEFAULT_PROJECT', 'KNOWLEDGE_ATLAS_DOCKER_PROJECT', 'file'])
+def test_removed_deployment_settings_reject_before_dispatch(tmp_path, monkeypatch, capsys, command, selector):
     import sys
-    from knowledge_atlas import cli, mcp_bridge
+    from knowledge_atlas import cli, launcher, mcp_bridge
+    from knowledge_atlas.viewer import backend
 
     monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path))
-    monkeypatch.setenv('KNOWLEDGE_ATLAS_DEFAULT_PROJECT', 'saved-in-claude')
-    monkeypatch.setenv('KNOWLEDGE_ATLAS_DOCKER_PROJECT', 'saved-in-env')
-    saved = tmp_path / 'knowledge-atlas/mcp.json'
-    saved.parent.mkdir()
-    stale_settings = '{"project":"saved-on-disk"}'
-    saved.write_text(stale_settings)
+    monkeypatch.delenv('KNOWLEDGE_ATLAS_DEFAULT_PROJECT', raising=False)
+    monkeypatch.delenv('KNOWLEDGE_ATLAS_DOCKER_PROJECT', raising=False)
+    config_dir = tmp_path / 'knowledge-atlas'
+    saved = config_dir / 'mcp.json'
+    if selector == 'file':
+        config_dir.mkdir()
+        saved.write_text('opaque user settings')
+    else:
+        monkeypatch.setenv(selector, 'old-deployment')
 
-    async def run(client):
-        arguments = {'atlas_id': str(uuid.uuid4()), 'payload': {'project': 'saved-on-disk'}}
-        response = mcp_bridge.call_tool(client, 'atlas_atlas_open', arguments)
-        assert response['error']['code'] == 'invalid_request'
-        assert 'atlas.connect' in response['error']['message']
-        assert 'container_name' in response['error']['message']
+    def unexpected(*args, **kwargs):
+        pytest.fail('removed settings reached dispatch')
 
-    monkeypatch.setattr(mcp_bridge, 'serve', run)
-    monkeypatch.setattr(sys, 'argv', ['knowledge-atlas', 'mcp'])
-    assert cli.main() == 0
+    monkeypatch.setattr(launcher, 'load_config', unexpected)
+    monkeypatch.setattr(mcp_bridge, 'serve', unexpected)
+    monkeypatch.setattr(backend, 'MCPBackend', unexpected)
+    args = ['knowledge-atlas', command]
+    if command == 'view':
+        args += ['--atlas', str(uuid.uuid4())]
+    monkeypatch.setattr(sys, 'argv', args)
+    assert cli.main() == 1
     captured = capsys.readouterr()
-    assert not captured.out
-    assert 'KNOWLEDGE_ATLAS_DEFAULT_PROJECT' in captured.err
-    assert 'KNOWLEDGE_ATLAS_DOCKER_PROJECT' in captured.err
-    assert 'mcp.json' in captured.err
-    assert 'atlas.connect' in captured.err and 'container_name' in captured.err
-    assert saved.read_text() == stale_settings
+    assert captured.out == ''
+    message = json.loads(captured.err)['message']
+    assert 'obsolete deployment settings' in message
+    assert (saved.name if selector == 'file' else selector) in message
+    assert 'old-deployment' not in message
+    if selector == 'file':
+        assert saved.read_text() == 'opaque user settings'
+    else:
+        assert not config_dir.exists()
+
+
+@pytest.mark.parametrize('profiles', [None, {}, {'wiki': {'provider': 'codex'}}])
+def test_native_config_refuses_supplied_incomplete_profiles(tmp_path, profiles):
+    from knowledge_atlas.launcher import service_context
+
+    config = {'service_root': str(tmp_path / 'service'), 'configuration': {'profiles': profiles}}
+    with pytest.raises(AtlasError, match='stage profiles') as error:
+        service_context(config)
+    assert error.value.code == 'invalid_configuration'
+    assert not (tmp_path / 'service').exists()
+
+
+def test_removed_mcp_selector_rejected_before_dispatch():
+    from knowledge_atlas.mcp_bridge import call_tool
+
+    class Client:
+        def call(self, request):
+            pytest.fail('removed payload selector reached dispatch')
+
+    response = call_tool(Client(), 'atlas_atlas_open',
+                         {'atlas_id': str(uuid.uuid4()), 'payload': {'project': 'old'}})
+    assert response['error']['code'] == 'invalid_request'
+
+
+def test_native_mcp_refuses_stale_settings_before_first_bind(tmp_path, monkeypatch):
+    from knowledge_atlas import mcp_bridge
+
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path))
+    monkeypatch.setenv('KNOWLEDGE_ATLAS_DEFAULT_PROJECT', 'old-deployment')
+    monkeypatch.setattr(mcp_bridge, 'load_config', lambda *_: pytest.fail('stale settings reached native lookup'))
+    session = mcp_bridge.SessionClient(None, 'mcp')
+    result = mcp_bridge.call_tool(session, 'atlas_atlas_list', None)
+    assert result['error']['code'] == 'invalid_configuration'
 
 
 def test_native_mcp_session_does_not_follow_rewritten_discovery(app, tmp_path):

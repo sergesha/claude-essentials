@@ -1,9 +1,6 @@
 """Official MCP SDK stdio bridge over the same authenticated HTTP client."""
 from dataclasses import asdict
 import json
-import os
-from pathlib import Path
-import sys
 from threading import Lock
 from typing import Literal
 
@@ -12,7 +9,7 @@ from .api_models import MODELS, Payload, parse_request
 from .client import AtlasClient
 from .container_client import ContainerClient, resolve_container
 from .contracts import ActionResult, AtlasError
-from .launcher import ensure_service, load_config, service_context
+from .launcher import ensure_service, load_config, reject_removed_deployment_settings, service_context
 from .viewer.backend import SERVICE_STATUS_TOOL
 
 
@@ -26,21 +23,6 @@ class ConnectRequest(Payload):
 
 
 MCP_MODELS = {**MODELS, 'atlas.connect': ConnectRequest}
-
-
-def warn_removed_compose_settings():
-    settings = Path(os.environ.get('XDG_CONFIG_HOME') or Path.home()/'.config')/'knowledge-atlas/mcp.json'
-    stale = [name for name in ('KNOWLEDGE_ATLAS_DEFAULT_PROJECT', 'KNOWLEDGE_ATLAS_DOCKER_PROJECT')
-             if os.environ.get(name)]
-    try:
-        if settings.is_file():
-            stale.append(str(settings))
-    except OSError:
-        pass
-    if stale:
-        print('Knowledge Atlas ignores the removed Compose settings ' + ', '.join(stale)
-              + '. For Docker, use atlas.connect with payload.container_name on a new MCP connection.',
-              file=sys.stderr)
 
 
 class SessionClient:
@@ -100,6 +82,8 @@ class SessionClient:
         with self.lock:
             if self._closed:
                 raise AtlasError('backend_unavailable', 'MCP connection is closed', 503)
+            if self._client is None and not self.attach_existing:
+                reject_removed_deployment_settings()
             if request.action == 'atlas.connect':
                 return self._connect(request)
             if self._client is None:
@@ -152,10 +136,6 @@ def call_tool(client, name, arguments, *, attach_existing=False):
             if action is None:
                 raise AtlasError('unsupported_action', name, 422)
             body = arguments if arguments is not None else {}
-            payload = body.get('payload') if isinstance(body, dict) else None
-            if isinstance(payload, dict) and 'project' in payload:
-                raise AtlasError('invalid_request', 'payload.project was removed. For Docker, call atlas.connect'
-                                 ' with payload.container_name, then open a registered atlas_id UUID.')
             result = client.call(parse_request(action, body, models=models))
         return json.loads(json.dumps(asdict(result), default=str))
     except AtlasError as error:

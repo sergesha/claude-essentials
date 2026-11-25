@@ -1,4 +1,5 @@
 """Relocation of the installed launch command keeps data outside the plugin."""
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -27,6 +28,17 @@ def test_relocated_packaging_and_data_survive_replacement(tmp_path):
     root.mkdir(exist_ok=True);(root/'keep').write_text('external state')
     shutil.rmtree(clone)
     assert (root/'keep').read_text()=='external state'
+
+
+def test_shipped_profiles_explicitly_pin_all_six_stage_providers():
+    path = ROOT / 'runtime/model-profiles.json'
+    profiles = json.loads(path.read_text())
+    assert set(profiles) == {'wiki', 'open', 'phrase', 'proposal', 'review_extension', 'grounded_answer'}
+    assert all(settings['provider'] == 'codex' for settings in profiles.values())
+    manifest = json.loads((ROOT / 'runtime/source-manifest.json').read_text())
+    assert any(entry.get('destination') == 'runtime/model-profiles.json'
+               and entry.get('source_sha256') == hashlib.sha256(path.read_bytes()).hexdigest()
+               for entry in manifest['files'])
 
 
 def test_marketplace_and_release_registration():

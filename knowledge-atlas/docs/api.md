@@ -20,7 +20,9 @@ poll operations on the connection that submitted them.
 
 For native use, call `atlas_atlas_list` without arguments. The first domain call
 starts or attaches to the configured native service and binds that connection.
-Python and HTTP callers address the service directly.
+Python and HTTP callers address the service directly. Atlas MCP replies carry
+results and application errors in `structuredContent`. Any accompanying
+human-readable text is for display.
 
 ## Selecting a project
 

@@ -13,7 +13,6 @@
         "XDG_DATA_HOME",
         "XDG_CACHE_HOME",
         "XDG_CONFIG_HOME",
-        "KNOWLEDGE_ATLAS_DOCKER_PROJECT",
         "DOCKER_CONTEXT",
         "DOCKER_HOST"
       ],

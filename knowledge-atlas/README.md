@@ -58,7 +58,7 @@ List registered projects with `atlas_atlas_list` and verify a project with
 `atlas_atlas_open` and `{"atlas_id":"REGISTERED_PROJECT_UUID"}`. Supply that UUID
 on project calls. Connect separately to use another service.
 
-Launch the local viewer with an explicit project. The sidebar **Project** chooser
+Launch the local viewer with a registered project UUID. The sidebar **Project** chooser
 switches between registered projects in the same service. It asks before
 discarding unsent form text, and submitted background work continues in its
 original project. [Local viewer usage](docs/viewer.md)

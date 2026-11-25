@@ -68,8 +68,10 @@ def test_claude_wiki_retains_native_mcp_and_completion(tmp_path, monkeypatch):
     request = {'mcp': {'command': '/runtime/python', 'args': ['local_server.py'],
                        'env': {'WIKI_ROOT': '/atlas/wiki'}},
                'workspace': '/atlas', 'sources': [{'id': 'source-a'}]}
-    evidence = tmp_path / 'wiki-call'
-    result = asyncio.run(ClaudeProvider(str(binary)).wiki(request, resolve_profile(profiles(), 'wiki'), evidence))
+    models = ConfiguredModels(config=profiles(), providers={'claude': ClaudeProvider(str(binary))},
+                             evidence=tmp_path / 'wiki-calls')
+    result = asyncio.run(models.wiki(request))
+    evidence, = (tmp_path / 'wiki-calls').iterdir()
     assert result['status'] == 'completed'
     assert result['summary'] == 'updated native page'
     invocation = json.loads(capture.read_text())

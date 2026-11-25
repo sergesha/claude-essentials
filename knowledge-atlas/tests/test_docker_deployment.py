@@ -18,22 +18,16 @@ def deployment():
     spec.loader.exec_module(module)
     return module
 
-def test_launcher_ignores_removed_compose_default(tmp_path):
-    docker = tmp_path / 'docker'
-    capture = tmp_path / 'docker-called'
-    docker.write_text(f'#!/bin/sh\ntouch "{capture}"\nexit 1\n')
-    docker.chmod(0o755)
-    fake_python = tmp_path / 'python'
-    fake_python.write_text('#!' + sys.executable + '\nimport json,sys\nprint(json.dumps(sys.argv[1:]))\n')
-    fake_python.chmod(0o755)
-    env = {**os.environ, 'PATH': str(tmp_path) + os.pathsep + os.environ['PATH'],
-           'KNOWLEDGE_ATLAS_DOCKER_PROJECT': 'atlas-test', 'KNOWLEDGE_ATLAS_PYTHON': str(fake_python)}
-    result = subprocess.run(['sh', str(PACKAGE / 'scripts/launch.sh'),
-                             'status', '--config', '/data/a b.json'],
-                            env=env, capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout) == ['-m', 'knowledge_atlas.cli', 'status', '--config', '/data/a b.json']
-    assert not capture.exists()
+def test_launcher_refuses_stale_selector_before_native_status(tmp_path):
+    env = {'HOME': str(tmp_path), 'PATH': os.defpath, 'KNOWLEDGE_ATLAS_PYTHON': sys.executable,
+           'XDG_DATA_HOME': str(tmp_path / 'data'), 'KNOWLEDGE_ATLAS_DOCKER_PROJECT': 'old-deployment'}
+    result = subprocess.run(['sh', str(PACKAGE / 'scripts/launch.sh'), 'status'],
+                            env=env, capture_output=True, text=True, timeout=10)
+    assert result.returncode != 0
+    assert result.stdout == ''
+    assert 'KNOWLEDGE_ATLAS_DOCKER_PROJECT' in result.stderr
+    assert 'old-deployment' not in result.stderr
+    assert not (tmp_path / 'data').exists()
 
 
 def test_plugin_mcp_launchers_request_no_compose_default():
@@ -44,9 +38,10 @@ def test_plugin_mcp_launchers_request_no_compose_default():
         assert 'project' not in manifest.get('userConfig', {})
         for stale in ('KNOWLEDGE_ATLAS_DEFAULT_PROJECT', 'KNOWLEDGE_ATLAS_DOCKER_PROJECT'):
             assert stale not in server.get('env', {})
+            assert stale not in server.get('env_vars', [])
 
 
-def test_installed_codex_launcher_reports_legacy_docker_selector(tmp_path):
+def test_installed_codex_launcher_refuses_visible_stale_file(tmp_path):
     installed = tmp_path / 'installed'
     for path in ('.codex-plugin/mcp.json', 'scripts/launch.sh'):
         target = installed / path
@@ -56,6 +51,9 @@ def test_installed_codex_launcher_reports_legacy_docker_selector(tmp_path):
 
     manifest = json.loads((installed / '.codex-plugin/mcp.json').read_text())
     server = manifest['mcpServers']['knowledge-atlas']
+    saved = tmp_path / 'config/knowledge-atlas/mcp.json'
+    saved.parent.mkdir(parents=True)
+    saved.write_text('user-owned settings')
     supplied = {
         'KNOWLEDGE_ATLAS_DOCKER_PROJECT': 'previous-compose-deployment',
         'KNOWLEDGE_ATLAS_PYTHON': sys.executable,
@@ -67,15 +65,17 @@ def test_installed_codex_launcher_reports_legacy_docker_selector(tmp_path):
            **{name: supplied[name] for name in server['env_vars'] if name in supplied}}
     result = subprocess.run([server['command'], *server['args']], cwd=installed / server['cwd'],
                             env=env, input='', capture_output=True, text=True, timeout=10)
-    assert result.returncode == 0, result.stderr
+    assert result.returncode != 0
     assert result.stdout == ''
-    assert 'KNOWLEDGE_ATLAS_DOCKER_PROJECT' in result.stderr
+    assert 'mcp.json' in result.stderr
     assert 'atlas.connect' in result.stderr and 'payload.container_name' in result.stderr
     assert 'previous-compose-deployment' not in result.stderr
+    assert saved.read_text() == 'user-owned settings'
     assert not (tmp_path / 'data').exists()
 
 
-def test_legacy_compose_stop_dispatches_to_neither_service(tmp_path):
+@pytest.mark.parametrize('selector', ['KNOWLEDGE_ATLAS_DEFAULT_PROJECT', 'KNOWLEDGE_ATLAS_DOCKER_PROJECT', 'file'])
+def test_legacy_compose_stop_dispatches_to_neither_service(tmp_path, selector):
     from knowledge_atlas.contracts import ServiceContext
     from knowledge_atlas.http_api import create_app
 
@@ -91,8 +91,13 @@ def test_legacy_compose_stop_dispatches_to_neither_service(tmp_path):
                       f'"--config", {str(container_config)!r}])\n')
     docker.chmod(0o755)
     env = {'HOME': str(tmp_path), 'PATH': str(tmp_path) + os.pathsep + os.defpath,
-           'XDG_DATA_HOME': str(native_data), 'KNOWLEDGE_ATLAS_PYTHON': sys.executable,
-           'KNOWLEDGE_ATLAS_DOCKER_PROJECT': 'previous-compose-deployment'}
+           'XDG_DATA_HOME': str(native_data), 'KNOWLEDGE_ATLAS_PYTHON': sys.executable}
+    saved = tmp_path / '.config/knowledge-atlas/mcp.json'
+    if selector == 'file':
+        saved.parent.mkdir(parents=True)
+        saved.write_text('user-owned settings')
+    else:
+        env[selector] = 'previous-compose-deployment'
 
     with ExitStack() as cleanup:
         native = create_app(ServiceContext(native_root)).start()
@@ -105,8 +110,10 @@ def test_legacy_compose_stop_dispatches_to_neither_service(tmp_path):
         assert not container.stopping, 'legacy stop reached the Docker service'
         assert result.returncode != 0
         assert result.stdout == ''
-        assert 'KNOWLEDGE_ATLAS_DOCKER_PROJECT' in result.stderr
-        assert 'docker stop' in result.stderr and 'stop --config' in result.stderr
+        assert (saved.name if selector == 'file' else selector) in result.stderr
+        assert 'docker stop' in result.stderr
+        if selector == 'file':
+            assert saved.read_text() == 'user-owned settings'
 
 
 def test_start_refuses_unprepared_runtime_without_creating_atlas(tmp_path, monkeypatch):
@@ -297,12 +304,13 @@ def test_graph_client_uses_deployment_key_only_for_the_local_request(tmp_path, m
     assert len(requests) == 1
 
 
-def startup_config(tmp_path, monkeypatch, *, runtime_check=None):
+def startup_config(tmp_path, monkeypatch, *, runtime_check=None, supply_profiles=True):
     module = deployment()
     data = tmp_path / 'data'
     data.mkdir(exist_ok=True)
-    profiles = json.loads((PACKAGE / 'runtime/model-profiles.json').read_text())
-    (data / 'profiles.json').write_text(json.dumps({k: {**v, 'provider': 'codex'} for k, v in profiles.items()}))
+    if supply_profiles:
+        profiles = json.loads((PACKAGE / 'runtime/model-profiles.json').read_text())
+        (data / 'profiles.json').write_text(json.dumps({k: {**v, 'provider': 'codex'} for k, v in profiles.items()}))
     monkeypatch.setenv('ATLAS_DATA_ROOT', str(data))
     monkeypatch.setenv('ATLAS_RUNTIME_ROOT', str(tmp_path / 'runtime'))
     binary = tmp_path / 'runtime/providers/codex/node_modules/.bin/codex'
@@ -332,6 +340,14 @@ def test_start_has_no_single_project_binding(tmp_path, monkeypatch):
     assert 'atlas_path' not in config['configuration']
     assert list_projects(service_context(config)) == []
     assert not (tmp_path / 'data/atlas').exists()
+
+
+def test_start_uses_shipped_profiles_without_writing_default_file(tmp_path, monkeypatch):
+    from knowledge_atlas.providers.config import default_profiles
+
+    config, _ = startup_config(tmp_path, monkeypatch, supply_profiles=False)
+    assert config['configuration']['profiles'] == default_profiles()
+    assert not (tmp_path / 'data/profiles.json').exists()
 
 
 def test_runtime_cache_is_outside_projects(tmp_path, monkeypatch):
@@ -525,13 +541,15 @@ def test_start_refuses_replaced_provider(tmp_path, monkeypatch):
     assert not (tmp_path / 'data/service-config.json').exists()
 
 
-@pytest.mark.parametrize('invalid', ['missing-stage', 'unknown-provider', 'missing-model', 'invalid-shape', 'invalid-effort'])
+@pytest.mark.parametrize('invalid', ['missing-stage', 'missing-provider', 'unknown-provider', 'missing-model', 'invalid-shape', 'invalid-effort'])
 def test_prepare_validates_retained_profiles_before_setup(tmp_path, monkeypatch, invalid):
     module = deployment()
     profiles = {name: {'provider': 'codex', 'model': 'fixture', 'effort': 'high'} for name in
                 ('wiki', 'open', 'phrase', 'proposal', 'review_extension', 'grounded_answer')}
     if invalid == 'missing-stage':
         del profiles['wiki']
+    elif invalid == 'missing-provider':
+        del profiles['grounded_answer']['provider']
     elif invalid == 'unknown-provider':
         profiles['open']['provider'] = 'unknown'
     elif invalid == 'missing-model':
@@ -551,6 +569,21 @@ def test_prepare_validates_retained_profiles_before_setup(tmp_path, monkeypatch,
     with pytest.raises(ValueError, match='profiles.json'):
         module.main()
     assert not volume.exists()
+
+
+def test_prepare_uses_shipped_profiles_without_writing_default_file(tmp_path, monkeypatch):
+    module = deployment()
+    runtime, data = tmp_path / 'runtime', tmp_path / 'data'
+    calls = []
+
+    monkeypatch.setattr(module, 'roots', lambda: (runtime, data))
+    monkeypatch.setattr(module, 'seed_packaged_runtime', lambda *_: 'fixture runtime')
+    monkeypatch.setattr(module, 'ensure_provider', lambda root, name: calls.append((root, name)))
+    monkeypatch.setattr(sys, 'argv', ['entrypoint.py', 'prepare'])
+    monkeypatch.setattr(module.os, 'umask', lambda *_: None)
+    module.main()
+    assert calls == [(runtime, 'codex')]
+    assert not (data / 'profiles.json').exists()
 
 
 def test_provider_boundary_rejects_unrecognized_name_without_writes(tmp_path):

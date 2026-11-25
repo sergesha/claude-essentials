@@ -181,27 +181,28 @@ distinguishable rebuilt library and its behavior remains pending.
 
 ## Explicit stage profiles and native sign-in
 
-Create `/data/profiles.json` with all six stage profiles before startup. For
-Codex, this example copies the retained default stage settings and guidance:
+Without `/data/profiles.json`, preparation and startup use the six shipped Codex
+profiles. Sign in to Codex in the deployment:
 
 ```sh
-atlas_compose run --rm atlas exec python3 -c 'import json; p=json.load(open("/opt/knowledge-atlas/runtime/model-profiles.json")); p={k:{**v,"provider":"codex"} for k,v in p.items()}; json.dump(p,open("/data/profiles.json","w"),indent=2)'
 atlas_compose run --rm atlas exec codex login --device-auth
 ```
 
-For Claude, use its own explicit models/settings and native subscription login:
+To use Claude, supply all six stages in `/data/profiles.json` with explicit
+providers. Set the profiles before preparation so it installs the selected
+provider. Use Claude's native subscription login:
 
 ```sh
-atlas_compose run --rm atlas exec python3 -c 'import json; p=json.load(open("/opt/knowledge-atlas/runtime/model-profiles.json")); p={k:{**v,"provider":"claude","model":"sonnet","effort":"high"} for k,v in p.items()}; json.dump(p,open("/data/profiles.json","w"),indent=2)'
+atlas_compose run --rm atlas exec python3 -c 'import json; p=json.load(open("/opt/knowledge-atlas/runtime/model-profiles.json")); p={k:{**v,"provider":"claude","model":"sonnet","effort":"high"} for k,v in p.items()}; json.dump(p,open("/data/profiles.json","x"),indent=2)'
 atlas_compose run --rm atlas exec claude auth login --claudeai
 ```
 
 The login command acquires the selected vendor's pinned Linux executable via
 npm over HTTPS. Its package lock checks the wrapper and platform package
 integrity. Codex 0.167.0 and Claude Code 2.1.319 are installed separately under
-`/runtime/providers`. A prepare with existing profiles also installs all their
-selected providers. Retry prepare or the chosen login after resolving registry
-access. Provider credentials remain in the private `/auth` volume. [Codex authentication](https://developers.openai.com/codex/auth/) · [Claude Code setup and terms](https://code.claude.com/docs/en/setup)
+`/runtime/providers`. Preparation installs the providers selected by the effective
+profiles. Retry preparation or the chosen login after resolving registry access.
+Provider credentials remain in the private `/auth` volume. [Codex authentication](https://developers.openai.com/codex/auth/) · [Claude Code setup and terms](https://code.claude.com/docs/en/setup)
 
 These are alternative initial configurations; editing profiles affects future
 processing/reuse identity. See [provider guidance](../docs/providers.md),
@@ -274,12 +275,12 @@ or place the token in a URL. There is no host-facing HTTP port in this recipe.
 
 ## Browse and review locally
 
-After the atlas exists, prepare the host viewer dependencies once, then launch
-the [viewer](../docs/viewer.md) from the host:
+Find the registered UUID with `atlas_atlas_list` and prepare the host viewer
+dependencies once. Launch the viewer from the host. [Viewer guide](../docs/viewer.md)
 
 ```sh
 sh /absolute/path/to/knowledge-atlas/scripts/launch.sh prepare-launcher
-sh /absolute/path/to/knowledge-atlas/scripts/launch.sh view --atlas /data/projects/notes --container-name atlas-atlas-1
+sh /absolute/path/to/knowledge-atlas/scripts/launch.sh view --atlas REGISTERED_PROJECT_UUID --container-name atlas-atlas-1
 ```
 
 Open the full localhost URL printed by that command. Browser pages and questions
@@ -328,7 +329,7 @@ container layer, but is not a backup and is not automatically disposable.
 | Shared embedding cache | `data:/data/service/vectors` | Retain verified cached vectors across restart |
 | TerminusDB database | `data:/data/graph` | Durable; do not delete on the assumption that LLM regeneration restores it |
 | Pending operations, attempt/read evidence, service identity and logs | `data:/data/service` and other `/data` paths | Preserve pending work and audit evidence |
-| Provider/model configuration | `data:/data/profiles.json` | Durable, outside image layers |
+| Optional provider/model overrides | `data:/data/profiles.json` | Durable, outside image layers |
 | Provider credentials and provider home | `auth:/auth` | Private durable state; never commit to Git |
 | Prepared runtime and downloaded models | `runtime:/runtime` | Image-bound native links, verified model downloads and selected provider installations |
 | Export and full-backup copies | Explicit destination outside Docker | Retain independently of Docker storage |

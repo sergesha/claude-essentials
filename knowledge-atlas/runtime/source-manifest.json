@@ -176,7 +176,7 @@
     },
     {
       "source": "model-profiles.json",
-      "source_sha256": "96b3e164a0fcb4e06716f8bfc9284f8af742fa3510405103cd147982491cae31",
+      "source_sha256": "bf482c3c15da481ebaa26abd06a48006e00c871d57dfcbb5807e0de521210174",
       "destination": "runtime/model-profiles.json"
     },
     {

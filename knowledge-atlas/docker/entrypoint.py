@@ -21,7 +21,7 @@ from knowledge_atlas.launcher import service_context
 from knowledge_atlas.operations import check_service_storage, initialize_service_storage, read_registry
 from knowledge_atlas.storage import check_graph_state, directory_lock
 from knowledge_atlas.providers.base import ProviderError
-from knowledge_atlas.providers.config import OPERATIONS, resolve_profile
+from knowledge_atlas.providers.config import default_profiles, resolve_profiles
 
 PACKAGE = Path(__file__).resolve().parents[1]
 
@@ -117,16 +117,16 @@ def verify_provider(path, name):
 
 
 def read_profiles(path):
-    profiles = json.loads(path.read_text())
-    if not isinstance(profiles, dict) or set(profiles) != set(OPERATIONS):
-        raise ValueError('profiles.json requires six explicit provider/model stage profiles')
-    for stage, profile in profiles.items():
-        if not isinstance(profile, dict) or 'provider' not in profile:
-            raise ValueError(f'profiles.json requires an explicit provider for {stage}')
-        try:
-            resolve_profile(profiles, stage)
-        except (ProviderError, TypeError) as exc:
-            raise ValueError(f'profiles.json contains invalid settings for {stage}: {exc}') from exc
+    try:
+        profiles = json.loads(path.read_text())
+    except FileNotFoundError:
+        if path.is_symlink():
+            raise ValueError('profiles.json points to a missing file')
+        profiles = default_profiles()
+    try:
+        resolve_profiles(profiles)
+    except ProviderError as error:
+        raise ValueError(f'profiles.json contains invalid stage profiles: {error}') from error
     return profiles
 
 
@@ -228,8 +228,7 @@ def main():
         start()
     elif args == ['prepare']:
         runtime, data = roots()
-        path = data / 'profiles.json'
-        profiles = read_profiles(path) if path.exists() else {}
+        profiles = read_profiles(data / 'profiles.json')
         identity = seed_packaged_runtime(SEED, runtime)
         for name in sorted({p['provider'] for p in profiles.values()}):
             ensure_provider(runtime, name)

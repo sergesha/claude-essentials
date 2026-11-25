@@ -62,16 +62,12 @@ name in `payload.container_name` on a fresh MCP connection. List its registered
 projects with `atlas_atlas_list` without arguments, then open a project with its
 `atlas_id` UUID. See the [Docker guide](../docker/README.md#use-the-installed-plugin).
 
-Remove obsolete Compose defaults from your host configuration when upgrading.
-These include the Claude Code plugin's old `project` setting,
-`KNOWLEDGE_ATLAS_DEFAULT_PROJECT`, `KNOWLEDGE_ATLAS_DOCKER_PROJECT` and
-`${XDG_CONFIG_HOME:-~/.config}/knowledge-atlas/mcp.json`. Existing settings files
-are left in place. Use the exact running container name on each new Docker
-connection.
-
-The launcher rejects `stop` while `KNOWLEDGE_ATLAS_DOCKER_PROJECT` is set to a
-nonempty value. For Docker, run `docker stop EXACT_CONTAINER_NAME`. For native,
-unset the old variable and run `sh scripts/launch.sh stop --config SERVICE_JSON`.
+When upgrading, clear the old Compose selectors from the host environment and
+move any obsolete `${XDG_CONFIG_HOME:-~/.config}/knowledge-atlas/mcp.json` to a
+backup location. Entry points that see either old selector variable
+(`KNOWLEDGE_ATLAS_DEFAULT_PROJECT` or `KNOWLEDGE_ATLAS_DOCKER_PROJECT`) or the
+obsolete file reject the launch. Atlas leaves the file in place.
+Stop a Docker deployment with `docker stop EXACT_CONTAINER_NAME`.
 
 For a native service, set `KNOWLEDGE_ATLAS_CONFIG` to an external service JSON
 file. Both hosts use the same service configuration:
@@ -87,9 +83,9 @@ file. Both hosts use the same service configuration:
 ```
 
 Add a `configuration.profiles` object containing all six stage profiles (the
-contents of the profiles JSON, not a filename). Omission selects the retained
-Codex defaults. Follow [provider configuration](providers.md) for stage profiles and native
-CLI authentication. The graph/embedding runtime must be prepared and running;
+contents of the profiles JSON). Each stage must name its provider. If you
+omit the object, Atlas uses the six shipped Codex profiles. See the provider
+guide for stage settings and native CLI authentication. [Provider configuration](providers.md) The graph/embedding runtime must be prepared and running;
 service startup alone does not qualify those components. The host used to call a
 tool does not override the configured processing provider.
 

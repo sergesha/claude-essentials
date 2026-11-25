@@ -92,49 +92,76 @@ def test_viewer_rejects_oversize_body_before_read(viewer):
     assert send(viewer,headers={'Content-Length':str(2*1024*1024)})[0]==413
 
 
-def test_viewer_resolves_explicit_native_path_to_uuid(tmp_path):
-    from knowledge_atlas.contracts import ServiceContext
-    from knowledge_atlas.viewer.backend import MCPBackend
+def test_viewer_verifies_explicit_native_uuid_before_serving(tmp_path, monkeypatch):
+    from knowledge_atlas.viewer import backend, server
+
+    events = []
+    config = tmp_path / 'service.json'
+
+    def attach(path, *, container_id):
+        assert path == config
+        assert container_id is None
+        connection = object.__new__(connection_type)
+        connection.container_id = None
+        connection.call = call
+        connection.close = lambda: events.append('detached')
+        return connection
+
+    def call(action, request):
+        events.append(action)
+        assert request == {'atlas_id': ATLAS_A}
+        return {'data': {'atlas_id': ATLAS_A}}
+
+    class Viewer:
+        launch_url = 'http://localhost/viewer-test'
+
+        def __init__(self, connection, atlas_id, port):
+            assert atlas_id == ATLAS_A
+            events.append('created')
+
+        def serve_forever(self):
+            events.append('served')
+
+        def server_close(self):
+            events.append('closed')
+
+    connection_type = backend.MCPBackend
+    monkeypatch.setattr(backend, 'MCPBackend', attach)
+    monkeypatch.setattr(server, 'ViewerServer', Viewer)
+    backend.run_viewer(ATLAS_A, config)
+    assert events == ['atlas.open', 'created', 'served', 'closed', 'detached']
+
+
+@pytest.mark.parametrize('container', [None, 'atlas-exact'])
+def test_viewer_rejects_path_before_service_resolution(tmp_path, monkeypatch, container):
+    from knowledge_atlas import container_client
+    from knowledge_atlas.contracts import AtlasError, ServiceContext
+    from knowledge_atlas.viewer import backend
     from test_project_registry import create_project
 
     path = tmp_path / 'notes'
-    identity = create_project(ServiceContext(tmp_path / 'service'), path)
-    backend = object.__new__(MCPBackend)
-    backend.container_id = None
+    create_project(ServiceContext(tmp_path / 'service'), path)
 
-    def call(action, request):
-        assert action == 'atlas.open'
-        assert request == {'atlas_id': identity}
-        return {'data': {'atlas_id': identity}}
+    def unexpected(*args, **kwargs):
+        pytest.fail('invalid initial selector reached service lookup')
 
-    backend.call = call
-    assert backend.open_atlas(str(path)) == identity
-    assert backend.open_atlas(identity) == identity
+    monkeypatch.setattr(container_client, 'resolve_container', unexpected)
+    monkeypatch.setattr(backend, 'MCPBackend', unexpected)
+    with pytest.raises(AtlasError, match='UUID') as error:
+        backend.run_viewer(str(path), container_name=container)
+    assert error.value.code == 'invalid_request'
 
 
-def test_viewer_resolves_docker_path_inside_selected_container(monkeypatch):
-    import subprocess
-    import uuid
-    from types import SimpleNamespace
-    from knowledge_atlas.viewer import backend as viewer_backend
+def test_viewer_refuses_removed_cli_selector_as_unknown(monkeypatch):
+    import sys
+    from knowledge_atlas import cli
+    from knowledge_atlas.viewer import backend
 
-    identity = str(uuid.uuid4())
-    backend = object.__new__(viewer_backend.MCPBackend)
-    backend.container_id = 'a' * 64
-
-    def run(argv, **_):
-        assert argv[:4] == ['docker', 'exec', '-i', 'a' * 64]
-        assert argv[-1] == '/data/atlas'
-        return SimpleNamespace(stdout=identity + '\n')
-
-    def call(action, request):
-        assert action == 'atlas.open'
-        assert request == {'atlas_id': identity}
-        return {'data': {'atlas_id': identity}}
-
-    monkeypatch.setattr(subprocess, 'run', run)
-    backend.call = call
-    assert backend.open_atlas('/data/atlas') == identity
+    monkeypatch.setattr(backend, 'run_viewer', lambda *_: pytest.fail('removed argument reached dispatch'))
+    monkeypatch.setattr(sys, 'argv', ['knowledge-atlas', 'view', '--atlas', ATLAS_A, '--docker-project', 'old'])
+    with pytest.raises(SystemExit) as error:
+        cli.main()
+    assert error.value.code == 2
 
 
 def test_docker_view_command_runs_on_host(tmp_path):
@@ -144,10 +171,10 @@ def test_docker_view_command_runs_on_host(tmp_path):
     capture=tmp_path/'arguments'
     fake.write_text('#!'+sys.executable+'\nimport sys\nfrom pathlib import Path\nPath('+repr(str(capture))+').write_text(" ".join(sys.argv[1:]))\n')
     fake.chmod(0o755)
-    result=subprocess.run(['sh',str(Path(__file__).parents[1]/'scripts/launch.sh'),'view','--atlas','/data/atlas','--container-name','atlas-test'],
+    result=subprocess.run(['sh',str(Path(__file__).parents[1]/'scripts/launch.sh'),'view','--atlas',ATLAS_A,'--container-name','atlas-test'],
         env={**os.environ,'KNOWLEDGE_ATLAS_PYTHON':str(fake)},capture_output=True,text=True)
     assert result.returncode==0,result.stderr
-    assert capture.read_text()=='-m knowledge_atlas.cli view --atlas /data/atlas --container-name atlas-test'
+    assert capture.read_text()==f'-m knowledge_atlas.cli view --atlas {ATLAS_A} --container-name atlas-test'
 
 
 def test_viewer_cannot_read_unrelated_operation(viewer):
