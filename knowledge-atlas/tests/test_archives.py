@@ -472,3 +472,46 @@ def test_restore_checks_uuid_publication_content_binding(portable, tmp_path):
     with pytest.raises(ValueError, match='identity'):
         restore_atlas(modified, tmp_path/'restored')
     assert not (tmp_path/'restored').exists()
+
+
+@pytest.mark.parametrize('wrong_owner', ['ready', 'previous', None])
+def test_restore_root_publication_owner(portable, tmp_path, monkeypatch, wrong_owner):
+    store, _, _, previous, profile, projection = portable
+    pubs = Publications(store)
+    base = pubs.read(previous)['content_commit']
+    child = GitStore(tmp_path/'child')
+    child_commit = snapshot(child)
+    proposed = store.pin_package(base, child, child_commit, mount='materials',
+        recorded_at='2026-11-13T02:00:00Z', base_publication=previous)
+    content = pubs.review(proposed, {'decision': 'accept', 'kind': 'synthetic', 'actor': 'Fixture',
+        'reason': 'Review legacy content pin', 'accepted_at': '2026-11-13T03:00:00Z',
+        'base_publication': previous}, profile)
+    ready = pubs.publish(content, projection)
+    path, destination = tmp_path/'backup.zip', tmp_path/'restored'
+    archive(portable, path)
+
+    if wrong_owner is not None:
+        selected = ready if wrong_owner == 'ready' else previous
+        verify = Publications._read_receipt
+
+        def mismatch(self, publication, manifest):
+            receipt = verify(self, publication, manifest)
+            if publication == selected:
+                # Inject a different owner at the verified snapshot boundary.
+                manifest['package_id'] = str(uuid.uuid4())
+            return receipt
+
+        monkeypatch.setattr(Publications, '_read_receipt', mismatch)
+        with pytest.raises(ValueError, match='publication.*identity'):
+            restore_atlas(path, destination)
+        assert not destination.exists()
+        return
+
+    restored = restore_atlas(path, destination)
+    assert git(restored.root, 'rev-parse', 'HEAD') == git(store.root, 'rev-parse', 'HEAD') != ready
+    restored_pubs = Publications(restored)
+    assert restored_pubs.ready() == ready
+    assert restored_pubs.read(ready)['previous_publication'] == previous
+    assert restored_pubs.read(previous)['content_commit'] == base
+    child_pin, = [mod for mod in restored.read(content)['manifest']['modules'].values() if mod.get('kind') == 'atlas']
+    assert child_pin['commit'] == child_commit and 'publication' not in child_pin

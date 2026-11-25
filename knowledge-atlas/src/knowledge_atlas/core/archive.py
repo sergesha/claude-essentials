@@ -258,14 +258,14 @@ def export_atlas(store, destination, *, tokenizer, formatter):
     return manifest
 
 
-def seed_retained_vectors(pubs, db):
+def seed_retained_vectors(pubs, db, *, expected_package_id=None):
     current = pubs.ready()
     seen = set()
     while current:
         if current in seen:
             raise ValueError('publication history cycle')
         seen.add(current)
-        receipt = pubs.read(current)
+        receipt = pubs.read(current, expected_package_id=expected_package_id)
         for artifact in receipt['vector_artifacts'].values():
             cache_artifact(db, artifact_key(artifact), artifact)
         current = receipt['previous_publication']
@@ -323,7 +323,7 @@ def restore_atlas(archive, destination):
         if pubs.ready()!=manifest['ready']:raise ValueError('archive READY mismatch')
         provider=EmbeddingProvider(assets/'embedding-profile.json',base/'vectors','http://127.0.0.1:1')
         with provider.connect() as db:
-            seed_retained_vectors(pubs, db)
+            seed_retained_vectors(pubs, db, expected_package_id=manifest['root_package_id'])
         # Full-history bundles can include child proposals outside the root's current
         # or historical layouts. Verify their edges from staged repositories as well.
         receipts = set()

@@ -153,9 +153,12 @@ class Publications:
             raise ValueError(f'Git show-ref failed (exit {result.returncode})')
         return result.stdout.decode().strip()
 
-    def read(self, publication):
-        snapshot = self.store.read(publication)
-        return self._read_receipt(publication, snapshot['manifest'])
+    def read(self, publication, *, expected_package_id=None):
+        manifest = self.store.read(publication)['manifest']
+        receipt = self._read_receipt(publication, manifest)
+        if expected_package_id is not None and manifest['package_id'] != expected_package_id:
+            raise ValueError('publication package identity mismatch')
+        return receipt
 
     def verify_child_receipt(self, publication, content_commit):
         """Check an edge without recursively loading the same package closure again."""
