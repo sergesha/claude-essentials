@@ -99,6 +99,9 @@ def test_schema_is_shared_with_mcp(app):
     assert set(domain_tools) == {'atlas_' + name.replace('.', '_') for name in schema['actions']}
     for name, action in schema['actions'].items():
         assert domain_tools['atlas_' + name.replace('.', '_')]['inputSchema'] == action['input']
+    assert 'packages.pin' not in schema['actions']
+    assert 'atlas_packages_pin' not in domain_tools
+    assert not hasattr(client, 'packages_pin')
     assert 'atlas.connect' not in schema['actions']
     connect = next(tool['inputSchema'] for tool in tools if tool['name'] == 'atlas_atlas_connect')
     assert connect['required'] == ['payload']

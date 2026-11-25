@@ -22,19 +22,35 @@ def portable(tmp_path,monkeypatch):
     from knowledge_atlas.runtime import _assets
     assets=tmp_path/'assets';assets.mkdir()
     tokenizer,formatter=assets/'tokenizer.json',assets/'chunking.py'
-    tokenizer.write_text('controlled tokenizer fixture');formatter.write_text('# controlled formatter fixture\n')
+    from tokenizers import Tokenizer, models, pre_tokenizers
+    from knowledge_atlas.core.graph_stage import records_for
+    from knowledge_atlas.core.vector_chunks import chunks_for
+    codec = Tokenizer(models.WordLevel({'[UNK]':0}, unk_token='[UNK]'))
+    codec.pre_tokenizer = pre_tokenizers.Whitespace()
+    codec.save(str(tokenizer))
+    formatter.write_bytes((_assets()/'chunking.py').read_bytes())
     profile=json.loads((_assets()/'embedding-profile.json').read_text())
-    profile['profile']['endpoint']['tokenizer_sha256']=hashlib.sha256(tokenizer.read_bytes()).hexdigest()
-    profile['profile']['formatter_sha256']=hashlib.sha256(formatter.read_bytes()).hexdigest()
+    tokenizer_digest = hashlib.sha256(tokenizer.read_bytes()).hexdigest()
+    profile['profile']['endpoint']['tokenizer_sha256'] = tokenizer_digest
+    profile['profile']['plugin_profile']['tokenizer_sha256'] = tokenizer_digest
     profile['profile_id']=hashlib.sha256(canonical(profile['profile']).encode()).hexdigest()
-    (assets/'embedding-profile.json').write_text(json.dumps(profile))
-    text='title: none | text: Retained controlled document'
-    artifact={'profile_id':profile['profile_id'],'profile':profile['profile'],'role':'document','input':text,
-        'input_sha256':hashlib.sha256(text.encode()).hexdigest(),'raw768':[1.0]+[0.0]*767}
-    def projection(content):
+    profile_path = assets/'embedding-profile.json'
+    profile_path.write_text(json.dumps(profile))
+
+    def projection(content, owner=None):
+        records = records_for((owner or store).read(content), content)
+        chunks = chunks_for(records, profile_path, tokenizer, formatter)
+        artifacts = {}
+        for chunk in chunks:
+            text = 'title: none | text: ' + chunk['text']
+            digest = hashlib.sha256(text.encode()).hexdigest()
+            artifacts[digest] = {'profile_id':profile['profile_id'],'profile':profile['profile'],'role':'document',
+                                 'input':text,'input_sha256':digest,'raw768':[1.0]+[0.0]*767}
         return {'content_commit':content,'graph_commit':'controlled-'+content,'search_checkpoint':'controlled-'+content,
                 'database':'admin/fixture','ready':True,'profile_id':profile['profile_id'],
-                'record_count':1,'chunk_count':1,'vector_artifacts':{'fixture':artifact}}
+                'record_count':len(records),'chunk_count':len(chunks),'vector_artifacts':artifacts}
+    from knowledge_atlas import runtime
+    monkeypatch.setattr(runtime, '_assets', lambda:assets)
     monkeypatch.setattr(decisions,'_assets',lambda:assets)
     monkeypatch.setattr(decisions,'build_projection',lambda context,content:projection(content))
     store=GitStore(tmp_path/'atlas');candidate=snapshot(store)
@@ -65,8 +81,8 @@ def with_decisions(portable,tmp_path):
 def test_decision_roundtrip_without_service_db(portable,tmp_path):
     with_decisions(portable,tmp_path)
     path=tmp_path/'atlas.zip'; manifest=archive(portable,path)
-    assert manifest['format']==2
-    assert len(manifest['decisions']['entries'])==3
+    assert manifest['format']==3
+    assert len(manifest['decisions']['entries'][manifest['root_package_id']])==3
     restored=restore_atlas(path,tmp_path/'restored')
     assert {item['receipt']['action'] for item in decision_inventory(restored)}=={'accept','reject','revise'}
     assert decision_inventory(restored)==decision_inventory(portable[0])
@@ -79,7 +95,7 @@ def test_decision_roundtrip_without_service_db(portable,tmp_path):
 def test_missing_decision_object_rejected(portable,tmp_path):
     with_decisions(portable,tmp_path)
     path=tmp_path/'original.zip';manifest=archive(portable,path)
-    manifest['decisions']['entries'][0]['receipt']['candidate']='a'*40
+    manifest['decisions']['entries'][manifest['root_package_id']][0]['receipt']['candidate']='a'*40
     damaged=tmp_path/'damaged.zip'
     with zipfile.ZipFile(path) as source,zipfile.ZipFile(damaged,'w') as target:
         for name in source.namelist():
@@ -89,16 +105,19 @@ def test_missing_decision_object_rejected(portable,tmp_path):
     assert not (tmp_path/'restored').exists()
 
 
-def test_legacy_archive_does_not_invent_decisions(portable,tmp_path):
+@pytest.mark.parametrize('version', [1, 2, 3.0])
+def test_unsupported_archive_is_preserved(portable,tmp_path,version):
     path=tmp_path/'new.zip';manifest=archive(portable,path)
-    manifest['format']=1;manifest.pop('decisions',None)
+    manifest['format']=version
     legacy=tmp_path/'legacy.zip'
     with zipfile.ZipFile(path) as source,zipfile.ZipFile(legacy,'w') as target:
         for name in source.namelist():
             target.writestr(name,json.dumps(manifest) if name=='archive.json' else source.read(name))
-    restored=restore_atlas(legacy,tmp_path/'restored')
-    assert decision_inventory(restored)==[]
-    assert Publications(restored).ready()==portable[3]
+    original = legacy.read_bytes()
+    with pytest.raises(ValueError, match='unsupported archive format'):
+        restore_atlas(legacy,tmp_path/'restored')
+    assert not (tmp_path/'restored').exists()
+    assert legacy.read_bytes() == original
 
 
 def test_restore_refuses_existing_destination(portable,tmp_path):
@@ -112,8 +131,9 @@ def test_restored_documents_replay_without_inference(portable,tmp_path):
     path=tmp_path/'atlas.zip';archive(portable,path)
     restored=restore_atlas(path,tmp_path/'restored')
     provider=EmbeddingProvider(restored.base/'assets/embedding-profile.json',restored.base/'vectors','http://127.0.0.1:1')
+    artifact = next(iter(Publications(restored).read(portable[3])['vector_artifacts'].values()))
     result=provider.embed({'role':'document','model':portable[4]['model_namespace'],'dimensions':256,
-                           'input':['Retained controlled document']})
+                           'input':[artifact['input'].removeprefix('title: none | text: ')]})
     assert result['data'][0]['embedding']==[1.0]+[0.0]*255
     assert provider.stats['inference_calls']==0
     assert provider.stats['cache_hits']==1
@@ -182,7 +202,7 @@ def test_submitted_restore_freezes_archive_bytes(portable,tmp_path,monkeypatch):
     service=ServiceContext(tmp_path/'service')
     operation=submit(service,request)
     path.write_bytes(b'changed after submission')
-    assert (operation.evidence/'archive.zip').read_bytes()==original
+    assert (operation.evidence/'archive-v3.zip').read_bytes()==original
     assert submit(service,request).operation_id==operation.operation_id
     monkeypatch.setattr(archives, 'rebuild_restored', lambda ctx: ActionResult(data={'ready': portable[3]}))
     # An explicit recovery handler can authorize replay when canonical installation
@@ -191,13 +211,13 @@ def test_submitted_restore_freezes_archive_bytes(portable,tmp_path,monkeypatch):
         db.execute("UPDATE operations SET state='interrupted' WHERE operation_id=?", (operation.operation_id,))
     def reconcile(ctx):
         assert not ctx.atlas_path.exists()
-        assert (ctx.previous_evidence / 'archive.zip').read_bytes() == original
+        assert (ctx.previous_evidence / 'archive-v3.zip').read_bytes() == original
         return None
     service.recoveries['archive.restore'] = reconcile
     resume(service, operation.operation_id, str(uuid.uuid4()))
     run_next(service)
     assert inspect_operation(service, operation.operation_id).state == 'succeeded'
-    assert not (operation.evidence / 'archive.zip').exists()
+    assert not (operation.evidence / 'archive-v3.zip').exists()
     assert path.read_bytes() == b'changed after submission'
 
 
@@ -328,7 +348,7 @@ def test_concurrent_restore_stages_outside_transaction(tmp_path, monkeypatch):
         first, second = pool.map(concurrent_submit, range(2))
     assert first.operation_id == second.operation_id
     assert list((service.service_root / 'attempts').iterdir()) == [first.evidence.parent]
-    assert (first.evidence / 'archive.zip').read_bytes() == source.read_bytes()
+    assert (first.evidence / 'archive-v3.zip').read_bytes() == source.read_bytes()
 
 
 def test_restore_staging_quota_and_terminal_cleanup(tmp_path, monkeypatch):
@@ -362,7 +382,7 @@ def test_restore_staging_quota_and_terminal_cleanup(tmp_path, monkeypatch):
     failed = next(result for result in results if result)
     run_next(service)
     assert operations.inspect_operation(service, failed.operation_id).error['code'] == 'invalid_archive'
-    assert not (failed.evidence / 'archive.zip').exists()
+    assert not (failed.evidence / 'archive-v3.zip').exists()
     assert (failed.evidence / 'error.json').is_file()
     assert operations.submit(service, requests[results.index(None)]).state == 'queued'
 
@@ -388,7 +408,7 @@ def test_unsupported_restore_resume_preserves_input(tmp_path):
     record = operations.inspect_operation(service, operation.operation_id)
     assert (record.state, record.attempt) == ('interrupted', 1)
     assert not (record.evidence.parent / '2').exists()
-    assert (record.evidence / 'archive.zip').read_bytes() == path.read_bytes()
+    assert (record.evidence / 'archive-v3.zip').read_bytes() == path.read_bytes()
 
     # Simulate a resume that an older deployment already queued.
     service.recoveries['archive.restore'] = lambda ctx: None
@@ -396,7 +416,7 @@ def test_unsupported_restore_resume_preserves_input(tmp_path):
     service.recoveries.clear()
     run_next(service)
     assert operations.inspect_operation(service, operation.operation_id).state == 'interrupted'
-    assert (record.evidence / 'archive.zip').read_bytes() == path.read_bytes()
+    assert (record.evidence / 'archive-v3.zip').read_bytes() == path.read_bytes()
 
 
 def test_restore_reconciles_retained_inputs_on_start(tmp_path):
@@ -413,20 +433,21 @@ def test_restore_reconciles_retained_inputs_on_start(tmp_path):
         request = ActionRequest('archive.restore', request_id=str(uuid.uuid4()),
                                 payload={'archive': str(path), 'path': str(tmp_path / state)})
         record = operations.submit(service, request)
-        inputs.append(record.evidence / 'archive.zip')
+        inputs.append(record.evidence / 'archive-v3.zip')
         with operations.database(service) as db:
             db.execute('UPDATE operations SET state=? WHERE operation_id=?', (state, record.operation_id))
-    for retained in inputs:
-        retained.write_bytes(path.read_bytes())  # Simulate v0.3.1 retention.
-    orphan = service.service_root / 'attempts' / str(uuid.uuid4()) / '1' / 'archive.zip'
+    orphan = service.service_root / 'attempts' / str(uuid.uuid4()) / '1' / 'archive-v3.zip'
     orphan.parent.mkdir(parents=True)
     orphan.write_bytes(path.read_bytes())
 
+    old_copy = orphan.with_name('archive.zip')
+    old_copy.write_bytes(b'untouched')
     dispatcher = operations.Dispatcher(service)
     dispatcher.start()
     dispatcher.stop()
     assert [staged.exists() for staged in inputs] == [True, False, False]
     assert not orphan.exists()
+    assert old_copy.read_bytes() == b'untouched'
     assert path.is_file()
 
 
@@ -442,17 +463,17 @@ def test_export_limits_leave_no_unrestorable_file(portable, tmp_path, monkeypatc
     assert not path.exists()
 
 
-def test_full_inventory_preserves_legacy_mixed_case_ref_order(portable, tmp_path):
+def test_full_inventory_preserves_decision_ref_order(portable, tmp_path):
     store, _, _, publication, _, _ = portable
     content = Publications(store).read(publication)['content_commit']
     candidate = propose_records(store, content, [], actor='Fixture', method='Review', reason='Archive',
                                 recorded_at='2026-11-13T02:00:00Z', base_publication=publication)
-    ids = ['BBBBBBBB-0000-4000-8000-000000000001', 'aaaaaaaa-0000-4000-8000-000000000002']
+    ids = ['aaaaaaaa-0000-4000-8000-000000000001', 'bbbbbbbb-0000-4000-8000-000000000002']
     for identifier in ids:
         ctx = context_for(tmp_path, store, candidate, 'reject', publication)
         decide_candidate(replace(ctx, request=replace(ctx.request, request_id=identifier)))
     assert [e['receipt']['decision_id'] for e in decision_inventory(store)] == ids
-    path = tmp_path/'mixed-case.zip'
+    path = tmp_path/'decisions.zip'
     archive(portable, path)
     restored = restore_atlas(path, tmp_path/'restored')
     assert [e['receipt']['decision_id'] for e in decision_inventory(restored)] == ids
@@ -481,10 +502,14 @@ def test_restore_root_publication_owner(portable, tmp_path, monkeypatch, wrong_o
     base = pubs.read(previous)['content_commit']
     child = GitStore(tmp_path/'child')
     child_commit = snapshot(child)
-    proposed = store.pin_package(base, child, child_commit, mount='materials',
-        recorded_at='2026-11-13T02:00:00Z', base_publication=previous)
+    from test_packages import layout, selection
+    child_pubs = Publications(child)
+    child_content = child_pubs.review(child_commit, {'decision':'accept','kind':'synthetic','actor':'Fixture',
+        'reason':'Review child','accepted_at':'2026-11-13T01:00:00Z','base_publication':None}, profile)
+    child_publication = child_pubs.publish(child_content, lambda oid:projection(oid, child))
+    proposed = layout(store, selection(store, child, child_publication, 'materials'))
     content = pubs.review(proposed, {'decision': 'accept', 'kind': 'synthetic', 'actor': 'Fixture',
-        'reason': 'Review legacy content pin', 'accepted_at': '2026-11-13T03:00:00Z',
+        'reason': 'Review child publication', 'accepted_at': '2026-11-13T03:00:00Z',
         'base_publication': previous}, profile)
     ready = pubs.publish(content, projection)
     path, destination = tmp_path/'backup.zip', tmp_path/'restored'
@@ -514,4 +539,89 @@ def test_restore_root_publication_owner(portable, tmp_path, monkeypatch, wrong_o
     assert restored_pubs.read(ready)['previous_publication'] == previous
     assert restored_pubs.read(previous)['content_commit'] == base
     child_pin, = [mod for mod in restored.read(content)['manifest']['modules'].values() if mod.get('kind') == 'atlas']
-    assert child_pin['commit'] == child_commit and 'publication' not in child_pin
+    assert child_pin['commit'] == child_content and child_pin['publication'] == child_publication
+
+
+@pytest.mark.parametrize('damage', ['unmarked-parent', 'missing-project-manifest', 'missing-receipt', 'missing-vectors', 'corrupt-vector', 'missing-one-vector',
+                                    'missing-child-inventory', 'forged-child-decision'])
+def test_staged_child_history_is_verified(portable, tmp_path, damage):
+    from knowledge_atlas.core.publication import commit_files
+    from test_packages import layout, selection
+    parent, _, _, previous, profile, projection = portable
+    child = GitStore(tmp_path/'child')
+    proposal = snapshot(child)
+    child_pubs = Publications(child)
+    decision = {'decision':'accept', 'kind':'synthetic', 'actor':'Fixture', 'reason':'Archive test',
+                'base_publication':None, 'accepted_at':'2026-11-13T02:00:00Z'}
+    content = child_pubs.review(proposal, decision, profile)
+    wrapper = child_pubs.publish(content, lambda oid:projection(oid, child))
+    parent_proposal = layout(parent, selection(parent, child, wrapper))
+    parent_content = Publications(parent).review(parent_proposal, {**decision, 'base_publication':previous}, profile)
+    Publications(parent).publish(parent_content, projection)
+    # Retain a child decision in its own namespace.
+    decide_candidate(context_for(tmp_path, child, layout(child), 'reject', wrapper))
+    original = tmp_path/'original.zip'
+    inventory = archive(portable, original)
+    child_id = child.read(content)['manifest']['package_id']
+    entries = inventory['decisions']['entries']
+    if damage in ('missing-child-inventory', 'forged-child-decision'):
+        assert set(entries) == {inventory['root_package_id'], child_id}
+        if damage == 'missing-child-inventory':
+            del entries[child_id]
+        else:
+            entries[child_id][0]['receipt']['actor'] = 'Substitution'
+    else:
+        if damage == 'unmarked-parent':
+            unmarked = commit_files(child.root, proposal, {'package.json':{'package_id':child_id}},
+                                    [proposal], 'Unmarked history')
+            bad = commit_files(child.root, proposal, {}, [unmarked], 'Current tip with unsupported ancestor')
+        elif damage == 'missing-project-manifest':
+            bad = commit_files(child.root, proposal, {}, [proposal], 'Missing child atlas manifest',
+                               remove_paths=['manifest.json'])
+        elif damage == 'missing-receipt':
+            bad = commit_files(child.root, content, {}, [content], 'Without wrapper document')
+            git(child.root, 'update-ref', Publications.ref, bad)
+        else:
+            receipt = child_pubs.read(wrapper)
+            if damage == 'missing-vectors':
+                del receipt['vector_artifacts']
+            elif damage == 'missing-one-vector':
+                assert len(receipt['vector_artifacts']) > 1
+                receipt['vector_artifacts'].popitem()
+            else:
+                next(iter(receipt['vector_artifacts'].values()))['raw768'] = [0]
+            bad = commit_files(child.root, content, {'publication.json':receipt}, [content], 'Bad vectors')
+        git(child.root, 'update-ref', 'refs/fixture/history', bad)
+    changed = {}
+    if damage not in ('missing-child-inventory', 'forged-child-decision'):
+        name = next(row['bundle'] for row in inventory['packages'] if row['package_id'] == child_id)
+        bundle = tmp_path/'child.bundle'
+        git(child.root, 'bundle', 'create', str(bundle), '--all')
+        changed[name] = bundle.read_bytes()
+        inventory['sha256'][name] = hashlib.sha256(changed[name]).hexdigest()
+    path = tmp_path/'changed.zip'
+    with zipfile.ZipFile(original) as source, zipfile.ZipFile(path, 'w') as target:
+        for name in source.namelist():
+            target.writestr(name, json.dumps(inventory) if name == 'archive.json' else changed.get(name, source.read(name)))
+    original_bytes = path.read_bytes()
+    with pytest.raises(ValueError):
+        restore_atlas(path, tmp_path/'restored')
+    assert not (tmp_path/'restored').exists()
+    assert path.read_bytes() == original_bytes
+
+
+def test_export_inventory_matches_mirrored_refs(portable, tmp_path, monkeypatch):
+    from knowledge_atlas.core import archive as codec
+    store, _, _, ready, _, _ = portable
+    from test_packages import layout
+    candidate = layout(store)
+    actual_git = codec.git
+    def add_decision_before_mirror(repo, *args, **kwargs):
+        if args[:2] == ('clone', '--mirror') and str(store.root) in args:
+            decide_candidate(context_for(tmp_path, store, candidate, 'reject', ready))
+        return actual_git(repo, *args, **kwargs)
+    monkeypatch.setattr(codec, 'git', add_decision_before_mirror)
+    path = tmp_path/'raced.zip'
+    archive(portable, path)
+    restored = restore_atlas(path, tmp_path/'restored')
+    assert len(decision_inventory(restored)) == 1

@@ -3,6 +3,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import urllib.parse
 import urllib.request
@@ -153,9 +154,14 @@ def records_for(snapshot,commit,*,namespace=None):
         if publication is not None:
             nodes[identity].setdefault('receipts', {})[mount] = publication
         for inclusion in data.get('included_packages',[]):
-            receipts = {item['mount']: item['publication'] for item in inclusion.get('inclusions', [])}
+            proofs = inclusion.get('inclusions', [])
+            receipts = {item['mount']: item['publication'] for item in proofs}
+            if (len(receipts) != len(proofs) or set(receipts) != set(inclusion['mounts'])
+                    or any(not isinstance(oid, str) or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', oid)
+                           for oid in receipts.values())):
+                raise ValueError('exact child publication required for every mount')
             for child_mount in inclusion['mounts']:
-                collect(inclusion['snapshot'],inclusion['commit'],mount+'/'+child_mount if mount else child_mount, receipts.get(child_mount))
+                collect(inclusion['snapshot'],inclusion['commit'],mount+'/'+child_mount if mount else child_mount, receipts[child_mount])
     collect(snapshot,commit,'')
     records=[];semantic={}
     for identity,node in nodes.items():

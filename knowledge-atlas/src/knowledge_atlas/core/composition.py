@@ -1,12 +1,12 @@
 """Versioned child layouts and retention in the owning Git repositories."""
 from datetime import datetime
 import hashlib
-import json
 import os
+import re
 from pathlib import Path, PureWindowsPath
 import tempfile
 
-from .git_store import GitStore, git
+from .git_store import GitStore, git, package_identity
 from .publication import Publications, StaleProposal, commit_files
 
 
@@ -50,10 +50,13 @@ def validate_layout(repo, oid, modules):
     for name, mod in modules.items():
         expected[(name, 'path')] = mod['mount']
         expected[(name, 'url')] = mod['url']
-        if mod.get('kind') == 'atlas' and mod.get('scope') != 'all':
-            raise ValueError('unsupported package inclusion scope')
-        if 'publication' in mod and (mod.get('kind') != 'atlas' or not isinstance(mod['publication'], str)):
-            raise ValueError('invalid child publication')
+        if name in ('sources', 'knowledge'):
+            if 'kind' in mod or 'publication' in mod:
+                raise ValueError('invalid own content module')
+        elif (mod.get('kind') != 'atlas' or mod.get('scope') != 'all'
+              or not isinstance(mod.get('publication'), str)
+              or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', mod['publication'])):
+            raise ValueError('child atlas requires an exact publication and all scope')
     actual = {}
     if '.gitmodules' in tree:
         config = git(repo, 'config', '--blob', oid + ':.gitmodules', '--null', '--list', binary=True)
@@ -98,8 +101,8 @@ def composition_receipts(store: GitStore, commit: str) -> list[dict]:
 def retain_child_publication(child: GitStore, publication: str, content_commit: str) -> None:
     """Pin the exact verified wrapper. Its Git parents retain the reviewed content."""
     Publications(child).verify_child_receipt(publication, content_commit)
-    owner = json.loads(git(child.root, 'show', 'HEAD:package.json'))['package_id']
-    selected = json.loads(git(child.root, 'show', content_commit + ':package.json'))['package_id']
+    owner = package_identity(child.root, 'HEAD')
+    selected = package_identity(child.root, content_commit)
     if selected != owner:
         raise ValueError('child publication belongs to another UUID')
     git(child.root, 'update-ref', 'refs/poc9/retained/publications/' + publication, publication)

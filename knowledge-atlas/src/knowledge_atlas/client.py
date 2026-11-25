@@ -142,9 +142,6 @@ class AtlasClient:
         return self._typed('packages.configure', payload, atlas_id=atlas_id, request_id=request_id,
                            expected_publication=expected_publication)
 
-    def packages_pin(self,payload:models.Pin,**selection)->OperationRecord:
-        return self._typed('packages.pin',payload,**selection)
-
     def sources_submit(self,payload:models.Sources,**selection)->OperationRecord:
         return self._typed('sources.submit',payload,**selection)
 

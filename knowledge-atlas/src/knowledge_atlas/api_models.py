@@ -27,16 +27,6 @@ class Sources(Payload):
     recorded_at: str
 
 
-class Pin(Payload):
-    path: str
-    package_id: str
-    commit: str
-    mount: str
-    recorded_at: str
-    candidate: str | None = None
-    scope: Literal['all'] = 'all'
-
-
 class IncludeSelection(Payload):
     package_id: str
     mount: str
@@ -148,7 +138,7 @@ class Operation(Payload):
 
 
 PAYLOADS = {'wiki.pages':Payload,'wiki.read':WikiPage,'question.ask':Question,'atlas.create':Location,'atlas.list':Payload,'atlas.open':Payload,'atlas.status':Payload,
-    'packages.inspect':Payload,'packages.pin':Pin,'packages.configure':ConfigurePackages,'sources.submit':Sources,'candidate.inspect':Candidate,
+    'packages.inspect':Payload,'packages.configure':ConfigurePackages,'sources.submit':Sources,'candidate.inspect':Candidate,
     'candidate.decide':Decision,'candidate.revise':Revision,'type.decide':TypeDecision,'search':Search,
     'evidence.read':Evidence,'knowledge.apply':Application,'feedback.record':Feedback,
     'knowledge.revise':KnowledgeRevision,'history':History,'diff':Difference,

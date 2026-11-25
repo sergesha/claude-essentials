@@ -98,7 +98,11 @@ def test_composed_pages_retain_distinct_canonical_ids(published,tmp_path):
     snapshot=store.read(content)
     child=GitStore(tmp_path/'child')
     child_commit=child.snapshot(snapshot['wiki'],snapshot['extraction'],{},recorded_at='2026-11-14T00:00:00Z')['commit']
-    candidate=store.pin_package(content,child,child_commit,mount='shared/child',recorded_at='2026-11-14T00:00:00Z',base_publication=first)
+    from test_packages import layout, publish, selection
+    from knowledge_atlas.project_registry import register_project
+    selected_child = selection(store, child, publish(child, child_commit))
+    register_project(published[4], selected_child['package_id'], child.base)
+    candidate = layout(store, selected_child)
     accepted=Publications(store).review(candidate,{'decision':'accept','actor':'Test','kind':'synthetic',
         'reason':'composition','accepted_at':'2026-11-14T01:00:00Z','base_publication':first},
         json.loads((_assets()/'embedding-profile.json').read_text()))

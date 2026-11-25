@@ -322,6 +322,7 @@ def external_archive_path(context, value):
 
 
 MAX_STAGED_ARCHIVE_BYTES = 1024**3
+_STAGED_ARCHIVE = 'archive-v3.zip'
 
 
 @contextmanager
@@ -334,10 +335,10 @@ def _archive_staging_lock(context):
 
 
 def _retained_archive_bytes(context):
-    """Called under the staging lock. Reconcile v0.3.1 copies and abandoned admissions."""
+    """Called under the staging lock. Account for current staged inputs and reclaim abandoned copies."""
     total = 0
     with database(context) as db:
-        for path in (context.service_root / 'attempts').glob('*/1/archive.zip'):
+        for path in (context.service_root / 'attempts').glob('*/1/' + _STAGED_ARCHIVE):
             attempt = path.parent
             operation = attempt.parent
             if attempt.is_symlink() or operation.is_symlink():
@@ -363,7 +364,7 @@ def _retained_archive_bytes(context):
 
 def staged_restore_input(evidence):
     """All attempts of a restore share the input frozen by its first submission."""
-    return evidence.parent / '1' / 'archive.zip'
+    return evidence.parent / '1' / _STAGED_ARCHIVE
 
 
 def _stage_archive(context, request, evidence):

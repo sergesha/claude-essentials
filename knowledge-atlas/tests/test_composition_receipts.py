@@ -1,4 +1,6 @@
 """Exact per-inclusion Git receipts through GC, recursive checkout and portable recovery."""
+import pytest
+
 from knowledge_atlas.core import composition
 from knowledge_atlas.core.archive import export_atlas, restore_atlas
 from knowledge_atlas.core.git_store import git
@@ -6,8 +8,20 @@ from knowledge_atlas.core.publication import Publications, commit_files
 from knowledge_atlas.project_registry import project_store
 from test_archives import portable
 from test_composition_config import (
-    candidate, configure, gc, identity, include, project, publish, recovery_copy, service,
+    candidate, configure, gc, identity, include, project, recovery_copy, service,
 )
+
+
+def publish(store, candidate):
+    from test_decisions import projection
+    from test_packages import publish as publish_candidate
+    from knowledge_atlas.core.graph_stage import records_for
+
+    def empty_projection(oid):
+        assert records_for(store.read(oid), oid) == []
+        return {**projection(oid), 'record_count':0, 'chunk_count':0, 'vector_artifacts':{}}
+
+    return publish_candidate(store, candidate, empty_projection)
 
 
 def publish_parent(service, parent, layout, portable, expected=None):
@@ -16,7 +30,7 @@ def publish_parent(service, parent, layout, portable, expected=None):
     content = pubs.review(oid, {'decision': 'accept', 'kind': 'synthetic', 'actor': 'Fixture',
         'reason': 'Review archived layout', 'accepted_at': '2026-11-13T02:00:00Z',
         'base_publication': expected}, portable[4])
-    return pubs.publish(content, portable[5])
+    return pubs.publish(content, lambda oid:portable[5](oid, pubs.store))
 
 
 def selected(child, publication, mount):
@@ -46,9 +60,18 @@ def test_nested_receipt_export_without_current_child_ready(service, portable, tm
                           [content], 'Another valid publication of the same content')
     inclusions = []
     copies = []
+    decisions = []
+    from test_decisions import context_for
+    from knowledge_atlas.actions.decisions import decide_candidate, decision_inventory
+    from knowledge_atlas.core.decision_receipts import DECISIONS
     for branch, wrapper in [(left, first), (right, second)]:
         branch_pub = publish(branch, candidate(configure(service, branch, [include(leaf, 'leaf', wrapper)])))
+        pending = candidate(configure(service, leaf, [], expected=first))
+        rejected = decide_candidate(context_for(tmp_path, leaf, pending, 'reject', first))
+        decision_ref = DECISIONS + rejected.data['decision']['decision_id']
+        decisions.append(decision_ref)
         copy = recovery_copy(branch, leaf)
+        git(leaf.root, 'update-ref', '-d', decision_ref)
         git(copy.root, 'update-ref', 'refs/fixture/selected', wrapper)
         for ref in git(copy.root, 'for-each-ref', '--format=%(refname)').splitlines():
             if ref != 'refs/fixture/selected' and git(copy.root, 'rev-parse', ref) in (first, second):
@@ -70,6 +93,8 @@ def test_nested_receipt_export_without_current_child_ready(service, portable, tm
     assert Publications(restored).ready() == ready
     shared, = [node for node in restored.closure(ready) if 'left/leaf' in node['mounts']]
     assert {r['mount']: r['publication'] for r in shared['inclusions']} == {'left/leaf': first, 'right/leaf': second}
+    saved_decisions = decision_inventory(restored.at_repository(shared['path']))
+    assert {entry['ref'] for entry in saved_decisions} == set(decisions)
     for wrapper in (first, second):
         assert git(shared['path'], 'rev-parse', 'refs/poc9/retained/publications/' + wrapper) == wrapper
 
@@ -112,7 +137,8 @@ def test_registry_reads_without_submodule_worktrees(service):
         selected(child, child_pub, 'materials')]
 
 
-def test_restore_rejects_wrong_wrapper_in_child_only_history(service, portable, tmp_path):
+@pytest.mark.parametrize('damage', ['wrong-wrapper', 'receipt-free-pending', 'receipt-free-ancestor'])
+def test_restore_rejects_wrong_wrapper_in_child_only_history(service, portable, tmp_path, damage):
     import hashlib
     import json
     import zipfile
@@ -125,10 +151,16 @@ def test_restore_rejects_wrong_wrapper_in_child_only_history(service, portable, 
     publish_parent(service, parent, [include(child, 'child', child_pub)], portable)
     source = tmp_path / 'original.zip'
     inventory = export_atlas(parent, source, tokenizer=portable[1], formatter=portable[2])
-    manifest = child.read(child_pub)['manifest']
+    child_content = Publications(child).read(child_pub)['content_commit']
+    manifest = child.read(child_content)['manifest']
     mod, = manifest['modules'].values()
-    mod['publication'] = second
-    bad = commit_files(child.root, child_pub, {'manifest.json': manifest}, [child_pub], 'Mismatched pending receipt')
+    if damage == 'wrong-wrapper':
+        mod['publication'] = second
+    else:
+        del mod['publication']
+    bad = commit_files(child.root, child_content, {'manifest.json': manifest}, [child_content], 'Invalid historical child selection')
+    if damage == 'receipt-free-ancestor':
+        bad = commit_files(child.root, child_content, {}, [bad], 'Valid layout retaining unsupported ancestor')
     git(child.root, 'update-ref', 'refs/poc9/proposals/' + bad, bad)
     bundle = tmp_path / 'modified.bundle'
     git(child.root, 'bundle', 'create', str(bundle), '--all')
@@ -144,9 +176,11 @@ def test_restore_rejects_wrong_wrapper_in_child_only_history(service, portable, 
                 after.writestr(member, contents)
             else:
                 after.writestr(member, before.read(member))
-    with pytest.raises(ValueError, match='publication/content mismatch'):
+    before_restore = broken.read_bytes()
+    with pytest.raises(ValueError, match='publication'):
         restore_atlas(broken, tmp_path / 'recovered')
     assert not (tmp_path / 'recovered').exists()
+    assert broken.read_bytes() == before_restore
 
 
 def test_archive_export_reports_missing_required_wrapper(service, portable, tmp_path):

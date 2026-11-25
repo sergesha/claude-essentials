@@ -1,12 +1,12 @@
 """Resolve the service's durable UUID, repository and projection bindings."""
 from dataclasses import dataclass
-import json
 from pathlib import Path
 from urllib.parse import urlsplit
 import uuid
 
 from .contracts import AtlasError, ServiceContext
-from .core.git_store import GitStore, git
+from .core.git_store import GitStore, git, package_identity, project_manifest
+from .core.composition import validate_layout
 
 
 @dataclass(frozen=True)
@@ -31,10 +31,10 @@ def repository_identity(path: Path) -> str:
         if not (store.root / '.git').exists():
             raise ValueError('missing native Git repository')
         head = git(store.root, 'rev-parse', 'HEAD')
-        package = json.loads(git(store.root, 'show', head + ':package.json'))
-        manifest = json.loads(git(store.root, 'show', head + ':manifest.json'))
-        identity = str(uuid.UUID(package['package_id']))
-        manifest_identity = str(uuid.UUID(manifest['package_id']))
+        identity = package_identity(store.root, head)
+        manifest = project_manifest(store.root, head)
+        validate_layout(store.root, head, manifest['modules'])
+        manifest_identity = manifest['package_id']
     except (ValueError, KeyError, TypeError, AttributeError, OSError) as error:
         raise AtlasError('invalid_atlas', 'native atlas repository identity is unavailable', 422) from error
     if manifest_identity != identity:

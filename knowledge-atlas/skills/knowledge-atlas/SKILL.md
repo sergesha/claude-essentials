@@ -55,7 +55,7 @@ is `atlas_atlas_status`. Omit `payload` for calls with no payload fields.
 | --- | --- |
 | Correct or withdraw knowledge | `knowledge.revise` proposes a candidate; inspect dependent impact and review it. |
 | Record experience | `feedback.record` retains the exact applied publication and raw JSON report text. |
-| Compose knowledge | `packages.pin` proposes an exact child pin; upgrades and rollback require candidate review. |
+| Compose knowledge | `packages.configure` proposes the complete child layout. Select exact child publications and review the parent candidate. |
 | Recover history | Export then restore to an unused location; restored reads require native rebuild. |
 | Interrupted work | Inspect operation/evidence, then explicit compatible resume; uncertain effects are not automatically replayed. |
 

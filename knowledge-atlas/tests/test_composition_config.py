@@ -13,18 +13,9 @@ from knowledge_atlas.core.graph_stage import records_for
 from knowledge_atlas.core.publication import Publications, commit_files
 from knowledge_atlas.operations import inspect_operation, submit
 from knowledge_atlas.project_registry import register_project
-from knowledge_atlas.runtime import _assets
 from knowledge_atlas.worker import run_next
 from test_decisions import projection
-from test_packages import snapshot
-
-
-def publish(store, candidate):
-    pubs = Publications(store)
-    content = pubs.review(candidate, {'decision': 'accept', 'kind': 'synthetic', 'actor': 'Fixture',
-        'reason': 'Review child layout', 'accepted_at': '2026-11-13T02:00:00Z',
-        'base_publication': pubs.ready()}, json.loads((_assets()/'embedding-profile.json').read_text()))
-    return pubs.publish(content, projection)
+from test_packages import publish, snapshot
 
 
 def identity(store):
@@ -213,7 +204,7 @@ def test_configure_retains_transitive_receipts_before_exposure(service):
     assert Publications(parent).ready() is None
 
 
-@pytest.mark.parametrize('corrupt', ['url', 'extra-gitlink', 'extra-section', 'pin', 'receipt'])
+@pytest.mark.parametrize('corrupt', ['url', 'extra-gitlink', 'extra-section', 'pin', 'receipt', 'no-receipt', 'no-kind', 'unknown-kind'])
 def test_read_rejects_inconsistent_layout(service, corrupt):
     parent, child = [project(service, name) for name in ('parent','child')]
     receipt = publish(child, git(child.root, 'rev-parse', 'HEAD'))
@@ -231,7 +222,13 @@ def test_read_rejects_inconsistent_layout(service, corrupt):
     elif corrupt == 'pin':
         links['child'] = receipt
     else:
-        mod['publication'] = mod['commit']
+        if corrupt == 'receipt':
+            mod['publication'] = mod['commit']
+        else:
+            mod.pop('publication')
+            mod.pop('kind')
+            if corrupt != 'no-kind':
+                mod['kind'] = 'atlas' if corrupt == 'no-receipt' else 'leaf'
         files['manifest.json'] = manifest
     broken = commit_files(parent.root, oid, files, [oid], 'Incoherent layout', gitlinks=links)
     with pytest.raises(ValueError):
@@ -461,3 +458,30 @@ def test_restored_parent_repins_registered_child_and_keeps_older_copy(service):
         assert historical['evidence'] == {'version': version}
     child.base.rename(child.base.with_name('unavailable-child'))
     assert Publications(project_store(service, parent.base)).read(ready)
+
+
+@pytest.mark.parametrize('name', ['sources', 'knowledge'])
+def test_own_leaf_role_must_match_retained_content(service, name):
+    parent = project(service, 'parent', materials=True)
+    head = git(parent.root, 'rev-parse', 'HEAD')
+    manifest = parent.read(head)['manifest']
+    original = manifest['modules'][name]
+    child = manifest['modules']['knowledge' if name == 'sources' else 'sources']
+    original.update({key:child[key] for key in ('package_id','url','commit')})
+    config = git(parent.root, 'show', head+':.gitmodules', binary=True)
+    old_url = ('../modules/' + name).encode()
+    config = config.replace(old_url, child['url'].encode())
+    broken = commit_files(parent.root, head, {'manifest.json':manifest, '.gitmodules':config}, [head],
+                          'Swap leaf content', gitlinks={original['mount']:child['commit']})
+    with pytest.raises(ValueError, match='content module|package roles'):
+        parent.closure(broken)
+
+
+def test_projection_requires_each_child_mount_receipt(service):
+    parent, child = [project(service, name) for name in ('parent','child')]
+    pub = publish(child, git(child.root, 'rev-parse', 'HEAD'))
+    oid = candidate(configure(service, parent, [include(child, 'child', pub)]))
+    retained = parent.read(oid)
+    retained['included_packages'][0]['inclusions'][0]['publication'] = None
+    with pytest.raises(ValueError, match='publication'):
+        records_for(retained, oid)

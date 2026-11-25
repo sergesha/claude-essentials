@@ -9,9 +9,9 @@ import os
 from pathlib import Path
 import re
 import subprocess
-import tempfile
 import uuid
 from ..atomic import write_private
+from ..storage import FORMAT
 
 
 def git(repo,*args,binary=False,data=None):
@@ -25,12 +25,45 @@ def _json(path,value):
     write_private(path,json.dumps(value,ensure_ascii=False,sort_keys=True,indent=2)+'\n')
 
 
+def package_identity(repo, revision):
+    package = json.loads(git(repo, 'show', revision + ':package.json'))
+    if (not isinstance(package, dict) or type(package.get('atlas_format')) is not int
+            or package['atlas_format'] != FORMAT):
+        raise ValueError('unsupported Git package format')
+    identity = package.get('package_id')
+    if not isinstance(identity, str) or str(uuid.UUID(identity)) != identity:
+        raise ValueError('canonical package UUID required')
+    return identity
+
+
+def project_manifest(repo, revision):
+    manifest = json.loads(git(repo, 'show', revision + ':manifest.json'))
+    if (not isinstance(manifest, dict) or not isinstance(manifest.get('modules'), dict)
+            or manifest.get('status') not in ('candidate', 'accepted')):
+        raise ValueError('invalid atlas project manifest')
+    return manifest
+
+
 def _repo(path):
     if not (path/'.git').exists():
         path.mkdir(parents=True,exist_ok=False)
         git(path,'init','-q','-b','data')
-        _json(path/'package.json',{'package_id':str(uuid.uuid4())})
-    return json.loads((path/'package.json').read_text())['package_id']
+        identity = str(uuid.uuid4())
+        _json(path/'package.json', {'package_id':identity, 'atlas_format':FORMAT})
+        return identity
+    identity = package_identity(path, 'HEAD')
+    if git(path, 'diff', 'HEAD', '--', 'package.json'):
+        raise ValueError('working package identity differs from committed package')
+    return identity
+
+
+def _validate_leaf(repo, oid, kind):
+    from .composition import _tree_entries
+    tree = _tree_entries(repo, oid)
+    required = {'provenance.json'} if kind == 'sources' else {'wiki.json', 'extraction.json', 'evidence.json'}
+    if ('manifest.json' in tree or any(tree.get(name, (None,))[0] != '100644' for name in required)
+            or any(mode == '160000' for mode, _ in tree.values())):
+        raise ValueError('invalid ' + kind + ' content module')
 
 
 def _commit(path,message,paths=None):
@@ -79,7 +112,7 @@ class GitStore:
                 raise ValueError('package missing from archive inventory') from error
         locations=self.base/'package-locations.json'
         mapping=json.loads(locations.read_text()) if locations.exists() else {}
-        registered = mod.get('kind') == 'atlas' and 'publication' in mod and self.resolve_atlas is not None
+        registered = mod.get('kind') == 'atlas' and self.resolve_atlas is not None
         if mod['package_id'] in mapping:
             mapped = (self.base / mapping[mod['package_id']]).resolve()
             if not registered or self._has_commits(mapped, mod['commit'], mod['publication']):
@@ -97,15 +130,16 @@ class GitStore:
         """Resolve pinned packages, preserving every inclusion of an identity."""
         return [node for _, node in self._closure(commit, root=root, by_repository=False)]
 
-    def repository_closure(self, commit):
+    def repository_closure(self, commit, *, kind='atlas'):
         """Return verified owners and their local content/receipt retention obligations."""
-        return self._closure(commit, root=None, by_repository=True)
+        return self._closure(commit, root=None, by_repository=True, kind=kind)
 
-    def _closure(self, commit, *, root, by_repository):
+    def _closure(self, commit, *, root, by_repository, kind='atlas'):
         nodes = {}
         versions = {}
+        owners = {}
 
-        def visit(owner, path, oid, expected, mount, ancestors, publication=None):
+        def visit(owner, path, oid, expected, mount, ancestors, kind, publication=None):
             if not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}',oid):
                 raise ValueError('exact Git object ID required')
             if not path.is_dir():
@@ -113,10 +147,12 @@ class GitStore:
             try:
                 if git(path,'cat-file','-t',oid)!='commit':
                     raise ValueError('package pin must be a commit')
-                identity=json.loads(git(path,'show',oid+':package.json'))['package_id']
+                identity=package_identity(path, oid)
             except (ValueError,KeyError) as exc:
                 raise ValueError('unavailable package at '+str(path)+': '+str(exc)) from exc
-            if expected is not None and identity!=expected:
+            if path not in owners:
+                owners[path] = package_identity(path, 'HEAD')
+            if identity != owners[path] or (expected is not None and identity != expected):
                 raise ValueError('package identity mismatch')
             if identity in ancestors:
                 raise ValueError('package identity cycle: '+identity)
@@ -126,26 +162,30 @@ class GitStore:
             if key not in nodes:
                 nodes[key] = owner, {'package_id': identity, 'commit': oid, 'path': path, 'mounts': []}
             _, node = nodes[key]
+            if by_repository:
+                if node.setdefault('kind', kind) != kind:
+                    raise ValueError('conflicting package roles')
             if mount not in node['mounts']:node['mounts'].append(mount)
             if publication is not None:
                 from .publication import Publications
                 Publications(owner).verify_child_receipt(publication, oid)
                 node.setdefault('inclusions', []).append({'mount': mount, 'publication': publication})
-            if not git(path,'ls-tree','--name-only',oid,'manifest.json'):
+            if kind != 'atlas':
+                _validate_leaf(path, oid, kind)
                 return
-            manifest=json.loads(git(path,'show',oid+':manifest.json'))
+            manifest=project_manifest(path, oid)
             if manifest['package_id']!=identity:
                 raise ValueError('manifest package identity mismatch')
             from .composition import validate_layout
             validate_layout(path, oid, manifest['modules'])
-            for mod in manifest['modules'].values():
+            for name, mod in manifest['modules'].items():
                 child = owner._module_store(path, mod)
                 inclusion=mount+'/'+mod['mount'] if mount else mod['mount']
                 visit(child, child.root, mod['commit'], mod['package_id'], inclusion,
-                      ancestors | {identity}, mod.get('publication'))
+                      ancestors | {identity}, mod.get('kind', name), mod.get('publication'))
 
         path = self.root if root is None else root
-        visit(self.at_repository(path),path,commit,None,'',set())
+        visit(self.at_repository(path),path,commit,None,'',set(),kind)
         return list(nodes.values())
 
     def snapshot(self,wiki,extraction,evidence,*,recorded_at,relation_model=None,relation_bundle=None,relation_previous=None):
@@ -162,17 +202,26 @@ class GitStore:
                 raise ValueError('source digest mismatch: '+name)
             if name in sources:raise ValueError('duplicate source name')
             sources[name]=raw
-        if relation_previous is None and (self.root/'manifest.json').exists():
-            relation_previous=self.read(git(self.root,'rev-parse','HEAD')).get('relations')
+        if (self.root/'.git').exists():
+            previous_snapshot = self.read(git(self.root,'rev-parse','HEAD'))
+            if relation_previous is None:
+                relation_previous = previous_snapshot.get('relations')
+            previous = previous_snapshot['manifest']['modules']
+        else:
+            previous = {}
+        paths = {kind:self.module_path(self.root,previous[kind]) if kind in previous else self.base/'modules'/kind
+                 for kind in ('sources','knowledge')}
+        for path in paths.values():
+            if path.exists():
+                if not (path/'.git').exists():
+                    raise ValueError('existing content module is not a Git repository')
+                _repo(path)
         relations = (validate_bundle(relation_bundle, extraction) if relation_bundle is not None else
                      resolve_relations(extraction, model=relation_model, previous=relation_previous))
         package_id=_repo(self.root)
-        previous_path=self.root/'manifest.json'
-        previous=json.loads(previous_path.read_text())['modules'] if previous_path.exists() else {}
         # Retain selected independent package pins; only managed contents change.
         modules=dict(previous)
-        for kind in ('sources','knowledge'):
-            path=self.module_path(self.root,previous[kind]) if kind in previous else self.base/'modules'/kind
+        for kind, path in paths.items():
             identity=_repo(path)
             if kind=='sources':
                 rawdir=path/'raw';rawdir.mkdir(exist_ok=True)
@@ -201,49 +250,6 @@ class GitStore:
         commit=_commit(self.root,'Pin unaccepted source and knowledge packages',['package.json','.gitmodules','manifest.json','relations.json'])
         return {'commit':commit,**manifest}
 
-    def pin_package(self,base,child,child_commit,*,mount,recorded_at,base_publication=None):
-        """Propose an exact independent package pin; acceptance is separate."""
-        from .publication import Publications,commit_files
-        if (not isinstance(mount,str) or not mount or mount.startswith('/')
-                or any(part in ('','.','..','.git') for part in mount.split('/'))):
-            raise ValueError('relative package mount required')
-        if datetime.fromisoformat(recorded_at.replace('Z','+00:00')).tzinfo is None:
-            raise ValueError('recorded_at requires timezone')
-        snapshot=self.read(base);manifest=snapshot['manifest'];pubs=Publications(self)
-        if pubs.ready()!=base_publication:raise ValueError('stale package proposal')
-        origin=pubs.read(base_publication)['content_commit'] if base_publication else manifest.get('proposal_base_content',base)
-        if base_publication and base!=origin:
-            if (manifest['status']!='candidate' or manifest.get('proposal_base_content')!=origin
-                    or manifest.get('proposal_base_publication')!=base_publication):
-                raise ValueError('package proposal must derive from selected publication')
-            git(self.root,'merge-base','--is-ancestor',origin,base)
-        child_snapshot=child.read(child_commit)
-        if manifest['package_id'] in {n['package_id'] for n in child.closure(child_commit)}:
-            raise ValueError('package identity cycle')
-        modules=dict(manifest['modules'])
-        for name,mod in modules.items():
-            if mod['mount']==mount and mod.get('kind')!='atlas':
-                raise ValueError('mount already belongs to a content module')
-            if mod['mount']!=mount and (mount.startswith(mod['mount']+'/') or mod['mount'].startswith(mount+'/')):
-                raise ValueError('overlapping package mounts')
-        name='included-'+hashlib.sha256(mount.encode()).hexdigest()[:24]
-        modules[name]={'package_id':child_snapshot['manifest']['package_id'],'commit':child_commit,
-            'mount':mount,'url':os.path.relpath(child.root,self.root),'kind':'atlas','scope':'all'}
-        manifest={**manifest,'modules':modules,'status':'candidate','accepted_at':None,'recorded_at':recorded_at,
-                  'proposal_base_content':origin,'proposal_base_publication':base_publication}
-        manifest.pop('acceptance',None)
-        with tempfile.TemporaryDirectory() as temporary:
-            config=Path(temporary)/'gitmodules'
-            config.write_bytes(git(self.root,'show',base+':.gitmodules',binary=True)
-                if git(self.root,'ls-tree','--name-only',base,'.gitmodules') else b'')
-            git(self.root,'config','-f',str(config),'submodule.'+name+'.path',mount)
-            git(self.root,'config','-f',str(config),'submodule.'+name+'.url',modules[name]['url'])
-            candidate=commit_files(self.root,base,{'manifest.json':manifest,'.gitmodules':config.read_bytes()},
-                [base],'Propose independent package pin',gitlinks={mount:child_commit})
-        self.read(candidate)
-        git(self.root,'update-ref','refs/poc9/proposals/'+candidate,candidate)
-        return candidate
-
     def read(self,commit):
         self.closure(commit)
         if not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}',commit):
@@ -262,7 +268,7 @@ class GitStore:
             oid=mod['commit']
             child = self._module_store(repo, mod)
             path = child.root
-            identity=json.loads(git(path,'show',oid+':package.json'))['package_id']
+            identity=package_identity(path, oid)
             if identity!=mod['package_id']:raise ValueError('package identity mismatch')
             if kind=='sources':
                 result['sources']={name[4:]:git(path,'show',oid+':'+name,binary=True)
@@ -279,9 +285,8 @@ class GitStore:
                     included[key]={'package_id':identity,'commit':oid,'scope':'all','mounts':[],
                                    'snapshot':child._read_package(path,oid)}
                 included[key]['mounts'].append(mod['mount'])
-                if 'publication' in mod:
-                    included[key].setdefault('inclusions', []).append(
-                        {'mount': mod['mount'], 'publication': mod['publication']})
+                included[key].setdefault('inclusions', []).append(
+                    {'mount': mod['mount'], 'publication': mod['publication']})
         if git(repo,'ls-tree','--name-only',commit,'relations.json'):
             result['relations']=json.loads(git(repo,'show',commit+':relations.json'))
         if 'relations' in result:

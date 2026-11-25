@@ -50,8 +50,7 @@ The manifest, gitlinks and `.gitmodules` record the same layout. For a child
 with a registered Git origin the submodule URL uses that locator. A child with
 only a local repository uses a locator relative to the parent repository and
 requires that directory layout for ordinary recursive Git checkout. Atlas
-resolves registered children locally without checking out submodules. Historical
-layouts that predate per-inclusion receipts retain their original content pins.
+resolves registered children locally without checking out submodules. Every selected layout requires the child receipt at each inclusion.
 
 A recursive Git clone needs access to every recorded locator and pinned content
 commit. For recovery on another machine, an Atlas full-history archive carries
@@ -59,42 +58,9 @@ the exact selected child publication objects as well. Restore maps their UUIDs
 to the recovered repositories, so earlier and current layouts can be read after
 the original locations disappear.
 
-## Content-pin interface
-
-Knowledge Atlas uses PoC9's exact Git submodule pins. An inclusion identifies a
-child package by UUID and full commit OID, with a relative mount such as
-`shared/materials`. The initial scope is the complete package (`all`). Branch names
-and moving tags are not accepted pins.
-
-Submit `packages.pin` with the common atlas ID, request UUID and expected READY,
-plus this payload (replace the example values with actual IDs and paths):
-
-```json
-{
-  "path": "/external/data/materials",
-  "package_id": "child-package-uuid",
-  "commit": "full-child-commit-oid",
-  "mount": "shared/materials",
-  "recorded_at": "2026-11-13T10:00:00Z"
-}
-```
-
-The result is a pending candidate. Inspect it with `candidate.inspect`, assess
-changed evidence and grounds, then explicitly accept or reject through
-`candidate.decide`. A first package can be included in an empty atlas. Add an
-optional `candidate` OID when composing further changes into an existing proposal;
-its reviewed base must still match current READY.
-
-To update, submit a new exact child OID at the same mount and review the resulting
-candidate. To roll back, submit the earlier OID at that mount and review again.
-Both create new candidates/publications; neither rewrites the previous publication
-or automatically accepts the child change. A child advancing independently cannot
-change the parent's selected knowledge.
-
 `packages.inspect` uses current READY, an exact `publication`, or `as_known_at` and
 returns the selected content, recursive package UUIDs, commit OIDs, resolved
 locations and all inclusion paths. `candidate.inspect` exposes unpublished pins.
-No manual submodule commands are needed for pinning, updating or rollback.
 
 Repeated and diamond inclusion of the same UUID/OID preserve every mount while
 contributing each evidence identity once. Cross-package joint grounds require all

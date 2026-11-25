@@ -19,12 +19,14 @@ The restore limits are
 manifest. Each filename must occur once, and the hash inventory must match the
 package bundles and runtime assets. Export checks the same limits before making the destination file visible.
 
-Format 2 extends PoC9's Git bundles and hashed runtime assets with a versioned
-inventory of canonical acceptance, rejection and revision receipts. Receipt
-references, referenced commits, recursive package pins, publication history and
-compatible document vectors travel together. The service SQLite database and
-host credentials are not required. Compatible format 1 archives remain readable;
-restoration never invents decision receipts absent from their Git history.
+Format 3 includes Git bundles, hashed runtime assets and a versioned decision
+inventory keyed by the UUID of each bundled atlas. A project with no decisions
+has an empty list. Source and knowledge leaves carry their own Git history.
+Every bundled revision requires integer `atlas_format: 3` in `package.json`.
+Restore verifies the decisions, child selections and publication vectors in
+staging. The service uses the qualified formatter and tokenizer to reconstruct
+the distinct document inputs for each publication and verifies their retained
+vectors before exposing the destination. It accepts only format 3.
 
 An export is a full-history backup. It can include additional child history,
 unpublished proposals and records beyond the selected parent publication.
@@ -33,8 +35,7 @@ commit, including nested selections and earlier parent layouts. Child READY may
 have moved. Restore resolves these bindings by UUID inside the bundled repositories.
 Original project paths, submodule checkouts and remote access are unnecessary.
 A missing wrapper or a mismatch between its reviewed content, UUID and gitlink
-causes restore to fail before the destination becomes visible. Older content-only
-pins keep their original commits and attribution.
+causes restore to fail before the destination becomes visible.
 
 Restore validates hashes and package/decision closure before exposing canonical
 files. It then reuses PoC9's oldest-to-newest native projection rebuild, verifies
@@ -57,7 +58,7 @@ service returns HTTP 409 (`unsafe_resume`) and preserves the original attempt
 and staged input. Inspect the canonical result before starting a fresh restore.
 If interrupted inputs fill the staging budget,
 confirm the operation is interrupted, preserve a copy of the input outside
-the service, and remove only that operation's staged `archive.zip` before
+the service, and remove only that operation's staged `archive-v3.zip` before
 submitting the fresh restore.
 
 The prepared runtime must have the pinned tokenizer, formatter, native graph

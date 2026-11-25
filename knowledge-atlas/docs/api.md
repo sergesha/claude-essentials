@@ -47,7 +47,7 @@ Supply external filesystem paths for explicit data management through
 `packages.configure` requires the parent `atlas_id`, a UUID `request_id`, an
 explicit `expected_publication` (null for an unpublished parent), and
 `payload.includes`. Each item contains the registered child UUID `package_id`,
-relative `mount`, and exact child wrapper OID `publication` as strings. The service derives the content commit and recording time.
+relative `mount`, and exact child wrapper OID `publication` as strings. Each request supplies the complete desired child list. The service derives the content commit and recording time.
 The Python method is `client.packages_configure(ConfigurePackages(includes=...),
 atlas_id=..., request_id=..., expected_publication=...)`.
 

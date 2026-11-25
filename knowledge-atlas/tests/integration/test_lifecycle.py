@@ -46,21 +46,9 @@ async def _cycle(package, config_path, native, root, host, profiles):
     from mcp import ClientSession,StdioServerParameters
     from mcp.client.stdio import stdio_client
     from knowledge_atlas.core.git_store import GitStore
+    from knowledge_atlas.core.feedback import revise_compilation
     from knowledge_atlas.core.graph_stage import records_for, key
     from knowledge_atlas.core.publication import Publications
-    # Retained reviewed package inputs: source fixtures, not a second service.
-    child=GitStore(root/'child')
-    wiki=json.loads((package/'tests/fixtures/evidence/wiki-initial-final.json').read_text())
-    extraction=json.loads((package/'tests/fixtures/evidence/extractor-output.json').read_text())
-    profile=json.loads((package/'runtime/embedding-profile.json').read_text())
-    child_pins=[]
-    for index in range(2):
-        if index: wiki['pages'][0]['content']+='\nRetained fixture revision for pin qualification.\n'
-        candidate=child.snapshot(wiki,extraction,{},recorded_at='2026-11-13T00:00:00Z')['commit']
-        child_pins.append(Publications(child).review(candidate,{'decision':'accept','kind':'synthetic',
-            'actor':'Package fixture','reason':'Technical pin fixture only','accepted_at':'2026-11-13T00:00:00Z',
-            'base_publication':None},profile))
-    child_id=child.read(child_pins[0])['manifest']['package_id']
     env={**os.environ,'KNOWLEDGE_ATLAS_CONFIG':str(config_path),'KNOWLEDGE_ATLAS_PYTHON':sys.executable}
     params=StdioServerParameters(command='sh',args=[str(package/'scripts/launch.sh')],env=env)
     transcript=[];atlas_id=None;ready=None;sequence=0
@@ -103,6 +91,21 @@ async def _cycle(package, config_path, native, root, host, profiles):
                 'kind':'synthetic','reason':'Explicit technical exercise, not human acceptance','decided_at':now()},mutation=True)
             assert result['data']['status']=='published', result
             ready=result['publication'];return result
+        child = GitStore(root/'child')
+        created_child = await call('atlas.create', {'path':str(child.base)}, mutation=True)
+        atlas_id = child_id = created_child['data']['atlas_id']
+        wiki = json.loads((package/'tests/fixtures/evidence/wiki-initial-final.json').read_text())
+        extraction = json.loads((package/'tests/fixtures/evidence/extractor-output.json').read_text())
+        first_child = child.snapshot(wiki, extraction, {}, recorded_at=now())['commit']
+        reviewed_child = await accept(first_child)
+        child_publications = [ready]
+        wiki['pages'][0]['content'] += '\nRetained fixture revision for pin qualification.\n'
+        second_child = revise_compilation(child, reviewed_child['data']['accepted_content'], [], wiki, extraction, {},
+            actor='Package fixture', method='Synthetic revision', reason='Change retained fixture',
+            recorded_at=now(), base_publication=ready)
+        await accept(second_child)
+        child_publications.append(ready)
+        atlas_id = ready = None
         created=await call('atlas.create',{'path':str(native['atlas'])},mutation=True)
         atlas_id=created['data']['atlas_id']
         raw=(package/'tests/fixtures/fixtures/printlab/review.txt').read_text()
@@ -187,9 +190,9 @@ async def _cycle(package, config_path, native, root, host, profiles):
         await call('history',{'record_id':lesson})
         await call('diff',{'before':semantic_publication,'after':ready})
         pin_publications=[]
-        for pin in (child_pins[0],child_pins[1],child_pins[0]):
-            proposed=await call('packages.pin',{'path':str(child.base),'package_id':child_id,'commit':pin,
-                'mount':'packages/retained','recorded_at':now()},mutation=True)
+        for publication in (*child_publications, child_publications[0]):
+            proposed=await call('packages.configure',{'includes':[{'package_id':child_id,
+                'mount':'packages/retained','publication':publication}]},mutation=True)
             await accept(proposed['data']['candidate']);pin_publications.append(ready)
             await call('packages.inspect',{})
         await call('packages.inspect',{},publication=pin_publications[1])

@@ -11,7 +11,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
-from .git_store import git
+from .git_store import git, package_identity
 
 
 def commit_files(repo, base, files, parents, message, *, gitlinks=None, remove_paths=()):
@@ -165,6 +165,8 @@ class Publications:
         if not isinstance(publication, str) or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', publication):
             raise ValueError('exact child publication required')
         wrapper = json.loads(git(self.store.root, 'show', publication + ':manifest.json'))
+        if package_identity(self.store.root, publication) != wrapper['package_id']:
+            raise ValueError('child publication package identity mismatch')
         if self._read_receipt(publication, wrapper)['content_commit'] != content_commit:
             raise ValueError('child publication/content mismatch')
 
