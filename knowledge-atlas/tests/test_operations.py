@@ -788,11 +788,10 @@ def test_native_service_root_refuses_literal_symlink(tmp_path, direct):
 
 
 def test_registry_preflight_admits_reads_while_current_writer_progresses(tmp_path):
-    import sqlite3
     import subprocess
     import sys
-    from contextlib import closing
     from knowledge_atlas.operations import check_service_storage
+    from knowledge_atlas.project_registry import list_projects
     from test_project_registry import create_project
     service = ServiceContext(tmp_path / 'service')
     project = create_project(service, tmp_path / 'project')
@@ -816,11 +815,11 @@ db.close()
     try:
         assert proc.stdout.readline().strip() == 'writing'
         observed = []
-        with closing(sqlite3.connect(path.as_uri() + '?mode=ro', uri=True)) as reader:
-            for _ in range(4):
-                check_service_storage(service)
-                locator = reader.execute('SELECT git_url FROM atlases WHERE atlas_id=?', (project,)).fetchone()[0]
-                observed.append(int(locator.rsplit('=', 1)[1]))
+        for _ in range(4):
+            check_service_storage(service)
+            binding, = list_projects(service)
+            assert binding.atlas_id == project
+            observed.append(int(binding.git_url.rsplit('=', 1)[1]))
         assert observed[-1] > observed[0] and proc.poll() is None
     finally:
         stop.touch()

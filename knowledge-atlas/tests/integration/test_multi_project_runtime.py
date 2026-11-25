@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import tempfile
@@ -19,9 +20,7 @@ from knowledge_atlas.core.feedback import revise_compilation
 from knowledge_atlas.core.git_store import GitStore, git
 from knowledge_atlas.core.graph_stage import GraphStage
 from knowledge_atlas.core.publication import Publications
-from knowledge_atlas.launcher import service_context
 from knowledge_atlas.locks import FileLock
-from knowledge_atlas.operations import submit
 from knowledge_atlas.providers.config import default_profiles
 
 PACKAGE = Path(__file__).resolve().parents[2]
@@ -50,7 +49,7 @@ def running_stack(data, runtime, log_path, *, packaged):
                     time.sleep(.2)
             else:
                 raise AssertionError('Atlas service did not start; see ' + str(log_path))
-            yield client
+            yield client, process
         finally:
             if process.poll() is None:
                 process.terminate()
@@ -59,6 +58,21 @@ def running_stack(data, runtime, log_path, *, packaged):
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
+
+
+def interrupt_service(process, service_root, *, packaged):
+    """Stop this fixture without draining the acknowledged queue."""
+    assert process.poll() is None
+    pid = json.loads((service_root / 'discovery.json').read_text())['pid']
+    if packaged:
+        status = Path(f'/proc/{pid}/status').read_text()
+        parent = next(line.split()[1] for line in status.splitlines() if line.startswith('PPid:'))
+        assert int(parent) == process.pid
+    else:
+        assert pid == process.pid
+    os.kill(pid, signal.SIGKILL)
+    # In the image the real supervisor cleans up the other native children.
+    assert process.wait(timeout=60) != 0
 
 
 def mutation(action, identity=None, /, *, expected=None, **payload):
@@ -184,7 +198,7 @@ def test_production_two_projects_independent_and_restart(runtime_configuration, 
                                            'publication': child_publication}])
 
             paths = [data / 'projects' / name for name in ('A', 'B', 'Composite')]
-            with stack() as client:
+            with stack() as (client, process):
                 config = json.loads(config_path.read_text())
                 graph = config['configuration']['graph']
                 assert set(graph) == {'url'} and client.atlas_list().data['projects'] == []
@@ -264,13 +278,17 @@ def test_production_two_projects_independent_and_restart(runtime_configuration, 
                 before_restart = [state(client, path, identity, graph['url']) for path, identity in zip(paths, ids)]
                 assert before_restart[1] == before[1]
 
-            # Submit while the dispatcher is stopped. The normal startup detects
-            # the persisted request and uses its original UUID and publication.
-            restart_update = decision(a, candidate(paths[0], 'Willow replaces the calibration sample.', a1), a1)
-            queued = submit(service_context(config), restart_update)
-            assert queued.state == 'queued'
-            with stack() as client:
-                a2 = published(completed(client, client.operation(queued.operation_id)))
+                restart_candidate = candidate(paths[0], 'Willow replaces the calibration sample.', a1)
+                with FileLock(data / 'service' / 'writer.lock'):
+                    queued = client.call(decision(a, restart_candidate, a1))
+                    assert queued.state == 'queued'
+                    assert client.operation(queued.operation_id).state == 'queued'
+                    interrupt_service(process, data / 'service', packaged=packaged)
+
+            with stack() as (client, _):
+                resumed = client.operation(queued.operation_id)
+                assert resumed.operation_id == queued.operation_id
+                a2 = published(completed(client, resumed))
                 after = [state(client, path, identity, graph['url']) for path, identity in zip(paths, ids)]
                 assert after[1:] == before_restart[1:]
                 assert after[0]['database'] == before_restart[0]['database']
