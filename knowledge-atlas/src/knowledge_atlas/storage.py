@@ -1,12 +1,14 @@
 """On-disk boundaries shared by service startup and Atlas-owned stores."""
-from contextlib import closing, contextmanager, ExitStack
+from contextlib import closing, contextmanager
+from functools import lru_cache
 import fcntl
 import json
 import os
 from pathlib import Path
 import re
 import sqlite3
-import shutil
+import subprocess
+import sys
 from stat import S_ISREG
 import tempfile
 
@@ -32,60 +34,116 @@ def _snapshot_identity(path):
     return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
 
 
-@contextmanager
-def readonly_database(path, *, recover_after_validation=False):
-    if path.is_symlink() or not path.is_file():
-        raise ValueError(f'unsupported {path.name} storage')
-    # A read-only connection to a WAL database can still create sidecars.
-    # Atlas writes rollback-journal databases with a current user_version.
-    with path.open('rb') as stream:
-        header = stream.read(64)
+def _probe(path, *args):
+    # SQLite uses process-wide POSIX record locks. A raw open/close in this
+    # process could release a transaction held by a different SQLite handle.
+    result = subprocess.run([sys.executable, '-I', '-B', '-S',
+                             Path(__file__).with_name('_sqlite_probe.py'), path, *args],
+                            stdin=subprocess.DEVNULL, capture_output=True)
+    if result.returncode == 2:
+        raise FileNotFoundError('database or rollback journal disappeared during inspection')
+    if result.returncode:
+        raise ValueError(f'could not inspect {path.name}: {result.stderr.decode(errors="replace").strip()}')
+    return result.stdout
+
+
+@lru_cache(maxsize=1)
+def _verify_header(path, identity):
+    """Reuse only the most recently checked physical file revision during polling."""
+    header = _probe(path)
     if (header[:16] != b'SQLite format 3\x00' or header[18:20] != b'\x01\x01'
             or int.from_bytes(header[60:64], 'big') != FORMAT):
         raise ValueError(f'unsupported {path.name} database format')
 
+
+def _current_identity(path, original=None):
+    try:
+        identity = _snapshot_identity(path)
+    except FileNotFoundError as error:
+        raise ValueError(f'{path.name} disappeared during inspection') from error
+    if original is not None and identity[:2] != original:
+        raise ValueError(f'{path.name} replaced during inspection')
+    return identity
+
+
+def _journal_pair(path, original):
+    identity = _current_identity(path, original)
+    try:
+        journal = _snapshot_identity(path.with_name(path.name + '-journal'))
+    except FileNotFoundError:
+        return None
+    return identity, journal
+
+
+@contextmanager
+def _read_snapshot(path, original):
     uri = path.absolute().as_uri()
-    with ExitStack() as stack:
-        db = stack.enter_context(closing(sqlite3.connect(uri + '?mode=ro', uri=True, timeout=10)))
-        db.row_factory = sqlite3.Row
-        db.execute('BEGIN')
+    for _ in range(4):
+        identity = _current_identity(path, original)
         try:
-            db.execute('PRAGMA schema_version').fetchone()
-        except sqlite3.OperationalError as error:
-            if error.sqlite_errorcode != sqlite3.SQLITE_READONLY_ROLLBACK:
-                raise
-        else:
-            yield db
-            return
-        db.close()  # The original cannot be read until SQLite rolls it back.
-        stack.enter_context(directory_lock(path.parent))
-        journal = path.with_name(path.name + '-journal')
-        if not journal.exists():
-            # A concurrent validated opener completed ordinary recovery.
-            with closing(sqlite3.connect(uri + '?mode=ro', uri=True, timeout=10)) as recovered:
+            _verify_header(path, identity)
+        except FileNotFoundError:
+            _current_identity(path, original)
+            continue
+        if _current_identity(path, original) != identity:
+            continue
+        with closing(sqlite3.connect(uri + '?mode=ro', uri=True, timeout=10)) as db:
+            db.row_factory = sqlite3.Row
+            db.execute('BEGIN')
+            try:
+                db.execute('PRAGMA schema_version').fetchone()
+            except sqlite3.OperationalError as error:
+                if error.sqlite_errorcode != sqlite3.SQLITE_READONLY_ROLLBACK:
+                    raise
+            else:
+                yield db, None
+                return
+        # An admitted handle may independently complete native recovery. Retry
+        # capture if it changes the source pair before we have a stable copy.
+        pair = _journal_pair(path, original)
+        if pair is None:
+            continue
+        with tempfile.TemporaryDirectory() as temporary:
+            scratch = Path(temporary)
+            try:
+                _probe(path, scratch)
+            except FileNotFoundError:
+                _current_identity(path, original)
+                continue
+            if pair != _journal_pair(path, original):
+                continue
+            with closing(sqlite3.connect(scratch / path.name)) as recovered:
                 recovered.row_factory = sqlite3.Row
-                recovered.execute('BEGIN')
-                yield recovered
+                recovered.execute('PRAGMA schema_version').fetchone()
+                recovered.execute('PRAGMA query_only=ON')
+                # The stable pair is the read snapshot, regardless of later
+                # commits or recovery by another already admitted connection.
+                yield recovered, pair
+                return
+    raise ValueError(f'{path.name} changed repeatedly while taking a read snapshot')
+
+
+@contextmanager
+def readonly_database(path):
+    original = _current_identity(path)[:2]
+    with _read_snapshot(path, original) as (db, _):
+        yield db
+
+
+def validate_database(path, validate, *, recover=False):
+    original = _current_identity(path)[:2]
+    for _ in range(4):
+        with _read_snapshot(path, original) as (db, pair):
+            validate(db)
+        if pair is None or not recover:
             return
-        sources = (path, journal)
-        identity = [_snapshot_identity(source) for source in sources]
-        scratch = Path(stack.enter_context(tempfile.TemporaryDirectory()))
-        for source in sources:
-            with os.fdopen(os.open(source, os.O_RDONLY | os.O_NOFOLLOW), 'rb') as input_file:
-                with (scratch / source.name).open('xb') as output:
-                    shutil.copyfileobj(input_file, output)
-        if identity != [_snapshot_identity(source) for source in sources]:
-            raise ValueError('database changed while copying interrupted transaction')
-        recovered = stack.enter_context(closing(sqlite3.connect(scratch / path.name)))
-        recovered.row_factory = sqlite3.Row
-        recovered.execute('PRAGMA schema_version').fetchone()  # SQLite recovers the private copy.
-        recovered.execute('PRAGMA query_only=ON')
-        yield recovered
-        if identity != [_snapshot_identity(source) for source in sources]:
-            raise ValueError('database changed during interrupted transaction validation')
-        if recover_after_validation:
-            with closing(sqlite3.connect(uri + '?mode=rw', uri=True)) as current:
+        with directory_lock(path.parent):
+            if pair != _journal_pair(path, original):
+                continue  # Validate the new committed original before admitting a writer.
+            with closing(sqlite3.connect(path.absolute().as_uri() + '?mode=rw', uri=True)) as current:
                 current.execute('PRAGMA schema_version').fetchone()
+            return
+    raise ValueError(f'{path.name} changed repeatedly during recovery validation')
 
 
 def verify_schema(db, schema):

@@ -233,3 +233,61 @@ def test_unmarked_wal_registry_leaves_no_sqlite_sidecars(tmp_path):
     with pytest.raises(AtlasError, match='unsupported'):
         check_service_storage(service)
     assert before == {p.name: p.read_bytes() for p in service.service_root.iterdir()}
+
+
+@pytest.mark.parametrize('access', ['read', 'write', 'write-new-invalid-schema', 'write-replaced-file'])
+def test_registry_validation_during_admitted_handle_recovery(tmp_path, monkeypatch, access):
+    from knowledge_atlas import storage
+    from knowledge_atlas.operations import check_service_storage, database
+    from test_operations import interrupt_configuration_write
+    service = ServiceContext(tmp_path / 'service', configuration={'notes': 'reviewed' * 20000})
+    submit(service, ActionRequest('atlas.create', request_id=str(uuid.uuid4()), payload={'path': str(tmp_path / 'p')}))
+    path = service.service_root / 'operations.sqlite3'
+    journal = path.with_name(path.name + '-journal')
+    verify_schema = storage.verify_schema
+    with database(service) as admitted:
+        interrupt_configuration_write(path)
+        assert journal.exists()
+        validated = []
+        def interleave(snapshot, schema):
+            verify_schema(snapshot, schema)
+            validated.append(snapshot.execute('SELECT count(*) FROM operations').fetchone()[0])
+            if len(validated) == 1:
+                assert admitted.execute('SELECT count(*) FROM operations').fetchone()[0] == 1
+                assert not journal.exists()
+                if access == 'write-new-invalid-schema':
+                    admitted.execute('DROP TABLE resumes')
+                    admitted.commit()
+                elif access == 'write-replaced-file':
+                    path.rename(tmp_path / 'displaced.sqlite3')
+                    path.write_bytes(b'unrelated replacement')
+        monkeypatch.setattr(storage, 'verify_schema', interleave)
+        if access == 'read':
+            check_service_storage(service)
+        elif access == 'write-new-invalid-schema':
+            with pytest.raises(AtlasError, match='unsupported.*schema'):
+                with database(service):
+                    pytest.fail('opened changed unsupported registry')
+        elif access == 'write-replaced-file':
+            with pytest.raises(AtlasError, match='replaced'):
+                with database(service):
+                    pytest.fail('opened replacement')
+            assert path.read_bytes() == b'unrelated replacement'
+        else:
+            with database(service) as current:
+                assert current.execute('SELECT count(*) FROM operations').fetchone()[0] == 1
+        assert validated and not journal.exists()
+
+def test_preflight_rechecks_cached_header_after_in_place_journal_mode_change(tmp_path):
+    from contextlib import closing
+    from knowledge_atlas.operations import check_service_storage, initialize_service_storage
+    service = ServiceContext(tmp_path / 'service')
+    initialize_service_storage(service)
+    check_service_storage(service)
+    path = service.service_root / 'operations.sqlite3'
+    with closing(sqlite3.connect(path)) as db:
+        assert db.execute('PRAGMA journal_mode=WAL').fetchone()[0] == 'wal'
+    before = {p.name: p.read_bytes() for p in service.service_root.iterdir()}
+    with pytest.raises(AtlasError, match='unsupported.*format'):
+        check_service_storage(service)
+    assert before == {p.name: p.read_bytes() for p in service.service_root.iterdir()}

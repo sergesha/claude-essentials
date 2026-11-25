@@ -186,7 +186,8 @@ exit "${UV_TEST_EXIT:-0}"
     assert result.stdout.strip() == "['status']"
 
 
-def test_graph_credential_initialization_interruption_and_current_restart(tmp_path):
+@pytest.fixture
+def graph_cli(tmp_path):
     import hashlib
     runtime = tmp_path / 'runtime'
     repo = runtime / 'terminusdb'
@@ -219,6 +220,23 @@ db.mkdir(exist_ok=True)
     base = [sys.executable, PACKAGE / 'runtime/native-runtime.py', '--runtime', runtime,
             '--profile', profile, '--tokenizer', tokenizer, '--provider', 'http://127.0.0.1:9402',
             '--port', '9403']
+    return base, swi
+
+
+def test_graph_init_rejects_linked_state_before_writing(tmp_path, graph_cli):
+    base, _ = graph_cli
+    target = tmp_path / 'empty-target'
+    target.mkdir()
+    link = tmp_path / 'graph'
+    link.symlink_to(target, target_is_directory=True)
+    result = subprocess.run([*base, '--state', link, 'init'], capture_output=True, text=True)
+    assert result.returncode != 0 and 'unsupported graph' in result.stderr
+    assert link.is_symlink() and list(target.iterdir()) == []
+
+
+def test_graph_credential_initialization_interruption_and_current_restart(tmp_path, graph_cli):
+    import hashlib
+    base, swi = graph_cli
     state = tmp_path / 'new'
     run = lambda *args: subprocess.run([*base, '--state', state, *args], capture_output=True, text=True)
     original_script = swi.read_text()
@@ -568,3 +586,43 @@ def test_second_supervisor_cannot_start_processes_on_same_data(tmp_path, monkeyp
         assert not (data / 'service').exists() and not (data / 'logs').exists()
     finally:
         os.close(fd)
+
+@pytest.mark.parametrize('mount', ['missing', 'empty'])
+def test_restart_refuses_displaced_managed_projection_before_runtime(tmp_path, monkeypatch, mount):
+    from knowledge_atlas.launcher import service_context
+    from knowledge_atlas.operations import database
+    from knowledge_atlas.core.publication import Publications
+    from test_project_registry import retained_publication
+    config, _ = startup_config(tmp_path, monkeypatch)
+    service = service_context(config)
+    data = tmp_path / 'data'
+    identity, store, ready = retained_publication(data / 'project', service_root=service.service_root)
+    with database(service) as db:
+        graph_database = db.execute('SELECT graph_database FROM atlases WHERE atlas_id=?', (identity,)).fetchone()[0]
+        db.execute('INSERT INTO projection_owners VALUES (?,?,?)',
+                   ('http://127.0.0.1:9403', graph_database, identity))
+    graph = data / 'graph'
+    if mount == 'empty':
+        graph.mkdir()
+    config_path = data / 'service-config.json'
+    original = config_path.read_bytes()
+    registry = service.service_root / 'operations.sqlite3'
+    original_registry = registry.read_bytes()
+    with pytest.raises(ValueError, match='graph'):
+        startup_config(tmp_path, monkeypatch, runtime_check=lambda *_: pytest.fail('started runtime probes'))
+    assert not graph.exists() or not list(graph.iterdir())
+    assert original == config_path.read_bytes() and original_registry == registry.read_bytes()
+    assert Publications(store).ready() == ready
+
+
+def test_docker_rejects_linked_service_slot_without_following_it(tmp_path, monkeypatch):
+    from knowledge_atlas.contracts import AtlasError
+    data = tmp_path / 'data'
+    data.mkdir()
+    target = tmp_path / 'empty-target'
+    target.mkdir()
+    (data / 'service').symlink_to(target, target_is_directory=True)
+    with pytest.raises(AtlasError, match='unsupported'):
+        startup_config(tmp_path, monkeypatch, runtime_check=lambda *_: pytest.fail('started runtime probes'))
+    assert not (data / 'service-config.json').exists()
+    assert (data / 'service').is_symlink() and not list(target.iterdir())

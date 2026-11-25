@@ -12,7 +12,7 @@ import sqlite3
 import time
 import urllib.request
 from ..storage import (check_init_stage, directory_lock, initialize_database, init_stage,
-                       readonly_database, verify_schema)
+                       readonly_database, validate_database, verify_schema)
 
 
 VECTOR_SCHEMA = (
@@ -91,8 +91,7 @@ def check_cache(cache, *, locked=False, recover=False):
             if any(p != init_stage(path) for p in cache.iterdir()):
                 raise ValueError('unsupported vector storage without its database')
             return
-        with readonly_database(path, recover_after_validation=recover) as db:
-            verify_cache_contents(db)
+        validate_database(path, verify_cache_contents, recover=recover)
     except (ValueError, KeyError, TypeError, AttributeError, sqlite3.Error) as error:
         raise ValueError(f'unsupported vector storage: {error}') from error
 

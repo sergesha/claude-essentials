@@ -41,8 +41,25 @@ REGISTRY_SCHEMA = (
 )
 
 
+def _verify_registry(db):
+    from .storage import verify_schema
+    verify_schema(db, REGISTRY_SCHEMA)
+    for row in db.execute('SELECT atlas_id,path,graph_database FROM atlases'):
+        identity = uuid.UUID(row['atlas_id'])
+        if (str(identity) != row['atlas_id'] or not Path(row['path']).is_absolute()
+                or row['graph_database'] != project_database(identity)):
+            raise ValueError('unsupported project binding')
+    for row in db.execute('SELECT endpoint,database_name,atlas_id FROM projection_owners'):
+        identity = uuid.UUID(row['atlas_id'])
+        if (str(identity) != row['atlas_id'] or not row['endpoint']
+                or graph_endpoint(row['endpoint']) != row['endpoint']
+                or not row['endpoint'].startswith('http://127.0.0.1:')
+                or row['database_name'] != project_database(identity)):
+            raise ValueError('unsupported projection ownership')
+
+
 def _check_registry(context, *, locked=False, recover=False):
-    from .storage import check_init_stage, directory_lock, init_stage, readonly_database, verify_schema
+    from .storage import check_init_stage, directory_lock, init_stage, validate_database
     root = context.service_root
     path = root / 'operations.sqlite3'
     if 'atlas_path' in context.configuration:
@@ -62,20 +79,7 @@ def _check_registry(context, *, locked=False, recover=False):
                     from .core.embedding_provider import check_cache
                     check_cache(root / 'vectors')
             return
-        with readonly_database(path, recover_after_validation=recover) as db:
-            verify_schema(db, REGISTRY_SCHEMA)
-            for row in db.execute('SELECT atlas_id,path,graph_database FROM atlases'):
-                identity = uuid.UUID(row['atlas_id'])
-                if (str(identity) != row['atlas_id'] or not Path(row['path']).is_absolute()
-                        or row['graph_database'] != project_database(identity)):
-                    raise ValueError('unsupported project binding')
-            for row in db.execute('SELECT endpoint,database_name,atlas_id FROM projection_owners'):
-                identity = uuid.UUID(row['atlas_id'])
-                if (str(identity) != row['atlas_id'] or not row['endpoint']
-                        or graph_endpoint(row['endpoint']) != row['endpoint']
-                        or not row['endpoint'].startswith('http://127.0.0.1:')
-                        or row['database_name'] != project_database(identity)):
-                    raise ValueError('unsupported projection ownership')
+        validate_database(path, _verify_registry, recover=recover)
     except (ValueError, TypeError, AttributeError, sqlite3.Error) as error:
         raise AtlasError('unsupported_storage', f'unsupported service registry: {error}', 422) from error
 

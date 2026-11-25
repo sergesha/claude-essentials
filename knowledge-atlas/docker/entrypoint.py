@@ -18,7 +18,7 @@ from knowledge_atlas.http_api import write_private
 from knowledge_atlas.client import AtlasClient
 from knowledge_atlas.contracts import AtlasError
 from knowledge_atlas.launcher import service_context
-from knowledge_atlas.operations import check_service_storage, initialize_service_storage
+from knowledge_atlas.operations import check_service_storage, initialize_service_storage, read_registry
 from knowledge_atlas.storage import check_graph_state, directory_lock
 from knowledge_atlas.providers.base import ProviderError
 from knowledge_atlas.providers.config import OPERATIONS, resolve_profile
@@ -146,7 +146,12 @@ def start_components(runtime, data):
               'configuration': {'project_data_root': str(data), 'profiles': profiles, 'graph': {'url': 'http://127.0.0.1:9403'}}}
     service = service_context(config)
     check_service_storage(service)
-    needs_graph_init(data / 'graph')
+    if needs_graph_init(data / 'graph'):
+        endpoint = config['configuration']['graph']['url']
+        with read_registry(service) as db:
+            if db is not None and db.execute('SELECT 1 FROM projection_owners WHERE endpoint=? LIMIT 1',
+                                             (endpoint,)).fetchone():
+                raise ValueError('managed graph storage is missing or incomplete for a retained projection')
     retained_config = data / 'service-config.json'
     if retained_config.is_symlink():
         raise ValueError('unsupported retained service configuration')

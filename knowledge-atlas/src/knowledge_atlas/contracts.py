@@ -100,7 +100,10 @@ class ServiceContext:
     recoveries: dict = field(default_factory=dict, repr=False)
 
     def __post_init__(self):
-        self.service_root = Path(self.service_root).expanduser().resolve()
+        root = Path(self.service_root).expanduser()
+        if root.is_symlink():
+            raise AtlasError('unsupported_storage', 'unsupported linked service root', 422)
+        self.service_root = root.resolve()
 
 
 @dataclass

@@ -22,9 +22,7 @@ def load_config(path=None):
 def service_context(config):
     if not isinstance(config,dict) or set(config)-{'service_root','runtime','configuration'}:
         raise AtlasError('invalid_configuration','service_root, runtime and configuration are supported',422)
-    root=Path(config['service_root']).expanduser().resolve()
-    if root.is_relative_to(Path(__file__).resolve().parents[2]):
-        raise AtlasError('invalid_location','service data must live outside the plugin',422)
+    root=Path(config['service_root']).expanduser()
     runtime=config.get('runtime')
     if runtime:
         runtime=RuntimeConfig(Path(runtime['runtime_root']).expanduser().resolve(),
@@ -32,7 +30,10 @@ def service_context(config):
     settings = config.get('configuration', {})
     if not isinstance(settings, dict) or 'atlas_path' in settings:
         raise AtlasError('invalid_configuration', 'unsupported service configuration or universal atlas_path', 422)
-    return ServiceContext(root,runtime,settings)
+    context = ServiceContext(root,runtime,settings)
+    if context.service_root.is_relative_to(Path(__file__).resolve().parents[2]):
+        raise AtlasError('invalid_location','service data must live outside the plugin',422)
+    return context
 
 
 def ensure_service(config):

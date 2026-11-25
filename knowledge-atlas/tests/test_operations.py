@@ -310,7 +310,9 @@ def test_unsupported_startup_leaves_storage_and_workers_untouched(tmp_path, monk
         (root / 'attempts').mkdir()
     (root / 'token').write_bytes(b'original')
     before = {p.name: p.read_bytes() if p.is_file() else None for p in root.iterdir()}
-    monkeypatch.setattr(launcher.subprocess, 'Popen', lambda *a, **kw: pytest.fail('started process'))
+    from types import SimpleNamespace
+    monkeypatch.setattr(launcher, 'subprocess', SimpleNamespace(
+        Popen=lambda *a, **kw: pytest.fail('started service process'), DEVNULL=launcher.subprocess.DEVNULL))
     from knowledge_atlas import operations
     monkeypatch.setattr(operations.Dispatcher, 'start', lambda *a: pytest.fail('started worker'))
     with pytest.raises(AtlasError, match='unsupported'):
@@ -629,11 +631,20 @@ def test_unrelated_create_survives_symlink_loop_at_registration(tmp_path, loop_a
     assert repository_identity(moved / 'old') == original_uuid
 
 
-@pytest.mark.parametrize('valid', [True, False])
-def test_hot_transaction_validates_without_rewriting_before_recovery(tmp_path, valid):
-    import sqlite3
+def interrupt_configuration_write(path):
     import subprocess
     import sys
+    script = """import os, sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+db.execute('PRAGMA cache_size=1')
+db.execute("UPDATE operations SET configuration=replace(configuration,'reviewed','unproven')")
+os._exit(0)
+"""
+    subprocess.run([sys.executable, '-c', script, str(path)], check=True)
+
+
+@pytest.mark.parametrize('valid', [True, False])
+def test_hot_transaction_validates_without_rewriting_before_recovery(tmp_path, valid):
     from knowledge_atlas.operations import check_service_storage, database
     service = ServiceContext(tmp_path / 'service', configuration={'notes': 'reviewed' * 20000})
     operation = submit(service, request(path=str(tmp_path / 'atlas')))
@@ -642,13 +653,7 @@ def test_hot_transaction_validates_without_rewriting_before_recovery(tmp_path, v
         original = db.execute('SELECT configuration FROM operations').fetchone()[0]
         if not valid:
             db.execute('DROP TABLE resumes')
-    script = """import os, sqlite3, sys
-db = sqlite3.connect(sys.argv[1])
-db.execute('PRAGMA cache_size=1')
-db.execute("UPDATE operations SET configuration=replace(configuration,'reviewed','unproven')")
-os._exit(0)
-"""
-    subprocess.run([sys.executable, '-c', script, str(path)], check=True)
+    interrupt_configuration_write(path)
     journal = path.with_name(path.name + '-journal')
     before = path.read_bytes(), journal.read_bytes()
     if not valid:
@@ -699,3 +704,44 @@ with database(ServiceContext(Path(sys.argv[1]))):
     with database(ServiceContext(root)) as db:
         assert db.execute('PRAGMA user_version').fetchone()[0] == 3
         assert db.execute('SELECT count(*) FROM operations').fetchone()[0] == 0
+
+def test_preflight_keeps_another_process_out_of_an_active_write_transaction(tmp_path):
+    import os
+    import subprocess
+    import sys
+    from knowledge_atlas.operations import check_service_storage, database
+    service = ServiceContext(tmp_path / 'service')
+    path = service.service_root / 'operations.sqlite3'
+    probe = """import sqlite3, sys
+with sqlite3.connect(sys.argv[1], timeout=0) as other:
+    try:
+        other.execute('BEGIN IMMEDIATE')
+    except sqlite3.OperationalError as error:
+        assert error.sqlite_errorcode == sqlite3.SQLITE_BUSY
+        print('busy')
+    else:
+        print('available')
+"""
+    def reservation():
+        return subprocess.check_output([sys.executable, '-c', probe, str(path)], text=True).strip()
+    with database(service) as db:
+        db.execute('BEGIN IMMEDIATE')
+        os.utime(path)  # Force inspection even if the preceding open cached a header.
+        assert reservation() == 'busy'
+        check_service_storage(service)
+        assert reservation() == 'busy'
+    assert reservation() == 'available'
+
+
+@pytest.mark.parametrize('direct', [True, False])
+def test_native_service_root_refuses_literal_symlink(tmp_path, direct):
+    from knowledge_atlas.launcher import service_context
+    from knowledge_atlas.operations import initialize_service_storage
+    target = tmp_path / 'empty'
+    target.mkdir()
+    link = tmp_path / 'service'
+    link.symlink_to(target, target_is_directory=True)
+    with pytest.raises(AtlasError, match='unsupported'):
+        ctx = ServiceContext(link) if direct else service_context({'service_root': str(link)})
+        initialize_service_storage(ctx)
+    assert link.is_symlink() and not list(target.iterdir())

@@ -21,7 +21,7 @@ parser.add_argument('--provider',required=True,help='Explicit-role embedding bri
 parser.add_argument('--port',required=True,type=int)
 parser.add_argument('command',choices=('init','serve'))
 args=parser.parse_args()
-runtime=args.runtime.resolve();repo=runtime/'terminusdb';state=args.state.resolve()
+runtime=args.runtime.resolve();repo=runtime/'terminusdb';state=args.state.absolute()
 profile=json.loads(args.profile.read_text());tokenizer=args.tokenizer.resolve()
 canonical=json.dumps(profile['profile'],sort_keys=True,separators=(',',':'),ensure_ascii=False)
 if hashlib.sha256(canonical.encode()).hexdigest()!=profile['profile_id']:
