@@ -68,7 +68,8 @@ def load_pins():
 
 
 def policy_files():
-    return {name: sha256(HERE / name) for name in ("gate.py", "advisories.py", "trivy-pins.json")}
+    return {name: sha256(HERE / name) for name in ("gate.py", "advisories.py", "coverage.py", "image_inventory.py",
+                                                   "ubuntu_coverage.py", "supplier_coverage.py", "trivy-pins.json")}
 
 
 def read_json(path):
@@ -322,9 +323,8 @@ def fetch_kev(reports):
 
 
 def collect_coverage(producer, candidate, archive, report, reports):
-    """Replace with in-process producer qualification against this archive and Trivy inventory."""
-    return {"complete": False, "components": [], "findings": [],
-            "errors": [f"no qualified coverage collector for {producer}"]}
+    from coverage import collect_coverage as collect
+    return collect(producer, candidate, archive, report, reports)
 
 
 def outcome(findings, errors):
@@ -335,7 +335,7 @@ def outcome(findings, errors):
     return "pass", 0
 
 
-def evaluate_report(report, candidate, evaluate, errors):
+def evaluate_report(report, candidate, evaluate, errors, virtual_workspaces=()):
     if not (report.get("SchemaVersion") == 2 and report.get("ArtifactType") == "container_image" and
             report.get("Trivy", {}).get("Version") == VERSION):
         errors.append("unexpected Trivy report schema, artifact type or version")
@@ -352,7 +352,10 @@ def evaluate_report(report, candidate, evaluate, errors):
             if not (cls in ("os-pkgs", "lang-pkgs") and string(target) and string(typ)):
                 errors.append(f"invalid Trivy result target at {index}")
             if not (isinstance(packages, list) and packages and all(isinstance(p, dict) and
-                    string(p.get("Name")) and string(p.get("Version")) for p in packages)):
+                    ((string(p.get("Name")) and string(p.get("Version"))) or
+                    (typ == "cargo" and any(proof["target"] == target and proof["package_index"] == i and
+                                           proof["row"] == p for proof in virtual_workspaces)))
+                    for i, p in enumerate(packages))):
                 errors.append(f"incomplete package inventory at target {index}")
             elif cls == "os-pkgs":
                 os_inventory = True
@@ -437,8 +440,6 @@ def scan(args, directory):
     report = None
     if raw.exists():
         report = step("Trivy JSON", lambda: read_trivy_report(raw, errors))
-        if report is not None:
-            step("Trivy evidence", lambda: evaluate_report(report, candidate or {}, evaluate, errors))
     else:
         errors.append("Trivy report unavailable")
     coverage = None
@@ -449,6 +450,10 @@ def scan(args, directory):
     coverage.update(producer=args.producer, image_id=(candidate or {}).get("id"),
                     archive_sha256=decision["archive_sha256"])
     write_json(reports / "coverage.json", coverage)
+
+    if report is not None:
+        step("Trivy evidence", lambda: evaluate_report(report, candidate or {}, evaluate, errors,
+                                                       coverage.get("virtual_workspaces", [])))
 
     def assess_coverage():
         rows = coverage["findings"]

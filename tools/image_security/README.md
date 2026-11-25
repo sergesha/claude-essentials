@@ -19,19 +19,20 @@ python3 tools/image_security/gate.py scan --producer knowledge-atlas \
 
 ### Linux amd64
 
-Build and scan the Redis Memory MCP production target. For the embeddings image use the `embeddings` target, its own local tag, producer `redis-memory-embeddings` and a separate new output directory.
+Build and scan the Redis Memory MCP production target. Run the same commands for `embeddings` with its own output directory. A local ARM64 Docker builder can build these amd64 targets and scan their saved archives.
 
 ```sh
 revision=$(git rev-parse HEAD)
 version=$(python3 -c 'import tomllib; print(tomllib.load(open("redis-memory-mcp/server/pyproject.toml","rb"))["project"]["version"])')
-docker build --platform linux/amd64 --target mcp \
-  --label org.opencontainers.image.source=https://github.com/sergesha/claude-essentials \
-  --label org.opencontainers.image.version="$version" \
-  --label org.opencontainers.image.revision="$revision" \
-  -t "redis-memory-mcp:check-$revision" redis-memory-mcp/server
 scan_parent=$(mktemp -d)
-python3 tools/image_security/gate.py scan --producer redis-memory-mcp \
-  --image "redis-memory-mcp:check-$revision" --platform linux/amd64 --out "$scan_parent/mcp"
+for target in mcp embeddings; do
+  docker build --platform linux/amd64 --target "$target" --iidfile "$scan_parent/$target.iid" \
+    --label org.opencontainers.image.source=https://github.com/sergesha/claude-essentials \
+    --label org.opencontainers.image.version="$version" \
+    --label org.opencontainers.image.revision="$revision" redis-memory-mcp/server || break
+  python3 tools/image_security/gate.py scan --producer "redis-memory-$target" \
+    --image "$(cat "$scan_parent/$target.iid")" --platform linux/amd64 --out "$scan_parent/$target"
+done
 ```
 
 ### Decision and publication
@@ -42,7 +43,9 @@ python3 tools/image_security/gate.py scan --producer redis-memory-mcp \
 | 1 | blocked | Complete evaluation found a CRITICAL, a HIGH with an available fix, or a CISA KEV match. |
 | 2 | incomplete | Required evidence is missing, inconsistent, expired or unavailable. Known blockers remain in the report. |
 
-Producer qualification is pending. The built-in collector returns incomplete for every producer until a candidate-bound inventory and supplemental advisory implementation exists. Review `reports/decision.json` and `reports/coverage.json`. The report directory also holds the raw Trivy output when available, fetch and scan logs, the KEV catalog, structured alias receipts and evidence hashes. Stage-level errors appear in the decision, and finding-level errors appear with the finding. A failure to start or complete a scan leaves an incomplete receipt in the new directory.
+The collector creates a disposable, network-disabled container from the scanned config ID. It verifies the stopped container's identity, exports its merged filesystem, and removes the container. It records the base OS, installed binary and source package versions, Python distributions, native output hashes and wheel owners, interpreter version, and producer-specific build materials. Empty required inventories and unresolved native components produce an incomplete decision. The checked scope is the shipped image; model and provider downloads performed after startup have separate identities.
+
+On Ubuntu Noble the collector fetches the current official Ubuntu CVE Tracker branch, examines the exact release/source-package status rows, and compares installed source versions using Debian epoch/revision ordering. Its receipt records the tree, commit, retrieval time, record hashes, priority, installed identities and original vendor wording. Uncertain vendor applicability remains a gap. The supplier directory retains requests, response hashes, times and response bytes for PSF, Node and OSV checks. Cargo compiler artifacts are a conservative superset and the runtime manifest identifies the shipped outputs. Source locks alone cannot establish linkage. Review `reports/decision.json` and `reports/coverage.json`. The report directory also holds the raw Trivy output when available, fetch and scan logs, the KEV catalog, structured alias receipts and evidence hashes. Stage-level errors appear in the decision, and finding-level errors appear with the finding. A failure to start or complete a scan leaves an incomplete receipt in the new directory.
 
 The repository-local composite action takes `producer`, `image`, `platform` and `out` in the producer’s build job. It uploads the reports directory on success or failure. In GitHub Actions the candidate revision label must match `GITHUB_SHA`. Keep the candidate archive, cache and decision in the same trusted job. After both the action and evidence upload succeed, a trusted publisher tags the scanned config ID, then rechecks the destination immediately before its existing push.
 
