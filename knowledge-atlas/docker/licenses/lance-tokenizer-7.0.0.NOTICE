@@ -1,0 +1,82 @@
+lance-tokenizer 7.0.0
+
+Copyright The Lance Authors
+Copyright (c) 2017-present Tantivy contributors.
+
+The following modules in src/ contain MIT-licensed adaptations from Tantivy
+v0.24.2. Their source headers credit The Lance Authors and the Tantivy
+contributors.
+
+alphanum_only.rs
+analyzer.rs
+lower_caser.rs
+ngram_tokenizer.rs
+raw_tokenizer.rs
+remove_long.rs
+simple_tokenizer.rs
+stemmer.rs
+stop_word_filter.rs
+tokenizer_api.rs
+whitespace_tokenizer.rs
+
+Tantivy 0.24.2, upstream LICENSE
+https://github.com/quickwit-oss/tantivy/blob/a3175f53412f0b33addc7cafa3aefb1731347051/LICENSE
+
+Copyright (c) 2018 by the project authors, as listed in the AUTHORS file.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+Tantivy 0.24.2, upstream AUTHORS
+https://github.com/quickwit-oss/tantivy/blob/a3175f53412f0b33addc7cafa3aefb1731347051/AUTHORS
+
+# This is the list of authors of tantivy for copyright purposes.
+Paul Masurel
+Laurentiu Nicola
+Dru Sellers
+Ashley Mannix
+Michael J. Curry
+Jason Wolfe
+# As an employee of Google I am required to add Google LLC
+# in the list of authors, but this project is not affiliated to Google
+# in any other way.
+Google LLC
+
+lance-tokenizer src/stop_word_filter/stopwords.rs
+Vendored stop-word lists from Tantivy v0.24.2 / Snowball (BSD-3-Clause).
+
+These stop word lists are from the Snowball project (https://snowballstem.org/)
+which carries the following copyright and license:
+
+Copyright (c) 2001, Dr Martin Porter
+Copyright (c) 2004,2005, Richard Boulton
+Copyright (c) 2013, Yoshiki Shibukawa
+Copyright (c) 2006,2007,2009,2010,2011,2014-2019, Olly Betts
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+
+  1. Redistributions of source code must retain the above copyright notice,
+     this list of conditions and the following disclaimer.
+  2. Redistributions in binary form must reproduce the above copyright notice,
+     this list of conditions and the following disclaimer in the documentation
+     and/or other materials provided with the distribution.
+  3. Neither the name of the Snowball project nor the names of its contributors
+     may be used to endorse or promote products derived from this software
+     without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.

@@ -65,11 +65,119 @@ and toolchain versions in `/opt/atlas-seed/runtime.json`. The checked-out
 Community sources include their licenses and identify the files Atlas patches.
 The SWI source archive, Cargo notices, source inventory and corresponding
 crate archives are under `/usr/share/doc/knowledge-atlas`. The application
-ships the exact patches and supplemental Lance and Tokenizers licenses under
+ships the exact patches and supplemental Lance, Tantivy/Snowball and Tokenizers notices under
 `/opt/knowledge-atlas/runtime/patches` and `/opt/knowledge-atlas/docker/licenses`.
 Wheel licenses and third-party notices remain with the installed packages. Public
 release qualification also needs the actual image's linked libraries and SWI
 extensions checked against their notice and corresponding-source requirements.
+
+## Rebuild the graph with modified GMP or Rug
+
+**The native graph library uses Rug 1.19.2 and statically links GNU GMP 6.2.1
+through gmp-mpfr-sys 1.5.3.** SWI-Prolog also uses the system GMP shared
+library. To change the GMP code embedded in `terminusdb/src/rust/librust.so`,
+rebuild the Rust graph library. Rug and gmp-mpfr-sys are distributed under
+LGPL-3.0-or-later. Their source archives contain the LGPL and GPL texts.
+The bundled GMP source includes its own licensing terms in `gmp-6.2.1-c/README`
+and `COPYING*`.
+
+On a native Linux ARM64 builder with the prerequisites for the explicit local
+build above, start from the exact image and its matching repository revision.
+Set `atlas_image` to the local image ID or a previously pulled qualified digest.
+From the Atlas Git repository root:
+
+```sh
+set -eu
+atlas_recipient="$(mktemp -d)"
+atlas_revision="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$atlas_image")"
+git worktree add --detach "$atlas_recipient/tree" "$atlas_revision"
+cd "$atlas_recipient/tree"
+atlas_src="$PWD/knowledge-atlas/docker/recipient"
+mkdir -p "$atlas_src" "$atlas_recipient/materials"
+docker run --rm --network none --entrypoint tar "$atlas_image" \
+  -C /usr/share/doc/knowledge-atlas -cf - cargo-inventory.json corresponding-source |
+  tar -xf - -C "$atlas_recipient/materials"
+python3 - "$atlas_recipient/materials" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+materials = Path(sys.argv[1])
+inventory = json.loads((materials / 'cargo-inventory.json').read_text())
+for name in ('gmp-mpfr-sys-1.5.3', 'rug-1.19.2'):
+    entry, = (v for k, v in inventory.items() if k.endswith('/' + name))
+    archive = materials / 'corresponding-source' / (name + '.crate')
+    if hashlib.sha256(archive.read_bytes()).hexdigest() != entry['sha256']:
+        raise SystemExit(f'Archive checksum mismatch: {name}')
+PY
+tar -xf "$atlas_recipient/materials/corresponding-source/gmp-mpfr-sys-1.5.3.crate" -C "$atlas_src"
+tar -xf "$atlas_recipient/materials/corresponding-source/rug-1.19.2.crate" -C "$atlas_src"
+```
+
+Edit the GMP sources in `$atlas_src/gmp-mpfr-sys-1.5.3/gmp-6.2.1-c` or the
+Rust sources in `$atlas_src/rug-1.19.2`. For compatible modifications, keep
+the crate names, versions and dependency declarations. Cargo can then resolve
+these local sources against the distributed lockfile. Disable reuse of earlier
+native library builds in the crate's private cache. [Cargo path overrides](https://doc.rust-lang.org/cargo/reference/overriding-dependencies.html#paths-overrides)
+
+```sh
+cat > "$atlas_src/cargo-config.toml" <<'TOML'
+paths = ["/opt/knowledge-atlas/docker/recipient/gmp-mpfr-sys-1.5.3", "/opt/knowledge-atlas/docker/recipient/rug-1.19.2"]
+
+[env]
+GMP_MPFR_SYS_CACHE = { value = "_", force = true }
+TOML
+```
+
+In this private copy of `knowledge-atlas/docker/Dockerfile`, insert the following
+instruction immediately after `COPY docker ./docker` in the builder stage.
+Cargo reads this configuration from an ancestor of both native workspaces.
+
+```dockerfile
+COPY docker/recipient/cargo-config.toml /opt/.cargo/config.toml
+```
+
+Commit the changes on the private checkout, archive that exact source, and
+build a separately tagged image. The original Dockerfile's locked Cargo
+build, Atlas patches and seed-manifest generation now run with the selected
+library sources.
+
+```sh
+git add -- knowledge-atlas/docker/Dockerfile
+git add -f -- knowledge-atlas/docker/recipient
+git commit -m "Build the Atlas graph with recipient library changes"
+export ATLAS_REVISION="$(git rev-parse HEAD)"
+export ATLAS_VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' knowledge-atlas/pyproject.toml)"
+mkdir "$atlas_recipient/snapshot"
+git archive "$ATLAS_REVISION" knowledge-atlas | tar -x -C "$atlas_recipient/snapshot"
+cd "$atlas_recipient/snapshot/knowledge-atlas"
+docker build --platform linux/arm64 --build-arg ATLAS_REVISION --build-arg ATLAS_VERSION \
+  -t knowledge-atlas:recipient-gmp -f docker/Dockerfile .
+for atlas_build in "$atlas_image" knowledge-atlas:recipient-gmp; do
+  docker run --rm --network none --entrypoint sha256sum "$atlas_build" \
+    /opt/atlas-seed/terminusdb/src/rust/librust.so
+done
+```
+
+Exercise the change using fresh deployment storage. Choose an unused Compose
+project and runtime volume. This overlay selects the private image for the
+usual prepare, provider login and startup commands.
+
+```sh
+cat > "$atlas_recipient/compose.recipient.yaml" <<'YAML'
+services:
+  atlas:
+    image: knowledge-atlas:recipient-gmp
+    pull_policy: never
+YAML
+export ATLAS_RUNTIME_VOLUME=atlas_recipient_gmp_runtime
+atlas_compose() { docker compose -p atlas-recipient-gmp -f "$atlas_recipient/snapshot/knowledge-atlas/docker/compose.yaml" -f "$atlas_recipient/compose.recipient.yaml" "$@"; }
+atlas_compose run --rm --no-deps atlas prepare
+```
+
+Follow the profile and startup steps below and check a graph operation that
+exercises your library change. Retain the source revision, original and
+modified library hashes, and the observed result. Dependency selection was
+checked against the packaged ARM64 graph lockfile. Qualification of a
+distinguishable rebuilt library and its behavior remains pending.
 
 ## Explicit stage profiles and native sign-in
 

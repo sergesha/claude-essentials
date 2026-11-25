@@ -50,9 +50,12 @@ LABEL org.opencontainers.image.source="https://github.com/sergesha/claude-essent
 ENV HOME=/auth PYTHONPATH=/opt/knowledge-atlas/src KNOWLEDGE_ATLAS_CONFIG=/data/service-config.json \
     PATH="/runtime/providers/codex/node_modules/.bin:/runtime/providers/claude/node_modules/.bin:${PATH}"
 USER ubuntu
-RUN .venv/bin/python -c "from pathlib import Path; from knowledge_atlas.runtime import _validate_runtime,RuntimeConfig; _validate_runtime(RuntimeConfig(Path('/opt/atlas-seed')), check_model=False)" && \
+RUN --mount=type=tmpfs,target=/tmp smoke_home="$(mktemp -d)" && \
+    export HOME="$smoke_home" XDG_CACHE_HOME="$smoke_home/.cache" && \
+    .venv/bin/python -c "from pathlib import Path; from knowledge_atlas.runtime import _validate_runtime,RuntimeConfig; _validate_runtime(RuntimeConfig(Path('/opt/atlas-seed')), check_model=False)" && \
     /opt/atlas-seed/python/bin/python -c "import onnxruntime, tokenizers, numpy" && \
     /opt/atlas-seed/native-tools/swipl/bin/swipl --version && \
-    echo '{"filename":"fixture.md","text":"Image build check"}' | /opt/atlas-seed/extract/target/debug/poc9-extract prepare >/dev/null && npm --version && test ! -e /opt/atlas-seed/model
+    echo '{"filename":"fixture.md","text":"Image build check"}' | /opt/atlas-seed/extract/target/debug/poc9-extract prepare >/dev/null && npm --version && test ! -e /opt/atlas-seed/model && \
+    python3 -c "import os; assert not os.listdir('/auth'), 'image auth directory must be empty'"
 ENTRYPOINT ["/opt/knowledge-atlas/.venv/bin/python", "/opt/knowledge-atlas/docker/entrypoint.py"]
 CMD ["start"]

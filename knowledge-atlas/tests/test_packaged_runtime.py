@@ -175,3 +175,38 @@ seed_packaged_runtime(Path(sys.argv[1]), Path(sys.argv[2]))
     assert retained.read_bytes() == b'retain'
     assert (destination / 'model/tokenizer.json').read_bytes() == b'model fixture'
     assert partials() == []
+
+
+def test_compiled_lance_tokenizer_redistributes_tantivy_attribution(tmp_path):
+    import hashlib
+    from pathlib import Path
+    import runpy
+
+    package = Path(__file__).resolve().parents[1]
+    collect = runpy.run_path(str(package / 'docker/build-seed.py'))['collect_cargo_materials']
+    cargo = tmp_path / 'cargo'
+    relative = Path('registry/src/index/lance-tokenizer-7.0.0')
+    source = cargo / relative
+    source.mkdir(parents=True)
+    manifest = source / 'Cargo.toml'
+    manifest.write_text('[package]\nname="lance-tokenizer"\nversion="7.0.0"\nlicense="Apache-2.0"\n')
+    archive = cargo / 'registry/cache/index/lance-tokenizer-7.0.0.crate'
+    archive.parent.mkdir(parents=True)
+    archive.write_bytes(b'fixture with no standalone notice file')
+    log = tmp_path / 'prepare.log'
+    log.write_text(json.dumps({'reason': 'compiler-artifact', 'manifest_path': str(manifest)}))
+    materials = tmp_path / 'distribution'
+    materials.mkdir()
+    collect(cargo, materials, log)
+    notices = json.loads((materials / 'cargo-inventory.json').read_text())[str(relative)]['notices']
+    assert notices
+    text = ''
+    for name, digest in notices.items():
+        content = (materials / 'cargo' / relative / name).read_bytes()
+        assert hashlib.sha256(content).hexdigest() == digest
+        text += content.decode()
+    assert 'Copyright (c) 2017-present Tantivy contributors.' in text
+    assert 'Copyright (c) 2018 by the project authors' in text
+    assert 'The above copyright notice and this permission notice shall be included' in text
+    assert 'Paul Masurel' in text
+    assert 'Redistributions in binary form must reproduce the above copyright notice' in text

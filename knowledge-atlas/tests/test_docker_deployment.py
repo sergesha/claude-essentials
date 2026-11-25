@@ -570,3 +570,17 @@ def test_provider_boundary_rejects_unrecognized_name_without_writes(tmp_path):
     with pytest.raises(ValueError, match='provider'):
         module.ensure_provider(tmp_path, 'unknown')
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize('anonymous_volume', [False, True], ids=['image', 'fresh-volume'])
+def test_image_auth_starts_empty(anonymous_volume):
+    image = os.environ.get('ATLAS_TEST_IMAGE')
+    if not image:
+        pytest.skip('set ATLAS_TEST_IMAGE to the local packaged image under qualification')
+    command = ['docker', 'run', '--rm', '--pull', 'never', '--network', 'none',
+               '--entrypoint', '/usr/bin/python3']
+    if anonymous_volume:
+        command.extend(['--volume', '/auth'])
+    command.extend([image, '-c', 'import json,os; print(json.dumps(os.listdir("/auth")))'])
+    result = subprocess.run(command, capture_output=True, text=True, check=True, timeout=60)
+    assert json.loads(result.stdout) == []

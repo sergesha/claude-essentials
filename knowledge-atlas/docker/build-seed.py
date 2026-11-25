@@ -49,6 +49,12 @@ def collect_cargo_materials(cargo: Path, materials: Path, build_log: Path):
             identity = {'revision': revision}
         else:
             package = tomllib.loads((source / 'Cargo.toml').read_text())['package']
+            if (package['name'], package['version']) == ('lance-tokenizer', '7.0.0'):
+                notice = Path(__file__).parent / 'licenses/lance-tokenizer-7.0.0.NOTICE'
+                target = materials / 'cargo' / relative / notice.name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(notice, target)
+                inventory[notice.name] = runtime._hash(target)
             archive = cargo / 'registry/cache' / relative.parts[-2] / (source.name + '.crate')
             license_id = package.get('license', '')
             identity = {'license': license_id, 'sha256': runtime._hash(archive),
