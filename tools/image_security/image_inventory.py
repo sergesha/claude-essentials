@@ -21,6 +21,25 @@ SOURCE = re.compile(r"([a-z0-9][a-z0-9.+-]*)(?: \(([^() ]+)\))?")
 NODE_LIMIT = 256 * 1024 * 1024
 LIMIT = 32 * 1024 * 1024
 
+COPY_ADVISORIES = {
+    "setuptools/package_index": {"CVE-2025-47273", "GHSA-5rjg-fvgr-3xxf", "PYSEC-2025-49"},
+    "msgpack C extension": {"CVE-2026-114613", "GHSA-j586-36cw-2gc2", "GHSA-6v7p-g79w-8964"},
+}
+PYTHON_IMPLEMENTATIONS = {"setuptools": "setuptools/package_index", "msgpack": "msgpack C extension"}
+SOURCE_ONLY_TARGETS = {"opt/atlas-seed/vectorlink/Cargo.lock", "usr/share/doc/knowledge-atlas/lance-7.0.0/Cargo.lock"}
+
+
+def cargo_registry_component(path, identity, material):
+    match = re.fullmatch(r"registry/src/[^/]+/([A-Za-z0-9_-]+)-(\d+\.\d+\.\d+(?:[-+].+)?)", path)
+    if match and re.fullmatch("[0-9a-f]{64}", identity.get("sha256", "")):
+        return dict(kind="compiled Cargo crate", name=match[1], version=match[2], origin=material, input=path,
+                    crate_sha256=identity["sha256"], applicability="conservative build superset")
+    return None
+
+
+def valid_cargo_checkout(path, identity):
+    return path.startswith("git/checkouts/") and re.fullmatch("[0-9a-f]{40}", identity.get("revision", ""))
+
 
 def export_rootfs(candidate, destination):
     import gate
@@ -278,12 +297,11 @@ def inventory(producer, rootfs, report, result=None):
             else:
                 cargo = json.loads(read(material))
                 for path, identity in cargo.items():
-                    match = re.fullmatch(r"registry/src/[^/]+/([A-Za-z0-9_-]+)-(\d+\.\d+\.\d+(?:[-+].+)?)", path)
-                    if match and re.fullmatch("[0-9a-f]{64}", identity.get("sha256", "")):
-                        row = component("compiled Cargo crate", match[1], match[2], material, input=path,
-                                        crate_sha256=identity["sha256"], applicability="conservative build superset")
-                        query(row, {"ecosystem": "crates.io", "name": match[1]})
-                    elif path.startswith("git/checkouts/") and re.fullmatch("[0-9a-f]{40}", identity.get("revision", "")):
+                    row = cargo_registry_component(path, identity, material)
+                    if row:
+                        components.append(row)
+                        query(row, {"ecosystem": "crates.io", "name": row["name"]})
+                    elif valid_cargo_checkout(path, identity):
                         component("compiled Cargo Git checkout", path, identity["revision"], material)
                         result["queries"].append({"component": len(components)-1, "commit": identity["revision"]})
                     else:
@@ -503,19 +521,21 @@ def pip_implementation(name, paths, manifest, bom, read_member):
     return proof
 
 
+def finding_ids(row):
+    vendors = row.get("VendorIDs", [])
+    return {v for v in [row.get("VulnerabilityID"), *(vendors if isinstance(vendors, list) else [])]
+            if isinstance(v, str)}
+
+
 def copy_disposition(row, copy):
     absent = copy.get("implementation", {}).get("absent")
-    vendors = row.get("VendorIDs", [])
-    identifiers = {v for v in [row.get("VulnerabilityID"), *(vendors if isinstance(vendors, list) else [])]
-                   if isinstance(v, str)}
-    affected = {"setuptools/package_index": {"CVE-2025-47273", "GHSA-5rjg-fvgr-3xxf", "PYSEC-2025-49"},
-                "msgpack C extension": {"CVE-2026-114613", "GHSA-j586-36cw-2gc2", "GHSA-6v7p-g79w-8964"}}
+    identifiers = finding_ids(row)
     if (copy.get("name") == "libgfortran" and copy.get("sha256") ==
             "25899a29a06d3f2927021b4823d858558839fea0e7e759eedb8926fd0a339ea4" and
             str(copy.get("origin")).endswith("/numpy.libs/libgfortran-e1b7dfc8-d8198c01.so.5.0.0") and
             row.get("VulnerabilityID") in {"CVE-2026-114690", "CVE-2026-114691"}):
         return {"status": "unaffected", "source": "CNA identifies libstdc++ implementation", "copy": copy}
-    expected = affected.get(absent, set())
+    expected = COPY_ADVISORIES.get(absent, set())
     if identifiers and identifiers <= expected:
         return {"status": "unaffected", "source": "identified implementation absent", "copy": copy,
                 "advisory_ids": sorted(expected)}
@@ -527,8 +547,7 @@ def trivy_disposition(row, origin, inventory):
     if origin["type"] == "cargo":
         evidence = inventory.get("cargo_outputs")
         lock = inventory.get("source_lock_packages", {}).get(origin["target"], [])
-        source_targets = {"opt/atlas-seed/vectorlink/Cargo.lock", "usr/share/doc/knowledge-atlas/lance-7.0.0/Cargo.lock"}
-        if (origin["target"] in source_targets and evidence and [name, version] in lock and [name, version] not in evidence["compiled"]
+        if (origin["target"] in SOURCE_ONLY_TARGETS and evidence and [name, version] in lock and [name, version] not in evidence["compiled"]
                 and [name, version] not in evidence["active_lock_packages"]):
             return {"status": "source only", "source": origin["target"], "package": [name, version],
                     "output_hashes": evidence["output_hashes"], "inventory_sha256": evidence["inventory_sha256"]}
@@ -600,3 +619,116 @@ def qualify_cargo(result, files, read, cargo, material, manifest):
             native["opt/atlas-seed/" + relative]["disposition"] = "output-bound compiler inventory"
     except (KeyError, TypeError, ValueError) as exc:
         result["errors"].append(f"Cargo compiler/output coverage: {exc}")
+
+
+def finding_targets(report):
+    """Select the reported findings for which this project has applicability evidence."""
+    python, cargo = set(), set()
+    results = report.get("Results") if isinstance(report, dict) else None
+    for target in results if isinstance(results, list) else ():
+        if not isinstance(target, dict) or not isinstance(target.get("Vulnerabilities"), list):
+            continue
+        for row in target["Vulnerabilities"]:
+            if not isinstance(row, dict):
+                continue
+            name, version = row.get("PkgName"), row.get("InstalledVersion")
+            if not isinstance(name, str) or not isinstance(version, str):
+                continue
+            kind, path = target.get("Type"), target.get("Target")
+            if kind == "cargo" and isinstance(path, str) and path in SOURCE_ONLY_TARGETS:
+                cargo.add(path)
+            if kind == "python-pkg" and name in PYTHON_IMPLEMENTATIONS:
+                if finding_ids(row) & COPY_ADVISORIES[PYTHON_IMPLEMENTATIONS[name]]:
+                    python.add((name, version))
+    return python, cargo
+
+
+def targeted_inventory(rootfs, inspect_swi, python, cargo, result):
+    with tarfile.open(rootfs, "r:") as tar:
+        files = {m.name.removeprefix("./"): m for m in tar if m.isfile() or m.islnk() or m.issym()}
+
+        def read(path):
+            member = files[path]
+            demand(member.size <= LIMIT, f"oversized metadata: {path}")
+            with tar.extractfile(member) as stream:
+                raw = stream.read(LIMIT + 1)
+            demand(len(raw) <= LIMIT, f"oversized metadata: {path}")
+            return raw
+
+        if inspect_swi and any(path.endswith("/libswipl.so.10.0.2") for path in files):
+            swi = {"findings": result["findings"], "errors": result["limitations"]}
+            native_proof.swi_browser(files, read, swi)
+        if python:
+            result["applicability"]["components"] = python_copy_evidence(files, read, python)
+        if cargo:
+            outputs = []
+            for name in ("extract/target/debug/poc9-extract", "terminusdb/src/rust/librust.so"):
+                path = "opt/atlas-seed/" + name
+                with tar.extractfile(files[path]) as stream:
+                    outputs.append({"path": path, "sha256": hashlib.file_digest(stream, "sha256").hexdigest()})
+            collect_cargo_evidence(files, read, cargo, outputs, result)
+
+
+def python_copy_evidence(files, read, requested):
+    copies = []
+
+    def vendor_copies(manifest, names, read_member, origin, kind, **identity):
+        bom = "bom.cdx.json"
+        for line in manifest.decode().splitlines():
+            match = re.match(r"^([\w.-]+)==([\w.+-]+)", line.strip())
+            if match and (match[1], match[2]) in requested:
+                impl = pip_implementation(match[1], names, manifest, read_member(bom) if bom in names else None,
+                                          read_member)
+                copies.append(dict(kind=kind, name=match[1], version=match[2], origin=origin,
+                                   implementation=impl, **identity))
+
+    requested_names = {name for name, _ in requested}
+    for path in files:
+        if path.endswith("/pip/_vendor/vendor.txt"):
+            prefix = path.removesuffix("vendor.txt")
+            names = [p[len(prefix):] for p in files if p.startswith(prefix)]
+            vendor_copies(read(path), names, lambda name: read(prefix + name), path, "vendored in pip")
+        elif "/ensurepip/_bundled/" in path and path.rsplit("/", 1)[-1].startswith("pip-") and path.endswith(".whl"):
+            raw = read(path)
+            with zipfile.ZipFile(io.BytesIO(raw)) as wheel:
+                prefix = "pip/_vendor/"
+                manifest = prefix + "vendor.txt"
+                paths = wheel.namelist()
+                demand(manifest in paths, f"missing bootstrap vendor manifest: {path}")
+                names = [p[len(prefix):] for p in paths if p.startswith(prefix)]
+                vendor_copies(wheel.read(manifest), names, lambda name: wheel.read(prefix + name),
+                              path + "!" + manifest, "vendored in bootstrap wheel",
+                              sha256=hashlib.sha256(raw).hexdigest())
+        elif re.search(r"/(?:site|dist)-packages/[^/]+\.(?:dist-info/METADATA|egg-info/PKG-INFO|egg-info)$", path):
+            distribution = re.split(r"\.(?:dist-info|egg-info)", path.rsplit("-packages/", 1)[1])[0]
+            if any(distribution.lower() == name or distribution.lower().startswith(name + "-")
+                   for name in requested_names):
+                metadata = BytesParser().parsebytes(read(path))
+                name, version = metadata.get("Name"), metadata.get("Version")
+                demand(name and version, f"invalid Python distribution: {path}")
+                if (name.lower(), version) in requested:
+                    copies.append(dict(kind="python", name=name, version=version, origin=path))
+        elif ".dist-info/sboms/" in path and path.endswith(".json"):
+            raw = read(path)
+            for row in json.loads(raw).get("components", []):
+                if (row.get("name"), row.get("version")) in requested:
+                    copies.append(dict(kind="wheel SBOM", name=row["name"], version=row["version"], origin=path,
+                                       sha256=hashlib.sha256(raw).hexdigest()))
+    return copies
+
+
+def collect_cargo_evidence(files, read, targets, outputs, result):
+    material = "usr/share/doc/knowledge-atlas/cargo-inventory.json"
+    cargo = json.loads(read(material))
+    source_locks = targets | {"opt/atlas-seed/extract/Cargo.lock", "opt/atlas-seed/terminusdb/src/rust/Cargo.lock"}
+    findings = {"components": [cargo_registry_component(path, identity, material) or {"kind": "Cargo build input"}
+                             for path, identity in cargo.items() if not valid_cargo_checkout(path, identity)],
+                "native_outputs": outputs, "errors": [], "source_lock_packages": {
+                    path: [[p["name"], p["version"]] for p in tomllib.loads(read(path).decode()).get("package", [])]
+                    for path in source_locks}}
+    qualify_cargo(findings, files, read, cargo, material, json.loads(read("opt/atlas-seed/runtime.json")))
+    if "cargo_outputs" in findings:
+        result["applicability"].update(cargo_outputs=findings["cargo_outputs"],
+                                      source_lock_packages=findings["source_lock_packages"])
+    else:
+        result["limitations"].extend(findings["errors"])

@@ -9,6 +9,8 @@ from unittest.mock import patch
 import advisories
 import gate
 import coverage as producer
+from image_inventory import inventory, trivy_disposition
+from ubuntu_coverage import ubuntu_record
 
 
 class TestProducerCoverage(unittest.TestCase):
@@ -34,7 +36,7 @@ class TestProducerCoverage(unittest.TestCase):
 
     def inspect(self, entries):
         image = self.tar(entries)
-        return producer.inventory("knowledge-atlas", image, self.trivy)
+        return inventory("knowledge-atlas", image, self.trivy)
 
     def test_missing_copied_interpreter_or_bundled_library_is_incomplete(self):
         result = self.inspect({})
@@ -59,7 +61,7 @@ class TestProducerCoverage(unittest.TestCase):
             cve = f"CVE-2026-{1000+i}"
             raw = (f"Candidate: {cve}\nPriority: {severity}\nPatches_example:\n"
                    f"jammy_example: needed\nnoble_example: {vendor_status}\n").encode()
-            producer.ubuntu_record(raw, cve, "noble", self.source, rows, proofs, errors)
+            ubuntu_record(raw, cve, "noble", self.source, rows, proofs, errors)
         self.assertFalse(errors)
         self.assertEqual([r["VulnerabilityID"] for r in rows],
                          ["CVE-2026-1000", "CVE-2026-1001", "CVE-2026-1002", "CVE-2026-1004"])
@@ -72,26 +74,25 @@ class TestProducerCoverage(unittest.TestCase):
     def test_other_release_and_uncertain_vendor_status(self):
         rows, proofs, errors = [], [], []
         raw = b"Candidate: CVE-2026-1234\nPriority: critical\njammy_example: needed\n"
-        producer.ubuntu_record(raw, "CVE-2026-1234", "noble", self.source, rows, proofs, errors)
+        ubuntu_record(raw, "CVE-2026-1234", "noble", self.source, rows, proofs, errors)
         self.assertEqual(rows, [])
-        producer.ubuntu_record(raw + b"noble_example: ignored (end of life, was needs-triage)\n",
+        ubuntu_record(raw + b"noble_example: ignored (end of life, was needs-triage)\n",
                                "CVE-2026-1234", "noble", self.source, rows, proofs, errors)
         self.assertFalse(errors)
         self.assertEqual(rows[0]["VendorEvidence"]["applicability"], "potentially affected")
 
-    def test_missing_ubuntu_vendor_source_blocks_even_for_trivy_listed_package(self):
-        dpkg = (b"Package: libexample\nStatus: install ok installed\nArchitecture: arm64\n"
-                b"Source: example\nVersion: 1:2.0~rc1-1ubuntu1\n")
-        archive = self.tar({"var/lib/dpkg/status": dpkg, "usr/lib/os-release":
-                            b"ID=ubuntu\nVERSION_ID=\"24.04\"\nVERSION_CODENAME=noble\n"})
-        with patch.object(producer, "export_rootfs", return_value=archive), \
-             patch.object(producer, "ubuntu_snapshot", side_effect=OSError("vendor unavailable")) as fetch:
-            result = producer.collect_coverage("knowledge-atlas", self.candidate, archive, self.trivy, self.root)
-        fetch.assert_called_once()
-        self.assertFalse(result["complete"])
-        self.assertIn("example", " ".join(result["errors"]))
-        self.assertIn("vendor unavailable", " ".join(result["errors"]))
-        self.assertEqual(result["diff_ids"], self.candidate["diff_ids"])
+    def test_retained_atlas_swi_finding_survives_unavailable_local_diagnostics(self):
+        candidate = dict(self.candidate, id="sha256:51fadf91d930e65cbd21da768700c7328c2c104a15b069a1c3fdbbf77c83c971",
+                         revision="cbd1bc08beb2ef49cf0ba682d639bfbfe09bc0b9")
+        with patch.object(producer, "export_rootfs", side_effect=OSError("export unavailable")):
+            result = producer.collect_coverage("knowledge-atlas", candidate, None, self.root)
+        self.assertFalse(result["errors"])
+        row, = result["findings"]
+        self.assertEqual(row["VulnerabilityID"], "CVE-2017-17524")
+        self.assertEqual(row["Evidence"]["candidate_id"], candidate["id"])
+        self.assertEqual(row["Copy"]["sha256"], "48553cb33a4660f112a83e73097c4591ea5059864ac4235af3dc24e425cdab0f")
+        decision = advisories.evaluate(row, set(), advisories.Aliases(None), supplier_identity=True)
+        self.assertEqual(decision["reasons"], ["HIGH with fix"])
 
     def test_redis_targets_scan_the_built_images_and_keep_both_reports(self):
         workflow = (gate.HERE.parents[1] / ".github/workflows/redis-memory.yml").read_text()
@@ -148,16 +149,17 @@ class TestProducerCoverage(unittest.TestCase):
         self.assertIn("broken", " ".join(result["errors"]))
         self.assertEqual([r["VulnerabilityID"] for r in result["findings"]], ["CVE-2026-1234"])
 
-    def test_malformed_package_keeps_previous_inventory(self):
-        dpkg = b"Package: base\nVersion: 1\nArchitecture: amd64\nStatus: install ok installed\n"
-        rootfs = self.tar({"var/lib/dpkg/status": dpkg, "usr/lib/os-release": b"ID=debian\n",
-                           "usr/local/lib/python3.12/site-packages/bad.dist-info/METADATA": b"Name: bad\n"})
+    def test_malformed_targeted_copy_evidence_preserves_original_finding(self):
+        rootfs = self.tar({"usr/local/lib/python3.12/ensurepip/_bundled/pip-26.3-py3-none-any.whl": b"bad zip"})
+        row = dict(VulnerabilityID="CVE-2025-47273", PkgName="setuptools", InstalledVersion="70.3.0")
+        report = {"Results": [{"Type": "python-pkg", "Vulnerabilities": [row]}]}
         with patch.object(producer, "export_rootfs", return_value=rootfs):
-            result = producer.collect_coverage("redis-memory-mcp", dict(self.candidate, platform="linux/amd64"),
-                                               rootfs, {}, self.root)
-        self.assertIn("base", [c["name"] for c in result["components"]])
-        self.assertIn("bad.dist-info", " ".join(result["errors"]))
-        self.assertFalse(result["complete"])
+            coverage = producer.collect_coverage("redis-memory-mcp", dict(self.candidate, platform="linux/amd64"),
+                                                 report, self.root)
+        self.assertFalse(coverage["errors"])
+        self.assertIn("applicability evidence unavailable", " ".join(coverage["limitations"]))
+        self.assertIsNone(trivy_disposition(row, {"type": "python-pkg"}, coverage["applicability"]))
+        self.assertEqual(report["Results"][0]["Vulnerabilities"], [row])
 
     def test_virtual_cargo_workspace_requires_exact_members(self):
         from image_inventory import workspace_evidence
@@ -183,7 +185,7 @@ class TestProducerCoverage(unittest.TestCase):
             with self.subTest(priority=priority, status=status):
                 rows, proofs, errors = [], [], []
                 cve = "CVE-2026-2345"
-                producer.ubuntu_record(f"Candidate: {cve}\nPriority: {priority}\nnoble_example: {status}\n".encode(),
+                ubuntu_record(f"Candidate: {cve}\nPriority: {priority}\nnoble_example: {status}\n".encode(),
                                        cve, "noble", self.source, rows, proofs, errors)
                 self.assertEqual(len(rows), 1)
                 decision = advisories.evaluate(rows[0], {cve} if kev else set(), advisories.Aliases(None))

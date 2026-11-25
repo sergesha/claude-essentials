@@ -162,11 +162,7 @@ def runtime_inputs(item, result):
     return False
 
 
-def swi_browser(files, read, result):
-    if SWI_BROWSER not in files:
-        result["errors"].append("missing SWI browser library")
-        return
-    digest = hashlib.sha256(read(SWI_BROWSER)).hexdigest()
+def swi_browser_finding(digest):
     copy = dict(origin=SWI_BROWSER, sha256=digest)
     row = {"VulnerabilityID": "CVE-2017-17524", "PkgName": "SWI-Prolog", "InstalledVersion": "10.0.2",
            "Severity": "HIGH", "FixedVersion": "11.0.0", "Status": "fixed", "Copy": copy,
@@ -175,9 +171,17 @@ def swi_browser(files, read, result):
                "nvd_sha256": "871d38e51dac44a09845fc8e5a11de24287ec7685cdecac48dafecd177f5f3e3"}}
     if digest == SWI_FIXED:
         row["ImplementationDisposition"] = dict(status="unaffected", copy=copy, source=row["Evidence"])
-    elif digest != SWI_OLD:
+    return row
+
+
+def swi_browser(files, read, result):
+    if SWI_BROWSER not in files:
+        result["errors"].append("missing SWI browser library")
+        return
+    digest = hashlib.sha256(read(SWI_BROWSER)).hexdigest()
+    if digest not in (SWI_FIXED, SWI_OLD):
         result["errors"].append("SWI browser library differs from reviewed source and backport")
-    result["findings"].append(row)
+    result["findings"].append(swi_browser_finding(digest))
 
 
 def reviewed_imports(item):

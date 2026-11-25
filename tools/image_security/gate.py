@@ -69,8 +69,7 @@ def load_pins():
 
 def policy_files():
     files = {name: sha256(HERE / name) for name in ("gate.py", "advisories.py", "coverage.py", "image_inventory.py",
-                                                   "ubuntu_coverage.py", "supplier_coverage.py", "native_evidence.py",
-                                                   "native-sources.json", "trivy-pins.json")}
+                                                   "native_evidence.py", "native-sources.json", "trivy-pins.json")}
     builder = "knowledge-atlas/docker/build-seed.py"
     files[builder] = sha256(HERE.parents[1] / builder)
     return files
@@ -128,11 +127,10 @@ def fetch_advisory(request):
 
 
 def lookup_advisory(source, identifier):
-    if source == "osv":
-        return fetch_advisory(advisory_request(adv.SOURCES["osv"] + adv.advisory_id(identifier)))
-    demand(source == "github" and adv.GHSA.fullmatch(identifier), "invalid GitHub advisory lookup")
-    url = adv.SOURCES["github"] + identifier
+    url = adv.lookup_url(source, identifier)
     request = advisory_request(url)
+    if source in {"osv", "debian"}:
+        return fetch_advisory(request)
     token = os.environ.get("GITHUB_TOKEN")
     if token:
         demand(token.isascii() and token.isprintable() and not any(c.isspace() for c in token),
@@ -326,9 +324,9 @@ def fetch_kev(reports):
     raise ValueError("KEV unavailable: " + "; ".join(a["source"] + ": " + a["error"] for a in attempts))
 
 
-def collect_coverage(producer, candidate, archive, report, reports):
+def collect_coverage(producer, candidate, report, reports, *, archive_bound):
     from coverage import collect_coverage as collect
-    return collect(producer, candidate, archive, report, reports)
+    return collect(producer, candidate, report, reports, archive_bound=archive_bound)
 
 
 def outcome(findings, errors):
@@ -339,30 +337,33 @@ def outcome(findings, errors):
     return "pass", 0
 
 
-def evaluate_report(report, candidate, evaluate, errors, virtual_workspaces=()):
+def evaluate_report(report, candidate, evaluate, errors, targets):
+    from coverage import target_summary
+
+    demand(isinstance(report, dict), "invalid Trivy report object")
+    scanner = report.get("Trivy")
     if not (report.get("SchemaVersion") == 2 and report.get("ArtifactType") == "container_image" and
-            report.get("Trivy", {}).get("Version") == VERSION):
+            isinstance(scanner, dict) and scanner.get("Version") == VERSION):
         errors.append("unexpected Trivy report schema, artifact type or version")
-    metadata = report.get("Metadata", {})
-    if (metadata.get("ImageID"), metadata.get("DiffIDs")) != (candidate.get("id"), candidate.get("diff_ids")):
+    metadata = report.get("Metadata")
+    if not isinstance(metadata, dict) or (metadata.get("ImageID"), metadata.get("DiffIDs")) != (
+            candidate.get("id"), candidate.get("diff_ids")):
         errors.append("Trivy report config ID or ordered DiffIDs mismatch")
     results = report.get("Results")
     demand(isinstance(results, list) and results, "missing Trivy package targets")
     os_inventory = False
     for index, result in enumerate(results):
         try:
-            cls, target, typ = result.get("Class"), result.get("Target"), result.get("Type")
+            demand(isinstance(result, dict), "invalid Trivy result object")
+            target, typ = result.get("Target"), result.get("Type")
             packages = result.get("Packages")
-            if not (cls in ("os-pkgs", "lang-pkgs") and string(target) and string(typ)):
-                errors.append(f"invalid Trivy result target at {index}")
-            if not (isinstance(packages, list) and packages and all(isinstance(p, dict) and
-                    ((string(p.get("Name")) and string(p.get("Version"))) or
-                    (typ == "cargo" and any(proof["target"] == target and proof["package_index"] == i and
-                                           proof["row"] == p for proof in virtual_workspaces)))
-                    for i, p in enumerate(packages))):
-                errors.append(f"incomplete package inventory at target {index}")
-            elif cls == "os-pkgs":
-                os_inventory = True
+            try:
+                summary = target_summary(result)
+            except ValueError as exc:
+                errors.append(f"Trivy target {index}: {exc}")
+            else:
+                targets.append(summary)
+                os_inventory |= summary["class"] == "os-pkgs"
             vulns = result.get("Vulnerabilities", [])
             demand(isinstance(vulns, list), "invalid vulnerabilities array")
             for row_index, item in enumerate(vulns):
@@ -410,7 +411,8 @@ def scan(args, directory):
     candidate = step("candidate", lambda: export_candidate(args.image, args.platform, directory))
     if candidate is None:
         if (reports / "candidate.json").exists():
-            decision["candidate"] = read_json(reports / "candidate.json")
+            candidate = step("candidate receipt", lambda: read_json(reports / "candidate.json"))
+            decision["candidate"] = candidate
     else:
         decision["candidate"] = candidate
         write_json(reports / "candidate.json", candidate)
@@ -448,19 +450,19 @@ def scan(args, directory):
                 try:
                     from image_inventory import copy_disposition, trivy_disposition
                     if origin["report"] == "trivy.json":
-                        implementation = trivy_disposition(item, origin, coverage)
+                        implementation = trivy_disposition(item, origin, coverage.get("applicability", coverage))
                     else:
                         implementation = item.get("ImplementationDisposition") or copy_disposition(item, item.get("Copy", {}))
                 except (ImportError, OSError, TypeError, ValueError, AttributeError, KeyError) as exc:
-                    assessed["errors"].append(f"implementation evidence: {exc}")
+                    coverage.setdefault("limitations", []).append(f"Implementation evidence unavailable: {exc}")
             if implementation and "advisory_ids" in implementation:
                 if not set(assessed["aliases"]["cves"]) <= set(implementation["advisory_ids"]):
-                    assessed["errors"].append("implementation evidence does not cover every resolved CVE")
+                    coverage.setdefault("limitations", []).append("Implementation evidence does not cover every resolved CVE.")
                     implementation = None
             if implementation:
                 assessed["implementation_disposition"] = implementation
                 assessed["raw_reasons"] = assessed["reasons"]
-                assessed["reasons"] = []
+                assessed["reasons"] = [reason for reason in assessed["raw_reasons"] if reason == "CISA KEV"]
             assessed["origin"] = origin
             findings.append(assessed)
         except ERRORS as exc:
@@ -473,28 +475,32 @@ def scan(args, directory):
     else:
         errors.append("Trivy report unavailable")
     coverage = None
-    if decision["archive_sha256"]:
-        coverage = step("coverage", lambda: collect_coverage(args.producer, candidate, archive, report, reports))
+    if candidate is not None:
+        archive_bound = bool(decision["archive_sha256"])
+
+        def summarize():
+            if not archive_bound:
+                check_candidate(candidate, args.platform)
+            return collect_coverage(args.producer, candidate, report, reports, archive_bound=archive_bound)
+
+        coverage = step("coverage", summarize)
     if coverage is None:
-        coverage = {"complete": False, "components": [], "findings": [], "errors": ["coverage unavailable"]}
+        coverage = {"findings": [], "errors": ["coverage unavailable"], "limitations": []}
     coverage.update(producer=args.producer, image_id=(candidate or {}).get("id"),
-                    archive_sha256=decision["archive_sha256"])
-    write_json(reports / "coverage.json", coverage)
+                    archive_sha256=decision["archive_sha256"], platform=(candidate or {}).get("platform"),
+                    diff_ids=(candidate or {}).get("diff_ids"), targets=[])
 
+    report_errors = []
     if report is not None:
-        step("Trivy evidence", lambda: evaluate_report(report, candidate or {}, evaluate, errors,
-                                                       coverage.get("virtual_workspaces", [])))
-
-    def assess_coverage():
-        rows = coverage["findings"]
-        demand(isinstance(rows, list), "invalid supplemental findings")
-        for index, item in enumerate(rows):
-            evaluate(item, {"report": "coverage.json", "producer": args.producer, "finding_index": index})
-        demand(isinstance(coverage["errors"], list), "invalid coverage errors")
-        errors.extend(coverage["errors"])
-        demand(coverage["complete"] is True and isinstance(coverage["components"], list) and
-               coverage["components"], "incomplete producer coverage")
-    step("coverage qualification", assess_coverage)
+        step("Trivy evidence", lambda: evaluate_report(report, candidate or {}, evaluate, report_errors,
+                                                       coverage["targets"]))
+    coverage["errors"].extend(report_errors)
+    coverage["complete"] = bool(decision["archive_sha256"] and report is not None and coverage["targets"] and
+                                not coverage["errors"])
+    errors.extend(coverage["errors"])
+    for index, item in enumerate(coverage["findings"]):
+        evaluate(item, {"report": "coverage.json", "producer": args.producer, "finding_index": index})
+    write_json(reports / "coverage.json", coverage)
     write_json(reports / "aliases.json", list(aliases.records.values()))
     if decision["db"]:
         step("final DB freshness", lambda: check_db(decision["db"]["metadata"], now()))
@@ -539,9 +545,11 @@ def verify(args, directory):
         demand(scanner["version"] == VERSION and scanner["sha256"] == pin["sha256"] and
                scanner["name"] == pin["name"], "unexpected scanner identity")
         coverage = read_json(reports / "coverage.json")
-        demand(coverage["complete"] is True and coverage["components"] and not coverage["errors"] and
+        demand(coverage["complete"] is True and coverage["targets"] and not coverage["errors"] and
                coverage["producer"] == decision["producer"] and coverage["image_id"] == candidate["id"] and
-               coverage["archive_sha256"] == decision["archive_sha256"], "coverage incomplete or mismatched")
+               coverage["archive_sha256"] == decision["archive_sha256"] and
+               coverage["platform"] == candidate["platform"] and coverage["diff_ids"] == candidate["diff_ids"],
+               "coverage incomplete or mismatched")
         catalog = read_json(reports / "kev.json")
         adv.catalog_cves(catalog, now())
         demand(decision["kev"]["source"] in KEV_SOURCES and

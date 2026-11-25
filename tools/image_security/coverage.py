@@ -1,43 +1,75 @@
-"""Bind a stopped-image inventory and supplemental sources to one verified Docker candidate."""
+"""Summarize the pinned scanner's inventory and investigate specific findings."""
 
 import subprocess
-import tempfile
 import tarfile
+import tempfile
 import zipfile
+from collections import Counter
 from pathlib import Path
 
-from image_inventory import export_rootfs, inventory
-from supplier_coverage import check_suppliers
-from ubuntu_coverage import ubuntu_record, ubuntu_snapshot
+from advisories import string
+from image_inventory import export_rootfs, finding_targets, targeted_inventory
+from native_evidence import SWI_OLD, swi_browser_finding
 
 PLATFORMS = {"knowledge-atlas": "linux/arm64", "redis-memory-mcp": "linux/amd64",
              "redis-memory-embeddings": "linux/amd64"}
+RETAINED_SWI = ("sha256:51fadf91d930e65cbd21da768700c7328c2c104a15b069a1c3fdbbf77c83c971",
+                "cbd1bc08beb2ef49cf0ba682d639bfbfe09bc0b9")
 
 
-def collect_coverage(producer, candidate, archive, report, reports):
-    result = {"complete": False, "errors": [], "components": [], "findings": [],
-              "platform": candidate.get("platform"), "diff_ids": candidate.get("diff_ids")}
-    if producer not in PLATFORMS or candidate["platform"] != PLATFORMS[producer]:
+def target_summary(result):
+    cls, target, kind = (result.get(key) for key in ("Class", "Target", "Type"))
+    if cls not in ("os-pkgs", "lang-pkgs") or not string(target) or not string(kind):
+        raise ValueError("invalid Trivy result target")
+    packages = result.get("Packages")
+    if not isinstance(packages, list) or not packages or not all(isinstance(p, dict) for p in packages):
+        raise ValueError("missing or invalid Trivy package inventory")
+    named, anonymous = [], []
+    for package in packages:
+        if string(package.get("Name")) and string(package.get("Version")):
+            named.append(package)
+        else:
+            anonymous.append(package)
+    ids = {p["ID"] for p in named if string(p.get("ID"))}
+    if not named or any(not (cls == "lang-pkgs" and kind == "cargo" and p.get("AnalyzedBy") == "cargo"
+            and p.get("Name") in (None, "") and p.get("Version") in (None, "") and string(p.get("ID"))
+            and p["ID"] not in ids and p.get("Relationship") == "root"
+            and isinstance(p.get("DependsOn"), list) and p["DependsOn"]
+            and all(string(dep) and dep in ids for dep in p["DependsOn"])) for p in anonymous):
+        raise ValueError("incomplete Trivy package inventory")
+    scope = "OS packages" if cls == "os-pkgs" else "source metadata" if kind == "cargo" else "library metadata"
+    return {"class": cls, "target": target, "type": kind, "scope": scope,
+            "package_count": len(named), "metadata_row_count": len(anonymous),
+            "analyzers": dict(Counter(p["AnalyzedBy"] if string(p.get("AnalyzedBy")) else "unspecified"
+                                      for p in named))}
+
+
+def collect_coverage(producer, candidate, report, reports, *, archive_bound=True):
+    result = {"errors": [], "findings": [], "applicability": {},
+              "limitations": ["Trivy reports recognized OS and library package metadata. Its inventory does not "
+                              "establish native linkage or the composition of vendored or statically linked code."]}
+    if producer in ("knowledge-atlas", "redis-memory-embeddings"):
+        result["limitations"].append("A reported ONNX Runtime package version does not establish its upstream source "
+                                     "tag or bundled native dependency composition.")
+    if PLATFORMS.get(producer) != candidate.get("platform"):
         result["errors"].append(f"unknown producer or unsupported candidate platform: {producer}")
         return result
-    try:
-        with tempfile.TemporaryDirectory(dir=reports.parent) as tmp:
-            rootfs = export_rootfs(candidate, Path(tmp) / "rootfs.tar")
-            inventory(producer, rootfs, report, result)
-    except (KeyError, ValueError, TypeError, OSError, EOFError, subprocess.SubprocessError,
-            tarfile.TarError, zipfile.BadZipFile) as exc:
-        result["errors"].append(f"candidate filesystem inventory: {exc}")
-    if result.get("build_revision") != candidate.get("revision") and producer == "knowledge-atlas":
-        result["errors"].append("runtime build manifest revision differs from the image revision")
-    if producer == "knowledge-atlas" and result.get("ubuntu_sources"):
+    retained_swi = (candidate.get("id"), candidate.get("revision")) == RETAINED_SWI
+    if producer == "knowledge-atlas" and retained_swi:
+        row = swi_browser_finding(SWI_OLD)
+        row["Evidence"].update(candidate_id=candidate["id"], candidate_revision=candidate["revision"],
+                               provenance="retained candidate file inspection")
+        result["findings"].append(row)
+    if not archive_bound:
+        return result
+    inspect_swi = producer == "knowledge-atlas" and not retained_swi
+    python, cargo = finding_targets(report)
+    if inspect_swi or python or cargo:
         try:
-            ubuntu_snapshot("noble", result["ubuntu_sources"], reports, result)
-        except (KeyError, OSError, ValueError, subprocess.SubprocessError) as exc:
-            result["errors"].append(f"Ubuntu vendor status for {', '.join(result['ubuntu_sources'])}: {exc}")
-    if "queries" in result:
-        try:
-            check_suppliers(result, reports)
-        except (KeyError, TypeError, ValueError, OSError, EOFError, subprocess.SubprocessError) as exc:
-            result["errors"].append(f"supplier evidence collection: {exc}")
-    result["complete"] = bool(result["components"]) and not result["errors"]
+            with tempfile.TemporaryDirectory(dir=reports.parent) as tmp:
+                rootfs = export_rootfs(candidate, Path(tmp) / "rootfs.tar")
+                targeted_inventory(rootfs, inspect_swi, python, cargo, result)
+        except (AttributeError, KeyError, OSError, TypeError, ValueError, EOFError, subprocess.SubprocessError,
+                tarfile.TarError, zipfile.BadZipFile) as exc:
+            result["limitations"].append(f"Candidate-specific applicability evidence unavailable: {exc}")
     return result
