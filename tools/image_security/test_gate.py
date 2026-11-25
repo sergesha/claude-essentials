@@ -723,7 +723,7 @@ class GateTest(unittest.TestCase):
         from re import findall
         action = (Path(__file__).resolve().parents[2] / ".github/actions/plugin-image-security/action.yml").read_text()
         self.assertEqual(findall(r"^  ([a-z]+):$", action.split("runs:")[0], flags=8),
-                         ["producer", "image", "platform", "out"])
+                         ["producer", "image", "platform", "out", "revision"])
         self.assertIn("if: always()", action)
         self.assertRegex(action, r"actions/upload-artifact@[a-f0-9]{40}")
         self.assertIn("if-no-files-found: error", action)

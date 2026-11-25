@@ -1,5 +1,6 @@
 """Release workflow contracts and isolated registry verification failures."""
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -64,6 +65,9 @@ def test_release_uses_only_atlas_outputs_and_exact_checkout():
     assert "--build-arg ATLAS_VERSION=" in steps
     assert "--build-arg ATLAS_REVISION=" in steps
     assert "git rev-parse HEAD" in steps
+    gate = next(step for step in publish["steps"] if step.get("uses") == "./.github/actions/plugin-image-security")
+    assert gate["with"]["revision"] == "${{ needs.release-please.outputs.atlas_sha }}"
+    assert "GITHUB_SHA" not in gate.get("env", {})
 
 
 def test_pr_scans_candidate_without_push_permissions():
@@ -181,6 +185,33 @@ def test_tag_only_image_is_rejected_without_docker(helper, monkeypatch, capsys):
     assert helper.main(["--image", f"{REGISTRY}:{VERSION}", "--version", VERSION, "--revision", REVISION]) != 0
     assert "digest" in capsys.readouterr().err.lower()
 
+@pytest.mark.parametrize("selection", ["event", "checkout", "mismatch"])
+def test_shared_scan_validates_checkout_and_uses_selected_revision(tmp_path, selection):
+    action = WORKFLOWS.parent / "actions/plugin-image-security/action.yml"
+    run = yaml.load(action.read_text(), Loader=yaml.BaseLoader)["runs"]["steps"][0]["run"]
+    head = subprocess.check_output(["git", "-C", str(PACKAGE.parent), "rev-parse", "HEAD"], text=True).strip()
+    event = "e" * 40
+    observed = tmp_path / "observed-revision"
+    fake = tmp_path / "python3"
+    fake.write_text('#!/bin/sh\nprintf "%s\\n" "$GITHUB_SHA" > "$ATLAS_TEST_SCAN_SHA"\n')
+    fake.chmod(0o755)
+    selected = {"event": "", "checkout": head, "mismatch": "f" * 40}[selection]
+    output = tmp_path / "output"
+    env = {
+        **os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}", "GITHUB_ACTION_PATH": str(action.parent),
+        "GITHUB_SHA": event, "GITHUB_WORKSPACE": str(PACKAGE.parent), "GITHUB_OUTPUT": str(output),
+        "GITHUB_RUN_ID": "42", "GITHUB_RUN_ATTEMPT": "1", "PRODUCER": "knowledge-atlas",
+        "IMAGE": ID, "PLATFORM": "linux/arm64", "OUT": str(tmp_path / "report"), "REVISION": selected,
+        "ATLAS_TEST_SCAN_SHA": str(observed),
+    }
+    result = subprocess.run(["bash", "-ec", run], env=env, capture_output=True, text=True)
+    if selection == "mismatch":
+        assert result.returncode and not observed.exists()
+    else:
+        assert result.returncode == 0, result.stderr
+        assert observed.read_text().strip() == (event if selection == "event" else head)
+
+
 # The workflow's real shell runs with a disposable Docker/scan boundary. The
 # shared gate owns vulnerability decisions; these cases exercise their effect
 # on the Atlas publisher and the previously recorded registry identity.
@@ -195,6 +226,9 @@ case = os.environ["ATLAS_TEST_CASE"]
 image = os.environ["ATLAS_REPOSITORY"] + ":" + os.environ["ATLAS_VERSION"]
 config = os.environ["IMAGE_ID"]
 digest = os.environ["ATLAS_TEST_DIGEST"]
+published = os.environ["ATLAS_TEST_MANIFEST"]
+replacement = os.environ["ATLAS_TEST_REPLACEMENT"]
+replacement_digest = os.environ["ATLAS_TEST_REPLACEMENT_DIGEST"]
 with Path(os.environ["ATLAS_TEST_TRACE"]).open("a") as trace:
     print(tool, *args, file=trace)
 
@@ -216,12 +250,24 @@ elif args[:3] == ["buildx", "imagetools", "inspect"]:
             print("ERROR: denied", file=sys.stderr)
             sys.exit(1)
         trace = Path(os.environ["ATLAS_TEST_TRACE"]).read_text()
-        if case not in {"reuse", "conflict"} and "docker push" not in trace:
+        pushed = "docker push" in trace
+        if case == "missing-child" and not pushed:
+            if args[-1] != "--raw":
+                print("ERROR: manifest unknown", file=sys.stderr)
+                sys.exit(1)
+            print(json.dumps({
+                "schemaVersion": 2, "mediaType": "application/vnd.oci.image.index.v1+json",
+                "manifests": [{"digest": "sha256:" + "0" * 64, "platform": {"os": "linux", "architecture": "arm64"}}],
+            }), end="")
+        elif case not in {"reuse", "conflict"} and not pushed:
             print(f"ERROR: {image}: not found", file=sys.stderr)
             sys.exit(1)
-        print(json.dumps({"digest": digest}))
+        elif args[-1] == "--raw":
+            print(replacement if case == "tag-switched" else published, end="")
+        else:
+            print(json.dumps({"digest": replacement_digest if case == "tag-switched" else digest}))
     elif args[-1] == "--raw":
-        print(json.dumps({"config": {"digest": config}}))
+        print(replacement if args[3].endswith(replacement_digest) else published, end="")
     else:
         print(json.dumps({
             "architecture": "arm64", "os": "linux", "config": {"Labels": {
@@ -234,13 +280,18 @@ elif args[0] == "tag":
     assert args == ["tag", config, image]
 elif args[0] == "push":
     assert args == ["push", image]
+    print(f"{os.environ['ATLAS_VERSION']}: digest: {digest} size: {len(published)}")
 else:
     raise AssertionError(args)
 """
 
 
-@pytest.mark.skipif(not shutil.which("bash") or not shutil.which("jq"), reason="publisher uses bash and jq")
-@pytest.mark.parametrize("case", ["blocked", "incomplete", "stale", "substituted", "denied", "conflict", "reuse", "publish"])
+@pytest.mark.skipif(
+    not all(shutil.which(tool) for tool in ("bash", "jq", "sha256sum")),
+    reason="publisher uses bash, jq and sha256sum",
+)
+@pytest.mark.parametrize("case", ["blocked", "incomplete", "stale", "substituted", "denied", "conflict", "reuse", "publish",
+         "missing-child", "tag-switched"])
 def test_publisher_refuses_unsafe_attempts_and_reuses_exact_receipt(tmp_path, case):
     steps = workflow("release-please.yml")["jobs"]["atlas-image"]["steps"]
     lookup = next(step["run"] for step in steps if step.get("id") == "existing")
@@ -259,8 +310,14 @@ def test_publisher_refuses_unsafe_attempts_and_reuses_exact_receipt(tmp_path, ca
     output = tmp_path / "outputs"
     output.touch()
     tag = f"knowledge-atlas-v{VERSION}"
+
+    manifest = {"schemaVersion": 2, "config": {"digest": ID}}
+    published = json.dumps(manifest, separators=(",", ":"))
+    replacement = json.dumps({**manifest, "annotations": {"name": "replacement"}}, separators=(",", ":"))
+    digest = "sha256:" + hashlib.sha256(published.encode()).hexdigest()
+    replacement_digest = "sha256:" + hashlib.sha256(replacement.encode()).hexdigest()
     expected = {
-        "digest": DIGEST, "config_id": ID, "version": VERSION, "revision": REVISION,
+        "digest": digest, "config_id": ID, "version": VERSION, "revision": REVISION,
         "platform": "linux/arm64", "tag": tag,
     }
     if case in {"reuse", "conflict"}:
@@ -272,7 +329,9 @@ def test_publisher_refuses_unsafe_attempts_and_reuses_exact_receipt(tmp_path, ca
         **os.environ, "PATH": f"{commands}:{os.environ['PATH']}", "RUNNER_TEMP": str(tmp_path),
         "GITHUB_OUTPUT": str(output), "ATLAS_REPOSITORY": REGISTRY, "ATLAS_TAG": tag,
         "ATLAS_VERSION": VERSION, "ATLAS_REVISION": REVISION, "IMAGE_ID": ID,
-        "ATLAS_TEST_CASE": case, "ATLAS_TEST_DIGEST": DIGEST, "ATLAS_TEST_PYTHON": sys.executable,
+        "ATLAS_TEST_CASE": case, "ATLAS_TEST_DIGEST": digest, "ATLAS_TEST_MANIFEST": published,
+        "ATLAS_TEST_REPLACEMENT": replacement, "ATLAS_TEST_REPLACEMENT_DIGEST": replacement_digest,
+        "ATLAS_TEST_PYTHON": sys.executable,
         "ATLAS_TEST_SHIM": str(shim), "ATLAS_TEST_TRACE": str(trace),
     }
 
@@ -282,11 +341,16 @@ def test_publisher_refuses_unsafe_attempts_and_reuses_exact_receipt(tmp_path, ca
 
     calls = trace.read_text().splitlines()
     pushes = [call for call in calls if call.startswith("docker push ")]
-    assert len(pushes) == (1 if case == "publish" else 0)
+    assert len(pushes) == (1 if case in {"publish", "tag-switched"} else 0)
+    if case == "missing-child":
+        assert calls == [f"docker buildx imagetools inspect {REGISTRY}:{VERSION} --raw"]
+    if case == "tag-switched":
+        assert f"docker buildx imagetools inspect {REGISTRY}@{digest} --raw" in calls
+        assert digest in result.stderr and replacement_digest in result.stderr
     if case in {"reuse", "publish"}:
         assert result.returncode == 0, result.stderr
         assert json.loads((evidence / "publication.json").read_text()) == expected
-        assert f"digest={DIGEST}" in output.read_text()
+        assert f"digest={digest}" in output.read_text()
     else:
         assert result.returncode != 0
         assert not (evidence / "publication.json").exists()

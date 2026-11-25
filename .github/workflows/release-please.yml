@@ -80,24 +80,25 @@ jobs:
           export DOCKER_CONFIG="$RUNNER_TEMP/atlas-registry"
           evidence="$RUNNER_TEMP/atlas-publication"
           image="$ATLAS_REPOSITORY:$ATLAS_VERSION"
-          if ! docker buildx imagetools inspect "$image" --format '{{json .Manifest}}' > "$evidence/existing.json" 2> "$evidence/lookup.log"; then
+          # Raw inspection reads only the authenticated version's top-level manifest.
+          if ! docker buildx imagetools inspect "$image" --raw > "$evidence/existing.json" 2> "$evidence/lookup.log"; then
             cat "$evidence/lookup.log" >&2
-            if grep -Fxq "ERROR: $image: not found" "$evidence/lookup.log" ||
-               grep -Eq '(^|: )(manifest unknown|name unknown)(: .*|$)' "$evidence/lookup.log"; then
+            if [[ "$(< "$evidence/lookup.log")" == "ERROR: $image: not found" ]]; then
               exit 0
             fi
             exit 1
           fi
-          digest="$(jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))' "$evidence/existing.json")"
+          digest="sha256:$(sha256sum < "$evidence/existing.json" | cut -d ' ' -f 1)"
           image="$ATLAS_REPOSITORY@$digest"
-          config_id="$(docker buildx imagetools inspect "$image" --raw | jq -er '.config.digest | select(test("^sha256:[0-9a-f]{64}$"))')"
-          docker buildx imagetools inspect "$image" --format '{{json .Image}}' |
-            jq -e --arg version "$ATLAS_VERSION" --arg revision "$ATLAS_REVISION" '
-              .os == "linux" and .architecture == "arm64"
-              and .config.Labels["org.opencontainers.image.source"] == "https://github.com/sergesha/claude-essentials"
-              and .config.Labels["org.opencontainers.image.version"] == $version
-              and .config.Labels["org.opencontainers.image.revision"] == $revision
-            ' >/dev/null
+          config_id="$(jq -er '.config.digest | select(test("^sha256:[0-9a-f]{64}$"))' "$evidence/existing.json")"
+          printf 'digest=%s\nconfig_id=%s\n' "$digest" "$config_id" > "$evidence/existing-identity.txt"
+          docker buildx imagetools inspect "$image" --format '{{json .Image}}' > "$evidence/existing-config.json"
+          jq -e --arg version "$ATLAS_VERSION" --arg revision "$ATLAS_REVISION" '
+            .os == "linux" and .architecture == "arm64"
+            and .config.Labels["org.opencontainers.image.source"] == "https://github.com/sergesha/claude-essentials"
+            and .config.Labels["org.opencontainers.image.version"] == $version
+            and .config.Labels["org.opencontainers.image.revision"] == $revision
+          ' "$evidence/existing-config.json" > "$evidence/existing-labels-match.txt"
           for receipt in "$RUNNER_TEMP"/atlas-prior-publication/*/publication.json; do
             if test -f "$receipt" && jq -e --arg digest "$digest" --arg id "$config_id" \
                 --arg version "$ATLAS_VERSION" --arg revision "$ATLAS_REVISION" --arg tag "$ATLAS_TAG" '
@@ -136,6 +137,7 @@ jobs:
           image: ${{ steps.build.outputs.image }}
           platform: linux/arm64
           out: ${{ runner.temp }}/atlas-security
+          revision: ${{ needs.release-please.outputs.atlas_sha }}
       - name: Publish verified Atlas image
         id: publish
         if: steps.existing.outputs.digest == ''
@@ -146,12 +148,11 @@ jobs:
           export DOCKER_CONFIG="$RUNNER_TEMP/atlas-registry"
           evidence="$RUNNER_TEMP/atlas-publication"
           image="$ATLAS_REPOSITORY:$ATLAS_VERSION"
-          if docker buildx imagetools inspect "$image" --format '{{json .Manifest}}' > "$evidence/pre-push.json" 2> "$evidence/pre-push.log"; then
+          if docker buildx imagetools inspect "$image" --raw > "$evidence/pre-push.json" 2> "$evidence/pre-push.log"; then
             echo "Atlas version appeared during the build. Publication stopped." >&2
             exit 1
           fi
-          if ! grep -Fxq "ERROR: $image: not found" "$evidence/pre-push.log" &&
-             ! grep -Eq '(^|: )(manifest unknown|name unknown)(: .*|$)' "$evidence/pre-push.log"; then
+          if [[ "$(< "$evidence/pre-push.log")" != "ERROR: $image: not found" ]]; then
             cat "$evidence/pre-push.log" >&2
             exit 1
           fi
@@ -159,11 +160,20 @@ jobs:
           GITHUB_SHA="$(git rev-parse HEAD)" python3 tools/image_security/gate.py verify \
             --image "$image" --platform linux/arm64 --revision "$ATLAS_REVISION" --out "$RUNNER_TEMP/atlas-security"
           docker push "$image" | tee "$evidence/push.log"
-          digest="$(docker buildx imagetools inspect "$image" --format '{{json .Manifest}}' |
-            jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))')"
+          digest="$(awk -v tag="$ATLAS_VERSION:" '$1 == tag && $2 == "digest:" && $4 == "size:" && NF == 5 {print $3}' "$evidence/push.log")"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           docker buildx imagetools inspect "$ATLAS_REPOSITORY@$digest" --raw > "$evidence/manifest.json"
+          manifest_digest="sha256:$(sha256sum < "$evidence/manifest.json" | cut -d ' ' -f 1)"
+          test "$manifest_digest" = "$digest"
           config_id="$(jq -er '.config.digest | select(test("^sha256:[0-9a-f]{64}$"))' "$evidence/manifest.json")"
           test "$config_id" = "$IMAGE_ID"
+          docker buildx imagetools inspect "$image" --raw > "$evidence/post-push-tag.json"
+          tag_digest="sha256:$(sha256sum < "$evidence/post-push-tag.json" | cut -d ' ' -f 1)"
+          if [[ "$tag_digest" != "$digest" ]]; then
+            printf 'Atlas version points to %s instead of pushed manifest %s.\n' "$tag_digest" "$digest" \
+              | tee "$evidence/tag-mismatch.txt" >&2
+            exit 1
+          fi
           jq -n --arg digest "$digest" --arg id "$config_id" \
             --arg version "$ATLAS_VERSION" --arg revision "$ATLAS_REVISION" --arg tag "$ATLAS_TAG" \
             '{digest: $digest, config_id: $id, version: $version, revision: $revision, tag: $tag, platform: "linux/arm64"}' \
