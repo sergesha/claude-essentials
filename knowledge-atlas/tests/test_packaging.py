@@ -1,4 +1,5 @@
 """Relocation of the installed launch command keeps data outside the plugin."""
+from importlib.resources import files
 import json
 from pathlib import Path
 import shutil
@@ -52,3 +53,13 @@ def test_marketplace_and_release_registration():
         assert len([e for e in entries if e['name']=='knowledge-atlas'])==1
     assert json.loads((repository/'.release-please-manifest.json').read_text())['knowledge-atlas']==tomllib.loads((ROOT/'pyproject.toml').read_text())['project']['version']
     assert 'knowledge-atlas' in json.loads((repository/'release-please-config.json').read_text())['packages']
+
+
+def test_wheel_viewer_entry_point_and_assets():
+    pyproject = tomllib.loads((ROOT / 'pyproject.toml').read_text())
+    assert pyproject['project']['scripts']['knowledge-atlas'] == 'knowledge_atlas.cli:main'
+    wheel = pyproject['tool']['hatch']['build']['targets']['wheel']
+    assert 'src/knowledge_atlas' in wheel['packages']
+    assets = files('knowledge_atlas').joinpath('viewer', 'static')
+    assert all(assets.joinpath(name).is_file() for name in ('index.html', 'app.js', 'requests.mjs'))
+    assert wheel['force-include']['runtime'] == 'knowledge_atlas/_assets/runtime'

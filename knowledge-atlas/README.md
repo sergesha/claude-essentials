@@ -66,7 +66,8 @@ original project. [Local viewer usage](docs/viewer.md)
 ## Development
 
 Use Python 3.12.16 and `uv sync --locked`, then `uv run pytest`. Native checks are
-explicitly configured; skipped checks are not platform qualification. Run
+explicitly configured. See the [integrated qualification procedures](docs/verification.md#integrated-qualification)
+for the prepared runtimes, exact ARM64 image and installed-wheel viewer. Run
 `uv run knowledge-atlas --help` for service and runtime commands.
 
 ## License

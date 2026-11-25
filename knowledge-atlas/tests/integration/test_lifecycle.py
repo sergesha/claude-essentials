@@ -10,6 +10,7 @@ import re
 import sys
 import time
 import uuid
+from zipfile import ZipFile
 
 
 def test_packaged_lifecycle(request, runtime_configuration, tmp_path):
@@ -45,7 +46,8 @@ def test_packaged_lifecycle(request, runtime_configuration, tmp_path):
 async def _cycle(package, config_path, native, root, host, profiles):
     from mcp import ClientSession,StdioServerParameters
     from mcp.client.stdio import stdio_client
-    from knowledge_atlas.core.git_store import GitStore
+    from knowledge_atlas.core.git_store import GitStore, git
+    from knowledge_atlas.core.decision_receipts import decision_inventory
     from knowledge_atlas.core.feedback import revise_compilation
     from knowledge_atlas.core.graph_stage import records_for, key
     from knowledge_atlas.core.publication import Publications
@@ -61,13 +63,16 @@ async def _cycle(package, config_path, native, root, host, profiles):
         await session.initialize()
         tools=await session.list_tools()
         (root/'mcp-tools.json').write_text(json.dumps([t.model_dump(mode='json') for t in tools.tools],indent=2))
-        async def call(action,payload,*,mutation=False,**selection):
+        async def call(action,payload,*,mutation=False,failure=None,**selection):
             arguments={'payload':payload,**({'atlas_id':atlas_id} if atlas_id else {}),**selection}
             if mutation:arguments.update(request_id=str(uuid.uuid4()),expected_publication=ready)
             response=await session.call_tool('atlas_'+action.replace('.','_'),arguments)
             value=response.structuredContent
             transcript.append({'action':action,'arguments':arguments,'response':value})
             (root/'mcp-actions.json').write_text(json.dumps(transcript,indent=2))
+            if response.isError and failure and 'operation_id' not in value:
+                assert value['error']['code'] == failure, value
+                return value
             assert not response.isError, value
             if not mutation:return value
             operation=value;deadline=time.monotonic()+1200
@@ -79,9 +84,12 @@ async def _cycle(package, config_path, native, root, host, profiles):
                 if polled.isError:
                     transcript[-1]['completed_operation']=operation
                     (root/'mcp-actions.json').write_text(json.dumps(transcript,indent=2))
-                assert not polled.isError, operation
+                assert not polled.isError or (failure and operation.get('state') == 'failed'), operation
             transcript[-1]['completed_operation']=operation
             (root/'mcp-actions.json').write_text(json.dumps(transcript,indent=2))
+            if failure:
+                assert operation['state'] == 'failed' and operation['error']['code'] == failure, operation
+                return operation
             assert operation['state']=='succeeded', operation
             return operation['result']
         async def accept(candidate):
@@ -194,9 +202,46 @@ async def _cycle(package, config_path, native, root, host, profiles):
             proposed=await call('packages.configure',{'includes':[{'package_id':child_id,
                 'mount':'packages/retained','publication':publication}]},mutation=True)
             await accept(proposed['data']['candidate']);pin_publications.append(ready)
-            await call('packages.inspect',{})
-        await call('packages.inspect',{},publication=pin_publications[1])
-        exported=await call('archive.export',{'path':str(root/'atlas.zip')},mutation=True)
+            inspected = await call('packages.inspect', {})
+            assert inspected['publication'] == ready
+            snapshot = store.read(inspected['data']['content'])
+            child_pin, = snapshot['included_packages']
+            assert child_pin['package_id'] == child_id
+            assert child_pin['inclusions'] == [{'mount': 'packages/retained', 'publication': publication}]
+            assert len(snapshot['wiki']['sources']) == 2
+        historical = await call('packages.inspect', {}, publication=pin_publications[1])
+        assert historical['publication'] == pin_publications[1]
+        original_id, original_ready = atlas_id, ready
+        before_receipts = decision_inventory(store)
+        before_refs = git(store.root, 'show-ref')
+        archive_path = root/'atlas.zip'
+        exported = await call('archive.export', {'path': str(archive_path)}, mutation=True)
+        assert exported['publication'] == original_ready
+        assert exported['data']['manifest']['ready'] == original_ready
+        archive_digest = hashlib.sha256(archive_path.read_bytes()).hexdigest()
+
+        # Keep the rest of the current archive intact to isolate format rejection.
+        obsolete_path = root/'obsolete.zip'
+        with ZipFile(archive_path) as source, ZipFile(obsolete_path, 'w') as obsolete:
+            for name in source.namelist():
+                data = source.read(name)
+                if name == 'archive.json':
+                    manifest = json.loads(data)
+                    data = json.dumps({**manifest, 'format': manifest['format'] - 1})
+                obsolete.writestr(name, data)
+        obsolete_digest = hashlib.sha256(obsolete_path.read_bytes()).hexdigest()
+        token_path = root/'service/token'
+        token_digest = hashlib.sha256(token_path.read_bytes()).hexdigest()
+        rejected_path = root/'obsolete-restore'
+        atlas_id = ready = None
+        before_list = await call('atlas.list', {})
+        await call('archive.restore', {'archive': str(obsolete_path), 'path': str(rejected_path)},
+                   mutation=True, failure='invalid_archive')
+        assert await call('atlas.list', {}) == before_list
+        assert not rejected_path.exists()
+        assert hashlib.sha256(obsolete_path.read_bytes()).hexdigest() == obsolete_digest
+        assert hashlib.sha256(token_path.read_bytes()).hexdigest() == token_digest
+        assert git(store.root, 'show-ref') == before_refs
         native['switch_cache'](root/'restored-service/vectors')
         restore_config=json.loads(config_path.read_text())
         restore_config['service_root']=str(root/'restored-service')
@@ -210,10 +255,22 @@ async def _cycle(package, config_path, native, root, host, profiles):
             session=restore_session
             atlas_id=None
             ready=None
-            restored=await call('archive.restore',{'archive':str(root/'atlas.zip'),'path':str(root/'restored')},mutation=True)
-            restored_id=restored['data']['atlas_id']
-            atlas_id=restored_id
-            ready=restored['publication']
+            restored_path = root/'restored'
+            restored = await call('archive.restore', {'archive': str(archive_path), 'path': str(restored_path)},
+                                  mutation=True)
+            restored_id = restored['data']['atlas_id']
+            atlas_id = restored_id
+            ready = restored['publication']
+            assert (restored_id, ready) == (original_id, original_ready)
+            assert restored_path != store.base and Path(restored['data']['path']) == restored_path
+            status = await call('atlas.status', {})
+            assert status['data']['matching_decision_receipt'] and status['publication'] == original_ready
+            restored_store = GitStore(restored_path)
+            assert decision_inventory(restored_store) == before_receipts
+            restored_packages = await call('packages.inspect', {}, publication=pin_publications[1])
+            assert restored_packages['data']['content'] == historical['data']['content']
+            assert restored_packages['publication'] == historical['publication']
+            assert hashlib.sha256(archive_path.read_bytes()).hexdigest() == archive_digest
             restored_read=await call('knowledge.apply',{'record_id':lesson,'context':condition},publication=semantic_publication)
             assert set(restored_read['data']['assessment']['independent_episodes'])=={'P-14','P-22'}
             restored_search=await call('search',{'query':'Fresh restored query '+str(uuid.uuid4()),'mode':'vector','count':1,'eligible':[lesson]})
@@ -221,4 +278,6 @@ async def _cycle(package, config_path, native, root, host, profiles):
             (root/'qualification.json').write_text(json.dumps({'host':host,'os':platform.platform(),'machine':platform.machine(),
                 'profiles':profiles,'runtime':str(native['runtime']),'first_publication':first_publication,
                 'semantic_publication':semantic_publication,'ready':ready,'restored_atlas_id':restored_id,
+                'child_atlas_id':child_id,'child_publications':child_publications,'composition_publications':pin_publications,
+                'archive_sha256':archive_digest,'obsolete_archive_sha256':obsolete_digest,
                 'input_sha256':[hashlib.sha256(s['content'].encode()).hexdigest() for s in sources]},indent=2))
