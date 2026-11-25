@@ -8,13 +8,16 @@ import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from .extraction_passage import extraction_passage
-from .extract_codec import CODEC_VERSION, COLLECTIONS, prepare_update_request, expand_statement_references
+from .extract_codec import (CODEC_VERSION, COLLECTIONS, decode_reference_response,
+                            prepare_update_request, expand_statement_references)
 
 ROOT = Path(__file__).resolve().parents[2]
 PASSAGE_VERSION = 1
 
 
 def validate_retained_extraction(extraction):
+    if not isinstance(extraction, dict):
+        raise ValueError('retained extraction object required')
     if any(extraction.get(field) for field in ('entities', 'statements', 'names', 'time', 'model_calls')):
         version = extraction.get('passage_version')
         if type(version) is not int or version != PASSAGE_VERSION:
@@ -125,7 +128,7 @@ def extract_wiki(wiki, model, *, previous=None, previous_wiki=None, model_profil
                                 'filename':filename,'text':previous_passages[filename]})}
                             if (old.get('page_request')==old_request and old.get('cache_key')==
                                     digest({'filename':filename,'request':old_request,**contract})):
-                                raw=json.loads(old['native_response'])
+                                raw=decode_reference_response(old['native_response'])
                                 if (isinstance(raw,dict) and set(raw)==set(COLLECTIONS)
                                         and all(isinstance(raw[k],list) and
                                                 all(isinstance(r,list) for r in raw[k]) for k in COLLECTIONS)):
@@ -142,7 +145,7 @@ def extract_wiki(wiki, model, *, previous=None, previous_wiki=None, model_profil
                 reply=model(request);trace['response']=copy.deepcopy(reply)
                 raw=response_text(reply)
                 if baseline is not None:
-                    raw=json.dumps(expand_statement_references(json.loads(raw),baseline),ensure_ascii=False)
+                    raw=json.dumps(expand_statement_references(decode_reference_response(raw),baseline),ensure_ascii=False)
                 trace['native_response']=raw
                 parsed=native('parse',raw)
                 if baseline is not None and (parsed['skipped'] or parsed['truncated']):

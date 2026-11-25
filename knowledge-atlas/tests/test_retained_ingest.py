@@ -13,6 +13,26 @@ from test_archives import portable as portable
 requires_native_utopia = pytest.mark.skipif(not os.environ.get('POC9_EXTRACT_BIN'), reason='explicit native Utopia binary required')
 
 @requires_native_utopia
+def test_recorded_incremental_fence_matches_native_parser():
+    from knowledge_atlas.core.extract_stage import extract_wiki
+
+    capture = json.loads((Path(__file__).parent/'fixtures/evidence/opus-incremental-fence.json').read_text())
+    page = '/wiki/entities/luma.md'
+    old, new = {page: 'Original text'}, {page: 'Updated text'}
+    previous = {'s': capture['previous_statements'], 'e': [], 'n': [], 't': []}
+    profile = {'model': 'offline-replay'}
+    baseline = extract_wiki(old, lambda _: '```json\n' + json.dumps(previous) + '\n```', model_profile=profile)
+    def replay(response):
+        return extract_wiki(new, lambda _: response, previous=baseline, previous_wiki=old, model_profile=profile)
+
+    result = replay(capture['raw_response'])
+    assert result['model_calls'][0]['mode'] == 'statement_refs'
+    assert len(result['statements']) == 9 and result['skipped'] == 0 and not result['truncated']
+    with pytest.raises(RuntimeError, match='extraction failed'):
+        replay(capture['raw_response'] + '\ntrailing prose')
+
+
+@requires_native_utopia
 class EfficientIngestTests(unittest.TestCase):
     def test_selected_git_page_drives_codec_candidate_and_bad_reply_stops_snapshot(self):
         import copy
@@ -165,15 +185,20 @@ def current_candidate(store):
     return store.snapshot(wiki, extraction, {}, recorded_at='2026-11-13T00:30:00Z')['commit']
 
 
-def damaged_candidate(store, candidate, field, value):
+def damaged_candidate(store, candidate, field, value, *, kind='knowledge'):
     from knowledge_atlas.core.git_store import git
     from knowledge_atlas.core.publication import commit_files
     from knowledge_atlas.core.relations import digest
 
     data = store.read(candidate)
     manifest = data['manifest']
-    pin = manifest['modules']['knowledge']
-    if field == 'passage_version':
+    pin = manifest['modules'][kind]
+    if kind == 'sources':
+        source = store.module_path(store.root, pin)
+        provenance = json.loads(git(source, 'show', pin['commit'] + ':provenance.json'))
+        del provenance[0][field]
+        files = {'provenance.json': provenance}
+    elif field == 'passage_version':
         extraction = data['extraction']
         if value is None:
             del extraction[field]
@@ -224,6 +249,14 @@ def test_retained_boundary_rejects_unsupported_material(tmp_path, field, value, 
 
 @pytest.mark.parametrize(('field', 'value'), _DAMAGE)
 def test_staged_restore_rejects_unsupported_retained_history(portable, tmp_path, field, value):
+    check_damaged_restore(portable, tmp_path, 'knowledge', field, value)
+
+
+def test_staged_restore_rejects_damaged_sources_leaf_only(portable, tmp_path):
+    check_damaged_restore(portable, tmp_path, 'sources', 'source_id', None)
+
+
+def check_damaged_restore(portable, tmp_path, kind, field, value):
     import zipfile
 
     from knowledge_atlas.core.archive import export_atlas, restore_atlas
@@ -233,7 +266,9 @@ def test_staged_restore_rejects_unsupported_retained_history(portable, tmp_path,
     candidate = current_candidate(store)
     good = tmp_path/'current.zip'
     manifest = export_atlas(store, good, tokenizer=tokenizer, formatter=formatter)
-    bad, _, leaf = damaged_candidate(store, candidate, field, value)
+    bad, _, leaf = damaged_candidate(store, candidate, field, value, kind=kind)
+    with pytest.raises(ValueError, match=field):
+        store.read(bad)
     replacements = {}
     for repo in [store.root, leaf]:
         identity = package_identity(repo, 'HEAD')

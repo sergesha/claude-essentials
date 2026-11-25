@@ -84,7 +84,10 @@ def test_recompilation_validates_both_owned_repositories_before_writes(tmp_path)
                        relation_previous=original['relations'])
     assert before == [git(path, 'show-ref') for path in (store.root, source, knowledge)]
 
-@pytest.mark.parametrize(('kind','damage'), [('knowledge','missing-wiki'), ('sources','project-manifest')])
+@pytest.mark.parametrize(('kind','damage'), [
+    ('knowledge','missing-wiki'), ('sources','project-manifest'), ('sources','source_id'),
+    ('knowledge','source_id'), ('knowledge','passage_version'), ('sources','non-array'),
+])
 def test_snapshot_rejects_wrong_writable_leaf_before_changing_files_or_refs(tmp_path, kind, damage):
     from knowledge_atlas.core.git_store import _commit
     from test_packages import snapshot
@@ -93,7 +96,21 @@ def test_snapshot_rejects_wrong_writable_leaf_before_changing_files_or_refs(tmp_
     original = store.read(snapshot(store))
     source, knowledge = (store.base/'modules'/name for name in ('sources','knowledge'))
     leaf = store.base/'modules'/kind
-    if damage == 'missing-wiki':
+    error = 'invalid ' + kind + ' content module'
+    if damage == 'source_id':
+        path = leaf/('provenance.json' if kind == 'sources' else 'wiki.json')
+        payload = json.loads(path.read_text())
+        rows = payload if kind == 'sources' else payload['sources']
+        del rows[0]['source_id']
+        path.write_text(json.dumps(payload))
+        error = 'source_id'
+    elif damage == 'non-array':
+        (leaf/'provenance.json').write_text('{}')
+        error = 'array of source records'
+    elif damage == 'passage_version':
+        (leaf/'extraction.json').write_text(json.dumps({'statements': [{}]}))
+        error = 'passage_version'
+    elif damage == 'missing-wiki':
         (leaf/'wiki.json').unlink()
     else:
         (leaf/'manifest.json').write_bytes((store.root/'manifest.json').read_bytes())
@@ -108,6 +125,6 @@ def test_snapshot_rejects_wrong_writable_leaf_before_changing_files_or_refs(tmp_
     before = state()
     wiki = original['wiki']
     wiki['sources'][0]['recorded_at'] = '2026-11-14T00:00:00Z'
-    with pytest.raises(ValueError, match='invalid ' + kind + ' content module'):
+    with pytest.raises(ValueError, match=error):
         store.snapshot(wiki, original['extraction'], {}, recorded_at='2026-11-14T00:00:00Z')
     assert state() == before

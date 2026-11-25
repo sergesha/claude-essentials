@@ -29,6 +29,8 @@ def _native_tools():
 
 def validate_source_records(sources):
     """Require each retained source's public identity and recording time."""
+    if not isinstance(sources, list) or not all(isinstance(row, dict) for row in sources):
+        raise ValueError('retained sources require an array of source records')
     for source in sources:
         identity = source.get('source_id')
         if not isinstance(identity, str) or not identity:

@@ -5,6 +5,7 @@ import os
 import re
 from pathlib import Path, PureWindowsPath
 import tempfile
+import unicodedata
 
 from .git_store import GitStore, git, package_identity
 from .publication import Publications, StaleProposal, commit_files
@@ -15,14 +16,18 @@ _RESERVED = {'.gitmodules', 'manifest.json', 'package.json', 'publication.json',
              'relations.json', 'knowledge-records.json', 'embedding-profile.json', 'proposal.json', 'atlas-decision.json'}
 
 
+def _mount_key(path):
+    return unicodedata.normalize('NFD', unicodedata.normalize('NFD', path).casefold())
+
+
 def _validate_mounts(mounts, files=()):
-    occupied = {path.casefold() for path in (*_RESERVED, *files)}
+    occupied = {_mount_key(path) for path in (*_RESERVED, *files)}
     for mount in mounts:
         if (not isinstance(mount, str) or not mount or PureWindowsPath(mount).drive
                 or '\\' in mount or any(ord(char) < 32 or ord(char) == 127 for char in mount)
-                or any(part.casefold() in ('', '.', '..', '.git') for part in mount.split('/'))):
+                or any(_mount_key(part) in ('', '.', '..', '.git') for part in mount.split('/'))):
             raise ValueError('safe relative package mount required')
-        path = mount.casefold()
+        path = _mount_key(mount)
         if any(path == used or path.startswith(used + '/') or used.startswith(path + '/')
                for used in occupied):
             raise ValueError('reserved, duplicate or overlapping package mount: ' + mount)
@@ -43,6 +48,10 @@ def validate_layout(repo, oid, modules):
     """Require the manifest, Git's submodule sections and all tree gitlinks to agree."""
     tree = _tree_entries(repo, oid)
     links = {path: target for path, (mode, target) in tree.items() if mode == '160000'}
+    required = ('mount', 'commit', 'url', 'package_id')
+    if any(not isinstance(mod, dict) or not all(isinstance(mod.get(field), str) for field in required)
+           for mod in modules.values()):
+        raise ValueError('invalid atlas module record')
     _validate_mounts([mod['mount'] for mod in modules.values()], tree.keys() - links.keys())
     if links != {mod['mount']: mod['commit'] for mod in modules.values()}:
         raise ValueError('manifest/gitlink mismatch')

@@ -113,6 +113,30 @@ def test_invalid_layout_is_atomic(service, mounts):
     assert parent.read(ready) == original
 
 
+@pytest.mark.parametrize('mounts', [
+    ('Café', 'Cafe\u0301'), ('Café', 'CAFE\u0301/child'), ('CAFE\u0301/child', 'Café'),
+])
+def test_portable_composition_refuses_equivalent_mounts_before_proposal(service, mounts):
+    parent, left, right = [project(service, name) for name in ('parent', 'left', 'right')]
+    git(parent.root, 'config', 'core.precomposeunicode', 'false')
+    git(parent.root, 'config', 'core.ignorecase', 'false')
+    original = git(parent.root, 'show-ref')
+    selections = [include(child, mount, publish(child, git(child.root, 'rev-parse', 'HEAD')))
+                  for child, mount in zip((left, right), mounts)]
+    result = configure(service, parent, selections)
+    assert result.state == 'failed' and result.error['code'] == 'invalid_package'
+    assert 'overlapping package mount' in result.error['message']
+    assert git(parent.root, 'show-ref') == original and not proposals(parent)
+
+
+def test_existing_tree_entries_use_portable_mount_keys():
+    from knowledge_atlas.core.composition import _validate_mounts
+    with pytest.raises(ValueError, match='overlapping package mount'):
+        _validate_mounts(['Cafe\u0301/child'], ['CAFÉ'])
+    with pytest.raises(ValueError, match='overlapping package mount'):
+        _validate_mounts(['Café'], ['CAFE\u0301/child'])
+
+
 @pytest.mark.parametrize('problem', ['unknown', 'unavailable', 'wrong-wrapper', 'content', 'cycle', 'versions'])
 def test_child_selection_conflicts_fail_before_exposure(service, problem):
     parent, child, other = [project(service, name) for name in ('parent','child','other')]
@@ -204,7 +228,7 @@ def test_configure_retains_transitive_receipts_before_exposure(service):
     assert Publications(parent).ready() is None
 
 
-@pytest.mark.parametrize('corrupt', ['url', 'extra-gitlink', 'extra-section', 'pin', 'receipt', 'no-receipt', 'no-kind', 'unknown-kind'])
+@pytest.mark.parametrize('corrupt', ['url', 'extra-gitlink', 'extra-section', 'pin', 'receipt', 'no-receipt', 'no-kind', 'unknown-kind', 'null-row'])
 def test_read_rejects_inconsistent_layout(service, corrupt):
     parent, child = [project(service, name) for name in ('parent','child')]
     receipt = publish(child, git(child.root, 'rev-parse', 'HEAD'))
@@ -219,6 +243,9 @@ def test_read_rejects_inconsistent_layout(service, corrupt):
         links['extra'] = mod['commit']
     elif corrupt == 'extra-section':
         files['.gitmodules'] = config + b'[submodule "extra"]\npath = extra\nurl = ../extra\n'
+    elif corrupt == 'null-row':
+        manifest['modules'][next(iter(manifest['modules']))] = None
+        files['manifest.json'] = manifest
     elif corrupt == 'pin':
         links['child'] = receipt
     else:

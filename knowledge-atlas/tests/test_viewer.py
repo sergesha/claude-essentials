@@ -164,15 +164,21 @@ def test_viewer_refuses_removed_cli_selector_as_unknown(monkeypatch):
     assert error.value.code == 2
 
 
-def test_docker_view_command_runs_on_host(tmp_path):
-    import os,subprocess,sys
+def test_docker_view_command_runs_on_host(tmp_path, monkeypatch):
+    import subprocess,sys
+    monkeypatch.setenv('HOME', str(tmp_path/'home'))
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path/'config'))
+    monkeypatch.setenv('XDG_CACHE_HOME', str(tmp_path/'cache'))
+    for selector in ('KNOWLEDGE_ATLAS_DEFAULT_PROJECT', 'KNOWLEDGE_ATLAS_DOCKER_PROJECT'):
+        monkeypatch.delenv(selector, raising=False)
     from pathlib import Path
     fake=tmp_path/'python'
     capture=tmp_path/'arguments'
     fake.write_text('#!'+sys.executable+'\nimport sys\nfrom pathlib import Path\nPath('+repr(str(capture))+').write_text(" ".join(sys.argv[1:]))\n')
     fake.chmod(0o755)
+    monkeypatch.setenv('KNOWLEDGE_ATLAS_PYTHON', str(fake))
     result=subprocess.run(['sh',str(Path(__file__).parents[1]/'scripts/launch.sh'),'view','--atlas',ATLAS_A,'--container-name','atlas-test'],
-        env={**os.environ,'KNOWLEDGE_ATLAS_PYTHON':str(fake)},capture_output=True,text=True)
+        capture_output=True,text=True)
     assert result.returncode==0,result.stderr
     assert capture.read_text()==f'-m knowledge_atlas.cli view --atlas {ATLAS_A} --container-name atlas-test'
 

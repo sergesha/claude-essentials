@@ -10,6 +10,18 @@ COLLECTIONS = ('e', 's', 'n', 't')
 STATEMENT_CODEC = '\n\nStatement transport encoding, applied AFTER the extraction rules:\nReturn the COMPLETE extraction for the CURRENT Passage, with all e/s/n/t arrays.\nBuild e, n and t afresh from the CURRENT Passage in their ordinary native array\nformat. No references are allowed in e, n or t. Prior classifications are not\nprovided and must not be inferred from the historical context.\nOnly within s, a whole unchanged statement may be encoded as {"ref": i}, its\nzero-based index in Previous statements.s. This copies that exact entire row.\nWrite new or changed statements in the ordinary eight-element array format.\nThe Git diff and Previous statements are context only, not current assertions.\nReassess each previous statement against the CURRENT Passage, including its\nparticipants, quotation, negation, conditions and time. Omitted statements are\nnot copied. Do not retain obsolete statements. Keep names in retained statements\nconsistent with the current e/n arrays. No partial patches or new keys. JSON only.\n'
 
 
+def decode_reference_response(raw):
+    """Consume one complete JSON value, optionally in a native Markdown fence."""
+    text = raw.strip()
+    if text.startswith('```') and text.endswith('```'):
+        opening = '```json' if text.startswith('```json') else '```'
+        text = text[len(opening):-3]
+    def reject_constant(value):
+        raise ValueError('non-JSON constant: ' + value)
+
+    return json.loads(text, parse_constant=reject_constant)
+
+
 def git_page_diff(previous_text, current_text):
     with tempfile.TemporaryDirectory(prefix='poc9-diff-') as tmp:
         directory = Path(tmp)

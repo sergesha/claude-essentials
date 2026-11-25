@@ -68,6 +68,15 @@ def _validate_leaf(repo, oid, kind):
         raise ValueError('invalid ' + kind + ' content module')
 
 
+def _validate_leaf_payloads(repo, oid, kind):
+    if kind == 'sources':
+        validate_source_records(json.loads(git(repo, 'show', oid + ':provenance.json')))
+    elif kind == 'knowledge':
+        wiki = json.loads(git(repo, 'show', oid + ':wiki.json'))
+        validate_source_records(wiki['sources'])
+        validate_retained_extraction(json.loads(git(repo, 'show', oid + ':extraction.json')))
+
+
 def _commit(path,message,paths=None):
     git(path,'add',*(paths if paths is not None else ['--all']))
     unchanged=subprocess.run(['git','-C',str(path),'diff','--cached','--quiet']).returncode==0
@@ -138,12 +147,7 @@ class GitStore:
         if self.archive_locations is not None:
             # The archive history walk visits each retained leaf commit directly,
             # including content whose owning candidate was never published.
-            if kind == 'sources':
-                validate_source_records(json.loads(git(self.root, 'show', commit+':provenance.json')))
-            elif kind == 'knowledge':
-                wiki = json.loads(git(self.root, 'show', commit+':wiki.json'))
-                validate_source_records(wiki['sources'])
-                validate_retained_extraction(json.loads(git(self.root, 'show', commit+':extraction.json')))
+            _validate_leaf_payloads(self.root, commit, kind)
         return closure
 
     def _closure(self, commit, *, root, by_repository, kind='atlas'):
@@ -231,6 +235,7 @@ class GitStore:
                     raise ValueError('existing content module is not a Git repository')
                 _repo(path)
                 _validate_leaf(path, 'HEAD', kind)
+                _validate_leaf_payloads(path, 'HEAD', kind)
         relations = (validate_bundle(relation_bundle, extraction) if relation_bundle is not None else
                      resolve_relations(extraction, model=relation_model, previous=relation_previous))
         package_id=_repo(self.root)

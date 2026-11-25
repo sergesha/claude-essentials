@@ -518,8 +518,9 @@ def test_create_rejects_unavailable_registered_destination(tmp_path):
     pytest.param('atlas', 'atlas', id='exact'),
     pytest.param('caf\u00e9', 'cafe\u0301', id='unicode'),
 ])
+@pytest.mark.parametrize('nested', [False, True], ids=['exact-location', 'child-location'])
 def test_queued_create_rechecks_registered_destination_under_lock(tmp_path, monkeypatch,
-                                                                  registered_name, requested_name):
+                                                                  registered_name, requested_name, nested):
     from contextlib import contextmanager
     from knowledge_atlas import worker
     from knowledge_atlas.core.git_store import GitStore
@@ -528,7 +529,8 @@ def test_queued_create_rechecks_registered_destination_under_lock(tmp_path, monk
     from test_packages import snapshot
 
     service = ServiceContext(tmp_path / 'service')
-    destination = tmp_path / requested_name
+    alternate = tmp_path / requested_name
+    destination = alternate/'child' if nested else alternate
     reserved = tmp_path / registered_name
     queued = submit(service, request(path=str(destination)))
     moved = tmp_path / 'moved'
@@ -541,7 +543,7 @@ def test_queued_create_rechecks_registered_destination_under_lock(tmp_path, monk
             store = GitStore(reserved)
             identity = store.read(snapshot(store))['manifest']['package_id']
             registrations.append(register_atlas(service, identity, reserved))
-            aliases.append(destination.exists() and destination.samefile(reserved))
+            aliases.append(alternate.exists() and alternate.samefile(reserved))
             reserved.rename(moved)
             yield
 
@@ -550,7 +552,8 @@ def test_queued_create_rechecks_registered_destination_under_lock(tmp_path, monk
 
     result = inspect_operation(service, queued.operation_id)
     if aliases[0]:
-        assert result.state == 'failed' and result.error['code'] == 'atlas_conflict'
+        assert result.state == 'failed'
+        assert result.error['code'] == ('invalid_location' if nested else 'atlas_conflict')
         assert not destination.exists()
         assert list_projects(service) == registrations
     else:
@@ -594,6 +597,38 @@ def test_create_reservation_respects_filesystem_name_equivalence(tmp_path, regis
         assert created.result.data['atlas_id'] != identity
         assert alternate.exists() and not reserved.exists()
 
+
+
+@pytest.mark.parametrize('boundary', ['registered', 'service', 'data-logs'])
+def test_project_ancestor_respects_volume_name_equivalence(tmp_path, boundary):
+    from knowledge_atlas.operations import atlas_path
+    from test_project_registry import create_project
+
+    service = ServiceContext(tmp_path/'service')
+    if boundary == 'registered':
+        root = tmp_path/'reserved'
+        create_project(service, root)
+    elif boundary == 'service':
+        root = service.service_root
+        root.mkdir(exist_ok=True)
+    else:
+        data = tmp_path/'data'
+        service.configuration['project_data_root'] = str(data)
+        root = data/'logs'
+        root.mkdir(parents=True)
+    alternate = root.with_name(root.name.upper())
+    equivalent = alternate.exists() and alternate.samefile(root)
+    if boundary == 'registered':
+        root.rename(tmp_path/'moved')
+    child = alternate/'new'/'child'
+    for action in ('atlas.create', 'archive.restore'):
+        req = request(action, path=str(child))
+        if equivalent:
+            with pytest.raises(AtlasError, match='invalid_location'):
+                atlas_path(service, req)
+        else:
+            assert atlas_path(service, req) == child
+    assert not child.exists()
 
 
 @pytest.mark.parametrize('permission_change', ['before_admission', 'after_queueing'])

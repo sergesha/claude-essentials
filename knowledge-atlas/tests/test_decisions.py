@@ -356,7 +356,28 @@ def test_interrupted_acceptance_requires_explicit_resume_with_original_attributi
     with pytest.raises(AtlasError, match='request_conflict'):
         client.operation_resume(selection, request_id=mutation.request_id)
     resume_id = str(uuid.uuid4())
-    assert client.operation_resume(selection, request_id=resume_id).attempt == 2
+    # A lost admission may leave partial or complete evidence with no committed resume.
+    from knowledge_atlas.operations import resume
+    first_input = replay.evidence / 'input.json'
+    abandoned = first_input.parent.parent / '2' / 'input.json'
+    write_text = Path.write_text
+    def fail_before_admission(path, data, *args, **kwargs):
+        if path == abandoned:
+            write_text(path, data[:12])
+            raise OSError('interrupted evidence write')
+        return write_text(path, data, *args, **kwargs)
+    with monkeypatch.context() as fault:
+        fault.setattr(Path, 'write_text', fail_before_admission)
+        with pytest.raises(OSError, match='interrupted evidence write'):
+            resume(restarted.context, op_id, resume_id)
+    assert client.operation(op_id) == replay
+    original_input = first_input.read_bytes()
+    resumed = client.operation_resume(selection, request_id=resume_id)
+    assert resumed.attempt == 2 and resumed.operation_id == op_id
+    assert (resumed.evidence/'input.json').read_bytes() == original_input
+    assert abandoned.read_bytes() == original_input[:12]
+    assert first_input.read_bytes() == original_input
+    assert client.operation_resume(selection, request_id=resume_id) == resumed
     with pytest.raises(AtlasError, match='request_conflict'):
         client.call(replace(mutation, request_id=resume_id))
     monkeypatch.setattr(decisions, 'build_projection', lambda ctx, c: projection(c))

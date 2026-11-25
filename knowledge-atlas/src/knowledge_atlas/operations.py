@@ -148,14 +148,16 @@ def _registered_roots(context):
 
 def validate_atlas_path(context, path):
     path = Path(path).resolve()
+    locations = (path, *path.parents)
     data_root = context.configuration.get('project_data_root')
     if data_root is not None:
         root = Path(data_root).resolve()
-        if root not in path.parents or path.relative_to(root).parts[0] in ('graph', 'logs'):
+        if (not _matches_location(path.parents, [root])
+                or _matches_location(locations, [root/'graph', root/'logs'])):
             raise AtlasError('invalid_location', 'projects require a destination on the deployment data volume outside internal state', 422)
-    if path.is_relative_to(Path(__file__).resolve().parents[2]) or path.is_relative_to(context.service_root):
+    if _matches_location(locations, [Path(__file__).resolve().parents[2], context.service_root]):
         raise AtlasError('invalid_location', 'atlas data must live outside the plugin and service')
-    if _inside_atlas(path) or any(root in path.parents for root in _registered_roots(context)):
+    if _inside_atlas(path) or _matches_location(path.parents, _registered_roots(context)):
         raise AtlasError('invalid_location', 'nested atlas paths are unsupported', 422)
     return path
 
@@ -189,38 +191,37 @@ def _accessible_ancestor(path):
             path = path.parent
 
 
-def _has_registered_destination(path, registered_paths):
-    if path in registered_paths:
+def _matches_location(candidates, roots):
+    """Compare resolved paths using the volume's identity and missing-name rules."""
+    if not roots:
+        return False
+    if any(path in roots for path in candidates):
         return True
-    if not registered_paths:
-        return False
-
-    ancestor, ancestor_stat = _accessible_ancestor(path)
-    requested = path.relative_to(ancestor)
-    alternates = []
-    for registered in registered_paths:
-        registered_ancestor, registered_stat = _accessible_ancestor(registered)
-        if not os.path.samestat(ancestor_stat, registered_stat):
-            continue
-        relative = registered.relative_to(registered_ancestor)
-        if relative == requested:
+    by_anchor = {}
+    for root in roots:
+        anchor, stat = _accessible_ancestor(root)
+        by_anchor.setdefault((stat.st_dev, stat.st_ino), []).append(root.relative_to(anchor))
+    for path in candidates:
+        ancestor, stat = _accessible_ancestor(path)
+        relatives = by_anchor.get((stat.st_dev, stat.st_ino), ())
+        requested = path.relative_to(ancestor)
+        if requested in relatives:
             return True
-        if len(relative.parts) == len(requested.parts):
-            alternates.append(relative)
-
-    if not alternates or not S_ISDIR(ancestor_stat.st_mode):
-        return False
-    # Test the exact spellings together on the destination filesystem. Keep
-    # all scratch entries under one private directory in the existing ancestor.
-    with tempfile.TemporaryDirectory(dir=ancestor, prefix='.atlas-reservation-') as directory:
-        probe = Path(directory)
-        (probe / requested).mkdir(parents=True)
-        return any((probe / alternate).exists() for alternate in alternates)
+        alternates = [other for other in relatives if len(other.parts) == len(requested.parts)]
+        if alternates and S_ISDIR(stat.st_mode):
+            # Both spellings are missing. Probe them under one private directory
+            # on this volume so case-sensitive names remain distinct.
+            with tempfile.TemporaryDirectory(dir=ancestor, prefix='.atlas-reservation-') as directory:
+                probe = Path(directory)
+                (probe / requested).mkdir(parents=True)
+                if any((probe / alternate).exists() for alternate in alternates):
+                    return True
+    return False
 
 
 def _verify_create_destination(db, path):
     registered_paths = [Path(row['path']) for row in db.execute('SELECT path FROM atlases')]
-    if _has_registered_destination(path, registered_paths):
+    if _matches_location((path,), registered_paths):
         raise AtlasError('atlas_conflict', 'the create destination is reserved for a registered atlas', 409)
 
 
@@ -493,7 +494,12 @@ def resume(context, operation_id, request_id):
         operation_project(context, request, Path(row['atlas_path']), frozen)
         attempt = row['attempt'] + 1
         evidence = context.service_root / 'attempts' / operation_id / str(attempt)
-        evidence.mkdir(parents=True, exist_ok=False)
+        try:
+            evidence.mkdir(parents=True, exist_ok=False)
+        except FileExistsError:
+            # BEGIN IMMEDIATE and the retained row establish that this next
+            # attempt has never been admitted. Keep its abandoned evidence.
+            evidence = Path(tempfile.mkdtemp(prefix=f'{attempt}-', dir=evidence.parent))
         (evidence / 'input.json').write_text(encoded({'request':asdict(request), **frozen}))
         db.execute('INSERT INTO resumes VALUES (?,?)', (request_id, operation_id))
         db.execute("UPDATE operations SET state='queued',attempt=?,previous_evidence=evidence,evidence=?,result=NULL,error=NULL WHERE operation_id=?", (attempt, str(evidence), operation_id))
