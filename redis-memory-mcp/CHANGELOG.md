@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0](https://github.com/sergesha/claude-essentials/compare/redis-memory-mcp-v0.11.2...redis-memory-mcp-v0.12.0) (2026-11-26)
+
+
+### Features
+
+* **redis-memory:** deliver security-qualified multiarch images from GHCR ([341cada](https://github.com/sergesha/claude-essentials/commit/341cada7a7aba779b97faa4afe2e7a1a1eaa1fd7))
+
 ## [0.11.2](https://github.com/sergesha/claude-essentials/compare/redis-memory-mcp-v0.11.1...redis-memory-mcp-v0.11.2) (2026-11-26)
 
 ### Bug Fixes
