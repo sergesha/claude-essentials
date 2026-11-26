@@ -5,6 +5,13 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.2](https://github.com/sergesha/claude-essentials/compare/redis-memory-mcp-v0.11.1...redis-memory-mcp-v0.11.2) (2026-11-26)
+
+### Bug Fixes
+
+* Harden the shared Docker base for the MCP and embeddings images: upgrade `libzstd1`, install checksum-verified `pip` 26.3, and replace Python's bundled `ensurepip` wheel with the same version ([af0c5ec](https://github.com/sergesha/claude-essentials/commit/af0c5ec3d528c40a84ebbf1c8623268b27561375)).
+* No changes to the memory API, storage format, namespaces or embedding profile. Existing Docker containers must be rebuilt from the updated source to receive these fixes.
+
 ## [0.11.1](https://github.com/sergesha/claude-essentials/compare/redis-memory-mcp-v0.11.0...redis-memory-mcp-v0.11.1) (2026-10-03)
 
 
