@@ -37,6 +37,15 @@ Files: .github/workflows/redis-memory.yml, redis-memory-images.yml, release-plea
 - [x] Add Release Please outputs/call and trigger coverage; run security tests and workflow validation.
 
 ### Task 3: Release and verify
-- [ ] Review complete diff, push feature PR, require relevant CI and merge.
-- [ ] Verify generated 0.12.0 release PR/version fields, merge after CI, observe actual release and GHCR publication.
-- [ ] Verify public multiarchitecture manifests and local pull/runtime with existing backend data.
+- [x] Review complete diff, push feature PR, require relevant CI and merge.
+- [x] Verify generated 0.12.0 release PR/version fields, merge after CI, observe actual release and GHCR publication.
+- [x] Verify public multiarchitecture manifests and local pull/runtime with existing backend data.
+
+## Delivery evidence
+
+- Implementation PR #158 and release PR #159 merged; tag `redis-memory-mcp-v0.12.0` points to `36ef2b66e844c9da999e0880a280448761de4034`.
+- [Release workflow 45866574526](https://github.com/sergesha/claude-essentials/actions/runs/45866574526) passed: four candidate gates, exact-image publication and anonymous amd64/arm64 delivery checks. Every final scan reported zero blockers and zero errors.
+- Both packages were already Public after first publication; no visibility mutation was needed.
+- MCP index: `sha256:2b1e73ca04074451d0b6a90b86b026d965652ac19cb71d4ebbaa5f6243d19552`.
+- Embeddings index: `sha256:e1ef7d75d02b3e978893267b112e6ba521c0771859cc2922256ddd8d71306e63`.
+- Local Codex and Claude Code installations report 0.12.0. A fresh Codex session loaded the published ARM64 MCP image and passed KV and semantic reads. The pulled embeddings image passed health/profile/inference checks. Existing data mounts, namespace settings, model cache and local override were retained; Redis and Atlas containers were unchanged.

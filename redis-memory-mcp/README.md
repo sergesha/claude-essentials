@@ -181,8 +181,8 @@ See [image candidates](../.github/workflows/redis-memory-images.yml),
 [security policy](../tools/image_security/README.md). If publication fails after
 some platform tags were uploaded, rerun failed jobs using the retained candidates;
 existing version tags must resolve to the same bytes. Never overwrite a published
-version with a rebuild. New GHCR packages must be made Public once in their
-package settings; keep the anonymous verification job mandatory.
+version with a rebuild. Verify that new GHCR packages are Public; change their visibility in package
+settings only if necessary. Keep the anonymous verification job mandatory.
 
 ## Tools
 
