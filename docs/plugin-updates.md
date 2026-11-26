@@ -104,3 +104,28 @@ Do not recreate old version paths or delete caches to hide the symptom. Existing
 sessions with older hook commands may still need one restart to load a guarded
 launcher. Standalone skill copies are separate installations: identify and update
 them explicitly, preserving a rollback copy and avoiding duplicate plugin skills.
+
+## Maintaining independent releases
+
+Before merging a release PR, compare each affected plugin directory with its last
+published tag. A mixed-component commit can contribute its `feat` or `fix` title
+to every package whose files it touches, even when one package changed only its
+README. Check the proposed version and changelog against the actual package diff.
+Prefer separate commits or PRs for changes that need different release treatment.
+
+For a pending release with an incorrect version, update the existing release PR's
+manifest, package version fields, changelog, title and generated release-notes
+section consistently. Keep the Release Please branch and lifecycle labels, verify
+the exact head and relevant checks, then merge through the normal workflow.
+Confirm the resulting tag and GitHub Release; a merged PR alone is not proof of
+publication. Do not leave a permanent `release-as` override after a one-off bump.
+
+Close an unnecessary documentation-only release PR with the supported
+`autorelease: snooze` label. Preserve its generated body: Release Please compares
+release notes and leaves a snoozed PR closed while those notes are unchanged;
+changed notes can reactivate it. Do not mark an unpublished version as tagged or
+advance the release manifest to suppress a PR. The `exclude-paths` option matches
+directories, so it is not an exact-file exclusion for a plugin's root README.
+See [Release Please](https://github.com/googleapis/release-please) for the native
+release lifecycle. Skill instructions and hooks are shipped behavior and need
+separate release assessment even when the instructions are Markdown files.

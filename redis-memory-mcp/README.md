@@ -129,6 +129,20 @@ namespace, index and embeddings settings. The existing launcher selects the
 latest `redis-memory-mcp-v*` release unless `REDIS_MEMORY_MCP_REF` is pinned;
 a pinned backend remains pinned independently of the plugin version.
 
+### 0.11.2 Docker maintenance update
+
+Version 0.11.2 updates the base shared by the MCP and embeddings Docker images:
+`libzstd1`, `pip` 26.3 and Python's bundled `ensurepip` wheel. The memory API,
+storage format, namespace and embedding profile are unchanged; no data migration
+is required. See the [changelog](CHANGELOG.md#0112-2026-11-26).
+
+A plugin update does not replace an already running container. Rebuild and
+recreate the affected services from the updated source using the existing
+deployment's Compose files and project name. Preserve its volumes and connection
+settings. If `REDIS_MEMORY_MCP_REF` is pinned, select `redis-memory-mcp-v0.11.2`
+explicitly before rebuilding. This release does not publish a Redis Memory GHCR
+image; the repository's Redis workflow builds and checks both image targets.
+
 ## Tools
 
 ### Key-Value Storage — instant lookup
