@@ -1,0 +1,12 @@
+# Explicit developer builds; production uses docker-compose.yaml and GHCR.
+services:
+  embeddings:
+    image: redis-memory-embeddings:dev
+    build:
+      context: ./server
+      target: embeddings
+  redis-memory-mcp:
+    image: redis-memory-mcp:dev
+    build:
+      context: ./server
+      target: mcp

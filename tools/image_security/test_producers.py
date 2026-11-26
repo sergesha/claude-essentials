@@ -95,25 +95,32 @@ class TestProducerCoverage(unittest.TestCase):
         self.assertEqual(decision["reasons"], ["HIGH with fix"])
 
     def test_redis_targets_scan_the_built_images_and_keep_both_reports(self):
-        workflow = (gate.HERE.parents[1] / ".github/workflows/redis-memory.yml").read_text()
-        for value in ("fail-fast: false", "target: [mcp, embeddings]", '--target "$TARGET"',
-                      "--iidfile", "--platform linux/amd64",
-                      'smoke_mcp.py "$IMAGE"', "scope-isolation:", "native-python:"):
-            self.assertIn(value, workflow)
-        images = workflow.split("\n  images:\n", 1)[1].split("\n  native-python:\n", 1)[0]
-        steps = images.split("\n      - ")
-        action = "uses: ./.github/actions/plugin-image-security"
-        scan, = [step for step in steps if action in (line.strip() for line in step.splitlines())]
-        inputs = {line.strip() for line in scan.splitlines()}
-        self.assertTrue({"with:", "producer: redis-memory-${{ matrix.target }}",
-                         "image: ${{ steps.build.outputs.image }}", "platform: linux/amd64",
-                         "out: ${{ runner.temp }}/redis-memory-${{ matrix.target }}"} <= inputs)
+        root = gate.HERE.parents[1]
+        workflow = (root / ".github/workflows/redis-memory.yml").read_text()
+        images = (root / ".github/workflows/redis-memory-images.yml").read_text()
+        self.assertIn("uses: ./.github/workflows/redis-memory-images.yml", workflow)
+        self.assertIn("target: [mcp, embeddings]", images)
+        self.assertIn("arch: [amd64, arm64]", images)
+        self.assertIn("image: ${{ steps.build.outputs.image }}", images)
         setup = images.index("uses: ./.github/actions/plugin-image-security/setup-docker")
         self.assertLess(images.index("uses: actions/checkout@"), setup)
         self.assertLess(setup, images.index("docker build"))
         for trigger in ("tools/image_security/**", ".github/actions/plugin-image-security/**"):
             self.assertEqual(workflow.count(trigger), 2)
         self.assertIn("coverage.py", gate.policy_files())
+
+    def test_redis_platform_registration_keeps_the_same_gate_on_both_architectures(self):
+        for name in ("redis-memory-mcp", "redis-memory-embeddings"):
+            for platform in ("linux/amd64", "linux/arm64"):
+                with self.subTest(name=name, platform=platform):
+                    result = producer.collect_coverage(name, dict(self.candidate, platform=platform),
+                                                       self.trivy, self.root, archive_bound=False)
+                    self.assertFalse(result["errors"])
+            result = producer.collect_coverage(name, dict(self.candidate, platform="linux/s390x"),
+                                               self.trivy, self.root, archive_bound=False)
+            self.assertIn("unsupported candidate platform", result["errors"][0])
+        result = producer.collect_coverage("unknown", self.candidate, self.trivy, self.root, archive_bound=False)
+        self.assertTrue(result["errors"])
 
     def test_debian_epoch_and_revision_from_scanner(self):
         from image_inventory import trivy_inventory

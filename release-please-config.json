@@ -29,7 +29,8 @@
       "extra-files": [
         { "type": "json", "path": ".claude-plugin/plugin.json", "jsonpath": "$.version" },
         { "type": "json", "path": ".codex-plugin/plugin.json", "jsonpath": "$.version" },
-        { "type": "toml", "path": "server/pyproject.toml", "jsonpath": "$.project.version" }
+        { "type": "toml", "path": "server/pyproject.toml", "jsonpath": "$.project.version" },
+        { "type": "generic", "path": "docker-compose.yaml" }
       ]
     },
     "lockstep": {

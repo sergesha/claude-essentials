@@ -1,0 +1,95 @@
+name: Redis Memory image candidates
+on:
+  workflow_call:
+    inputs:
+      revision:
+        type: string
+        required: true
+      release:
+        type: boolean
+        default: false
+      version:
+        type: string
+        default: ''
+      tag:
+        type: string
+        default: ''
+permissions:
+  contents: read
+jobs:
+  candidates:
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [mcp, embeddings]
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    env:
+      REVISION: ${{ inputs.revision }}
+      RELEASE_VERSION: ${{ inputs.version }}
+      RELEASE_TAG: ${{ inputs.tag }}
+      TARGET: ${{ matrix.target }}
+      PLATFORM: linux/${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.revision }}
+          persist-credentials: false
+      - uses: ./.github/actions/plugin-image-security/setup-docker
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify source and build candidate
+        id: build
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$REVISION"
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("redis-memory-mcp/server/pyproject.toml", "rb"))["project"]["version"])')
+          if [[ -n "$RELEASE_VERSION" ]]; then
+            test "$version" = "$RELEASE_VERSION"
+            test "$RELEASE_TAG" = "redis-memory-mcp-v$version"
+            git fetch --no-tags origin "refs/tags/$RELEASE_TAG"
+            test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$REVISION"
+          fi
+          docker build --platform "$PLATFORM" --target "$TARGET" --iidfile "$RUNNER_TEMP/image.iid" \
+            --label "org.opencontainers.image.source=https://github.com/sergesha/claude-essentials" \
+            --label "org.opencontainers.image.version=$version" \
+            --label "org.opencontainers.image.revision=$REVISION" redis-memory-mcp/server
+          echo "image=$(cat "$RUNNER_TEMP/image.iid")" >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/plugin-image-security
+        with:
+          producer: redis-memory-${{ matrix.target }}
+          image: ${{ steps.build.outputs.image }}
+          platform: linux/${{ matrix.arch }}
+          revision: ${{ inputs.revision }}
+          out: ${{ runner.temp }}/candidate
+      - name: Smoke exact candidate
+        env:
+          IMAGE: ${{ steps.build.outputs.image }}
+        run: |
+          set -euo pipefail
+          if [[ "$TARGET" = mcp ]]; then
+            python3 -m pip install 'mcp>=2.0.0,<3'
+            python3 redis-memory-mcp/tests/smoke_mcp.py "$IMAGE"
+          else
+            docker run --rm "$IMAGE" python -c 'import onnxruntime, embedding_service; print("Embedding runtime imports OK")'
+          fi
+      - name: Retain qualified archive and revalidation material
+        if: inputs.release
+        uses: actions/upload-artifact@v4
+        with:
+          name: redis-candidate-${{ matrix.target }}-${{ matrix.arch }}
+          path: |
+            ${{ runner.temp }}/candidate/candidate.tar
+            ${{ runner.temp }}/candidate/reports/
+            ${{ runner.temp }}/candidate/cache/db/
+          compression-level: 0
+          retention-days: 2
+          if-no-files-found: error
+          include-hidden-files: true
+          overwrite: true

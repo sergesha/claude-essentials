@@ -11,8 +11,9 @@ from advisories import string
 from image_inventory import export_rootfs, finding_targets, targeted_inventory
 from native_evidence import SWI_OLD, swi_browser_finding
 
-PLATFORMS = {"knowledge-atlas": "linux/arm64", "redis-memory-mcp": "linux/amd64",
-             "redis-memory-embeddings": "linux/amd64"}
+PLATFORMS = {"knowledge-atlas": {"linux/arm64"},
+             "redis-memory-mcp": {"linux/amd64", "linux/arm64"},
+             "redis-memory-embeddings": {"linux/amd64", "linux/arm64"}}
 RETAINED_SWI = ("sha256:51fadf91d930e65cbd21da768700c7328c2c104a15b069a1c3fdbbf77c83c971",
                 "cbd1bc08beb2ef49cf0ba682d639bfbfe09bc0b9")
 
@@ -51,7 +52,7 @@ def collect_coverage(producer, candidate, report, reports, *, archive_bound=True
     if producer in ("knowledge-atlas", "redis-memory-embeddings"):
         result["limitations"].append("A reported ONNX Runtime package version does not establish its upstream source "
                                      "tag or bundled native dependency composition.")
-    if PLATFORMS.get(producer) != candidate.get("platform"):
+    if candidate.get("platform") not in PLATFORMS.get(producer, set()):
         result["errors"].append(f"unknown producer or unsupported candidate platform: {producer}")
         return result
     retained_swi = (candidate.get("id"), candidate.get("revision")) == RETAINED_SWI

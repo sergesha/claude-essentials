@@ -6,6 +6,8 @@ on:
       - "redis-memory-mcp/**"
       - ".agents/plugins/marketplace.json"
       - ".github/workflows/redis-memory.yml"
+      - ".github/workflows/redis-memory-images.yml"
+      - ".github/workflows/release-please.yml"
       - "tools/image_security/**"
       - ".github/actions/plugin-image-security/**"
   push:
@@ -14,6 +16,8 @@ on:
       - "redis-memory-mcp/**"
       - ".agents/plugins/marketplace.json"
       - ".github/workflows/redis-memory.yml"
+      - ".github/workflows/redis-memory-images.yml"
+      - ".github/workflows/release-please.yml"
       - "tools/image_security/**"
       - ".github/actions/plugin-image-security/**"
 
@@ -38,7 +42,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: python -m pip install ./redis-memory-mcp/server pytest pytest-asyncio
+      - run: python -m pip install ./redis-memory-mcp/server pytest pytest-asyncio pyyaml
       - name: Check scope isolation and legacy compatibility
         env:
           REDIS_SCOPE_TEST_URL: redis://127.0.0.1:6379/0
@@ -46,41 +50,9 @@ jobs:
         run: python -m pytest redis-memory-mcp/tests -q
 
   images:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        target: [mcp, embeddings]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/plugin-image-security/setup-docker
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Build Redis image
-        id: build
-        env:
-          TARGET: ${{ matrix.target }}
-        run: |
-          version=$(python -c 'import tomllib; print(tomllib.load(open("redis-memory-mcp/server/pyproject.toml", "rb"))["project"]["version"])')
-          docker build --platform linux/amd64 --target "$TARGET" --iidfile "$RUNNER_TEMP/image.iid" \
-            --label "org.opencontainers.image.source=https://github.com/sergesha/claude-essentials" \
-            --label "org.opencontainers.image.version=$version" \
-            --label "org.opencontainers.image.revision=$GITHUB_SHA" redis-memory-mcp/server
-          echo "image=$(cat "$RUNNER_TEMP/image.iid")" >> "$GITHUB_OUTPUT"
-      - uses: ./.github/actions/plugin-image-security
-        with:
-          producer: redis-memory-${{ matrix.target }}
-          image: ${{ steps.build.outputs.image }}
-          platform: linux/amd64
-          out: ${{ runner.temp }}/redis-memory-${{ matrix.target }}
-      - name: Smoke exact MCP candidate
-        if: ${{ !cancelled() && matrix.target == 'mcp' && steps.build.outcome == 'success' }}
-        env:
-          IMAGE: ${{ steps.build.outputs.image }}
-        run: |
-          python -m pip install 'mcp>=2.0.0,<3'
-          python redis-memory-mcp/tests/smoke_mcp.py "$IMAGE"
+    uses: ./.github/workflows/redis-memory-images.yml
+    with:
+      revision: ${{ github.sha }}
 
   native-python:
     runs-on: ubuntu-latest

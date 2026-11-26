@@ -1,126 +1,90 @@
 #!/bin/bash
-# redis-memory-mcp — self-installing start script
-# All setup output goes to stderr; only MCP server uses stdout (JSON-RPC)
-set -e
-
+# Release delivery uses prebuilt, security-qualified GHCR images. stdout is MCP only.
+set -eo pipefail
 REPO="sergesha/claude-essentials"
-# redis-memory-mcp is one of several independently-versioned packages in $REPO
-# (a monorepo, since v0.5.0) -- its tags are prefixed "redis-memory-mcp-v...",
-# never bare "v...", so release lookups must filter by that prefix rather
-# than take the repo's single "latest release" (ambiguous with other packages).
 TAG_PREFIX="redis-memory-mcp-v"
 REF="${REDIS_MEMORY_MCP_REF:-}"
 WORK_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/redis-memory-mcp"
 REF_FILE="$WORK_DIR/.installed-ref"
 mkdir -p "$WORK_DIR"
-
 log() { echo "🧠 redis-memory-mcp: $*" >&2; }
-
 latest_release() {
-  # Latest published release tag matching $TAG_PREFIX; empty on any failure
-  # (network, rate limit, no matching release). Bounded timeouts so an
-  # offline/slow host fails fast into the fallback chain instead of hanging.
-  # Releases list is newest-first, so the first match is the latest.
   curl -fsSL --connect-timeout 5 --max-time 10 "https://api.github.com/repos/$REPO/releases" 2>/dev/null \
     | grep -m1 "\"tag_name\": *\"$TAG_PREFIX" \
     | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/'
 }
-
-# Resolve which ref to install, in order of preference (no version is ever hardcoded here):
-#   1. explicit REDIS_MEMORY_MCP_REF (e.g. redis-memory-mcp-v0.5.0, or "main" to track dev)
-#   2. latest published release tag matching $TAG_PREFIX (GitHub API)
-#   3. the ref already installed here — a transient API failure must not change the version
-#   4. "main" as a last resort on a cold, offline first run
 if [ -z "$REF" ]; then
   REF="$(latest_release || true)"
   if [ -z "$REF" ] && [ -f "$REF_FILE" ]; then
     REF="$(cat "$REF_FILE")"
     log "Release lookup failed; reusing installed ref."
   fi
-  if [ -z "$REF" ]; then
-    REF="main"
-    log "No release found and nothing installed yet; falling back to 'main'."
-  fi
 fi
-log "Using ref: $REF"
-
-# MODE selects whether this invocation owns its own Redis+Gemma backend
-# (dedicated, default — current behavior) or connects to one already running
-# elsewhere (shared — e.g. one backend started once by a "fleet" user, reused
-# by every other agent/user on the same host via REDIS_URL/EMBED_URL pointed
-# at it). shared refuses to guess a backend: REDIS_URL and EMBED_URL must
-# both be set explicitly, or this exits rather than silently start a second,
-# unshared local instance.
-MODE="${REDIS_MEMORY_MCP_MODE:-dedicated}"
-case "$MODE" in
-  dedicated|shared) ;;
-  *)
-    log "Invalid REDIS_MEMORY_MCP_MODE '$MODE' (expected 'dedicated' or 'shared')."
-    exit 1
-    ;;
-esac
-if [ "$MODE" = "shared" ] && { [ -z "${REDIS_URL:-}" ] || [ -z "${EMBED_URL:-}" ]; }; then
-  log "REDIS_MEMORY_MCP_MODE=shared requires REDIS_URL and EMBED_URL to point at the shared backend."
+if [[ ! "$REF" =~ ^redis-memory-mcp-v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+  log "A published redis-memory-mcp-vX.Y.Z release is required. For development use docker-compose.build.yaml explicitly."
   exit 1
 fi
-
-RAW_URL="https://raw.githubusercontent.com/$REPO/$REF/redis-memory-mcp"
-# Docker tags must match [A-Za-z0-9_][A-Za-z0-9_.-]{0,127}: allowed chars only,
-# a leading alnum/underscore, and <=128 chars. A ref may contain '/' (branch
-# names), other punctuation, or a leading '.'/'-', so sanitize for the tag while
-# RAW_URL keeps the real ref.
-IMAGE_TAG="$(printf '%s' "$REF" | tr -c 'A-Za-z0-9_.-' '-')"
-case "$IMAGE_TAG" in [!A-Za-z0-9_]*) IMAGE_TAG="ref-$IMAGE_TAG" ;; esac
-IMAGE_TAG="$(printf '%s' "$IMAGE_TAG" | cut -c1-128)"
-IMAGE="redis-memory-mcp:$IMAGE_TAG"
-COMPOSE_FILE="$WORK_DIR/docker-compose.yaml"
-SERVER_DIR="$WORK_DIR/server"
-
-# ── 1. (Re)download pinned sources when the installed ref changes ─────────────
-INSTALLED_REF="$(cat "$REF_FILE" 2>/dev/null || true)"
-if [ "$INSTALLED_REF" != "$REF" ] || [ ! -f "$COMPOSE_FILE" ] || [ ! -d "$SERVER_DIR" ]; then
-  log "Downloading sources for $REF..."
-  curl -fsSL --connect-timeout 10 --max-time 60 "$RAW_URL/docker-compose.yaml" -o "$COMPOSE_FILE"
-  mkdir -p "$SERVER_DIR"
-  for f in memory_mcp.py embedding.py embedding_service.py chunking.py memory_index.py migrate.py Dockerfile pyproject.toml README.md; do
-    curl -fsSL --connect-timeout 10 --max-time 60 "$RAW_URL/server/$f" -o "$SERVER_DIR/$f"
-  done
-  mkdir -p "$SERVER_DIR/licenses"
-  for f in GEMMA-TERMS.txt GEMMA-PROHIBITED-USE.txt NOTICE MODEL-USE-TERMS.md THIRD-PARTY.md; do
-    curl -fsSL --connect-timeout 10 --max-time 60 "$RAW_URL/server/licenses/$f" -o "$SERVER_DIR/licenses/$f"
-  done
-  echo "$REF" > "$REF_FILE"
+# Preserve explicit historical pins: those releases predate registry delivery.
+if (( 10#${BASH_REMATCH[1]} == 0 && 10#${BASH_REMATCH[2]} < 12 )); then
+  log "Legacy $REF uses its original source-build launcher."
+  rm -f "$WORK_DIR/.compose-ref"
+  legacy="$(mktemp)"
+  trap 'rm -f "$legacy"' EXIT
+  curl -fsSL --connect-timeout 10 --max-time 60 "https://raw.githubusercontent.com/$REPO/$REF/redis-memory-mcp/start.sh" -o "$legacy"
+  REDIS_MEMORY_MCP_REF="$REF" bash "$legacy"
+  exit $?
 fi
-
-# ── 2-3. Start Redis + Gemma and wait for Redis — dedicated mode only ───────────
-# In shared mode, the backend is owned and started elsewhere; connecting to
-# someone else's REDIS_URL/EMBED_URL is all this invocation should do.
-if [ "$MODE" = "dedicated" ]; then
-  log "Starting infrastructure..."
-  docker compose -f "$COMPOSE_FILE" up -d --build redis embeddings >/dev/null 2>&1
-
-  log "Waiting for Redis..."
-  until docker exec redis-stack redis-cli ping >/dev/null 2>&1; do sleep 1; done
-  log "Waiting for Gemma (first start downloads the pinned model)..."
-  GEMMA_DEADLINE=$((SECONDS + 180))
-  until docker exec embeddings-gemma python -c "import urllib.request; urllib.request.urlopen('http://localhost/health', timeout=5)" >/dev/null 2>&1; do
-    if [ "$SECONDS" -ge "$GEMMA_DEADLINE" ]; then
-      log "Gemma is not ready after 180 seconds. Check 'docker logs embeddings-gemma' and retry after model download/startup finishes."
-      exit 1
-    fi
-    sleep 2
-  done
-else
-  log "MODE=shared: skipping local infra bring-up, connecting to REDIS_URL/EMBED_URL from environment."
+VERSION="${REF#$TAG_PREFIX}"
+MODE="${REDIS_MEMORY_MCP_MODE:-dedicated}"
+case "$MODE" in dedicated|shared) ;; *) log "Invalid REDIS_MEMORY_MCP_MODE: expected dedicated or shared."; exit 1;; esac
+if [ "$MODE" = shared ] && { [ -z "${REDIS_URL:-}" ] || [ -z "${EMBED_URL:-}" ]; }; then
+  log "Shared mode requires REDIS_URL and EMBED_URL."
+  exit 1
 fi
-
-# ── 4. Build the version-tagged MCP server image if not present ───────────────
-# Tagging the image per ref means switching REF rebuilds instead of reusing stale layers.
+IMAGE="ghcr.io/sergesha/redis-memory-mcp:$VERSION"
+export REDIS_MEMORY_MCP_IMAGE="$IMAGE"
+export REDIS_MEMORY_EMBEDDINGS_IMAGE="ghcr.io/sergesha/redis-memory-embeddings:$VERSION"
+# Version tags are immutable. A cached release works without contacting GHCR.
 if ! docker image inspect "$IMAGE" >/dev/null 2>&1; then
-  log "Building $IMAGE..."
-  docker build --target mcp -t "$IMAGE" "$SERVER_DIR" >&2
+  log "Pulling $IMAGE..."
+  docker pull "$IMAGE" >&2
 fi
-
+# Bind this invocation to the pulled registry digest, not a mutable local tag.
+IMAGE="$(docker image inspect --format '{{index .RepoDigests 0}}' "$IMAGE")"
+if [[ ! "$IMAGE" =~ ^ghcr.io/sergesha/redis-memory-mcp@sha256:[a-f0-9]{64}$ ]]; then
+  log "The MCP image has no valid registry digest. Pull the selected release again."
+  exit 1
+fi
+COMPOSE_FILE="$WORK_DIR/docker-compose.yaml"
+if [ "$MODE" = dedicated ]; then
+  INSTALLED_REF="$(cat "$WORK_DIR/.compose-ref" 2>/dev/null || true)"
+  if [ "$INSTALLED_REF" != "$REF" ] || [ ! -f "$COMPOSE_FILE" ]; then
+    temporary="$(mktemp "$WORK_DIR/compose.XXXXXX")"
+    trap 'rm -f "$temporary"' EXIT
+    curl -fsSL --connect-timeout 10 --max-time 60 "https://raw.githubusercontent.com/$REPO/$REF/redis-memory-mcp/docker-compose.yaml" -o "$temporary"
+    mv "$temporary" "$COMPOSE_FILE"
+    trap - EXIT
+  fi
+  compose=(docker compose -f "$COMPOSE_FILE")
+  if [ -f "$WORK_DIR/docker-compose.local.yaml" ]; then
+    compose+=(-f "$WORK_DIR/docker-compose.local.yaml")
+  fi
+  # The final override selects this release even if an old local override named a
+  # locally built image. All other operator settings and relative mounts survive.
+  release_file="$WORK_DIR/docker-compose.release.yaml"
+  temporary="$(mktemp "$WORK_DIR/release.XXXXXX.yaml")"
+  trap 'rm -f "$temporary"' EXIT
+  printf 'services:\n  embeddings:\n    image: %s\n' "$REDIS_MEMORY_EMBEDDINGS_IMAGE" > "$temporary"
+  mv "$temporary" "$release_file"
+  trap - EXIT
+  compose+=(-f "$release_file")
+  "${compose[@]}" up -d --no-build --pull missing --wait --wait-timeout 180 redis embeddings >&2
+else
+  log "Shared mode: using the existing backend."
+fi
+# Dedicated configuration is refreshed independently of shared bridge activation.
+printf '%s\n' "$REF" > "$REF_FILE"
+if [ "$MODE" = dedicated ]; then printf '%s\n' "$REF" > "$WORK_DIR/.compose-ref"; fi
 log "Ready ($REF)."
 
 # ── 5. Launch MCP server — only this writes to stdout ─────────────────────────
