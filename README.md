@@ -1,71 +1,48 @@
 # claude-essentials
 
-A Claude Code marketplace for small, reusable, infra-flavored plugins — things useful across
-unrelated projects, not tied to any one domain.
+A plugin marketplace for **Claude Code and Codex**: knowledge management, persistent
+memory, code exploration, planning, workflow execution, learning and technology news.
 
-This repository is a Claude Code marketplace (`.claude-plugin/marketplace.json`). Each plugin it
-lists is versioned and released independently (see [Versioning](#versioning)).
+Choose the plugins you need. Each has its own setup guide, dependencies and release cycle.
 
 ## Plugins
 
-| Plugin | What it does |
-|---|---|
-| [`knowledge-atlas`](knowledge-atlas/) | Reviewed, versioned knowledge for Codex and Claude Code; local wiki, cited questions, evidence graph and portable history. |
-| [`tech-radar`](tech-radar/) | Monitor technology news with SearXNG, Redis memory, and HTML/YAML reports. Claude Code support restored at 0.5.0; Codex support tracked in #63. |
-| [`code-intel`](code-intel/skills/code-intel/SKILL.md) | Package the CodeGraph and code-review-graph setup skill, MCP servers, and indexing hooks for Claude Code and Codex. |
-| [`continuous-learning`](continuous-learning/) | Capture runtime surprises as they happen, periodically promote them into a project's own versioned skills/docs/commands. Requires a namespaced `redis-memory` connection — see its own README. |
-| [`redis-memory`](redis-memory-mcp/) | Persistent cross-session memory for AI agents — semantic search + KV store with auto-expiry. Moved here from the standalone `sergesha/redis-memory-mcp` repo at v0.5.0. |
+| Plugin | Use it to | Documentation |
+| --- | --- | --- |
+| `knowledge-atlas` | Build reviewed, versioned knowledge with a local wiki, cited answers, an evidence graph and reusable knowledge packages. | [Guide](knowledge-atlas/README.md) · [Docker setup](knowledge-atlas/docker/README.md) |
+| `redis-memory` | Remember facts and settings across agent sessions using semantic search and key-value storage. | [Guide and setup](redis-memory-mcp/README.md) |
+| `code-intel` | Explore symbols, call paths and change impact through CodeGraph and code-review-graph, with shared setup and indexing hooks. | [Setup and operations](code-intel/skills/code-intel/SKILL.md) |
+| `speciflow` | Coordinate backlog, specifications and execution tasks across Backlog.md, OpenSpec and Beads, with Superpowers and Grill supporting the work. | [Workflow guide](speciflow/skills/speciflow/SKILL.md) · [Setup](speciflow/skills/speciflow/references/installation.md) |
+| `lockstep` | Run durable, declarative workflows that advance only after validating submitted evidence. | [Guide and setup](lockstep/README.md) |
+| `continuous-learning` | Capture unexpected tool and workflow behavior, then turn reviewed findings into a project's versioned documentation and skills. | [Guide and setup](continuous-learning/README.md) |
+| `tech-radar` | Collect technology news through SearXNG, retain summaries in Redis memory and generate reports and dashboards. | [Guide and setup](tech-radar/README.md) |
 
 ## Install
 
-```
+Add the marketplace once, then install a selected plugin. Replace `<plugin>` with
+a name from the table above.
+
+### Claude Code
+
+Run inside Claude Code:
+
+```text
 /plugin marketplace add sergesha/claude-essentials
-/plugin install continuous-learning@claude-essentials
+/plugin install <plugin>@claude-essentials
 ```
 
-Or auto-enable per project in `.claude/settings.json`:
+### Codex
 
-```json
-{
-  "enabledPlugins": { "continuous-learning@claude-essentials": true },
-  "extraKnownMarketplaces": {
-    "claude-essentials": { "source": { "source": "github", "repo": "sergesha/claude-essentials" }, "autoUpdate": true }
-  }
-}
-```
+Run in a terminal:
 
-`continuous-learning` depends on `redis-memory` (`mem_save`/`mem_list`/`mem_search`/`mem_delete`
-tools) — both live in this marketplace, declared in `continuous-learning`'s `dependencies`, so
-installing it also pulls in `redis-memory`. The auto-pulled dependency installs with
-`redis-memory`'s defaults (`mode: dedicated`, no namespace) — since continuous-learning requires
-a namespaced connection (see its README), also run `redis-memory`'s own install with `--config`
-to configure it, either before or after installing `continuous-learning`.
-
-### Redis memory in Codex
-
-```bash
+```text
 codex plugin marketplace add sergesha/claude-essentials
-codex plugin add redis-memory@claude-essentials
+codex plugin add <plugin>@claude-essentials
 ```
 
-For an existing backend, configure the Codex process environment before starting
-a new session. See [redis-memory installation, credentials and upgrades](redis-memory-mcp/README.md#codex).
-Claude Code continues to use its existing installation and `--config` settings.
-
-### Code intelligence installation
-
-In Claude Code, add this marketplace as above, then run
-`/plugin install code-intel@claude-essentials`.
-
-In Codex, add this repository with `codex plugin marketplace add <repository-path>`
-and run `codex plugin add code-intel@claude-essentials`.
-
-The plugin requires Python 3.11+ and `codegraph` / `code-review-graph` on the
-host's PATH, regardless of their installation manager. Ask the bundled
-`code-intel` skill to install the tools (npm plus uv or pipx), or use your preferred
-manager, then restart the host. It uses the existing local skill's
-project discovery, initialization, updates, and hooks. Plugin declarations supply
-the host integration; there is no global-config migration step.
+Follow the selected plugin's guide for prerequisites, backend setup, credentials
+and hook activation. Installing a plugin does not necessarily configure its
+services or dependencies; those steps can differ between hosts.
 
 ## Updating plugins
 
@@ -75,10 +52,15 @@ sessions, stale hook paths, and separate installation/activation checks.
 
 ## Versioning
 
-Each plugin is its own [release-please](https://github.com/googleapis/release-please) package,
-tagged independently (`<plugin>-vX.Y.Z`) with its own CHANGELOG. A change to one plugin does not
-bump another's version. Config: `release-please-config.json`, state:
-`.release-please-manifest.json`.
+Plugins are released independently through
+[release-please](https://github.com/googleapis/release-please), with tags of the
+form `<plugin>-vX.Y.Z` and a changelog in each plugin directory. See
+[GitHub Releases](https://github.com/sergesha/claude-essentials/releases) for
+published versions. A change to one plugin does not bump another's version.
+
+Marketplace catalogs: [Claude Code](.claude-plugin/marketplace.json) ·
+[Codex](.agents/plugins/marketplace.json). Release configuration:
+[packages](release-please-config.json) · [versions](.release-please-manifest.json).
 
 ## License
 
