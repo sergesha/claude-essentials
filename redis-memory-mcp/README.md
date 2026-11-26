@@ -27,8 +27,9 @@ git clone --filter=blob:none --sparse https://github.com/sergesha/claude-essenti
 cd claude-essentials && git sparse-checkout set redis-memory-mcp
 cd redis-memory-mcp
 
-# 2. Start infrastructure
-docker compose up -d
+# 2. Pull release images and start infrastructure
+docker compose pull
+docker compose up -d --no-build --wait redis embeddings
 
 # 3. Add to your AI tool's MCP config
 ```
@@ -45,7 +46,7 @@ docker compose up -d
         "-e", "REDIS_URL=redis://host.docker.internal:6379/0",
         "-e", "EMBED_URL=http://host.docker.internal:8082",
         "-e", "INDEX_NAME=idx:memories",
-        "redis-memory-mcp"
+        "ghcr.io/sergesha/redis-memory-mcp:0.12.0"
       ]
     }
   }
@@ -97,8 +98,8 @@ export NAMESPACE=my-project
 codex
 ```
 
-The first start may download and build the bridge image. Codex allows up to five
-minutes for that startup; memory remains optional if the backend is unavailable.
+The first start pulls the prebuilt bridge image from GHCR. Codex allows up to five
+minutes for startup; memory remains optional if the backend is unavailable.
 
 Keep the same namespace (or leave it unset for the existing shared/base area)
 to access existing memories. The URLs must be reachable from the bridge
@@ -129,19 +130,59 @@ namespace, index and embeddings settings. The existing launcher selects the
 latest `redis-memory-mcp-v*` release unless `REDIS_MEMORY_MCP_REF` is pinned;
 a pinned backend remains pinned independently of the plugin version.
 
-### 0.11.2 Docker maintenance update
+### 0.12.0 prebuilt Docker images
 
-Version 0.11.2 updates the base shared by the MCP and embeddings Docker images:
-`libzstd1`, `pip` 26.3 and Python's bundled `ensurepip` wheel. The memory API,
-storage format, namespace and embedding profile are unchanged; no data migration
-is required. See the [changelog](CHANGELOG.md#0112-2026-11-26).
+Release images are public and support **linux/amd64** and **linux/arm64**:
 
-A plugin update does not replace an already running container. Rebuild and
-recreate the affected services from the updated source using the existing
-deployment's Compose files and project name. Preserve its volumes and connection
-settings. If `REDIS_MEMORY_MCP_REF` is pinned, select `redis-memory-mcp-v0.11.2`
-explicitly before rebuilding. This release does not publish a Redis Memory GHCR
-image; the repository's Redis workflow builds and checks both image targets.
+- `ghcr.io/sergesha/redis-memory-mcp:0.12.0`
+- `ghcr.io/sergesha/redis-memory-embeddings:0.12.0`
+
+The launcher pulls the selected release and runs the bridge by registry digest.
+Version tags are immutable; already cached images can be reused offline. It does
+not build a replacement when a registry request fails. A GitHub release can appear
+before its image pipeline finishes; retry after that pipeline succeeds. The model
+is still downloaded on the embeddings service's first start and retained in its
+existing cache. Redis Stack remains the upstream Redis image.
+
+In dedicated mode the launcher retains the cache directory, Redis data and model
+mounts, and automatically includes `docker-compose.local.yaml` when present.
+It writes `docker-compose.release.yaml` to select the released embeddings image
+without losing the other local settings. Shared mode only updates the bridge;
+the backend owner updates embeddings using their existing Compose project/files:
+
+```bash
+export REDIS_MEMORY_EMBEDDINGS_IMAGE=ghcr.io/sergesha/redis-memory-embeddings:0.12.0
+# Include your existing override files; replace an old override's local image name
+# with the released reference while retaining its other settings.
+docker compose pull embeddings
+docker compose up -d --no-deps --no-build --wait embeddings
+```
+
+Do not delete volumes, change namespaces or change the embedding profile during
+this update. No data migration is required. Open MCP sessions need a restart.
+Historical pins before 0.12.0 retain their original source-building launcher.
+Development branch refs use an explicit local build instead of the release launcher:
+
+```bash
+docker compose -f docker-compose.yaml -f docker-compose.build.yaml up -d --build
+```
+
+CI builds both targets on native runners for both architectures. The shared image
+security gate downloads the vulnerability database, matches findings against CISA
+KEV and retains its reports. CRITICAL, HIGH with an available fix, any KEV match,
+and failures of mandatory checks block publication. All four candidates must pass
+before publishing starts. The publisher rechecks the archived images and evidence
+and assembles version indexes from their exact manifests, without rebuilding.
+Clean runners then verify anonymous pulls and runtime startup on both platforms.
+Missing manually reconstructed binary inventories are not an extra release gate.
+
+See [image candidates](../.github/workflows/redis-memory-images.yml),
+[release publication](../.github/workflows/release-please.yml), and
+[security policy](../tools/image_security/README.md). If publication fails after
+some platform tags were uploaded, rerun failed jobs using the retained candidates;
+existing version tags must resolve to the same bytes. Never overwrite a published
+version with a rebuild. New GHCR packages must be made Public once in their
+package settings; keep the anonymous verification job mandatory.
 
 ## Tools
 
@@ -241,7 +282,7 @@ settings such as `REDIS_MEMORY_MCP_MODE`, `REDIS_MEMORY_MCP_NETWORK`, and
 | `NAMESPACE` | unset | Isolates `kv_*`/`mem_*` data on a shared instance — see below |
 | `DEFAULT_TTL` | `7776000` (90 days) | Default TTL in seconds |
 | `REDIS_MEMORY_MCP_MODE` | `dedicated` | `start.sh` only — see Shared Deployment below |
-| `REDIS_MEMORY_MCP_REF` | unset (tracks latest release) | `start.sh` only — pin to a specific `redis-memory-mcp-vX.Y.Z` tag, or `main` for dev |
+| `REDIS_MEMORY_MCP_REF` | unset (tracks latest release) | `start.sh` only — pin to a published `redis-memory-mcp-vX.Y.Z` tag; use the explicit Compose build override for development |
 | `REDIS_MEMORY_MCP_NETWORK` | unset | Join an existing Docker/Podman network to reach the backend by container name; does not create a network |
 | `EMBED_SOCKET` | unset | Unix socket for embedding HTTP requests; `EMBED_URL` remains the nominal HTTP URL |
 | `REDIS_MEMORY_MCP_SOCKET_DIR` | unset | Bind-mount this host socket directory at the same path in the bridge; uses Podman's `--group-add keep-groups` for group-gated sockets |

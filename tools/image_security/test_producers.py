@@ -95,19 +95,13 @@ class TestProducerCoverage(unittest.TestCase):
         self.assertEqual(decision["reasons"], ["HIGH with fix"])
 
     def test_redis_targets_scan_the_built_images_and_keep_both_reports(self):
-        workflow = (gate.HERE.parents[1] / ".github/workflows/redis-memory.yml").read_text()
-        for value in ("fail-fast: false", "target: [mcp, embeddings]", '--target "$TARGET"',
-                      "--iidfile", "--platform linux/amd64",
-                      'smoke_mcp.py "$IMAGE"', "scope-isolation:", "native-python:"):
-            self.assertIn(value, workflow)
-        images = workflow.split("\n  images:\n", 1)[1].split("\n  native-python:\n", 1)[0]
-        steps = images.split("\n      - ")
-        action = "uses: ./.github/actions/plugin-image-security"
-        scan, = [step for step in steps if action in (line.strip() for line in step.splitlines())]
-        inputs = {line.strip() for line in scan.splitlines()}
-        self.assertTrue({"with:", "producer: redis-memory-${{ matrix.target }}",
-                         "image: ${{ steps.build.outputs.image }}", "platform: linux/amd64",
-                         "out: ${{ runner.temp }}/redis-memory-${{ matrix.target }}"} <= inputs)
+        root = gate.HERE.parents[1]
+        workflow = (root / ".github/workflows/redis-memory.yml").read_text()
+        images = (root / ".github/workflows/redis-memory-images.yml").read_text()
+        self.assertIn("uses: ./.github/workflows/redis-memory-images.yml", workflow)
+        self.assertIn("target: [mcp, embeddings]", images)
+        self.assertIn("arch: [amd64, arm64]", images)
+        self.assertIn("image: ${{ steps.build.outputs.image }}", images)
         setup = images.index("uses: ./.github/actions/plugin-image-security/setup-docker")
         self.assertLess(images.index("uses: actions/checkout@"), setup)
         self.assertLess(setup, images.index("docker build"))

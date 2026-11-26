@@ -14,6 +14,10 @@ jobs:
       contents: write
       pull-requests: write
     outputs:
+      redis_created: ${{ steps.release.outputs['redis-memory-mcp--release_created'] }}
+      redis_sha: ${{ steps.release.outputs['redis-memory-mcp--sha'] }}
+      redis_tag: ${{ steps.release.outputs['redis-memory-mcp--tag_name'] }}
+      redis_version: ${{ steps.release.outputs['redis-memory-mcp--version'] }}
       atlas_created: ${{ steps.release.outputs['knowledge-atlas--release_created'] }}
       atlas_sha: ${{ steps.release.outputs['knowledge-atlas--sha'] }}
       atlas_tag: ${{ steps.release.outputs['knowledge-atlas--tag_name'] }}
@@ -287,3 +291,99 @@ jobs:
           name: atlas-delivery-${{ github.run_attempt }}
           path: ${{ runner.temp }}/atlas-delivery/
           if-no-files-found: error
+
+  redis-images:
+    needs: release-please
+    if: needs.release-please.outputs.redis_created == 'true'
+    uses: ./.github/workflows/redis-memory-images.yml
+    with:
+      revision: ${{ needs.release-please.outputs.redis_sha }}
+      version: ${{ needs.release-please.outputs.redis_version }}
+      tag: ${{ needs.release-please.outputs.redis_tag }}
+      release: true
+
+  redis-publish:
+    needs: [release-please, redis-images]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: redis-memory-image-${{ needs.release-please.outputs.redis_version }}
+      cancel-in-progress: false
+    env:
+      REVISION: ${{ needs.release-please.outputs.redis_sha }}
+      VERSION: ${{ needs.release-please.outputs.redis_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.redis_sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/plugin-image-security/setup-docker
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: redis-candidate-*
+          path: ${{ runner.temp }}/redis-candidates
+      - name: Authenticate the image publisher
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          export DOCKER_CONFIG="$RUNNER_TEMP/redis-registry"
+          install -d -m 0700 "$DOCKER_CONFIG"
+          printf '%s\n' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: Revalidate every candidate and publish exact images
+        run: |
+          set -euo pipefail
+          export DOCKER_CONFIG="$RUNNER_TEMP/redis-registry"
+          export GITHUB_SHA="$REVISION"
+          python3 redis-memory-mcp/scripts/publish_images.py \
+            --candidates "$RUNNER_TEMP/redis-candidates" --version "$VERSION" \
+            --revision "$REVISION" --output "$RUNNER_TEMP/redis-publication.json"
+      - name: Retain registry identities and final checks
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: redis-publication-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/redis-publication.json
+            ${{ runner.temp }}/redis-candidates/*/reports/verify-*.json
+          if-no-files-found: error
+
+  redis-verify:
+    needs: [release-please, redis-publish]
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    env:
+      VERSION: ${{ needs.release-please.outputs.redis_version }}
+      REVISION: ${{ needs.release-please.outputs.redis_sha }}
+      ARCH: ${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.redis_sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/plugin-image-security/setup-docker
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: redis-publication-*
+          path: ${{ runner.temp }}/redis-publication
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Anonymous pull and runtime checks
+        run: |
+          set -euo pipefail
+          export DOCKER_CONFIG="$RUNNER_TEMP/anonymous-docker"
+          install -d -m 0700 "$DOCKER_CONFIG"
+          python3 -m pip install 'mcp>=2.0.0,<3'
+          python3 redis-memory-mcp/scripts/verify_images.py \
+            --receipts "$RUNNER_TEMP/redis-publication" --version "$VERSION" --revision "$REVISION" --arch "$ARCH"

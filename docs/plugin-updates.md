@@ -105,6 +105,16 @@ sessions with older hook commands may still need one restart to load a guarded
 launcher. Standalone skill copies are separate installations: identify and update
 them explicitly, preserving a rollback copy and avoiding duplicate plugin skills.
 
+## Redis Memory container updates
+
+Starting with Redis Memory 0.12.0, release launches pull the MCP and embeddings
+images from GHCR; they do not build locally. Existing sessions retain their old
+bridge until restarted. Dedicated launches update their managed embeddings
+service while retaining local Compose settings and data. With a shared backend,
+its owner updates embeddings separately using the existing Compose project/files.
+Keep credentials, namespace, index, model cache and embedding profile unchanged.
+See the [Redis Memory upgrade instructions](../redis-memory-mcp/README.md#0120-prebuilt-docker-images).
+
 ## Maintaining independent releases
 
 Before merging a release PR, compare each affected plugin directory with its last

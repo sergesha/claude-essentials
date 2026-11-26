@@ -27,9 +27,7 @@ services:
     restart: unless-stopped
 
   embeddings:
-    build:
-      context: ./server
-      target: embeddings
+    image: ${REDIS_MEMORY_EMBEDDINGS_IMAGE:-ghcr.io/sergesha/redis-memory-embeddings:0.12.0} # x-release-please-version
     container_name: embeddings-gemma
     ports:
       - "8082:80"
@@ -44,10 +42,7 @@ services:
     restart: unless-stopped
 
   redis-memory-mcp:
-    build:
-      context: ./server
-      target: mcp
-    image: redis-memory-mcp
+    image: ${REDIS_MEMORY_MCP_IMAGE:-ghcr.io/sergesha/redis-memory-mcp:0.12.0} # x-release-please-version
     container_name: redis-memory-mcp
     depends_on:
       redis:
