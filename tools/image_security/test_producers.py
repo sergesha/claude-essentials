@@ -109,6 +109,19 @@ class TestProducerCoverage(unittest.TestCase):
             self.assertEqual(workflow.count(trigger), 2)
         self.assertIn("coverage.py", gate.policy_files())
 
+    def test_redis_platform_registration_keeps_the_same_gate_on_both_architectures(self):
+        for name in ("redis-memory-mcp", "redis-memory-embeddings"):
+            for platform in ("linux/amd64", "linux/arm64"):
+                with self.subTest(name=name, platform=platform):
+                    result = producer.collect_coverage(name, dict(self.candidate, platform=platform),
+                                                       self.trivy, self.root, archive_bound=False)
+                    self.assertFalse(result["errors"])
+            result = producer.collect_coverage(name, dict(self.candidate, platform="linux/s390x"),
+                                               self.trivy, self.root, archive_bound=False)
+            self.assertIn("unsupported candidate platform", result["errors"][0])
+        result = producer.collect_coverage("unknown", self.candidate, self.trivy, self.root, archive_bound=False)
+        self.assertTrue(result["errors"])
+
     def test_debian_epoch_and_revision_from_scanner(self):
         from image_inventory import trivy_inventory
         report = {"Results": [{"Class": "os-pkgs", "Type": "debian", "Packages": [
